@@ -25,6 +25,7 @@ import {
  */
 export function PersonaProviderApiKeyField({
   disabled,
+  envVarName,
   isInherited,
   inheritedLabel,
   isRequired,
@@ -33,6 +34,13 @@ export function PersonaProviderApiKeyField({
   value,
 }: {
   disabled: boolean;
+  /**
+   * The backing environment variable name, e.g. `OPENAI_COMPAT_API_KEY`.
+   * Rendered as a monospace hint beneath the label so users can distinguish
+   * this field from other keys with similar names (e.g. `OPENAI_API_KEY`).
+   * When present, the input's `aria-describedby` points at the hint element.
+   */
+  envVarName?: string;
   /** True when the key is satisfied by an inherited layer. */
   isInherited: boolean;
   /** Human-readable source of the inherited value. */
@@ -46,13 +54,22 @@ export function PersonaProviderApiKeyField({
   value: string;
 }) {
   const [showValue, setShowValue] = React.useState(false);
-  const inputId = "persona-provider-api-key";
+  const uid = React.useId();
+  const inputId = `persona-provider-api-key-${uid}`;
+  const hintId = envVarName
+    ? `persona-provider-api-key-hint-${uid}`
+    : undefined;
 
   return (
     <div className="space-y-1.5">
       <RequiredFieldLabel htmlFor={inputId} isRequired={isRequired}>
         {label}
       </RequiredFieldLabel>
+      {envVarName ? (
+        <p className="text-xs text-muted-foreground font-mono" id={hintId}>
+          {envVarName}
+        </p>
+      ) : null}
       <div
         className={cn(
           "flex min-h-11 items-center gap-2 px-3",
@@ -60,6 +77,7 @@ export function PersonaProviderApiKeyField({
         )}
       >
         <Input
+          aria-describedby={hintId}
           autoComplete="off"
           className={cn(
             "h-8 flex-1 px-0 py-0 leading-6",

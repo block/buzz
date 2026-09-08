@@ -1,9 +1,14 @@
 import * as React from "react";
 
+import { stripImplicitAgentMentionPrefix } from "@/features/messages/lib/stripImplicitAgentMentions";
+
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
-import type {
-  DraftMentionRef,
-  DraftState,
+import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
+import {
+  getDraftAuthority,
+  recordDraftAuthoredContent,
+  type DraftMentionRef,
+  type DraftState,
 } from "@/features/messages/lib/useDrafts";
 
 type UseDraftPersistLifecycleParams = {
@@ -28,6 +33,19 @@ type UseDraftPersistLifecycleParams = {
   livePendingImeta: ImetaMedia[];
   /** Async setter for pendingImeta — called after the synchronous snapshot. */
   setPendingImeta: (imeta: ImetaMedia[]) => void;
+  /** Snapshot the local files owned by the outgoing draft key. */
+  getQueuedAttachments?: () => QueuedMediaAttachment[];
+  /** Retain local files in memory under their draft key. */
+  saveQueuedAttachmentsForDraft?: (
+    draftKey: string,
+    attachments: QueuedMediaAttachment[],
+  ) => void;
+  /** Local files cannot be persisted, so clear them at a draft-key boundary. */
+  clearQueuedAttachments?: () => void;
+  /** Restore local files retained while a deferred upload was off-channel. */
+  restoreQueuedAttachments?: (attachments: QueuedMediaAttachment[]) => void;
+  /** Read and remove local files retained for a recovered draft. */
+  takeQueuedAttachmentsForDraft?: (draftKey: string) => QueuedMediaAttachment[];
   /** Set the rich-text editor content from a draft string. */
   setContent: (content: string) => void;
   /** Clear the rich-text editor content (no-draft path). */
@@ -44,6 +62,21 @@ type UseDraftPersistLifecycleParams = {
    * closure to capture the latest text before the effect fires.
    */
   syncComposerContentFromEditor: () => string;
+  /** Exact editor prefix inserted by automatic addressing, including separator. */
+  getImplicitAgentMentionPrefix?: () => string;
+};
+
+type UseDraftPersistLifecycleResult = {
+  /** Shared key intent; later visits can revoke a captured continuation. */
+  getComposerRevision: () => number;
+  /** Optimistic send/recovery is not an authored edit or authoritative deletion. */
+  runComposerUpdate: (update: () => void, pendingImeta?: ImetaMedia[]) => void;
+  /**
+   * Record the latest authored editor content. Empty content is persisted
+   * immediately and remains authoritative across composer remounts until a
+   * later non-empty editor update supersedes it.
+   */
+  trackAuthoredContent: (content: string) => void;
 };
 
 /**
@@ -80,29 +113,102 @@ export function useDraftPersistLifecycle({
   restoreMentionRefs,
   livePendingImeta,
   setPendingImeta,
+  getQueuedAttachments,
+  saveQueuedAttachmentsForDraft,
+  clearQueuedAttachments,
+  restoreQueuedAttachments,
+  takeQueuedAttachmentsForDraft,
   setContent,
   clearContent,
   setSpoileredAttachmentUrls,
   spoileredAttachmentUrlsRef,
   syncComposerContentFromEditor,
-}: UseDraftPersistLifecycleParams): void {
+  getImplicitAgentMentionPrefix,
+}: UseDraftPersistLifecycleParams): UseDraftPersistLifecycleResult {
+  const persistedContent = React.useCallback(
+    (content: string) =>
+      stripImplicitAgentMentionPrefix(
+        content,
+        getImplicitAgentMentionPrefix?.() ?? "",
+      ),
+    [getImplicitAgentMentionPrefix],
+  );
+
+  // Each visit keeps its own accessor identity (visible ownership), but reads
+  // the store's shared key authority, including later visits and absent values.
+  const authority = React.useMemo(
+    () =>
+      effectiveDraftKey
+        ? getDraftAuthority(effectiveDraftKey)
+        : {
+            revision: 0,
+            authoredRevision: 0,
+            emptyContentIsAuthoritative: false,
+          },
+    [effectiveDraftKey],
+  );
+  const getComposerRevision = React.useCallback(
+    () => authority.revision,
+    [authority],
+  );
+  const lastAuthoredRevisionRef = React.useRef(authority.authoredRevision);
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
+  const emptyContentIsAuthoritativeRef = React.useRef(false);
+  const isRestoringContentRef = React.useRef(false);
+  const runComposerUpdate = React.useCallback(
+    (update: () => void, pendingImeta?: ImetaMedia[]) => {
+      // Recovery may notify a mounted source immediately before it unmounts.
+      // Snapshot media synchronously, just as the initial restore below does.
+      if (pendingImeta) pendingImetaForPersistRef.current = pendingImeta;
+      const wasRestoring = isRestoringContentRef.current;
+      isRestoringContentRef.current = true;
+      try {
+        update();
+      } finally {
+        isRestoringContentRef.current = wasRestoring;
+      }
+    },
+    [],
+  );
+  const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
+    [],
+  );
+  const restoredQueuedAttachmentsDraftKeyRef = React.useRef<string | null>(
+    null,
+  );
   // Render-time update: keep the ref in sync with committed state so the
   // cleanup always reads the latest value during normal mounted operation.
   pendingImetaForPersistRef.current = livePendingImeta;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     // The outgoing draft is persisted by the cleanup below, which runs before
     // this body on key changes and has the correct outgoing channelId in its
     // closure. Do NOT re-persist prevKey here: channelId in this render
     // already reflects the incoming channel, which would corrupt the outgoing
     // draft's channelId metadata.
 
+    // Files cannot be serialized into localStorage. Replace the outgoing
+    // queue (retained by the cleanup below) with the incoming draft's queue.
+    clearQueuedAttachments?.();
+    if (effectiveDraftKey !== restoredQueuedAttachmentsDraftKeyRef.current) {
+      restoredQueuedAttachmentsDraftKeyRef.current = effectiveDraftKey ?? null;
+      restoredQueuedAttachmentsRef.current = effectiveDraftKey
+        ? (takeQueuedAttachmentsForDraft?.(effectiveDraftKey) ?? [])
+        : [];
+    }
+    restoreQueuedAttachments?.(restoredQueuedAttachmentsRef.current);
+    lastAuthoredRevisionRef.current = authority.authoredRevision;
+    const wasAuthoritativelyCleared = authority.emptyContentIsAuthoritative;
     const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
+    emptyContentIsAuthoritativeRef.current = wasAuthoritativelyCleared;
+    isRestoringContentRef.current = true;
     if (saved) {
-      setContent(saved.content);
-      restoreMentionRefs(saved.mentionRefs ?? []);
+      const restoredContent = wasAuthoritativelyCleared ? "" : saved.content;
+      setContent(restoredContent);
+      restoreMentionRefs(
+        wasAuthoritativelyCleared ? [] : (saved.mentionRefs ?? []),
+      );
       // Set the persist-snapshot ref SYNCHRONOUSLY before calling the async
       // state setter, so the cleanup closure (which may fire before the state
       // update commits in React StrictMode's simulate-unmount pass) reads the
@@ -118,10 +224,23 @@ export function useDraftPersistLifecycle({
       setPendingImeta([]);
       setSpoileredAttachmentUrls(new Set());
     }
+    isRestoringContentRef.current = false;
 
     return () => {
-      if (effectiveDraftKey) {
-        const content = syncComposerContentFromEditor();
+      // Another composer or explicit inbox deletion may supersede this visit
+      // without changing its editor. A send claim alone does not block saving
+      // the outgoing editor: optimistic clear must still persist normally.
+      if (
+        effectiveDraftKey &&
+        lastAuthoredRevisionRef.current === authority.authoredRevision
+      ) {
+        const queuedAttachments = getQueuedAttachments?.() ?? [];
+        if (queuedAttachments.length > 0) {
+          saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
+        }
+        const content = emptyContentIsAuthoritativeRef.current
+          ? ""
+          : persistedContent(syncComposerContentFromEditor());
         persistDraft(
           effectiveDraftKey,
           content,
@@ -133,4 +252,35 @@ export function useDraftPersistLifecycle({
       }
     };
   }, [effectiveDraftKey]);
+
+  const trackAuthoredContent = React.useCallback(
+    (content: string) => {
+      if (isRestoringContentRef.current) return;
+      if (!effectiveDraftKey) return;
+      recordDraftAuthoredContent(effectiveDraftKey, content);
+      lastAuthoredRevisionRef.current = authority.authoredRevision;
+      if (content.length > 0) {
+        emptyContentIsAuthoritativeRef.current = false;
+        return;
+      }
+      emptyContentIsAuthoritativeRef.current = true;
+      persistDraft(
+        effectiveDraftKey,
+        content,
+        channelId ?? effectiveDraftKey,
+        [...pendingImetaForPersistRef.current],
+        [...spoileredAttachmentUrlsRef.current],
+        [],
+      );
+    },
+    [
+      authority,
+      channelId,
+      effectiveDraftKey,
+      persistDraft,
+      spoileredAttachmentUrlsRef,
+    ],
+  );
+
+  return { trackAuthoredContent, getComposerRevision, runComposerUpdate };
 }

@@ -62,7 +62,12 @@ function findCrossedSliderTick(
 }
 
 type AvatarFramingSliderProps = {
+  ariaDescribedBy?: string;
+  ariaLabel?: string;
+  ariaValueText?: string;
+  compact?: boolean;
   disabled?: boolean;
+  handleAlwaysVisible?: boolean;
   helpText?: string | null;
   helpTestId?: string;
   max: number;
@@ -70,6 +75,7 @@ type AvatarFramingSliderProps = {
   onChange: (value: number) => void;
   onReset: () => void;
   resetValue: number;
+  resetLabel?: string;
   resetTestId: string;
   testId: string;
   tipText?: string | null;
@@ -77,7 +83,12 @@ type AvatarFramingSliderProps = {
 };
 
 export function AvatarFramingSlider({
+  ariaDescribedBy,
+  ariaLabel = "Avatar size",
+  ariaValueText,
+  compact = false,
   disabled = false,
+  handleAlwaysVisible = false,
   helpText = null,
   helpTestId,
   max,
@@ -85,6 +96,7 @@ export function AvatarFramingSlider({
   onChange,
   onReset,
   resetValue,
+  resetLabel = "Reset avatar size",
   resetTestId,
   testId,
   tipText = null,
@@ -158,13 +170,18 @@ export function AvatarFramingSlider({
   const sliderControl = (
     <div className="buzz-avatar-framing-slider-wrapper">
       <div
-        aria-label="Avatar size"
-        aria-describedby={tipText ? tipId : undefined}
+        aria-label={ariaLabel}
+        aria-describedby={tipText ? tipId : ariaDescribedBy}
         aria-valuemax={max}
         aria-valuemin={min}
         aria-valuenow={value}
-        className="buzz-avatar-framing-slider"
+        aria-valuetext={ariaValueText}
+        className={cn(
+          "buzz-avatar-framing-slider",
+          compact && "buzz-avatar-framing-slider--compact",
+        )}
         data-active={isActive ? "true" : undefined}
+        data-handle-visible={handleAlwaysVisible ? "true" : undefined}
         data-testid={testId}
         onKeyDown={(event) => {
           if (disabled) {
@@ -242,7 +259,7 @@ export function AvatarFramingSlider({
         <div aria-hidden="true" className="buzz-avatar-framing-slider-handle" />
       </div>
       <button
-        aria-label="Reset avatar size"
+        aria-label={resetLabel}
         className="buzz-avatar-framing-slider-hashmark"
         data-reset="true"
         data-testid={resetTestId}
@@ -255,7 +272,7 @@ export function AvatarFramingSlider({
           onReset();
         }}
         style={resetTickStyle}
-        title="Reset avatar size"
+        title={resetLabel}
         type="button"
       />
       {tipText ? (

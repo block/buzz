@@ -1,5 +1,11 @@
+import { getSentFromThreadRootId } from "@/features/messages/lib/sentFromThread";
+
 type MessageAuthorCandidate = {
   pubkey?: string | null;
+};
+
+type MessageGroupingCandidate = {
+  tags?: readonly (readonly string[])[] | null;
 };
 
 /**
@@ -10,6 +16,16 @@ type MessageAuthorCandidate = {
  * the threaded reply panel, and the home inbox detail view.
  */
 export const MESSAGE_GROUPING_WINDOW_SECONDS = 10 * 60;
+
+/**
+ * Shared thread messages introduce context from another conversation, so they
+ * always start a fresh visual message group even beside the same author.
+ */
+export function startsNewMessageGroup(
+  message: MessageGroupingCandidate | null | undefined,
+) {
+  return getSentFromThreadRootId(message?.tags) !== null;
+}
 
 export function hasSameMessageAuthor(
   previous: MessageAuthorCandidate | null | undefined,

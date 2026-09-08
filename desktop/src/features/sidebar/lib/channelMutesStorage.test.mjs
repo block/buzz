@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundMuteStore,
+  MAX_CHANNEL_MUTE_ENTRIES,
   parseMutePayload,
   mergeStores,
   mutedChannelIdsFromStore,
@@ -206,6 +208,135 @@ test("mergeStores: both empty returns empty", () => {
     { version: 1, channels: {} },
   );
   assert.deepEqual(result, { version: 1, channels: {} });
+});
+
+test("boundMuteStore: retains newest entries regardless of muted value", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index + 1 },
+    ]),
+  );
+  channels["old-false"] = { muted: false, updatedAt: 0 };
+  channels["new-false"] = { muted: false, updatedAt: 9999 };
+
+  const result = boundMuteStore({ version: 1, channels });
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.equal(result.channels["old-false"], undefined);
+  assert.deepEqual(result.channels["new-false"], {
+    muted: false,
+    updatedAt: 9999,
+  });
+  assert.equal(result.channels["active-0"], undefined);
+  assert.deepEqual(result.channels["active-1"], { muted: true, updatedAt: 2 });
+});
+
+test("boundMuteStore: uses channel ID as an updatedAt tie-breaker", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES + 1 }, (_, index) => [
+      `channel-${String(MAX_CHANNEL_MUTE_ENTRIES - index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+
+  const result = boundMuteStore({ version: 1, channels });
+
+  assert.equal(result.channels["channel-000"], undefined);
+  assert.deepEqual(result.channels["channel-500"], {
+    muted: true,
+    updatedAt: 1,
+  });
+});
+
+test("boundMuteStore: preserves a same-second mute mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { muted: true, updatedAt: 1 };
+
+  const result = boundMuteStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    muted: true,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
+test("boundMuteStore: preserves a same-second unmute mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { muted: false, updatedAt: 1 };
+
+  const result = boundMuteStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    muted: false,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
+test("mergeStores: a fresh at-capacity unmute defeats an older remote mute", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index + 1 },
+    ]),
+  );
+  channels["unmuted"] = { muted: false, updatedAt: 9999 };
+  const bounded = boundMuteStore({ version: 1, channels });
+
+  const result = mergeStores(bounded, {
+    version: 1,
+    channels: { unmuted: { muted: true, updatedAt: 9998 } },
+  });
+
+  assert.deepEqual(result.channels.unmuted, {
+    muted: false,
+    updatedAt: 9999,
+  });
+});
+
+test("mergeStores: evicted remote ID re-enters and the oldest state is re-trimmed", () => {
+  const localChannels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index + 10 },
+    ]),
+  );
+  const result = mergeStores(
+    { version: 1, channels: localChannels },
+    {
+      version: 1,
+      channels: {
+        "evicted-id": { muted: true, updatedAt: 9999 },
+        "active-0": { muted: false, updatedAt: 9998 },
+      },
+    },
+  );
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["evicted-id"], {
+    muted: true,
+    updatedAt: 9999,
+  });
+  assert.deepEqual(result.channels["active-0"], {
+    muted: false,
+    updatedAt: 9998,
+  });
+  assert.equal(result.channels["active-1"], undefined);
+  assert.deepEqual(result.channels["active-2"], { muted: true, updatedAt: 12 });
 });
 
 // ── mutedChannelIdsFromStore ──────────────────────────────────────────────────

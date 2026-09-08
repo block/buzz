@@ -75,10 +75,14 @@ export async function runPxTextCheck({
   const violations = [];
 
   for (const filePath of candidateFiles) {
-    const relativePath = path.relative(projectRoot, filePath);
-    const rule = rules.find((r) =>
-      relativePath.startsWith(`${r.root}${path.sep}`),
-    );
+    // `rules[].root` and the `overrides` keys are authored with `/`, but
+    // path.relative yields `\` on Windows — so every comparison against them
+    // has to happen in posix form or it silently matches nothing.
+    const relativePath = path
+      .relative(projectRoot, filePath)
+      .split(path.sep)
+      .join("/");
+    const rule = rules.find((r) => relativePath.startsWith(`${r.root}/`));
     if (!rule) {
       continue;
     }

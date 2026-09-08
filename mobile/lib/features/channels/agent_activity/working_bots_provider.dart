@@ -8,21 +8,20 @@ import '../channel_typing_provider.dart';
 ///
 /// Used by both the members button badge and the members sheet to avoid
 /// duplicating the bot-typing cross-reference logic.
-final workingBotPubkeysProvider = Provider.family<Set<String>, String>((
-  ref,
-  channelId,
-) {
-  final typingEntries = ref.watch(channelTypingProvider(channelId));
-  final membersAsync = ref.watch(channelMembersProvider(channelId));
-  final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
+final workingBotPubkeysProvider = Provider.autoDispose
+    .family<Set<String>, String>((ref, channelId) {
+      final typingEntries = ref.watch(channelTypingProvider(channelId));
+      final membersAsync = ref.watch(channelMembersProvider(channelId));
+      final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
 
-  final botPubkeys = <String>{
-    for (final m in allMembers)
-      if (m.isBot) m.pubkey.toLowerCase(),
-  };
+      final botPubkeys = <String>{
+        for (final m in allMembers)
+          if (m.isBot) m.pubkey.toLowerCase(),
+      };
 
-  return <String>{
-    for (final e in typingEntries)
-      if (botPubkeys.contains(e.pubkey.toLowerCase())) e.pubkey.toLowerCase(),
-  };
-});
+      return <String>{
+        for (final e in typingEntries)
+          if (botPubkeys.contains(e.pubkey.toLowerCase()))
+            e.pubkey.toLowerCase(),
+      };
+    });

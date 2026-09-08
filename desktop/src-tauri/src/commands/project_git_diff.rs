@@ -25,6 +25,7 @@ pub struct ProjectRepoDiffInfo {
     pub files: Vec<ProjectRepoDiffFileInfo>,
     pub additions: usize,
     pub deletions: usize,
+    pub commit_body: Option<String>,
 }
 
 fn clean_target_ref(value: Option<String>) -> Option<String> {
@@ -340,7 +341,25 @@ fn diff_from_repo(
     repo_dir: &std::path::Path,
     auth: &GitAuthConfig,
     range: &str,
+    target_commit: Option<&str>,
 ) -> Result<ProjectRepoDiffInfo, String> {
+    let commit_body = target_commit
+        .map(|commit| {
+            run_git(
+                &[
+                    "show",
+                    "--no-patch",
+                    "--format=%b",
+                    "--end-of-options",
+                    commit,
+                ],
+                Some(repo_dir),
+                auth,
+            )
+            .map(|body| body.trim_end().to_string())
+        })
+        .transpose()?
+        .filter(|body| !body.is_empty());
     let numstat = run_git(&["diff", "--numstat", range], Some(repo_dir), auth)?;
     let files = parse_numstat(&numstat)
         .into_iter()
@@ -375,6 +394,7 @@ fn diff_from_repo(
     Ok(ProjectRepoDiffInfo {
         additions: files.iter().map(|file| file.additions).sum(),
         deletions: files.iter().map(|file| file.deletions).sum(),
+        commit_body,
         files,
     })
 }
@@ -430,7 +450,12 @@ pub async fn get_project_repo_diff(
                 diff_base_ref(&repo_dir, &auth, base_branch.as_deref()),
             ),
         };
-        diff_from_repo(&repo_dir, &auth, &range)
+        let commit_body_ref = if target_ref.is_none() && base_branch.is_none() {
+            target_commit.as_deref()
+        } else {
+            None
+        };
+        diff_from_repo(&repo_dir, &auth, &range, commit_body_ref)
     })
     .await
     .map_err(|error| format!("repo diff task failed: {error}"))?
@@ -468,7 +493,12 @@ pub async fn get_project_local_repo_diff(
             base_commit.as_deref(),
             target_commit.as_deref(),
         );
-        diff_from_repo(&repo_dir, &auth, &range).map(Some)
+        let commit_body_ref = if base_commit.is_none() && base_branch.is_none() {
+            target_commit.as_deref()
+        } else {
+            None
+        };
+        diff_from_repo(&repo_dir, &auth, &range, commit_body_ref).map(Some)
     })
     .await
     .map_err(|error| format!("local repo diff task failed: {error}"))?

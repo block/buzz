@@ -1,4 +1,5 @@
 export const INVITE_EXPIRED_ERROR = "invite_expired";
+export const INVITE_EXHAUSTED_ERROR = "invite_exhausted";
 
 /**
  * Parsed invite — either a full (relay + code) or bare-code form.
@@ -88,4 +89,8 @@ export function inviteErrorMessage(error: unknown): string {
 
 export function isInviteExpiredError(error: unknown): boolean {
   return inviteErrorMessage(error) === INVITE_EXPIRED_ERROR;
+}
+
+export function isInviteExhaustedError(error: unknown): boolean {
+  return inviteErrorMessage(error) === INVITE_EXHAUSTED_ERROR;
 }

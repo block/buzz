@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { CopyButton } from "@/features/agents/ui/CopyButton";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
@@ -11,21 +12,26 @@ import {
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
+import { Button } from "@/shared/ui/button";
 
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
   effectivePubkey,
+  ownerPubkey,
   logCopyValue,
   logSubtitle,
   onBack,
+  onEditAgent,
   view,
   viewerIsOwner,
 }: {
   agentSettingsMenu: ReactNode;
   effectivePubkey: string | null;
+  ownerPubkey?: string | null;
   logCopyValue?: string | null;
   logSubtitle?: string | null;
   onBack: () => void;
+  onEditAgent?: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
@@ -44,6 +50,13 @@ export function getUserProfilePanelHeaderContent({
         subtitleTitle={logSubtitle ?? undefined}
         title={title}
       />
+      {view !== "summary" ? (
+        <AgentManagementMarker
+          pubkey={effectivePubkey}
+          ownerPubkey={ownerPubkey}
+          testId="user-profile-header-agent-provenance"
+        />
+      ) : null}
     </AuxiliaryPanelHeaderGroup>
   );
   const headerActions = (
@@ -56,6 +69,19 @@ export function getUserProfilePanelHeaderContent({
         />
       ) : null}
       {view === "summary" ? agentSettingsMenu : null}
+      {view === "summary" && onEditAgent ? (
+        <Button
+          aria-label="Edit agent"
+          className="text-sm"
+          data-testid="user-profile-header-edit-agent"
+          onClick={onEditAgent}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          Edit
+        </Button>
+      ) : null}
       {shouldShowLogDetails ? (
         <CopyButton
           className="text-muted-foreground hover:text-foreground"

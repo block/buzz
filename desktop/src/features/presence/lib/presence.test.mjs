@@ -2,16 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activePresencePubkeys,
   mergePresenceUpdate,
   parseLivePresenceEvent,
   presenceQueryWantsPubkey,
+  PRESENCE_HEARTBEAT_INTERVAL_MS,
   PRESENCE_IDLE_TIMEOUT_MS,
+  PRESENCE_TTL_SECONDS,
   resolveAutomaticPresenceStatus,
 } from "./presence.ts";
 
 const WILL = "8e39cba681211b3782d0e4483e9343719b9b7be66515252da5491f26421896b1";
 const OTHER =
   "44b8e82baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+test("active presence authors are normalized, deduplicated, and sorted", () => {
+  const queries = [
+    { queryKey: ["presence", WILL.toUpperCase(), OTHER], isActive: () => true },
+    { queryKey: ["presence", WILL], isActive: () => true },
+  ];
+  assert.deepEqual(activePresencePubkeys(queries), [OTHER, WILL].sort());
+});
+
+test("inactive and non-presence queries do not retain presence authors", () => {
+  const queries = [
+    { queryKey: ["presence", WILL], isActive: () => false },
+    { queryKey: ["profiles", OTHER], isActive: () => true },
+  ];
+  assert.deepEqual(activePresencePubkeys(queries), []);
+});
+
+test("presence heartbeat is one minute with a three-window TTL", () => {
+  assert.equal(PRESENCE_HEARTBEAT_INTERVAL_MS, 60_000);
+  assert.equal(PRESENCE_TTL_SECONDS, 180);
+  assert.equal(
+    PRESENCE_TTL_SECONDS,
+    3 * (PRESENCE_HEARTBEAT_INTERVAL_MS / 1000),
+  );
+});
 
 test("merge adds an absent pubkey going online (the core bug)", () => {
   const old = {};

@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: buzz
       PGDATA: /var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -34,7 +34,7 @@ services:
     image: redis:7-alpine
     container_name: buzz-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     networks:
       - buzz-net
     healthcheck:
@@ -56,7 +56,7 @@ services:
     image: adminer:latest
     container_name: buzz-adminer
     ports:
-      - "8082:8080"
+      - "127.0.0.1:8082:8080"
     networks:
       - buzz-net
     depends_on:
@@ -82,7 +82,7 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports:
-      - "8180:8080"
+      - "127.0.0.1:8180:8080"
     networks:
       - buzz-net
     healthcheck:
@@ -108,8 +108,8 @@ services:
       MINIO_ROOT_USER: buzz_dev
       MINIO_ROOT_PASSWORD: buzz_dev_secret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
     networks:
@@ -152,7 +152,7 @@ services:
     image: prom/prometheus:latest
     container_name: buzz-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus

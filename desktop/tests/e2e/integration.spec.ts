@@ -36,7 +36,9 @@ async function openChannelManagement(page: import("@playwright/test").Page) {
 async function openChannelEditDialog(page: import("@playwright/test").Page) {
   await page.getByTestId("channel-management-edit").click();
   await expect(
-    page.getByRole("dialog", { name: "Edit channel" }),
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
   ).toBeVisible();
 }
 
@@ -91,11 +93,23 @@ async function sendChannelMessage(
         throw new Error("Tauri invoke bridge is unavailable.");
       }
 
-      const channels = (await invoke("get_channels")) as Array<{
-        id: string;
-        name: string;
-      }>;
-      const channel = channels.find(({ name }) => name === targetChannelName);
+      const memberPayload = (await invoke("get_channels")) as {
+        channels: Array<{ id: string; name: string }> | null;
+      };
+      let channel = (memberPayload.channels ?? []).find(
+        ({ name }) => name === targetChannelName,
+      );
+      if (!channel) {
+        // get_channels is member-only; fall back to the open-channel
+        // directory for a joinable non-member channel like watercooler.
+        const directory = (await invoke(
+          "get_open_channel_directory",
+        )) as Array<{
+          id: string;
+          name: string;
+        }>;
+        channel = directory.find(({ name }) => name === targetChannelName);
+      }
       if (!channel) {
         throw new Error(`Channel not found: ${targetChannelName}`);
       }
@@ -132,11 +146,21 @@ async function joinChannel(
       throw new Error("Tauri invoke bridge is unavailable.");
     }
 
-    const channels = (await invoke("get_channels")) as Array<{
-      id: string;
-      name: string;
-    }>;
-    const channel = channels.find(({ name }) => name === targetChannelName);
+    const memberPayload = (await invoke("get_channels")) as {
+      channels: Array<{ id: string; name: string }> | null;
+    };
+    let channel = (memberPayload.channels ?? []).find(
+      ({ name }) => name === targetChannelName,
+    );
+    if (!channel) {
+      // get_channels is member-only; fall back to the open-channel
+      // directory for a joinable non-member channel like watercooler.
+      const directory = (await invoke("get_open_channel_directory")) as Array<{
+        id: string;
+        name: string;
+      }>;
+      channel = directory.find(({ name }) => name === targetChannelName);
+    }
     if (!channel) {
       throw new Error(`Channel not found: ${targetChannelName}`);
     }
@@ -301,18 +325,18 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       },
     ]);
 
-    // The inbox feed should have been refetched live (the original purpose
+    // The Inbox feed should have been refetched live (the original purpose
     // of this test). The home badge stays at 0 while the user is actively
     // reading #general — reading in-channel advances the NIP-RS marker past
     // the new mention — so the assertion that the refetch happened is the
-    // inbox-list content, not the badge.
+    // Inbox-list content, not the badge.
     await targetPage
       .getByTestId("app-sidebar")
       .getByRole("button", { name: "Inbox" })
       .click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message,
+      message.replace("@tyler", "tyler"),
     );
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
@@ -369,7 +393,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message,
+      message.replace("@tyler", "tyler"),
     );
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
@@ -454,7 +478,7 @@ test("multiple channels independent", async ({ page }) => {
   );
 });
 
-test("manage sheet updates channel details and context through the relay", async ({
+test("manage sheet updates channel details through the relay", async ({
   page,
 }) => {
   const stamp = Date.now();
@@ -462,8 +486,6 @@ test("manage sheet updates channel details and context through the relay", async
   const renamedChannel = `manage-renamed-${stamp}`;
   const initialDescription = `Initial description ${stamp}`;
   const updatedDescription = `Updated description ${stamp}`;
-  const updatedTopic = `Updated topic ${stamp}`;
-  const updatedPurpose = `Updated purpose ${stamp}`;
 
   await installRelayBridge(page, "tyler");
   await page.goto("/");
@@ -471,16 +493,20 @@ test("manage sheet updates channel details and context through the relay", async
 
   await openChannelManagement(page);
   await openChannelEditDialog(page);
-  const editDialog = page.getByRole("dialog", { name: "Edit channel" });
+  const editDialog = page.getByRole("dialog", {
+    name: /Edit (?:public|private) channel/,
+  });
 
   await editDialog.getByTestId("channel-management-name").fill(renamedChannel);
   await editDialog
     .getByTestId("channel-management-description")
     .fill(updatedDescription);
-  await editDialog.getByTestId("channel-management-topic").fill(updatedTopic);
-  await editDialog
-    .getByTestId("channel-management-purpose")
-    .fill(updatedPurpose);
+  await expect(editDialog.getByTestId("channel-management-topic")).toHaveCount(
+    0,
+  );
+  await expect(
+    editDialog.getByTestId("channel-management-purpose"),
+  ).toHaveCount(0);
   await editDialog.getByTestId("channel-management-save-changes").click();
   await expect(editDialog).toHaveCount(0);
 
@@ -492,16 +518,15 @@ test("manage sheet updates channel details and context through the relay", async
 
   await page.getByTestId(`channel-${renamedChannel}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(renamedChannel);
-  // channelDescription deduplicates by showing only the first non-empty field
   await expect(page.getByTestId("chat-title")).toHaveAttribute(
     "title",
-    updatedTopic,
+    updatedDescription,
   );
 
   await openChannelManagement(page);
   await openChannelEditDialog(page);
   const reopenedEditDialog = page.getByRole("dialog", {
-    name: "Edit channel",
+    name: /Edit (?:public|private) channel/,
   });
 
   await expect(
@@ -512,10 +537,10 @@ test("manage sheet updates channel details and context through the relay", async
   ).toHaveValue(updatedDescription);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-topic"),
-  ).toHaveValue(updatedTopic);
+  ).toHaveCount(0);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
-  ).toHaveValue(updatedPurpose);
+  ).toHaveCount(0);
 });
 
 test("manage sheet archive and unarchive survives a reload through the relay", async ({

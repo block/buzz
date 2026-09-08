@@ -1,0 +1,11 @@
+[package]
+name = "ifc-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Generic reader-set information-flow control primitives"
+
+[dev-dependencies]
+proptest = { workspace = true }

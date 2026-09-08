@@ -14,6 +14,10 @@ const TYLER_PUBKEY =
 const D_TAG = "sync-test-persona";
 const KIND_PERSONA = 30175;
 const KIND_DELETION = 5;
+// The command scopes an inbound event to the community it arrived on. Under the
+// mock bridge the app subscribes on e2eBridge's DEFAULT_RELAY_WS_URL, so that is
+// the arrival relay these direct invocations stand in for.
+const ARRIVAL_RELAY_URL = "ws://localhost:3000";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -139,6 +143,7 @@ test("upsert round-trip: reconcile_inbound_persona_event writes record and emits
   // Drive the inbound reconcile path.
   await invokeTauri(page, "reconcile_inbound_persona_event", {
     eventJson: JSON.stringify(personaEvent),
+    arrivalRelayUrl: ARRIVAL_RELAY_URL,
   });
 
   // Assert the record landed on disk.
@@ -176,6 +181,7 @@ test("tombstone round-trip: reconcile_inbound_persona_event removes record and e
 
   await invokeTauri(page, "reconcile_inbound_persona_event", {
     eventJson: JSON.stringify(personaEvent),
+    arrivalRelayUrl: ARRIVAL_RELAY_URL,
   });
 
   // Step 2: confirm it landed.
@@ -202,6 +208,7 @@ test("tombstone round-trip: reconcile_inbound_persona_event removes record and e
 
   await invokeTauri(page, "reconcile_inbound_persona_event", {
     eventJson: JSON.stringify(tombstoneEvent),
+    arrivalRelayUrl: ARRIVAL_RELAY_URL,
   });
 
   // Step 4: assert the record is gone.

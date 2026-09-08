@@ -1,3 +1,4 @@
+import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   Activity,
   Ban,
@@ -18,15 +19,23 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import {
+  agentCommunityAvailability,
+  MANAGED_AGENT_PAIR_ACTION_LABELS,
+  type ManagedAgentPairAction,
+} from "@/features/agents/managedAgentRuntimeStatus";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
   ManagedAgent,
+  ManagedAgentRuntimeStatus,
   PresenceStatus,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { Badge } from "@/shared/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,6 +54,10 @@ type MembersSidebarMemberCardProps = {
   isActionPending: boolean;
   isArchived: boolean;
   managedAgent?: ManagedAgent;
+  managedAgentRuntime?: ManagedAgentRuntimeStatus;
+  /** When set, the lifecycle menu item controls this agent+community pair
+   * (local agents in a community context) instead of the whole agent. */
+  pairAction?: ManagedAgentPairAction;
   member: ChannelMember;
   memberAvatarLabel: string;
   memberIsBot: boolean;
@@ -62,6 +75,7 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
+  profileOwnerPubkey?: string | null;
   viewerIsOwner: boolean;
 };
 
@@ -98,22 +112,9 @@ function formatRespondToLabel(agent: ManagedAgent) {
     case "anyone":
       return "Anyone";
     case "allowlist":
-      return `Allowlist (${agent.respondToAllowlist.length})`;
+      return `Selected people (${agent.respondToAllowlist.length})`;
     default:
-      return "Owner only";
-  }
-}
-
-function formatManagedAgentStatus(agent: ManagedAgent) {
-  switch (agent.status) {
-    case "running":
-      return "Running";
-    case "stopped":
-      return "Stopped";
-    case "deployed":
-      return "Deployed";
-    case "not_deployed":
-      return "Not deployed";
+      return "Only me";
   }
 }
 
@@ -124,6 +125,8 @@ export function MembersSidebarMemberCard({
   isActionPending,
   isArchived,
   managedAgent,
+  managedAgentRuntime,
+  pairAction,
   member,
   memberAvatarLabel,
   memberIsBot,
@@ -141,6 +144,7 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
+  profileOwnerPubkey,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
@@ -165,6 +169,7 @@ export function MembersSidebarMemberCard({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={memberAvatarLabel}
+          shape={memberIsBot ? "squircle" : "circle"}
         />
         {presenceStatus ? (
           <span
@@ -177,21 +182,28 @@ export function MembersSidebarMemberCard({
       </div>
       <div className="min-w-0 flex-1">
         {memberIsBot ? (
-          <div className="relative min-w-0">
-            <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
-              <span className="truncate text-sm font-medium tracking-tight">
-                {memberLabel}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <Bot aria-hidden="true" className="h-4 w-4" />
-                {roleLabel}
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
+                <span className="truncate text-sm font-medium tracking-tight">
+                  {memberLabel}
+                </span>
+                <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                  <Bot aria-hidden="true" className="h-4 w-4" />
+                  {roleLabel}
+                </span>
+              </div>
+              <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
+                <span className="truncate font-mono text-sm text-muted-foreground">
+                  {truncatePubkey(member.pubkey)}
+                </span>
               </span>
             </div>
-            <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
-              <span className="truncate font-mono text-sm text-muted-foreground">
-                {truncatePubkey(member.pubkey)}
-              </span>
-            </span>
+            <AgentManagementMarker
+              pubkey={member.pubkey}
+              ownerPubkey={profileOwnerPubkey}
+              testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+            />
           </div>
         ) : (
           <div className="flex min-w-0 items-center gap-2">
@@ -205,21 +217,37 @@ export function MembersSidebarMemberCard({
             ) : null}
           </div>
         )}
-        {managedAgent ? (
-          <span
-            className="sr-only"
-            data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
-          >
-            {formatManagedAgentStatus(managedAgent)}
-          </span>
-        ) : null}
-        {managedAgent ? (
-          <span
-            className="sr-only"
-            data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
-          >
-            {formatRespondToLabel(managedAgent)}
-          </span>
+        {managedAgentRuntime || managedAgent ? (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            <Badge
+              className="normal-case tracking-normal"
+              data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
+              variant={
+                managedAgentRuntime
+                  ? agentCommunityAvailability(managedAgentRuntime) === "Here"
+                    ? "default"
+                    : "secondary"
+                  : managedAgent && isManagedAgentActive(managedAgent)
+                    ? "default"
+                    : "secondary"
+              }
+            >
+              {managedAgentRuntime
+                ? agentCommunityAvailability(managedAgentRuntime)
+                : managedAgent && isManagedAgentActive(managedAgent)
+                  ? "Running"
+                  : "Stopped"}
+            </Badge>
+            {managedAgent ? (
+              <Badge
+                className="normal-case tracking-normal"
+                data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
+                variant="outline"
+              >
+                {formatRespondToLabel(managedAgent)}
+              </Badge>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -265,6 +293,8 @@ export function MembersSidebarMemberCard({
           onUnban={onUnban}
           onUntimeout={onUntimeout}
           onViewActivity={onViewActivity}
+          pairAction={pairAction}
+          availability={presenceStatus ?? undefined}
         />
       ) : null}
     </div>
@@ -274,6 +304,7 @@ export function MembersSidebarMemberCard({
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
+  availability,
   canChangeRole,
   canModerateMember,
   canRemoveMember,
@@ -292,8 +323,10 @@ function MemberActionsMenu({
   onUnban,
   onUntimeout,
   onViewActivity,
+  pairAction,
 }: {
   canChangeRole: boolean;
+  availability: PresenceStatus | undefined;
   canModerateMember: boolean;
   canRemoveMember: boolean;
   canViewActivity: boolean;
@@ -311,11 +344,19 @@ function MemberActionsMenu({
   onUnban: (member: ChannelMember) => void;
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
+  pairAction?: ManagedAgentPairAction;
 }) {
   const showChangeRole =
     canChangeRole && !memberIsBot && member.role !== "owner";
   const isBanned = moderationState?.banned ?? false;
   const isTimedOut = moderationState?.timedOut ?? false;
+
+  const startBlockReason = managedAgent
+    ? agentPresenceStartBlockReason(
+        pairAction ? pairAction === "stop" : isManagedAgentActive(managedAgent),
+        availability,
+      )
+    : undefined;
 
   return (
     <DropdownMenu modal={false}>
@@ -346,11 +387,18 @@ function MemberActionsMenu({
             {canViewActivity ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               data-testid={`sidebar-agent-action-${member.pubkey}`}
-              disabled={disabled}
-              onClick={() => onManagedAgentAction(managedAgent)}
+              disabled={disabled || Boolean(startBlockReason)}
+              title={startBlockReason}
+              onClick={() => {
+                if (!startBlockReason) onManagedAgentAction(managedAgent);
+              }}
             >
-              {getManagedAgentActionIcon(managedAgent)}
-              {getManagedAgentPrimaryActionLabel(managedAgent)}
+              {pairAction
+                ? getPairActionIcon(pairAction)
+                : getManagedAgentActionIcon(managedAgent)}
+              {pairAction
+                ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
+                : getManagedAgentPrimaryActionLabel(managedAgent)}
             </DropdownMenuItem>
             {onEditRespondTo ? (
               <DropdownMenuItem
@@ -359,7 +407,7 @@ function MemberActionsMenu({
                 onClick={() => onEditRespondTo(managedAgent)}
               >
                 <Pencil className="h-4 w-4" />
-                Edit respond-to...
+                Manage agent access...
               </DropdownMenuItem>
             ) : null}
             {canRemoveMember || showChangeRole ? (
@@ -473,6 +521,12 @@ function MemberActionsMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function getPairActionIcon(action: ManagedAgentPairAction) {
+  if (action === "stop") return <Square className="h-4 w-4" />;
+  if (action === "restart") return <RotateCcw className="h-4 w-4" />;
+  return <Play className="h-4 w-4" />;
 }
 
 function getManagedAgentActionIcon(agent: ManagedAgent) {

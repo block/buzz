@@ -87,7 +87,7 @@ export BUZZ_PRIVATE_KEY="nsec1..."   # from the mint output
 | `channels:read` | ✅ | `channels list`, `channels get`, `channels members` |
 | `channels:write` | ✅ | `channels create`, `channels update`, `channels join`, `channels leave`, `channels topic`, `channels purpose` |
 | `users:read` | ✅ | `users get`, `users presence` |
-| `users:write` | ✅ | `users set-profile`, `users set-presence` |
+| `users:write` | ✅ | `users set-profile`, `users set-presence`, `users set-status` |
 | `files:read` | ✅ | — |
 | `files:write` | ✅ | — |
 | `admin:channels` | ❌ | `channels archive`, `channels unarchive`, `channels delete`, `channels add-member`, `channels remove-member` |
@@ -216,8 +216,11 @@ echo 'Body with `backticks` and $vars stays literal.' \
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 
-# messages thread
+# messages thread from the root, a reply, and a canonical link
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
+buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
+buzz messages thread \
+  --link "buzz://message?channel=$CHANNEL_ID&id=$REPLY_ID&thread=$EVENT_ID" | jq .
 
 # messages search
 buzz messages search --query "Hello" | jq .
@@ -331,6 +334,20 @@ buzz users set-presence --status online | jq .
 buzz users set-presence --status away | jq .
 buzz users set-presence --status offline | jq .
 # Note: set-presence may fail — kind:20001 is ephemeral and rejected by the HTTP bridge
+
+# users set-status — NIP-38 kind:30315 on the d:general coordinate
+buzz users set-status --text "reviewing PRs" --emoji "🔍" | jq .
+buzz users set-status --text "no emoji this time" | jq .
+
+# users set-status — emoji-only status (intentional: text is blank, emoji is kept)
+buzz users set-status --text "" --emoji "🎶" | jq .
+
+# users set-status --clear — removes the status (empty content, d:general only)
+buzz users set-status --clear | jq .
+
+# --clear is mutually exclusive with --text/--emoji
+buzz users set-status --clear --text "nope" 2>&1; echo "exit: $?"
+# Expected: exit 1 — clap conflict error
 ```
 
 ### 6.8 Channel Members (add/remove require admin:channels)
@@ -411,7 +428,8 @@ buzz workflows delete --workflow "$WF_ID" | jq .
 ```bash
 buzz feed get | jq .
 buzz feed get --limit 5 | jq .
-# Expected: [{id,pubkey,kind,content,created_at,tags}] — sig-stripped, sorted newest-first
+# Expected: complete signed Nostr events with
+# {id,pubkey,kind,content,created_at,sig,tags}, sorted newest-first
 ```
 
 ### 6.11 Forum & Voting
@@ -606,3 +624,4 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 59 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
+| 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |

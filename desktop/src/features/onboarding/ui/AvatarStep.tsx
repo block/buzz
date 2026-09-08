@@ -30,6 +30,7 @@ type AvatarStepProps = {
   direction: OnboardingTransitionDirection;
   /** When true, a ghost "Skip for now" button is always visible (not just on error). */
   showAlwaysSkip?: boolean;
+  showBack?: boolean;
   state: Pick<
     ProfileStepState,
     "avatar" | "isSaving" | "isUploadingAvatar" | "name" | "saveRecovery"
@@ -130,6 +131,7 @@ function AvatarStepActions({
   onSkipForNow,
   onSubmit,
   saveRecovery,
+  showBack,
   showAlwaysSkip,
 }: {
   canSubmit: boolean;
@@ -141,6 +143,7 @@ function AvatarStepActions({
   onSkipForNow: () => void;
   onSubmit: () => void;
   saveRecovery: ProfileStepState["saveRecovery"];
+  showBack: boolean;
   showAlwaysSkip: boolean;
 }) {
   const areNavigationActionsDisabled = isSaving || isUploadingAvatar;
@@ -222,16 +225,18 @@ function AvatarStepActions({
               </Button>
             ) : null}
 
-            <Button
-              className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
-              data-testid="onboarding-back"
-              disabled={areNavigationActionsDisabled}
-              onClick={onBack}
-              type="button"
-              variant="ghost"
-            >
-              Back
-            </Button>
+            {showBack ? (
+              <Button
+                className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-back"
+                disabled={areNavigationActionsDisabled}
+                onClick={onBack}
+                type="button"
+                variant="ghost"
+              >
+                Back
+              </Button>
+            ) : null}
           </motion.div>
         )}
       </AnimatePresence>
@@ -243,6 +248,7 @@ export function AvatarStep({
   actions,
   direction,
   showAlwaysSkip = false,
+  showBack = true,
   state,
 }: AvatarStepProps) {
   const {
@@ -407,6 +413,7 @@ export function AvatarStep({
             onSkipForNow={skipForNow}
             onSubmit={submit}
             saveRecovery={saveRecovery}
+            showBack={showBack}
             showAlwaysSkip={showAlwaysSkip}
           />
         </motion.div>

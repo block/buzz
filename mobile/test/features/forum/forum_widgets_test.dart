@@ -8,10 +8,13 @@ import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/forum/forum_provider.dart';
 import 'package:buzz/features/forum/forum_thread_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'forum-channel';
 
@@ -60,19 +63,27 @@ Widget _buildPostCard({
   Map<String, UserProfile> users = const {},
   VoidCallback? onTap,
   void Function(String)? onDelete,
+  TextScaler textScaler = TextScaler.noScaling,
+  Set<String> knownAgentPubkeys = const {},
 }) {
   return ProviderScope(
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+      knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(
-        body: ForumPostCard(
-          post: post,
-          currentPubkey: currentPubkey,
-          onTap: onTap ?? () {},
-          onDelete: onDelete,
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: Scaffold(
+            body: ForumPostCard(
+              post: post,
+              currentPubkey: currentPubkey,
+              onTap: onTap ?? () {},
+              onDelete: onDelete,
+            ),
+          ),
         ),
       ),
     ),
@@ -103,6 +114,10 @@ Widget _buildPostsView({
   );
 }
 
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
+
 Widget _buildThreadPage({
   required ForumThreadResponse threadResponse,
   String postEventId = 'post1',
@@ -110,33 +125,75 @@ Widget _buildThreadPage({
   bool isMember = true,
   bool isArchived = false,
   Map<String, UserProfile> users = const {},
+  Set<String> knownAgentPubkeys = const {},
+  Set<String> channelBotPubkeys = const {},
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+      knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
+      channelBotPubkeysProvider(
+        _channelId,
+      ).overrideWith((ref) async => channelBotPubkeys),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       forumThreadProvider((
         channelId: _channelId,
         eventId: postEventId,
       )).overrideWith((ref) async => threadResponse),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: ForumThreadPage(
-        channelId: _channelId,
-        postEventId: postEventId,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: ForumThreadPage(
+            channelId: _channelId,
+            postEventId: postEventId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+          ),
+        ),
       ),
     ),
   );
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
+  test('cancels a captured forum delivery after the community changes', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://first.example');
+    final delivery = ForumEventDelivery.capture(container);
+
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://second.example');
+
+    expect(
+      delivery.createPost(channelId: _channelId, content: 'Queued post'),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('active community changed'),
+        ),
+      ),
+    );
+  });
+
   group('ForumPostCard', () {
     testWidgets('renders author name and content', (tester) async {
       await tester.pumpWidget(
@@ -158,6 +215,95 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('abcdef12\u2026'), findsOneWidget);
+    });
+
+    testWidgets('uses directory classification for uncached author avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(pubkey: 'directory-agent'),
+          knownAgentPubkeys: const {'directory-agent'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+        isTrue,
+      );
+    });
+
+    testWidgets('keeps human author avatar circular', (tester) async {
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(),
+          users: const {'alice': _aliceProfile},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+        isFalse,
+      );
+    });
+
+    testWidgets(
+      'constrains an older timestamp at large accessible text sizes',
+      (tester) async {
+        _setSurfaceSize(tester, const Size(240, 600));
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          _buildPostCard(
+            post: _makePost(
+              createdAt:
+                  DateTime.utc(2025, 12, 31, 12).millisecondsSinceEpoch ~/ 1000,
+            ),
+            users: const {
+              'alice': UserProfile(
+                pubkey: 'alice',
+                displayName: 'A very long display name',
+              ),
+            },
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final timestamp = tester.widget<Text>(find.text('12/31/2025'));
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('gives the author unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 600));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const displayName = 'A moderately long forum author name';
+
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(createdAt: createdAt),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: displayName),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(displayName)).width, greaterThan(150));
+      expect(find.text('2m ago'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('truncates long content', (tester) async {
@@ -430,6 +576,81 @@ void main() {
   });
 
   group('ForumThreadPage', () {
+    AvatarImage avatarIn(WidgetTester tester, Key key) =>
+        tester.widget<AvatarImage>(
+          find.descendant(
+            of: find.byKey(key),
+            matching: find.byType(AvatarImage),
+          ),
+        );
+
+    testWidgets(
+      'uses directory classification for an uncached original author',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildThreadPage(
+            threadResponse: ForumThreadResponse(
+              post: _makePost(pubkey: 'directory-agent'),
+              replies: const [],
+              totalReplies: 0,
+            ),
+            knownAgentPubkeys: const {'directory-agent'},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          avatarIn(
+            tester,
+            const ValueKey('forum-original-avatar-post1'),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets('uses bot-role classification for an uncached reply author', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: const [
+              ThreadReply(
+                eventId: 'bot-reply',
+                pubkey: 'channel-bot',
+                content: 'Automated reply',
+                kind: 45003,
+                createdAt: 2000,
+                channelId: _channelId,
+                tags: [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {'alice': _aliceProfile},
+          channelBotPubkeys: const {'channel-bot'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        avatarIn(
+          tester,
+          const ValueKey('forum-reply-avatar-bot-reply'),
+        ).isAgent,
+        isTrue,
+      );
+      expect(
+        avatarIn(tester, const ValueKey('forum-original-avatar-post1')).isAgent,
+        isFalse,
+      );
+    });
+
     testWidgets('shows original post and replies header', (tester) async {
       await tester.pumpWidget(
         _buildThreadPage(
@@ -482,6 +703,97 @@ void main() {
 
       expect(find.text('1 reply'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
+    });
+
+    testWidgets('constrains post and reply timestamps at large text sizes', (
+      tester,
+    ) async {
+      final oldTimestamp =
+          DateTime.utc(2025, 12, 31, 12).millisecondsSinceEpoch ~/ 1000;
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(createdAt: oldTimestamp),
+            replies: [
+              ThreadReply(
+                eventId: 'old-reply',
+                pubkey: 'bob',
+                content: 'An older reply',
+                kind: 45003,
+                createdAt: oldTimestamp,
+                channelId: _channelId,
+                tags: const [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {
+            'alice': _aliceProfile,
+            'bob': UserProfile(
+              pubkey: 'bob',
+              displayName: 'A very long reply author name',
+            ),
+          },
+          textScaler: const TextScaler.linear(2),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final timestamps = tester.widgetList<Text>(find.text('12/31/2025'));
+      expect(timestamps, hasLength(2));
+      for (final timestamp in timestamps) {
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('gives thread authors unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 800));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const postAuthor = 'A moderately long original author';
+      const replyAuthor = 'A moderately long reply author';
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(createdAt: createdAt),
+            replies: [
+              ThreadReply(
+                eventId: 'reply',
+                pubkey: 'bob',
+                content: 'A reply',
+                kind: 45003,
+                createdAt: createdAt,
+                channelId: _channelId,
+                tags: const [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: postAuthor),
+            'bob': UserProfile(pubkey: 'bob', displayName: replyAuthor),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(postAuthor)).width, greaterThan(150));
+      expect(tester.getSize(find.text(replyAuthor)).width, greaterThan(140));
+      expect(find.text('2m ago'), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('shows compose bar for members', (tester) async {

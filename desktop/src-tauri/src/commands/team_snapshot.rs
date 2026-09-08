@@ -122,6 +122,9 @@ fn definition_from_snapshot(
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
         avatar_url: effective_avatar(member),
+        description: crate::managed_agents::effective_agent_description(
+            member.profile.about.as_deref(),
+        ),
         system_prompt: member.definition.system_prompt.clone().unwrap_or_default(),
         runtime: member.definition.runtime.clone(),
         model: member.definition.model.clone(),
@@ -129,8 +132,11 @@ fn definition_from_snapshot(
         name_pool: member.definition.name_pool.clone(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
@@ -170,6 +176,11 @@ pub(crate) fn build_import_team(
         persona_ids,
         instructions: snapshot.team.instructions.clone(),
         is_builtin: false,
+        // An imported team starts unshared; sharing is an explicit choice.
+        shared: false,
+        // A snapshot import is not a catalog add — there is no publication
+        // coordinate to point back to.
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -551,6 +562,10 @@ pub async fn confirm_team_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            // Linked definitions remain the sole description authority. Do
+            // not persist a second instance copy that can go stale after an
+            // edit or survive a later definition deletion.
+            description: None,
             slug: None,
             persona_id: Some(definition.id.clone()),
             private_key_nsec: private_key_nsec.clone(),
@@ -577,6 +592,7 @@ pub async fn confirm_team_snapshot_import(
             runtime_pid: None,
             backend: crate::managed_agents::BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: Some(imported_team.id.clone()),
             persona_team_dir: None,
@@ -599,12 +615,16 @@ pub async fn confirm_team_snapshot_import(
             respond_to_allowlist: definition.respond_to_allowlist.clone(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
+            effort_level: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };
@@ -758,12 +778,15 @@ pub async fn confirm_team_snapshot_import(
         let relay_url = effective_agent_relay_url(&m.record.relay_url, &relay_ws);
 
         // Phase 4: profile sync (best-effort).
+        let profile_about =
+            crate::managed_agents::effective_agent_description(m.definition.description.as_deref());
         let profile_sync_error = sync_managed_agent_profile(
             &state,
             &relay_url,
             &m.agent_keys,
             &m.display_name,
             m.effective_avatar.as_deref(),
+            profile_about.as_deref(),
             m.auth_tag.as_deref(),
         )
         .await
@@ -846,7 +869,6 @@ pub async fn confirm_team_snapshot_import(
 fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
     use crate::managed_agents::{
         agent_events::{agent_event_content, build_agent_event},
-        managed_agents_base_dir,
         persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     };
@@ -854,11 +876,12 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let conn = open_retention_db(&scope.db_path)?;
         let content = serde_json::to_string(&agent_event_content(record))
             .map_err(|e| format!("failed to serialize agent content: {e}"))?;
         let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
+            let keys = &scope.owner_keys;
             let owner_pubkey = keys.public_key().to_hex();
             let existing =
                 get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
@@ -867,7 +890,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
             }
             let event = build_agent_event(record)?
                 .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(&keys)
+                .sign_with_keys(keys)
                 .map_err(|e| format!("failed to sign agent event: {e}"))?;
             (owner_pubkey, event)
         };
@@ -891,7 +914,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
 
 /// POST a pre-built signed engram event to the relay, authenticating as the
 /// new agent. Mirrors the same helper in `snapshot::import`.
-async fn submit_engram_event(
+pub(crate) async fn submit_engram_event(
     state: &AppState,
     agent_keys: &nostr::Keys,
     event_json: &[u8],
@@ -900,6 +923,8 @@ async fn submit_engram_event(
 ) -> Result<(), String> {
     use crate::relay::build_nip98_auth_header_for_keys;
     use reqwest::Method;
+
+    crate::egress_guard::assert_no_key_backup_bytes(event_json, "team snapshot engram submit")?;
 
     // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
     // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the

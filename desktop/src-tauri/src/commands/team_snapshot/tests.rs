@@ -13,6 +13,7 @@ fn member(name: &str) -> AgentSnapshot {
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
             name: name.to_string(),
+            source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
             runtime: Some("goose".to_string()),
             model: None,
@@ -54,6 +55,7 @@ fn snapshot(members: Vec<AgentSnapshot>) -> TeamSnapshot {
 fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     let definitions = vec![
         AgentDefinition {
+            description: Some("A careful reviewer.".to_string()),
             id: "alice".to_string(),
             display_name: "Alice".to_string(),
             avatar_url: None,
@@ -64,8 +66,11 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             name_pool: vec![],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -74,6 +79,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             updated_at: "now".to_string(),
         },
         AgentDefinition {
+            description: None,
             id: "bob".to_string(),
             display_name: "Bob".to_string(),
             avatar_url: None,
@@ -84,8 +90,11 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             name_pool: vec![],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -101,6 +110,8 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
         instructions: Some("Be thorough.".to_string()),
         persona_ids: vec!["alice".to_string(), "bob".to_string()],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -127,6 +138,11 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     assert_eq!(decoded.team.description.as_deref(), Some("Reviews changes"));
     assert_eq!(decoded.team.instructions.as_deref(), Some("Be thorough."));
     assert_eq!(decoded.members.len(), 2);
+    assert_eq!(
+        decoded.members[0].profile.about.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(decoded.members[1].profile.about, None);
     assert!(decoded.members.iter().all(|member| {
         member.memory.level == MemoryLevel::None && member.memory.entries.is_empty()
     }));
@@ -135,6 +151,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
 #[test]
 fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     let definitions = vec![AgentDefinition {
+        description: None,
         id: "alice".to_string(),
         display_name: "Alice".to_string(),
         avatar_url: None,
@@ -145,8 +162,11 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         name_pool: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -161,6 +181,8 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         instructions: None,
         persona_ids: vec!["alice".to_string()],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -171,6 +193,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
 
     // Build a fake instance record tied to this team+persona.
     let instance = ManagedAgentRecord {
+        description: None,
         pubkey: "a".repeat(64),
         name: "Alice".to_string(),
         display_name: None,
@@ -199,6 +222,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         runtime_pid: None,
         backend: crate::managed_agents::BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: Some("t1".to_string()),
         persona_team_dir: None,
@@ -214,12 +238,16 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         respond_to_allowlist: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
         runtime: None,
         name_pool: vec![],
     };
@@ -279,6 +307,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
 #[test]
 fn team_import_definitions_are_built_for_all_members() {
     let mut memory_bearing = member("Alice");
+    memory_bearing.profile.about = Some("  A careful reviewer.  ".to_string());
     memory_bearing.memory = AgentSnapshotMemory {
         level: MemoryLevel::Everything,
         entries: vec![AgentSnapshotMemoryEntry {
@@ -318,6 +347,11 @@ fn team_import_definitions_are_built_for_all_members() {
             && definition.respond_to_allowlist.is_empty()
     }));
     assert_eq!(definitions[0].system_prompt, "Alice prompt");
+    assert_eq!(
+        definitions[0].description.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(definitions[1].description, None);
 }
 
 #[test]
@@ -673,6 +707,8 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
         instructions: None,
         persona_ids: vec![],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -723,4 +759,32 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
     );
     assert!(!teams_path.exists());
     assert_eq!(errors.len(), 1, "only the teams-write error");
+}
+
+// ── NIP-49 egress guard: boundary 6 (team snapshot engram submit) ────────────
+
+mod egress_guard_boundary {
+    use super::super::submit_engram_event;
+
+    const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+    /// An engram body carrying an ncryptsec must be rejected by the guard
+    /// before any network I/O (the target port is a discard address; a guard
+    /// error — not a connection error — proves the abort ordering).
+    #[tokio::test]
+    async fn blocks_ncryptsec_before_network() {
+        let state = crate::app_state::build_app_state();
+        let keys = nostr::Keys::generate();
+        let body = format!("{{\"content\":\"{NCRYPTSEC}\"}}");
+        let err = submit_engram_event(
+            &state,
+            &keys,
+            body.as_bytes(),
+            "http://127.0.0.1:9/events",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("key-backup material"), "{err}");
+    }
 }

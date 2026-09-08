@@ -1,0 +1,74 @@
+@layer base {
+  :root {
+    /*
+     * Two independent dials compose here:
+     *
+     * - Cmd +/- zoom scales the real root font-size (see
+     *   useWebviewZoomShortcuts), so every rem in the app — text, gaps,
+     *   widths, radii — grows and shrinks together. True zoom.
+     * - The Font size preference sets `data-font-size` on the root; it nudges
+     *   only the type scale below, so text changes without moving layout.
+     *
+     * Every text token derives from this virtual typography rem, which is
+     * rem-relative so it rides on top of zoom automatically. At the default
+     * preference and zoom it equals 16px, making `text-sm` 14px.
+     */
+    --buzz-type-scale: 1;
+    --buzz-type-rem: calc(1rem * var(--buzz-type-scale));
+    --text-xs: calc(var(--buzz-type-rem) * 0.75);
+    --text-sm: calc(var(--buzz-type-rem) * 0.875);
+    --text-base: var(--buzz-type-rem);
+    --text-lg: calc(var(--buzz-type-rem) * 1.125);
+    --text-xl: calc(var(--buzz-type-rem) * 1.25);
+    --text-2xl: calc(var(--buzz-type-rem) * 1.5);
+    --text-3xl: calc(var(--buzz-type-rem) * 1.875);
+    --text-4xl: calc(var(--buzz-type-rem) * 2.25);
+    --text-5xl: calc(var(--buzz-type-rem) * 3);
+    --text-6xl: calc(var(--buzz-type-rem) * 3.75);
+
+    /*
+     * Default conversation type and comfy spacing for channels, DMs, threads,
+     * Inbox, and the composer. Font size changes the type tokens only;
+     * Conversation density overrides only spacing.
+     */
+    --conversation-message-font-size: calc(var(--buzz-type-rem) * 0.875);
+    --conversation-message-line-height: calc(var(--buzz-type-rem) * 1.25);
+    --conversation-author-line-height: var(--buzz-type-rem);
+    --conversation-body-gap: 0.125rem;
+    --conversation-row-padding-block: 0.25rem;
+    --conversation-paragraph-gap: 0.5rem;
+    --conversation-list-item-gap: 0.375rem;
+    --conversation-timestamp-font-size: calc(var(--buzz-type-rem) * 0.75);
+    --conversation-timestamp-line-height: var(--buzz-type-rem);
+  }
+
+  /* Conversation text contract: 13 / 14 / 15px before keyboard zoom. */
+  :root[data-font-size="smaller"] {
+    --buzz-type-scale: calc(13 / 14);
+  }
+
+  :root[data-font-size="larger"] {
+    --buzz-type-scale: calc(15 / 14);
+  }
+
+  :root[data-conversation-density="compact"] {
+    --conversation-body-gap: 0rem;
+    --conversation-row-padding-block: 0.25rem;
+    --conversation-paragraph-gap: 0.375rem;
+    --conversation-list-item-gap: 0.25rem;
+  }
+
+  :root[data-conversation-density="spacious"] {
+    --conversation-body-gap: 0.25rem;
+    --conversation-row-padding-block: 0.5rem;
+    --conversation-paragraph-gap: 0.625rem;
+    --conversation-list-item-gap: 0.5rem;
+  }
+
+  body {
+    font-synthesis-weight: none;
+    font-variant-emoji: unicode;
+    font-variant-ligatures: no-contextual;
+    text-rendering: optimizeLegibility;
+  }
+}

@@ -7,9 +7,15 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test, { mock } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { RelayReconnectController } from "./relayReconnectController.ts";
+import {
+  DEFAULT_RECONNECT_TIMING_POLICY,
+  RelayReconnectController,
+} from "./relayReconnectController.ts";
 
 // ── Dep builder helpers ───────────────────────────────────────────────────────
 
@@ -21,9 +27,7 @@ function makeDeps({
   connectionStateListener = null,
 } = {}) {
   const timers = [];
-  const intervals = [];
   let timerSeq = 0;
-  let intervalSeq = 0;
 
   const deps = {
     preconnect: mock.fn(preconnectResult),
@@ -44,23 +48,58 @@ function makeDeps({
       const idx = timers.findIndex((t) => t.id === id);
       if (idx !== -1) timers.splice(idx, 1);
     }),
-    setInterval: mock.fn((fn, ms) => {
-      const id = ++intervalSeq;
-      intervals.push({ id, fn, ms });
-      return id;
-    }),
-    clearInterval: mock.fn((id) => {
-      const idx = intervals.findIndex((t) => t.id === id);
-      if (idx !== -1) intervals.splice(idx, 1);
-    }),
-    // Test helpers to fire timers/intervals.
+    // Test helper to fire timers.
     _fireTimer: (id) => timers.find((t) => t.id === id)?.fn(),
-    _fireInterval: (id) => intervals.find((t) => t.id === id)?.fn(),
     _timers: timers,
-    _intervals: intervals,
   };
   return deps;
 }
+
+// ── Timing policy ─────────────────────────────────────────────────────────────
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+
+test("fast path outlives the native websocket connection timeout", () => {
+  const rustSource = readFileSync(
+    path.resolve(testDir, "../../../src-tauri/src/native_websocket.rs"),
+    "utf8",
+  );
+  const match = rustSource.match(
+    /const CONNECT_TIMEOUT: Duration = Duration::from_secs\((\d+)\);/,
+  );
+  assert.ok(match, "native websocket connect timeout is declared in seconds");
+
+  const nativeConnectTimeoutMs = Number(match[1]) * 1_000;
+  assert.ok(
+    DEFAULT_RECONNECT_TIMING_POLICY.fastPathTimeoutMs > nativeConnectTimeoutMs,
+    "fast path must wait for the native websocket attempt to settle",
+  );
+});
+
+test("default timing policy preserves current reconnect timings", () => {
+  assert.deepEqual(DEFAULT_RECONNECT_TIMING_POLICY, {
+    fastPathTimeoutMs: 11_000,
+    backstopMs: 120_000,
+  });
+});
+
+test("injected timing policy drives fast-path and backstop timers", async () => {
+  const ctrl = new RelayReconnectController({
+    fastPathTimeoutMs: 11,
+    backstopMs: 33,
+  });
+  const deps = makeDeps({
+    preconnectResult: async () => {
+      throw new Error("relay unreachable");
+    },
+    hookConfiguredResult: async () => false,
+  });
+
+  await ctrl.start(deps);
+
+  assert.equal(deps.setTimeout.mock.calls[0].arguments[1], 11);
+  assert.equal(deps.setTimeout.mock.calls[1].arguments[1], 33);
+});
 
 // ── Phase 1: fast path ────────────────────────────────────────────────────────
 
@@ -80,13 +119,12 @@ test("fast-path success — hook never invoked, onSuccess fires, state resets", 
   });
 });
 
-test("fast-path success — no poll interval or backstop scheduled", async () => {
+test("fast-path success — no backstop scheduled", async () => {
   const ctrl = new RelayReconnectController();
   const deps = makeDeps({ preconnectResult: async () => {} });
 
   await ctrl.start(deps);
 
-  assert.equal(deps.setInterval.mock.calls.length, 0, "no poll interval");
   // The fast-path withDeadline schedules one timeout for the deadline, but
   // that is cleared by finally(). After success no backstop should remain.
   assert.equal(
@@ -103,7 +141,7 @@ test("escalation fires only when fast path fails and hook is configured", async 
   let callIdx = 0;
   const deps = makeDeps({
     preconnectResult: async () => {
-      // First call (fast path) fails; subsequent calls (poll) succeed.
+      // First call (fast path) fails.
       if (++callIdx === 1) throw new Error("relay unreachable");
     },
     hookConfiguredResult: async () => true,
@@ -141,7 +179,7 @@ test("escalation skipped when hook not configured", async () => {
   );
 });
 
-test("hook failure is non-fatal — polling still starts", async () => {
+test("hook failure is non-fatal — background wait still starts", async () => {
   const ctrl = new RelayReconnectController();
   const deps = makeDeps({
     preconnectResult: async () => {
@@ -162,48 +200,12 @@ test("hook failure is non-fatal — polling still starts", async () => {
   }
 
   assert.equal(threw, false, "hook failure does not propagate");
-  assert.ok(
-    deps._intervals.length > 0 || deps._timers.length > 0,
-    "phase 3 timers scheduled",
-  );
+  assert.ok(deps._timers.length > 0, "phase 3 backstop scheduled");
 });
 
-// ── Phase 3: poll-until-connected ─────────────────────────────────────────────
+// ── Phase 3: wait for background reconnect ───────────────────────────────────
 
-test("poll preempts backstop — onSuccess fires when poll wins", async () => {
-  const ctrl = new RelayReconnectController();
-  let callIdx = 0;
-  const deps = makeDeps({
-    preconnectResult: async () => {
-      if (++callIdx <= 2) throw new Error("not yet");
-      // Third call succeeds — simulates poll winning.
-    },
-    hookConfiguredResult: async () => false,
-  });
-
-  // Phase 1 fails, enters phase 3. start() returns false.
-  const promise = ctrl.start(deps);
-  await promise;
-
-  // Fire the poll interval twice to reach the succeeding call.
-  const intervalId = deps._intervals[0]?.id;
-  assert.ok(intervalId !== undefined, "poll interval is active");
-
-  await deps._fireInterval(intervalId); // call 2 — fails
-  await deps._fireInterval(intervalId); // call 3 — succeeds
-
-  assert.equal(
-    deps.onSuccess.mock.calls.length,
-    1,
-    "onSuccess fired after poll win",
-  );
-  assert.deepEqual(ctrl.getState(), {
-    isPending: false,
-    isWaitingOnReconnectHook: false,
-  });
-});
-
-test("connection-state emitter fires onSuccess and cancels poll/backstop", async () => {
+test("connection-state emitter fires onSuccess and cancels backstop", async () => {
   let capturedListener = null;
   const ctrl = new RelayReconnectController();
   const deps = makeDeps({
@@ -220,7 +222,7 @@ test("connection-state emitter fires onSuccess and cancels poll/backstop", async
 
   await ctrl.start(deps);
 
-  // Emitter fires "connected" — should resolve without waiting for poll.
+  // Emitter fires "connected" — should resolve without waiting for backstop.
   assert.ok(capturedListener !== null, "connection-state listener registered");
   capturedListener("connected");
 
@@ -233,7 +235,6 @@ test("connection-state emitter fires onSuccess and cancels poll/backstop", async
     isPending: false,
     isWaitingOnReconnectHook: false,
   });
-  assert.equal(deps._intervals.length, 0, "poll interval cancelled");
   assert.equal(deps._timers.length, 0, "backstop cancelled");
 });
 
@@ -266,7 +267,7 @@ test("backstop fires onBackstop, not onSuccess, and resets state", async () => {
 
 // ── Cancellation token ────────────────────────────────────────────────────────
 
-test("cancellation token — superseded poll callback does not call onSuccess", async () => {
+test("cancellation token — superseded attempt does not call onSuccess", async () => {
   const ctrl = new RelayReconnectController();
   let preconnectCallCount = 0;
   let resolveFirstPreconnect;
@@ -342,11 +343,6 @@ test("cancel mid fast-path — preconnect resolves SUCCESSFULLY after cancel but
     "state is idle",
   );
   assert.equal(deps._timers.length, 0, "no timers outstanding after cancel");
-  assert.equal(
-    deps._intervals.length,
-    0,
-    "no intervals outstanding after cancel",
-  );
 });
 
 test("last subscriber unsubscribe cancels in-flight attempt", async () => {
@@ -472,7 +468,7 @@ test("OSS build (hookConfigured returns false) — runHook never called", async 
 
 // ── Synchronous connected emission ───────────────────────────────────────────
 
-test("sync connected emission — onSuccess fires once, no interval/backstop installed, subscription cleaned up", async () => {
+test("sync connected emission — onSuccess fires once, no backstop installed, subscription cleaned up", async () => {
   const ctrl = new RelayReconnectController();
 
   // subscribeToConnectionState fake that invokes the listener synchronously
@@ -505,7 +501,6 @@ test("sync connected emission — onSuccess fires once, no interval/backstop ins
     1,
     "onSuccess fires exactly once",
   );
-  assert.equal(deps._intervals.length, 0, "no poll interval installed");
   assert.equal(deps._timers.length, 0, "no backstop timer installed");
   assert.equal(cleanupCalled, true, "subscription cleanup handle was called");
   assert.deepEqual(

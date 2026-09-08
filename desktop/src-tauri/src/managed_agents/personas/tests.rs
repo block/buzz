@@ -8,6 +8,7 @@ use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -18,8 +19,11 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -43,7 +47,7 @@ fn merge_personas_adds_missing_built_ins() {
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
+    assert_eq!(display_names, vec!["Fizz", "Honey", "Pollen"]);
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)
@@ -171,10 +175,7 @@ fn ensure_persona_is_active_rejects_inactive_personas() {
 
     let err = ensure_persona_is_active(&[persona], "builtin:fizz").unwrap_err();
 
-    assert_eq!(
-        err,
-        "Fizz is not in My Agents. Choose it from Agent Catalog first."
-    );
+    assert_eq!(err, "Fizz is not in My Agents.");
 }
 
 #[test]
@@ -317,6 +318,7 @@ fn migrate_preserves_customized_personas() {
         system_prompt: "My custom research workflow with special instructions".to_string(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         ..custom_persona("builtin:researcher", "My Researcher")
     }];
 
@@ -350,6 +352,7 @@ fn migrate_is_idempotent() {
         system_prompt: "My custom prompt".to_string(),
         is_builtin: false,
         is_active: false,
+        shared: false,
         ..custom_persona("builtin:researcher", "Researcher (retired)")
     }];
     assert!(
@@ -365,6 +368,7 @@ fn migrate_is_idempotent() {
         system_prompt: "Custom review prompt".to_string(),
         is_builtin: true,
         is_active: true,
+        shared: false,
         ..custom_persona("builtin:reviewer", "Reviewer")
     }];
     assert!(migrate_retired_personas(&mut stored_pre_demotion, now));

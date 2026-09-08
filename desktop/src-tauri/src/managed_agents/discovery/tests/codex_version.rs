@@ -1,8 +1,8 @@
-use super::super::probe_codex_acp_major_version_with_path;
+use super::super::probe_codex_acp_version_with_path;
 
 #[cfg(unix)]
 #[test]
-fn probe_codex_acp_major_version_uses_augmented_path_for_env_shebang_interpreter() {
+fn probe_codex_acp_version_uses_augmented_path_for_env_shebang_interpreter() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().expect("temp dir");
@@ -31,7 +31,7 @@ fn probe_codex_acp_major_version_uses_augmented_path_for_env_shebang_interpreter
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        probe_codex_acp_major_version_with_path(&shim_path, Some(&scrubbed_path)),
+        probe_codex_acp_version_with_path(&shim_path, Some(&scrubbed_path)),
         None,
         "with a scrubbed PATH, /usr/bin/env should not find node"
     );
@@ -41,8 +41,8 @@ fn probe_codex_acp_major_version_uses_augmented_path_for_env_shebang_interpreter
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        probe_codex_acp_major_version_with_path(&shim_path, Some(&augmented_path)),
-        Some(1),
+        probe_codex_acp_version_with_path(&shim_path, Some(&augmented_path)),
+        Some((1, 1, 2)),
         "the injected augmented PATH should allow /usr/bin/env to find node"
     );
 }

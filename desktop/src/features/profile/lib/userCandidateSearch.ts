@@ -1,4 +1,5 @@
 import type { UserSearchResult } from "@/shared/api/types";
+import { hasTypoTolerantPrefixMatch } from "@/shared/lib/fuzzyText";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ScoreUserCandidateInput = {
@@ -54,6 +55,14 @@ export function scoreUserCandidate({
   const pubkey = normalizePubkey(user.pubkey);
   if (pubkey.startsWith(normalizedQuery)) return 3;
   if (pubkey.includes(normalizedQuery)) return 4;
+
+  if (
+    labels.some((candidateLabel) =>
+      hasTypoTolerantPrefixMatch(candidateLabel, normalizedQuery),
+    )
+  ) {
+    return 5;
+  }
 
   return null;
 }

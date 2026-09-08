@@ -19,7 +19,6 @@ test("classifyRelayClosed: terminal messages return terminal", () => {
   for (const message of [
     "restricted: not a channel member",
     "restricted: channel access revoked",
-    "auth-required: not authenticated",
     "blocked: banned",
     "invalid: malformed filter",
     "pow: difficulty too low",
@@ -36,6 +35,21 @@ test("classifyRelayClosed: transient errors return retryable", () => {
   for (const message of ["error: database error", "server shutting down", ""]) {
     assert.equal(classifyRelayClosed(message), "retryable", message);
   }
+});
+
+test("classifyRelayClosed: auth-required is retryable (REQ/AUTH reconnect race)", () => {
+  // A REQ that lands before the AUTH handshake completes gets CLOSED with
+  // auth-required. Deleting the subscription would silently freeze the
+  // channel while the connection state still reads "connected" — the sub
+  // must survive and be retried after backoff.
+  assert.equal(
+    classifyRelayClosed("auth-required: not authenticated"),
+    "retryable",
+  );
+  assert.equal(
+    classifyRelayClosed("auth-required: authenticate before subscribing"),
+    "retryable",
+  );
 });
 
 // ── Subscription-survival semantics ──────────────────────────────────────────
@@ -59,7 +73,6 @@ test("classifyRelayClosed: retryable class survives (subscription must not be de
 test("classifyRelayClosed: terminal class triggers deletion (no retry)", () => {
   for (const message of [
     "restricted: not a channel member",
-    "auth-required: not authenticated",
     "blocked: banned",
     "invalid: malformed filter",
     "pow: difficulty too low",

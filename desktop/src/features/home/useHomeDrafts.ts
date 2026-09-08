@@ -1,25 +1,27 @@
 import * as React from "react";
 
-import { clearDraftEntry } from "@/features/messages/lib/useDrafts";
+import { deleteDraftEntry } from "@/features/messages/lib/useDrafts";
 import {
   useActiveDraftCount,
   useDraftViewItems,
 } from "@/features/messages/ui/DraftsPanel";
 
 type UseHomeDraftsOptions = {
-  isDrafts: boolean;
+  autoSelect: boolean;
   isNarrowHomeViewport: boolean;
+  selectionEnabled: boolean;
   viewportWidthPx: number;
 };
 
 export function useHomeDrafts({
-  isDrafts,
+  autoSelect,
   isNarrowHomeViewport,
+  selectionEnabled,
   viewportWidthPx,
 }: UseHomeDraftsOptions) {
-  const items = useDraftViewItems(isDrafts);
+  const items = useDraftViewItems(selectionEnabled);
   const optimisticActiveCount = useActiveDraftCount(new Map());
-  const activeCount = isDrafts
+  const activeCount = selectionEnabled
     ? items.filter((item) => item.rootStatus !== "deleted").length
     : optimisticActiveCount;
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null);
@@ -27,10 +29,18 @@ export function useHomeDrafts({
     items.find((item) => item.entry.key === selectedKey) ?? null;
 
   React.useEffect(() => {
-    if (!isDrafts) {
+    if (!selectionEnabled) {
       setSelectedKey(null);
       return;
     }
+    if (
+      selectedKey !== null &&
+      !items.some((item) => item.entry.key === selectedKey)
+    ) {
+      setSelectedKey(null);
+      return;
+    }
+    if (!autoSelect) return;
     if (viewportWidthPx === 0) {
       return;
     }
@@ -41,11 +51,18 @@ export function useHomeDrafts({
       return;
     }
     setSelectedKey(isNarrowHomeViewport ? null : (items[0]?.entry.key ?? null));
-  }, [isDrafts, isNarrowHomeViewport, items, selectedKey, viewportWidthPx]);
+  }, [
+    autoSelect,
+    isNarrowHomeViewport,
+    items,
+    selectedKey,
+    selectionEnabled,
+    viewportWidthPx,
+  ]);
 
   const deleteDraft = React.useCallback(
     (draftKey: string) => {
-      clearDraftEntry(draftKey);
+      deleteDraftEntry(draftKey);
       if (selectedKey === draftKey) {
         setSelectedKey(null);
       }

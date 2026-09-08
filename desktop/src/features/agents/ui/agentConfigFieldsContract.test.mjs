@@ -21,6 +21,9 @@ import test from "node:test";
 import {
   CANONICAL_CONFIG_BEHAVIORS,
   resolveDisclosure,
+  shouldRevealDependentConfigFields,
+  shouldRenderModelControl,
+  shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
 
 test("canonical behaviors: onboarding's values are the only behavior", () => {
@@ -56,4 +59,162 @@ test("onboarding-essential hides power tools but never the effort field", () => 
     showRequiredIndicators: false,
     showUnavailableEffortOptions: false,
   });
+});
+
+test("progressive defaults keep full disclosure", () => {
+  assert.deepEqual(
+    resolveDisclosure("progressive-defaults"),
+    resolveDisclosure("full"),
+  );
+});
+
+test("progressive defaults wait for a provider only when the harness needs one", () => {
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: true,
+      providerValue: "",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: true,
+      providerValue: "anthropic",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: false,
+      providerValue: "",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "full",
+      providerFieldVisible: true,
+      providerValue: "",
+    }),
+    true,
+  );
+});
+
+// ── shouldShowModelStatusMessage ──────────────────────────────────────────────
+// The onboarding-essential preset sets showDescriptions=false.  Discovery
+// warnings must bypass the preset so first-run failures are never invisible.
+
+test("shouldShowModelStatusMessage_fullDisclosure_nullStatus_showsMessage", () => {
+  // Full disclosure always shows the status line regardless of status.
+  assert.equal(shouldShowModelStatusMessage(true, null), true);
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_nullStatus_hidesMessage", () => {
+  // Happy path: no status → status line hidden in onboarding.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  assert.equal(shouldShowModelStatusMessage(showDescriptions, null), false);
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_warningStatus_showsMessage", () => {
+  // Discovery failure → status line surfaces even in onboarding-essential.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  const warning = {
+    message: "Claude Code reported no models.",
+    tone: "warning",
+  };
+  assert.equal(shouldShowModelStatusMessage(showDescriptions, warning), true);
+});
+
+// ── shouldRenderModelControl ──────────────────────────────────────────────────
+// Optional-model harnesses omit the control only after a confirmed successful
+// empty catalog. Failures keep the control so #2246 status UI can render.
+
+test("optional model control hides while loading", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: null,
+      modelDiscoveryLoading: true,
+      modelDiscoverySuccessfulEmpty: false,
+      modelIsOptional: true,
+      showCustomModelOption: false,
+    }),
+    false,
+    "optional + loading must hide the control",
+  );
+});
+
+test("optional model control hides after successful empty discovery", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: null,
+      modelDiscoveryLoading: false,
+      modelDiscoverySuccessfulEmpty: true,
+      modelIsOptional: true,
+      showCustomModelOption: false,
+    }),
+    false,
+    "optional + successful empty + no custom must hide the control",
+  );
+});
+
+test("optional model control stays visible on discovery failure", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: null,
+      modelDiscoveryLoading: false,
+      modelDiscoverySuccessfulEmpty: false,
+      modelIsOptional: true,
+      showCustomModelOption: false,
+    }),
+    true,
+    "optional + failed/unavailable discovery must keep the control",
+  );
+});
+
+test("optional model control shows when explicit models are available", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: [
+        { id: "", label: "Default model" },
+        { id: "claude-sonnet-4", label: "Claude Sonnet 4" },
+      ],
+      modelDiscoveryLoading: false,
+      modelDiscoverySuccessfulEmpty: false,
+      modelIsOptional: true,
+      showCustomModelOption: false,
+    }),
+    true,
+    "explicit models must show the control",
+  );
+});
+
+test("full disclosure keeps Custom escape hatch when discovery is empty", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: null,
+      modelDiscoveryLoading: false,
+      modelDiscoverySuccessfulEmpty: true,
+      modelIsOptional: true,
+      showCustomModelOption: true,
+    }),
+    true,
+    "full disclosure keeps Custom escape hatch when discovery is empty",
+  );
+});
+
+test("required-model harnesses always keep the control", () => {
+  assert.equal(
+    shouldRenderModelControl({
+      discoveredModelOptions: null,
+      modelDiscoveryLoading: false,
+      modelDiscoverySuccessfulEmpty: true,
+      modelIsOptional: false,
+      showCustomModelOption: false,
+    }),
+    true,
+    "required-model harnesses always keep the control",
+  );
 });

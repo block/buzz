@@ -34,6 +34,7 @@ buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --br
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
+buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
@@ -52,11 +53,25 @@ buzz channels topic --channel <uuid> --topic "New topic"
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
+# GIFs (requires relay to advertise buzz-gif / KLIPY)
+buzz gifs search                              # trending GIFs
+buzz gifs search --query "celebration"        # search GIFs
+buzz gifs share --slug <slug>                 # report selection to provider Recents
+# Paste the `cdn_url` from a search result directly into messages send --content
+
+# Custom emoji in messages
+# buzz messages send scans outgoing content for :shortcode: patterns and
+# automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
+# workspace palette — identical to the desktop composer behavior.
+
 # Users & Presence
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
+buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
 buzz users set-presence --status online
+buzz users set-status --text "heads down on the CLI" --emoji "🚀"
+buzz users set-status --clear                 # remove your status
 
 # DMs
 buzz dms open --pubkey <hex>
@@ -126,6 +141,8 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
+| `gifs` | `search` | Search or browse trending GIFs (requires relay buzz-gif support) |
+| | `share` | Report a selected GIF to the provider's Recents |
 | `dms` | `list` | List DM conversations |
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |
@@ -133,6 +150,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
+| | `set-status` | Set or clear your NIP-38 profile status |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
 | | `create` | Create a workflow |

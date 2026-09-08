@@ -37,6 +37,19 @@ export function normalizeRelayUrl(input: string): string | null {
     }
   }
 
+  // Match the legacy add/edit community forms: a scheme-less host is assumed
+  // to be a secure relay. Validation still rejects whitespace and malformed
+  // values instead of blindly persisting the prefixed string.
+  if (!trimmed.includes("://")) {
+    const wsUrl = `wss://${trimmed}`;
+    try {
+      new URL(wsUrl);
+      return wsUrl;
+    } catch {
+      return null;
+    }
+  }
+
   return null;
 }
 

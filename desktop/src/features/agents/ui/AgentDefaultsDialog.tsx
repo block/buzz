@@ -94,6 +94,7 @@ export function AgentDefaultsDialog({
             </DialogDescription>
           </DialogHeader>
           <AgentDefaultsEditor
+            layout="flat"
             onDirtyChange={setDirty}
             onSaveSuccess={handleSaveSuccess}
             onSavingChange={setSaving}

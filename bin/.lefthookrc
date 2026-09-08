@@ -1,0 +1,21 @@
+# Sourced by the generated .git/hooks/* dispatchers (see `rc:` in lefthook.yml)
+# before their $LEFTHOOK_BIN-first lookup. Two jobs, both anchored on the repo
+# root so they hold regardless of the hook's working dir:
+#   1. Pin dispatch to the Hermit-managed lefthook (bin/lefthook ->
+#      .lefthook-2.1.3.pkg) so a push from any worktree runs the pinned version
+#      even when a newer lefthook is on PATH (e.g. Homebrew).
+#   2. Prepend the Hermit bin/ to PATH so every lane subprocess (just mobile-check
+#      -> flutter/dart, etc.) resolves the repo's pinned toolchain, not whatever
+#      the invoking shell had first (e.g. Homebrew flutter). This is the safe
+#      subset of `activate-hermit`: a plain PATH prepend, no interactive-shell
+#      machinery. It makes the hook self-pinning regardless of shell setup.
+_lefthook_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$_lefthook_root" ] && [ -d "$_lefthook_root/bin" ]; then
+  PATH="$_lefthook_root/bin:$PATH"
+  export PATH
+  if [ -x "$_lefthook_root/bin/lefthook" ]; then
+    LEFTHOOK_BIN="$_lefthook_root/bin/lefthook"
+    export LEFTHOOK_BIN
+  fi
+fi
+unset _lefthook_root

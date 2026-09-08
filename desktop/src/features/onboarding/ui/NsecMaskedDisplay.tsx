@@ -1,12 +1,35 @@
-import { Check, Copy, Eye, EyeOff } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, MoreHorizontal } from "lucide-react";
 import * as React from "react";
 import { Button } from "@/shared/ui/button";
-import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import {
+  copyTextToClipboard,
+  writeTextToClipboard,
+} from "@/shared/lib/clipboard";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
+
+type NsecAction = {
+  icon?: React.ReactNode;
+  label: string;
+  onSelect: () => void;
+  testId?: string;
+};
 
 type NsecMaskedDisplayProps = {
   nsec: string;
   /** "bare" drops the boxed chrome for the onboarding spotlight treatment. */
   variant?: "boxed" | "bare";
+  /**
+   * Called when the user reveals or copies the key. Lets flows that require
+   * a backup (e.g. sign-out) gate on actual interaction with the key.
+   */
+  onKeyInteraction?: () => void;
+  /** Replaces the copy icon with an overflow menu containing Copy plus these actions. */
+  actions?: readonly NsecAction[];
 };
 
 export const ONBOARDING_KEY_FRAME_CLASS =
@@ -25,6 +48,8 @@ export const ONBOARDING_KEY_TEXT_CLASS = "buzz-onboarding-key-text";
 export function NsecMaskedDisplay({
   nsec,
   variant = "boxed",
+  onKeyInteraction,
+  actions,
 }: NsecMaskedDisplayProps) {
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [isCopied, setIsCopied] = React.useState(false);
@@ -40,14 +65,21 @@ export function NsecMaskedDisplay({
   }, []);
 
   function handleRevealToggle() {
+    if (!isRevealed) onKeyInteraction?.();
     setIsRevealed((prev) => !prev);
   }
 
   async function handleCopy() {
     await writeTextToClipboard(nsec);
+    onKeyInteraction?.();
     setIsCopied(true);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => setIsCopied(false), 2000);
+  }
+
+  function handleMenuCopy() {
+    copyTextToClipboard(nsec);
+    onKeyInteraction?.();
   }
 
   const isBare = variant === "bare";
@@ -113,24 +145,60 @@ export function NsecMaskedDisplay({
               <Eye className={iconSize} aria-hidden="true" />
             )}
           </Button>
-          <Button
-            aria-label="Copy private key"
-            className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
-            data-testid="nsec-copy"
-            onClick={() => void handleCopy()}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            {isCopied ? (
-              <Check
-                className={`${iconSize} text-primary`}
-                aria-hidden="true"
-              />
-            ) : (
-              <Copy className={iconSize} aria-hidden="true" />
-            )}
-          </Button>
+          {actions?.length ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label="Private key actions"
+                  className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
+                  data-testid="nsec-actions"
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <MoreHorizontal className={iconSize} aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-40!">
+                <DropdownMenuItem
+                  data-testid="nsec-copy"
+                  onSelect={handleMenuCopy}
+                >
+                  <Copy aria-hidden="true" />
+                  Copy
+                </DropdownMenuItem>
+                {actions.map((action) => (
+                  <DropdownMenuItem
+                    data-testid={action.testId}
+                    key={action.label}
+                    onSelect={action.onSelect}
+                  >
+                    {action.icon}
+                    {action.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <Button
+              aria-label="Copy private key"
+              className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
+              data-testid="nsec-copy"
+              onClick={() => void handleCopy()}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {isCopied ? (
+                <Check
+                  className={`${iconSize} text-primary`}
+                  aria-hidden="true"
+                />
+              ) : (
+                <Copy className={iconSize} aria-hidden="true" />
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </div>

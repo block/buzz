@@ -174,6 +174,8 @@ test.describe("agent provider dropdown screenshots", () => {
     const dialog = page.getByTestId("persona-dialog");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
 
+    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+
     // Regression: the runtime trigger must not be empty — the auto-seed effect
     // must have run and selected the app default (buzz-agent in the mock catalog).
     const runtimeTrigger = dialog.locator("#persona-runtime");
@@ -181,8 +183,6 @@ test.describe("agent provider dropdown screenshots", () => {
     await expect(runtimeTrigger).not.toContainText("No preference", {
       timeout: 8_000,
     });
-
-    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
 
     // Regression: the model combobox must appear (modelFieldVisible = true once
     // runtime is non-empty) and model discovery must have run, populating it.
@@ -250,6 +250,6 @@ test.describe("agent provider dropdown screenshots", () => {
     await expect(
       dialog.getByRole("combobox", { name: /model/i }),
     ).toBeVisible();
-    await expect(dialog.getByText("Model changes apply only")).toBeVisible();
+    await expect(dialog.getByText("Model changes apply only")).toHaveCount(0);
   });
 });

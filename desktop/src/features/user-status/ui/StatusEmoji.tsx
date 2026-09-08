@@ -13,7 +13,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
  * Every place that shows a status emoji renders this, so the shortcode→image
  * resolution can't drift across the (five) display sites — the same reason the
  * picker is unified. The relay URL is rewritten through the localhost media
- * proxy, matching reactions' `EmojiGlyph` (WKWebView bypasses WARP, so a direct
+ * proxy, matching reactions' `EmojiGlyph` (WKWebView bypasses the VPN tunnel, so a direct
  * relay URL 403s and renders broken).
  */
 type StatusEmojiProps = {
@@ -21,11 +21,21 @@ type StatusEmojiProps = {
   value: string | undefined;
   /** Sizes the resolved custom image to match the surrounding text. */
   className?: string;
+  /** Hides the glyph from assistive technology when its parent provides a fuller label. */
+  decorative?: boolean;
+  /** Controls the browser-native tooltip without changing the accessible name. */
+  showTitle?: boolean;
 };
 
 const SHORTCODE_RE = /^:([^:\s]+):$/;
+export const DEFAULT_USER_STATUS_EMOJI = "💬";
 
-export function StatusEmoji({ value, className }: StatusEmojiProps) {
+export function StatusEmoji({
+  value,
+  className,
+  decorative = false,
+  showTitle = true,
+}: StatusEmojiProps) {
   const customEmoji = useCustomEmoji();
 
   if (!value) return null;
@@ -40,8 +50,9 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
     if (found) {
       return (
         <img
-          alt={value}
-          title={displayName}
+          alt={decorative ? "" : value}
+          aria-hidden={decorative || undefined}
+          title={decorative || !showTitle ? undefined : displayName}
           src={rewriteRelayUrl(found.url)}
           className={cn("inline-block object-contain align-middle", className)}
           draggable={false}
@@ -55,11 +66,12 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
   // (e.g. `mr-1`) every display site applies to the image branch above.
   return (
     <span
+      aria-hidden={decorative || undefined}
       className={cn(
         "inline-flex items-center justify-center leading-normal align-middle",
         className,
       )}
-      title={displayName}
+      title={decorative || !showTitle ? undefined : displayName}
     >
       {value}
     </span>

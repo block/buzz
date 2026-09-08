@@ -5,6 +5,26 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/shared/lib/cn";
 import "./card-texture.css";
 
+export type CardTextureTone = "light" | "dark";
+export type CardTextureSize = "regular" | "compact";
+
+export const TEXTURED_SURFACE_CLASS =
+  "buzz-card-textured relative isolate rounded-none border-0 bg-transparent p-[var(--buzz-card-textured-safe-inset)] shadow-none";
+
+export function texturedSurfaceClasses({
+  size = "regular",
+  tone = "light",
+}: {
+  size?: CardTextureSize;
+  tone?: CardTextureTone;
+} = {}): string {
+  return cn(
+    TEXTURED_SURFACE_CLASS,
+    tone === "dark" && "buzz-card-textured-dark",
+    size === "compact" && "buzz-card-textured-compact",
+  );
+}
+
 /**
  * `variant="textured"` renders the baked nine-slice powder texture
  * (`card-texture.css`). The asset bakes the card surface INTO the image:
@@ -37,7 +57,7 @@ const cardVariants = cva("text-card-foreground", {
         // card-texture.css); when that floor stretches the card beyond its
         // content, the content stays vertically centered instead of pinning
         // to the top padding edge.
-        "buzz-card-textured relative isolate flex flex-col justify-center rounded-none border-0 p-[var(--buzz-card-textured-safe-inset)] shadow-none",
+        `${TEXTURED_SURFACE_CLASS} flex flex-col justify-center`,
     },
   },
   defaultVariants: {
@@ -49,15 +69,35 @@ export interface CardProps
   extends React.HTMLAttributes<HTMLDivElement>,
     VariantProps<typeof cardVariants> {
   asChild?: boolean;
+  textureSize?: CardTextureSize;
+  textureTone?: CardTextureTone;
 }
 
 const Card = React.forwardRef<HTMLDivElement, CardProps>(
-  ({ asChild = false, className, variant, ...props }, ref) => {
+  (
+    {
+      asChild = false,
+      className,
+      textureSize = "regular",
+      textureTone = "light",
+      variant,
+      ...props
+    },
+    ref,
+  ) => {
     const Comp = asChild ? Slot : "div";
     return (
       <Comp
         ref={ref}
-        className={cn(cardVariants({ variant, className }))}
+        className={cn(
+          cardVariants({ variant, className }),
+          variant === "textured" &&
+            textureTone === "dark" &&
+            "buzz-card-textured-dark",
+          variant === "textured" &&
+            textureSize === "compact" &&
+            "buzz-card-textured-compact",
+        )}
         {...props}
       />
     );

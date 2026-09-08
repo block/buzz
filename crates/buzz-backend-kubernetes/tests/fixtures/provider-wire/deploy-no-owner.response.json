@@ -1,0 +1,1 @@
+{"ok":false,"error":"deploy refused: neither auth_tag nor launch.owner_pubkey resolved — without an owner the agent cannot honor !shutdown"}

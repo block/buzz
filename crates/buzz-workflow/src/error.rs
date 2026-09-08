@@ -54,13 +54,61 @@ pub enum WorkflowError {
     #[error("database error: {0}")]
     Database(String),
 
+    /// The workflow's owner is not currently authorized to run it (removed
+    /// from the channel, insufficient role for the definition's actions, or
+    /// the authority lookup failed — all deny, fail-closed).
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),
 }
 
+impl WorkflowError {
+    /// Stable run-level classification. Diagnostics remain in `Display` output.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidYaml(_) => "invalid_yaml",
+            Self::InvalidDefinition(_) => "invalid_definition",
+            Self::ConditionError(_) => "condition_evaluation_failed",
+            Self::TemplateError(_) => "template_resolution_failed",
+            Self::StepTimeout { .. } => "step_timeout",
+            Self::WebhookError(_) => "webhook_failed",
+            Self::CapacityExceeded => "capacity_exceeded",
+            Self::Database(_) => "database_error",
+            Self::Unauthorized(_) => "owner_unauthorized",
+            Self::NotImplemented(_) => "action_not_implemented",
+        }
+    }
+}
+
 impl From<buzz_db::error::DbError> for WorkflowError {
     fn from(e: buzz_db::error::DbError) -> Self {
         WorkflowError::Database(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkflowError;
+
+    #[test]
+    fn workflow_error_codes_are_stable_and_separate_from_diagnostics() {
+        let timeout = WorkflowError::StepTimeout {
+            step_id: "notify".to_owned(),
+            timeout_secs: 30,
+        };
+        assert_eq!(timeout.code(), "step_timeout");
+        assert!(timeout.to_string().contains("notify"));
+
+        let webhook = WorkflowError::WebhookError("secret-bearing detail".to_owned());
+        assert_eq!(webhook.code(), "webhook_failed");
+        assert!(!webhook.code().contains("secret-bearing detail"));
+
+        assert_eq!(
+            WorkflowError::NotImplemented("SendDm".to_owned()).code(),
+            "action_not_implemented"
+        );
     }
 }

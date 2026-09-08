@@ -144,7 +144,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigRestartedCount: 2,
     });
@@ -181,7 +181,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
     });
 
@@ -301,7 +301,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigRestartedCount: 1,
     });
@@ -329,7 +329,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigFailedRestartCount: 1,
     });
@@ -366,7 +366,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigSaveDelayMs: 2_000,
     });

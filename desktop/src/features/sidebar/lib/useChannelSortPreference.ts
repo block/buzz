@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundChannelSortStore,
   DEFAULT_STORE,
   readChannelSortStore,
   sortModeForGroup,
@@ -49,7 +50,7 @@ export function useChannelSortPreference(
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -58,7 +59,7 @@ export function useChannelSortPreference(
     setStore(readChannelSortStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSortSyncManager(pubkey);
+    managerRef.current = new ChannelSortSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -101,18 +102,15 @@ export function useChannelSortPreference(
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
+    const local = readChannelSortStore(pubkey, relayUrl);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSortStore(pubkey, relayUrl);
-        if (Object.keys(local.groups).length > 0) {
-          managerRef.current?.publishSortPrefs(local);
-        }
+      if (result.action === "apply-remote") {
+        setStore(applyRemote(result.data));
       }
+      // "hold": seed already performed by bootstrap (if first-sync), or blocked.
     });
     return () => {
       cancelled = true;
@@ -145,10 +143,10 @@ export function useChannelSortPreference(
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
+      void managerRef.current?.fetchRemoteSortPrefs().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {
@@ -177,9 +175,11 @@ export function useChannelSortPreference(
         };
         // Prune sort modes left behind by deleted custom sections on write so
         // the stored map can't grow unboundedly with stale `section:` keys.
-        const next = liveSectionIds
-          ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
-          : withUpdate;
+        const next = boundChannelSortStore(
+          liveSectionIds
+            ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
+            : withUpdate,
+        );
         if (!writeChannelSortStore(pubkey, next, relayUrl)) return prev;
         managerRef.current?.publishSortPrefs(next);
         return next;

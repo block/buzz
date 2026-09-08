@@ -11,6 +11,9 @@ spec:
   template:
     metadata:
       labels: {{- include "push.runtimeLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
@@ -31,17 +34,18 @@ spec:
             - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }
             - { name: BUZZ_PUSH_PUBLIC_DELIVERY_URL, value: {{ .Values.publicDeliveryUrl | quote }} }
             - { name: BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS, value: {{ .Values.maxGrantLifetimeSeconds | quote }} }
-            - { name: BUZZ_PUSH_ENABLED_PROFILES, value: {{ .Values.enabledProfiles | quote }} }
-            - { name: BUZZ_PUSH_APP_ATTEST_APP_ID, value: {{ .Values.appAttestAppId | quote }} }
             - { name: BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH, value: /run/buzz/app-attest/root.pem }
-            - { name: BUZZ_PUSH_APNS_KEY_PATH, value: /run/buzz/apns/provider.p8 }
-            {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_APNS_KEY_ID" "BUZZ_PUSH_APNS_TEAM_ID" "BUZZ_PUSH_APNS_TOPIC" "BUZZ_PUSH_GRANT_KEYS" "BUZZ_PUSH_TOKEN_KEYS" }}
+            - { name: BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID, value: {{ .Values.profiles.dogfood.appAttestAppId | quote }} }
+            - { name: BUZZ_PUSH_DOGFOOD_APNS_TOPIC, value: {{ .Values.profiles.dogfood.apnsTopic | quote }} }
+            - { name: BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT, value: {{ .Values.profiles.dogfood.apnsEnvironment | quote }} }
+            - { name: BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH, value: /run/buzz/apns-dogfood/identity.pem }
+            {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_GRANT_KEYS" "BUZZ_PUSH_TOKEN_KEYS" }}
             - name: {{ $name }}
               valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $name }} } }
             {{- end }}
           volumeMounts:
             - { name: app-attest-root, mountPath: /run/buzz/app-attest, readOnly: true }
-            - { name: apns-key, mountPath: /run/buzz/apns, readOnly: true }
+            - { name: apns-dogfood, mountPath: /run/buzz/apns-dogfood, readOnly: true }
           livenessProbe: { httpGet: { path: /_liveness, port: health }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
           readinessProbe: { httpGet: { path: /_readiness, port: health }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 3 }
           startupProbe: { httpGet: { path: /_liveness, port: health }, periodSeconds: 2, failureThreshold: 60 }
@@ -49,8 +53,8 @@ spec:
       volumes:
         - name: app-attest-root
           secret: { secretName: {{ .Values.appAttestRoot.secretName }}, items: [{ key: {{ .Values.appAttestRoot.secretKey }}, path: root.pem }] }
-        - name: apns-key
-          secret: { secretName: {{ .Values.apnsKey.secretName }}, items: [{ key: {{ .Values.apnsKey.secretKey }}, path: provider.p8 }] }
+        - name: apns-dogfood
+          secret: { secretName: {{ .Values.profiles.dogfood.apnsCert.secretName }}, defaultMode: 0400, items: [{ key: {{ .Values.profiles.dogfood.apnsCert.secretKey }}, path: identity.pem }] }
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

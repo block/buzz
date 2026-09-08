@@ -115,11 +115,12 @@ function TeamAvatarRow({
 }) {
   const visiblePersonas = personas.slice(0, MAX_VISIBLE_MEMBER_AVATARS);
   const overflowCount = Math.max(0, memberCount - visiblePersonas.length);
+  const stackItemCount = visiblePersonas.length + (overflowCount > 0 ? 1 : 0);
 
   if (visiblePersonas.length === 0 && overflowCount === 0) {
     return (
       <div className="absolute inset-x-4 top-0 bottom-12 flex items-center justify-center">
-        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-border/65 bg-background/80 text-muted-foreground shadow-xs">
+        <div className="flex h-24 w-24 items-center justify-center rounded-[30%] border border-border/65 bg-background/80 text-muted-foreground shadow-xs">
           <Users className="h-9 w-9" />
         </div>
       </div>
@@ -130,16 +131,21 @@ function TeamAvatarRow({
     <div className="absolute inset-x-0 top-0 bottom-12 flex items-center justify-center">
       <div
         aria-label={`${teamName} member avatars`}
-        className="flex max-w-full items-center justify-center gap-2 px-4"
+        className="flex max-w-full items-center justify-center px-4"
         role="img"
       >
         {visiblePersonas.map((persona, index) => (
           <TeamAvatarItem index={index} key={persona.id} persona={persona} />
         ))}
         {overflowCount > 0 ? (
-          <span className="flex h-14 w-14 items-center justify-center rounded-full border-[3px] border-background bg-card text-sm font-semibold text-muted-foreground shadow-sm">
-            +{overflowCount}
-          </span>
+          <div
+            className={visiblePersonas.length > 0 ? "-ml-5" : ""}
+            style={{ zIndex: stackItemCount }}
+          >
+            <span className="flex h-14 w-14 items-center justify-center rounded-[30%] bg-card text-sm font-semibold text-muted-foreground ring-2 ring-card">
+              +{overflowCount}
+            </span>
+          </div>
         ) : null}
       </div>
     </div>
@@ -156,29 +162,39 @@ function TeamAvatarItem({
   const avatarUrl = persona.avatarUrl?.trim() ?? null;
 
   return (
-    <div className="h-14 w-14" data-team-member-avatar="avatar">
-      {avatarUrl ? (
-        <ProfileAvatar
-          avatarUrl={avatarUrl}
-          className="h-full w-full border-[3px] border-background bg-muted shadow-sm"
-          iconClassName="h-6 w-6"
-          label={persona.displayName}
-          testId={`team-member-avatar-${persona.id}`}
-        />
-      ) : (
-        <IdentityInitialsAvatar
-          colorIndex={index}
-          label={persona.displayName}
-          size={56}
-        />
-      )}
+    <div
+      className={`relative h-14 w-14 before:absolute before:-inset-0.5 before:rounded-[calc(30%+2px)] before:bg-card before:content-[''] ${index > 0 ? "-ml-5" : ""}`}
+      data-team-member-avatar="avatar"
+      style={{
+        zIndex: index + 1,
+      }}
+    >
+      <div className="relative z-10 h-full w-full">
+        {avatarUrl ? (
+          <ProfileAvatar
+            avatarUrl={avatarUrl}
+            className="h-full w-full bg-muted shadow-none"
+            iconClassName="h-6 w-6"
+            label={persona.displayName}
+            shape="squircle"
+            testId={`team-member-avatar-${persona.id}`}
+          />
+        ) : (
+          <IdentityInitialsAvatar
+            className="border-0 shadow-none"
+            colorIndex={index}
+            label={persona.displayName}
+            size={56}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
 function getTeamFooterModelLabel(personas: AgentPersona[]) {
   const modelLabels = personas
-    .map((persona) => formatAgentModelLabel(persona.model))
+    .map((persona) => formatAgentModelLabel(persona.model, persona.provider))
     .filter((model): model is string => Boolean(model));
 
   if (modelLabels.length === 0) return "Auto";

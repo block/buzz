@@ -188,6 +188,17 @@ test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suff
   );
 });
 
+test("formatImetaMediaLine: packaged voice note MP4 stays on the audio-card link path", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://relay.example/media/hash.mp4",
+      type: "video/mp4",
+      filename: "voice-note-123.mp4",
+    }),
+    "\n[voice-note-123.mp4](https://relay.example/media/hash.mp4)",
+  );
+});
+
 test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
   assert.equal(
     formatImetaMediaLine({
@@ -597,22 +608,31 @@ test("imetaMediaFromTags: entry without size leaves size 0", () => {
   assert.equal(out[0].size, 0);
 });
 
-test("buildImetaTags: omits x line when sha256 is empty", () => {
+test("buildImetaTags: omits hashless external media entirely", () => {
   const tags = buildImetaTags([
     {
-      url: "https://b/a.png",
-      type: "image/png",
+      url: "https://static.klipy.com/a.gif",
+      type: "image/gif",
       sha256: "",
       size: 1,
       uploaded: 0,
     },
   ]);
-  assert.equal(tags.length, 1);
-  // No element starts with "x " or "x\t" — no empty x line emitted.
-  assert.ok(
-    !tags[0].some((part) => /^x[\s\t]/.test(part)),
-    `expected no x line, got ${JSON.stringify(tags[0])}`,
-  );
+  assert.deepEqual(tags, []);
+});
+
+test("buildOutgoingMessage: hashless external media is content-only", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://static.klipy.com/a.gif",
+      type: "image/gif",
+      sha256: "",
+      size: 1,
+      uploaded: 0,
+    },
+  ]);
+  assert.equal(out.content, "\n![image](https://static.klipy.com/a.gif)");
+  assert.equal(out.mediaTags, undefined);
 });
 
 test("buildImetaTags: omits size line when size is 0", () => {
@@ -632,36 +652,20 @@ test("buildImetaTags: omits size line when size is 0", () => {
   );
 });
 
-test("round-trip: sparse imeta from legacy tags rebuilds without empty x/size", () => {
-  // Legacy / cross-client entry: only url + m. No x, no size.
+test("round-trip: sparse legacy imeta is not re-emitted without a hash", () => {
   const legacyTags = [["imeta", "url https://b/legacy.png", "m image/png"]];
   const projected = imetaMediaFromTags(legacyTags);
   assert.equal(projected.length, 1);
   assert.equal(projected[0].sha256, "");
   assert.equal(projected[0].size, 0);
 
-  const rebuilt = buildImetaTags(projected);
-  assert.equal(rebuilt.length, 1);
-  // Neither "x " nor "size 0" leaked into the rebuilt tag.
-  assert.ok(
-    !rebuilt[0].some((part) => /^x[\s\t]/.test(part)),
-    `expected no x line, got ${JSON.stringify(rebuilt[0])}`,
-  );
-  assert.ok(
-    !rebuilt[0].some((part) => /^size[\s\t]/.test(part)),
-    `expected no size line, got ${JSON.stringify(rebuilt[0])}`,
-  );
-  // url and m survived.
-  assert.deepEqual(rebuilt[0], [
-    "imeta",
-    "url https://b/legacy.png",
-    "m image/png",
-  ]);
+  assert.deepEqual(buildImetaTags(projected), []);
 });
 
 const IMETA = ["imeta", "url https://blossom/abc.png", "m image/png"];
 const EMOJI_A = ["emoji", "shipit", "https://relay/s.png"];
 const EMOJI_B = ["emoji", "party", "https://relay/p.gif"];
+const LINK_PREVIEW = ["link-preview", "snapshot", "1", "https://example.com/"];
 const MENTION_REF = [
   "mention",
   "1111111111111111111111111111111111111111111111111111111111111111",
@@ -672,55 +676,64 @@ test("splitOutgoingTags: undefined input yields three empty arrays", () => {
     mediaTags: [],
     emojiTags: [],
     mentionTags: [],
+    linkPreviewTags: [],
   });
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
-    IMETA,
-    EMOJI_A,
-    EMOJI_B,
-  ]);
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags([IMETA, EMOJI_A, EMOJI_B]);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(linkPreviewTags, []);
 });
 
 test("splitOutgoingTags: emoji-only set leaves mediaTags empty", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([EMOJI_A]);
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags([EMOJI_A]);
   assert.deepEqual(mediaTags, []);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(linkPreviewTags, []);
 });
 
 test("splitOutgoingTags: separates reference-only mention tags", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
-    IMETA,
-    MENTION_REF,
-    EMOJI_A,
-  ]);
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags([IMETA, MENTION_REF, EMOJI_A]);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, [MENTION_REF]);
+  assert.deepEqual(linkPreviewTags, []);
+});
+
+test("splitOutgoingTags: separates authored link-preview snapshots", () => {
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags([IMETA, LINK_PREVIEW]);
+  assert.deepEqual(mediaTags, [IMETA]);
+  assert.deepEqual(emojiTags, []);
+  assert.deepEqual(mentionTags, []);
+  assert.deepEqual(linkPreviewTags, [LINK_PREVIEW]);
 });
 
 test("splitOutgoingTags: unknown prefixes stay with mediaTags (injection defense)", () => {
   // A forged ["p", ...] must NOT be misrouted to the emoji channel; it stays on
   // mediaTags where the server-side imeta guard rejects it.
   const forged = ["p", "deadbeef"];
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
-    forged,
-    EMOJI_A,
-  ]);
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags([forged, EMOJI_A]);
   assert.deepEqual(mediaTags, [forged]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(linkPreviewTags, []);
 });
 
 test("splitOutgoingTags is the inverse of mergeOutgoingTags", () => {
   const merged = mergeOutgoingTags([IMETA], [EMOJI_A, EMOJI_B]);
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags(merged);
+  const { mediaTags, emojiTags, mentionTags, linkPreviewTags } =
+    splitOutgoingTags(merged);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(linkPreviewTags, []);
 });

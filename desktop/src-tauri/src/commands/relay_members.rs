@@ -17,8 +17,15 @@ struct RelayInformationDocument {
 }
 
 #[tauri::command]
-pub async fn relay_requires_membership(state: State<'_, AppState>) -> Result<bool, String> {
-    let url = format!("{}/info", relay_api_base_url_with_override(&state));
+pub async fn relay_requires_membership(
+    relay_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let base_url = relay_url
+        .as_deref()
+        .map(crate::relay::relay_http_base_url)
+        .unwrap_or_else(|| relay_api_base_url_with_override(&state));
+    let url = format!("{}/info", base_url.trim_end_matches('/'));
     let response = state
         .http_client
         .get(url)

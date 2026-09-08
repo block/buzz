@@ -4,24 +4,28 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, open a GitHub Discussion or
-reach out in the community channels.
+If you have questions that aren't answered here, [open an issue](https://github.com/block/buzz/issues/new).
+
+If you believe you found a security vulnerability, do not open a public issue.
+Follow our [security policy](SECURITY.md) to submit a private vulnerability
+report instead.
 
 ---
 
 ## Table of Contents
 
 1. [Code of Conduct](#code-of-conduct)
-2. [Setting Up the Development Environment](#setting-up-the-development-environment)
-3. [Running Tests](#running-tests)
-4. [Code Style](#code-style)
-5. [Making a Pull Request](#making-a-pull-request)
-6. [Architecture Overview](#architecture-overview)
-7. [Ecosystem](#ecosystem)
-8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-11. [License and CLA](#license-and-cla)
+2. [Before You Open a PR](#before-you-open-a-pr)
+3. [Setting Up the Development Environment](#setting-up-the-development-environment)
+4. [Running Tests](#running-tests)
+5. [Code Style](#code-style)
+6. [Making a Pull Request](#making-a-pull-request)
+7. [Architecture Overview](#architecture-overview)
+8. [Ecosystem](#ecosystem)
+9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
+10. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+11. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+12. [License and CLA](#license-and-cla)
 
 ---
 
@@ -30,6 +34,43 @@ reach out in the community channels.
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
 By participating you agree to uphold these standards. Please report
 unacceptable behavior to **conduct@buzz-relay.org**.
+
+---
+
+## Before You Open a PR
+
+Before starting, search [open PRs](https://github.com/block/buzz/pulls) and [open issues](https://github.com/block/buzz/issues) for duplicates — someone may already be working on the same thing. When you open your PR, link the closest existing one in the description (or say "none found").
+
+For anything beyond a small fix, opening an issue first is strongly recommended. Describe the problem and proposed solution so a maintainer can acknowledge the approach before you build — it avoids two people building the same thing in parallel.
+
+Buzz is an agent platform, so AI-assisted PRs are welcome. No need to disclose the tools you used, but you own and must have reviewed the final code. Submissions that are clearly unreviewed may be closed with a pointer here.
+
+We squash-merge, so your PR title becomes the commit subject in `main`. Use [Conventional Commits](https://www.conventionalcommits.org/) format: `feat(mcp): add get_feed_actions tool`. The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is required. See the [Commit Messages](#commit-messages) section for the full reference.
+
+### Sign Your Commits
+
+```bash
+git commit -s
+```
+
+Every commit needs a Developer Certificate of Origin (DCO) sign-off. The `-s` flag appends a `Signed-off-by` trailer that certifies you wrote the change and can contribute it under the project license. The **DCO Check** will block your PR without it.
+
+#### Fix unsigned commits already pushed
+
+```bash
+git rebase --signoff main
+git push --force-with-lease
+```
+
+#### Auto-setup for future commits
+
+```bash
+just hooks
+```
+
+This installs a `commit-msg` hook that adds the sign-off trailer automatically for `git commit` and `git merge`. Other flows (`git rebase`, `git cherry-pick`) still need their own flag — `--signoff` and `-s` respectively.
+
+We review as capacity allows — focused PRs that follow this guide move fastest.
 
 ---
 
@@ -60,6 +101,37 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 (which `just setup` calls automatically) to pre-download all required tools
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
 versions in the table above.
+
+#### Linux: Tauri system libraries
+
+Hermit pins language toolchains, not system libraries. On Linux, the desktop
+app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
+`just desktop-tauri-*` recipe) needs these installed system-wide first. On
+Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  build-essential curl file libasound2-dev libayatana-appindicator3-dev \
+  libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+  patchelf wget
+```
+
+This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
+it locally keeps your results comparable to CI. Other distributions ship these
+under different package names — see the
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
+equivalents.
+
+Without them, `just ci` fails partway through `just check` with a pkg-config
+error such as:
+
+```
+The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
+```
+
+If you're only touching the relay, CLI, or other server-side crates, you can
+skip this and run the narrower recipes instead — `just fmt-check`, `just
+clippy`, `just test-unit`, and `just test` need no GTK.
 
 ### First-Time Setup
 
@@ -143,6 +215,64 @@ connections, NIP-42 auth, event ingestion, search indexing, and workflow
 execution. `just test` starts Docker services automatically if they're not
 already running.
 
+### PostgreSQL-backed tests
+
+PostgreSQL-backed tests run in a dedicated nextest lane. Mark them ignored with
+a PostgreSQL reason and place them in a module whose name ends in
+`postgres_tests`. Standalone integration-test targets use a `postgres_`
+filename prefix instead. Tests that also require infrastructure beyond
+PostgreSQL and Redis live under an `external_infra*_tests` module and are
+excluded without changing their descriptive function names.
+
+See the [buzz-db testing guide](crates/buzz-db/TESTING.md) for the crate-level
+checklist.
+
+`scripts/test-postgres-test-discovery.sh` enforces the convention across every
+Rust source file. It fails CI when an ignored PostgreSQL test would be omitted,
+or when a Redis-only or hybrid test is accidentally included, so module or file
+renames cannot silently change lane membership. The archive and runner derive
+their Cargo package set from the same markers, so a database test in a new crate
+does not require a separate package-list update.
+
+The `postgres-ci` nextest profile creates one database per test process, so
+destructive and concurrent tests must use the database URL supplied through
+`BUZZ_TEST_DATABASE_URL`, `TEST_DATABASE_URL`, or `DATABASE_URL`; do not
+hard-code the shared development database. Ordinary tests receive the committed
+desired-state schema from `schema/schema.sql`. Tests under
+`migration::postgres_tests` receive an empty database and own the embedded
+migration lifecycle. A test outside that module whose behavior intentionally
+depends on migration-created triggers or seed rows uses a
+`migration_schema_` function-name prefix and also receives an empty database
+with `BUZZ_TEST_SCHEMA_MODE=migration`. Test helpers that normally call the
+migrator honor `BUZZ_TEST_SCHEMA_MODE=desired` so the desired-state contract is
+not re-migrated.
+
+Tests that inspect cluster-wide PostgreSQL state or open least-privilege
+sessions use a `cluster_global_` function-name segment; migration-backed cases
+use `migration_schema_cluster_global_`. Nextest serializes this small group
+while the database-isolated remainder stays parallel.
+
+The setup process requires a PostgreSQL role that can create and drop databases
+and owns the databases it creates; the harness itself does not require
+superuser access. The complete inventory includes privilege-boundary tests that
+create temporary roles and inspect all sessions, so grant that role
+`CREATEROLE` and membership in `pg_read_all_stats` (or use an ephemeral
+superuser, as CI does).
+Set `BUZZ_POSTGRES_ADMIN_URL` to that role's maintenance database, and set
+`PGHOST`, `PGPORT`, `PGUSER`, and `PGPASSWORD` for the desired-state
+schema bootstrap. PostgreSQL client tools are resolved from `PATH` unless
+`PG_BIN_DIR` is set. Tests that use Redis read `REDIS_URL`.
+
+With native PostgreSQL and Redis running, the complete lane is below. The
+runner bounds compilation to the packages discovered from the current source
+tree and removes the run-scoped desired-state source database on exit.
+Per-test and source-database cleanup retries transient PostgreSQL disconnect
+races and emits a warning if all five attempts fail.
+
+```bash
+./scripts/postgres-test-run.sh
+```
+
 ### End-to-End Tests
 
 End-to-end tests live in `crates/buzz-test-client/tests/`:
@@ -171,7 +301,7 @@ just ci
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
-merged.
+merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
 
 ---
 
@@ -248,13 +378,6 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ## Making a Pull Request
 
-### Before You Start
-
-- Check open issues and PRs to avoid duplicate work.
-- For significant changes, open an issue first to discuss the approach.
-- For small fixes (typos, doc improvements, obvious bugs), go ahead and open
-  a PR directly.
-
 ### What a Good PR Looks Like
 
 1. **Focused** — one logical change per PR. If you're fixing a bug and
@@ -275,19 +398,34 @@ required. The scope (in parentheses) is optional but encouraged.
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
 
-### PR Checklist
+6. **Shows the UI** — any PR that changes the desktop or mobile UI includes
+   before/after screenshots (or a short recording for interactions) in the
+   description. We can't run every branch locally — screenshots let us review
+   UI changes same-day instead of waiting for someone to build your branch.
 
-```
-- [ ] `just ci` passes (fmt + clippy + unit tests + mobile)
-- [ ] Integration tests pass (`just test`)
-- [ ] New public APIs / tools / endpoints are documented
-- [ ] No new `unwrap()` in production code paths
-- [ ] No new `unsafe` blocks
-```
+### PRs We're Unlikely to Merge
 
-### Review Process
+Some kinds of PRs usually get closed — not because they're bad ideas, but
+because we can't safely review them without prior discussion:
 
-- A maintainer will review your PR within a few business days.
+- **Large refactors or dependency swaps** without a prior issue agreeing on
+  the direction
+- **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
+  clarity
+- **Entirely new features** with no prior discussion
+- **Drive-by changes bundled into an unrelated fix** — split them out
+
+If you're considering any of these, open an issue first and we'll tell you
+quickly whether it's a direction we'd merge. That saves your time as much as
+ours.
+
+### What to Expect After You Open a PR
+
+- Maintainers triage new PRs on a best-effort cadence. Focused PRs that
+  follow this guide move fastest.
+- Duplicates and PRs that skip this guide may be closed with a pointer here
+  rather than a full review. A close isn't a rejection of you or the idea —
+  address the gaps and reopen (or open a fresh PR) anytime.
 - Address review comments by pushing new commits (don't force-push during
   review; it makes it hard to see what changed).
 - Once approved, a maintainer will squash-merge your PR.

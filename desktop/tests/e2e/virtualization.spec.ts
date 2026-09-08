@@ -32,15 +32,69 @@ async function seedChannelSections(page: Page) {
 // the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
 async function dragOver(page: Page, source: Locator, target: Locator) {
   const from = await source.boundingBox();
-  const to = await target.boundingBox();
-  if (!from || !to) throw new Error("drag handles not laid out");
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 + 10);
-  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, {
-    steps: 10,
+  if (!from) throw new Error("drag source not laid out");
+  const pointer = {
+    x: from.x + from.width / 2,
+    y: from.y + from.height / 2,
+  };
+  await source.dispatchEvent("pointerdown", {
+    button: 0,
+    buttons: 1,
+    clientX: pointer.x,
+    clientY: pointer.y,
+    isPrimary: true,
+    pointerId: 1,
+    pointerType: "mouse",
   });
-  await page.mouse.up();
+  await page.evaluate(({ x, y }) => {
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: x,
+        clientY: y + 8,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+  }, pointer);
+  await expect(page.getByTestId("sidebar-section-drag-overlay")).toBeVisible();
+
+  const to = await target.boundingBox();
+  if (!to) throw new Error("drag target not laid out");
+  const destination = {
+    x: to.x + to.width / 2,
+    y: to.y + to.height - 2,
+  };
+  await page.evaluate(async ({ x, y }) => {
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: x,
+        clientY: y,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    document.dispatchEvent(
+      new PointerEvent("pointerup", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        clientX: x,
+        clientY: y,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+  }, destination);
 }
 
 test.describe("list virtualization", () => {
@@ -160,6 +214,10 @@ test.describe("list virtualization", () => {
     const headers = page.locator('[aria-roledescription="sortable"]');
     const topHeader = headers.filter({ hasText: "Priority" });
     const bottomHeader = headers.filter({ hasText: "Archive" });
+    const topHeaderButton = topHeader.getByRole("button", {
+      name: "Priority",
+      exact: true,
+    });
     await expect(topHeader).toBeVisible();
     await expect(bottomHeader).toBeVisible();
     await expect(headers).toHaveCount(2);
@@ -176,7 +234,7 @@ test.describe("list virtualization", () => {
 
     // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
     // the new order. The drop must land for the order to flip.
-    await dragOver(page, topHeader, bottomHeader);
+    await dragOver(page, topHeaderButton, bottomHeader);
 
     // The drop landed: order flipped. A no-op drag would leave it unchanged.
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
@@ -252,6 +310,29 @@ test.describe("list virtualization", () => {
       });
       await page.waitForTimeout(150);
       const before = await sampleVisibleAnchor();
+      const ctrlWheelPromise =
+        pageIndex === 0
+          ? timeline.evaluate(
+              (scroller) =>
+                new Promise<boolean>((resolve) => {
+                  const s = scroller as HTMLElement;
+                  const observer = new MutationObserver(() => {
+                    observer.disconnect();
+                    // Ctrl+wheel is browser zoom, not reader scroll intent. Fire
+                    // it synchronously with the prepend DOM commit, before the
+                    // ResizeObserver measurement batch reconciles estimated rows.
+                    s.dispatchEvent(
+                      new WheelEvent("wheel", { ctrlKey: true, deltaY: -100 }),
+                    );
+                    resolve(true);
+                  });
+                  observer.observe(s.firstElementChild ?? s, {
+                    childList: true,
+                    subtree: true,
+                  });
+                }),
+            )
+          : Promise.resolve(false);
       const wheelTracePromise = timeline.evaluate(async (scroller) => {
         const s = scroller as HTMLElement;
         let previousScrollTop = s.scrollTop;
@@ -335,6 +416,7 @@ test.describe("list virtualization", () => {
         },
       );
       expect(motion.sawPrepend).toBe(true);
+      if (pageIndex === 0) expect(await ctrlWheelPromise).toBe(true);
       expect(motion.maxDrift).toBeLessThan(5);
 
       await expect
@@ -357,11 +439,10 @@ test.describe("list virtualization", () => {
         await timeline.evaluate((element) => element.clientHeight),
       );
 
-      // Leave the boundary with real downward wheel input while this prepend's
-      // three-second semantic-anchor watcher is still alive. The watcher belongs
-      // only to the completed prepend: it must not reinterpret this deliberate
-      // reader movement as row drift and pull the viewport back toward its stale
-      // baseline before the next upward load.
+      // Leave the boundary with real downward wheel input after this prepend.
+      // That reader intent retires Virtua's active prepend reconciliation, so
+      // later row measurements must not pull the viewport back toward the
+      // completed prepend before the next upward load.
       const exitTracePromise = timeline.evaluate(async (scroller) => {
         const s = scroller as HTMLElement;
         const startScrollTop = s.scrollTop;
@@ -667,6 +748,10 @@ test("offscreen rich-row resize preserves the viewport-center anchor", async ({
 
   const result = await timeline.evaluate(async (element) => {
     const scroller = element as HTMLDivElement;
+    // Retire bottom-follow intent the same way real reader input does before
+    // moving into detached history. A raw scrollTop assignment alone is not
+    // user intent and would correctly leave bottom following armed.
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     scroller.scrollTop = scroller.scrollHeight / 2;
     scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 250));

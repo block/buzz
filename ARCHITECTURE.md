@@ -139,7 +139,7 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
 
-`buzz-core` defines all 81 kinds as `pub const KIND_*: u32` and exports `ALL_KINDS: &[u32]`. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
+`buzz-core` defines each event kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (127 kinds at the time of writing); `crates/buzz-core/src/kind.rs` is the source of truth for the current list. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
 Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.rs` and imported by `buzz-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `buzz-core/src/kind.rs`.
 
@@ -325,6 +325,15 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
+**Client consumption invariant.** A client rebuilding channel state must
+open its live subscription before (or overlapping) the finite history
+REQ — a gap between the last backfill page and live delivery silently
+drops events and rebuilds stale state (PR #3995). When the relay sends a
+terminal CLOSED, the subscription is removed server-side; any client-side
+ownership tied to it (chunk/scope fences) must be released in the same
+step, or live delivery stops permanently while the client believes it is
+subscribed (PR #6996).
+
 ---
 
 ## 6. Crate Reference
@@ -352,7 +361,7 @@ pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
 |----------|---------|
 | `filters_match(filters, event)` | OR across filters, AND within each filter. Includes NIP-01 prefix matching on event IDs. |
 | `verify_event(event)` | Schnorr signature + SHA-256 ID check. CPU-bound — callers use `spawn_blocking`. |
-| `is_private_ip(ip)` | SSRF protection: IPv4 unspecified/loopback/private/link-local/CGNAT/benchmarking/broadcast + IPv6 loopback/ULA/link-local/multicast/documentation + IPv4-mapped IPv6. |
+| `is_not_global_unicast(ip)` | SSRF protection: enumerated-deny policy — blocks a specific set of non-public address classes and accepts everything else (including addresses not covered by an explicit deny rule, e.g. `fe00::1`). Blocked IPv4 classes: loopback, private (RFC 1918), link-local, CGNAT (RFC 6598), benchmarking (RFC 2544), IETF Protocol Assignments (192.0.0.0/24, exceptions: 192.0.0.9 PCP anycast, 192.0.0.10 TURN anycast), documentation (RFC 5737: 192.0.2/24, 198.51.100/24, 203.0.113/24), deprecated 6to4 relay anycast (192.88.99.0/24, RFC 7526), multicast (RFC 5771, 224/4), reserved/class-E (240/4). Blocked IPv6 classes: loopback, unspecified, ULA (fc00::/7), link-local (fe80::/10), deprecated site-local (fec0::/10, RFC 3879), multicast (ff00::/8), IETF Protocol Assignments envelope (2001::/23, global exceptions: 2001:1::1–::3 anycast, 2001:3::/32 AMT, 2001:4:112::/48 AS112-v6, 2001:20::/28 ORCHIDv2, 2001:30::/28 DETs), documentation (2001:db8::/32, 3fff::/20), 6to4 (2002::/16), Discard-Only (100::/64), Dummy prefix (100:0:0:1::/64), SRv6 SIDs (5f00::/16), NAT64 local-use (64:ff9b:1::/48). IPv4 embedded in mapped, compatible, NAT64 well-known (64:ff9b::/96), and SIIT IPv4-translated (::ffff:0:0:0/96) forms checked recursively. Compat alias: `is_private_ip`. |
 
 **Does NOT:** store events, make network calls, spawn tasks, or depend on any async runtime.
 
@@ -447,7 +456,7 @@ The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
-**Presence:** `SET buzz:presence:{pubkey_hex} {status} EX 90` — 90-second TTL (3× the 30-second heartbeat interval). Single missed heartbeat does not cause presence flap.
+**Presence:** `SET buzz:presence:{pubkey_hex} {status} EX 180` — 180-second TTL (3× the 60-second heartbeat interval). Single missed heartbeat does not cause presence flap.
 
 **Typing indicators:**
 ```
@@ -737,12 +746,10 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 
 ### SSRF Protection
 
-`is_private_ip()` in `buzz-core` covers:
-- IPv4: unspecified (0.0.0.0/8), loopback (127.0.0.0/8), private (10/8, 172.16/12, 192.168/16), link-local (169.254/16), CGNAT (100.64/10), benchmarking (198.18/15), broadcast (255.255.255.255)
-- IPv6: loopback (::1), ULA (fc00::/7), link-local (fe80::/10), multicast (ff00::/8), documentation (2001:db8::/32)
-- IPv4-mapped IPv6 (::ffff:0:0/96) — recursively checks the embedded IPv4 address
+`is_not_global_unicast(ip)` (compat alias `is_private_ip`) in `buzz-core` is an enumerated-deny policy: it blocks a specific set of non-public address classes and accepts everything else, including addresses not covered by an explicit deny rule (e.g. `fe00::1`). Blocked IPv4 classes: loopback (127.0.0.0/8), private RFC 1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16), unspecified (0/8), broadcast, CGNAT/RFC 6598 (100.64/10), benchmarking/RFC 2544 (198.18/15), IETF Protocol Assignments (192.0.0.0/24, globally reachable exceptions: 192.0.0.9 PCP anycast RFC 7723 and 192.0.0.10 TURN anycast RFC 8155), documentation/RFC 5737 (192.0.2/24, 198.51.100/24, 203.0.113/24), deprecated 6to4 relay anycast (192.88.99.0/24, RFC 7526, global=None/blank → conservative deny), multicast/RFC 5771 (224/4), and reserved class-E (240/4). Blocked IPv6 classes: loopback (::1), unspecified (::), ULA (fc00::/7), link-local (fe80::/10), deprecated site-local (fec0::/10, RFC 3879), multicast (ff00::/8), IETF Protocol Assignments envelope (2001::/23, global exceptions: 2001:1::1–::3 PCP/TURN/DNS-SD anycast, 2001:3::/32 AMT RFC 7450, 2001:4:112::/48 AS112-v6 RFC 7535, 2001:20::/28 ORCHIDv2 RFC 7343, 2001:30::/28 DETs RFC 9374), documentation (2001:db8::/32 RFC 3849, 3fff::/20 RFC 9637), 6to4 (2002::/16, RFC 3056), Discard-Only (100::/64, RFC 6666), Dummy IPv6 Prefix (100:0:0:1::/64, RFC 9780), SRv6 SIDs (5f00::/16, RFC 9252), and NAT64 local-use (64:ff9b:1::/48, RFC 8215). IPv4 embedded in IPv4-mapped, IPv4-compatible, and NAT64 well-known (64:ff9b::/96, RFC 6052) forms is checked recursively against the IPv4 table; SIIT IPv4-translated (::ffff:0:0:0/96) follows the same path.
 
-Applied in: `buzz-workflow` (CallWebhook action), `buzz-core` (shared utility).
+Applied in: `buzz-auth` (JWKS boundary), `buzz-workflow` (CallWebhook action),
+desktop `link_preview` (SSRF check).
 
 ### Audit Integrity
 
@@ -797,7 +804,7 @@ Docker Compose provides the full local development stack. All services include h
 | Pattern | Type | TTL | Purpose |
 |---------|------|-----|---------|
 | `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out (single-community form; shared multi-community Redis must use `buzz:{community}:channel:{uuid}` or equivalent) |
-| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
+| `buzz:presence:{pubkey_hex}` | String | 180s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
 | `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
 ### Full-Text Search (Postgres FTS)

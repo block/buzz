@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::header;
+use axum::http::HeaderValue;
 use axum::{
     extract::{FromRequestParts, Path, State},
     http::{request::Parts, HeaderMap, StatusCode},
@@ -207,12 +208,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         // storage and of `require_auth_token` (which governs the REST API, not
         // media). On open relays (membership disabled) any valid Blossom signer
         // may upload, matching the WS door's admission policy.
-        let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+        let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
         crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             auth_event.pubkey.as_bytes(),
             auth_tag,
+            Some(auth_event.created_at.as_secs()),
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
@@ -283,6 +285,19 @@ async fn upload_attribution(
     })
 }
 
+fn serving_write_error(error: anyhow::Error) -> MediaError {
+    if buzz_deletion::ServingWriteGuard::acquisition_is_fenced(&error) {
+        MediaError::CommunityWriteFenced
+    } else {
+        MediaError::ServiceUnavailable
+    }
+}
+
+fn serving_lease_lost(error: anyhow::Error) -> MediaError {
+    tracing::warn!(%error, "media serving-write lease lost");
+    MediaError::ServiceUnavailable
+}
+
 /// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
@@ -310,6 +325,11 @@ pub async fn upload_blob(
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
+    let serving_write =
+        buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
+            .await
+            .map_err(serving_write_error)?;
+
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
     }
@@ -335,69 +355,86 @@ pub async fn upload_blob(
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
 
-    let mut descriptor = if should_stream_as_video(&sniff) {
-        // Video path: stream body directly to disk — never fully buffered in RAM.
-        let content_length = headers
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-        buzz_media::process_video_upload(
-            &state.media_storage,
-            &state.config.media,
-            &auth.tenant,
-            &auth.auth_event,
-            replay,
-            content_length,
-            attribution,
-        )
-        .await?
-    } else {
-        // Non-video path: buffer the body (bounded by the larger of the image
-        // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-        // Images go through the thumbnailing pipeline; non-media attachments
-        // (docs, archives, text, data) take the generic file path and are
-        // served as downloads. Recognized audio/video cannot fall through it.
-        let max = state
-            .config
-            .media
-            .max_image_bytes
-            .max(state.config.media.max_file_bytes);
-        let bytes = axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
-            .await
-            .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
+    serving_write.verify().await.map_err(serving_lease_lost)?;
 
-        let is_image = matches!(
-            infer::get(&bytes).map(|t| t.mime_type()),
-            Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
-        );
+    let mut descriptor = serving_write
+        .protect(async {
+            Ok(if should_stream_as_video(&sniff) {
+                // Video path: stream body directly to disk — never fully buffered in RAM.
+                let content_length = headers
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok());
+                buzz_media::process_video_upload(
+                    &state.media_storage,
+                    &state.config.media,
+                    &auth.tenant,
+                    &auth.auth_event,
+                    replay,
+                    content_length,
+                    attribution,
+                )
+                .await?
+            } else {
+                // Non-video path: buffer the body (bounded by the larger of the image
+                // and generic-file caps), then decide image-vs-generic by sniffed MIME.
+                // Images go through the thumbnailing pipeline; non-media attachments
+                // (docs, archives, text, data) take the generic file path and are
+                // served as downloads. Recognized audio/video cannot fall through it.
+                let max = state
+                    .config
+                    .media
+                    .max_image_bytes
+                    .max(state.config.media.max_file_bytes);
+                let bytes =
+                    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
+                        .await
+                        .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
 
-        if is_image {
-            buzz_media::process_upload(
-                &state.media_storage,
-                &state.config.media,
-                &auth.tenant,
-                &auth.auth_event,
-                bytes,
-                attribution,
-            )
-            .await?
-        } else if auth.route_mode == UploadRouteMode::LegacyMedia {
-            let mime = infer::get(&bytes)
-                .map(|kind| kind.mime_type().to_string())
-                .unwrap_or_else(|| "application/octet-stream".to_string());
-            return Err(MediaError::DisallowedContentType(mime));
-        } else {
-            buzz_media::process_file_upload(
-                &state.media_storage,
-                &state.config.media,
-                &auth.tenant,
-                &auth.auth_event,
-                bytes,
-                attribution,
-            )
-            .await?
-        }
-    };
+                let is_image = matches!(
+                    infer::get(&bytes).map(|t| t.mime_type()),
+                    Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
+                );
+
+                if is_image {
+                    buzz_media::process_upload(
+                        &state.media_storage,
+                        &state.config.media,
+                        &auth.tenant,
+                        &auth.auth_event,
+                        bytes,
+                        attribution,
+                    )
+                    .await?
+                } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+                    let mime = infer::get(&bytes)
+                        .map(|kind| kind.mime_type().to_string())
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
+                    return Err(MediaError::DisallowedContentType(mime));
+                } else {
+                    buzz_media::process_file_upload(
+                        &state.media_storage,
+                        &state.config.media,
+                        &auth.tenant,
+                        &auth.auth_event,
+                        bytes,
+                        attribution,
+                    )
+                    .await?
+                }
+            })
+        })
+        .await
+        .map_err(|error| {
+            if buzz_deletion::ServingWriteGuard::is_lease_lost(&error) {
+                serving_lease_lost(error)
+            } else {
+                match error.downcast::<MediaError>() {
+                    Ok(error) => error,
+                    Err(_) => MediaError::Internal,
+                }
+            }
+        })??;
 
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
@@ -441,6 +478,7 @@ pub async fn upload_blob(
         }
     }
 
+    serving_write.finish().await.map_err(serving_lease_lost)?;
     Ok(Json(descriptor))
 }
 
@@ -493,20 +531,17 @@ async fn authenticate_media_read(
 ) -> Result<MediaReadAuth, MediaError> {
     let tenant = bind_media_read_tenant(state, headers).await?;
 
-    if !state.config.require_media_get_auth {
-        return Ok(MediaReadAuth { tenant });
-    }
-
     let auth_event = extract_blossom_auth(headers)?;
     let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
     buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
     crate::api::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         auth_event.pubkey.as_bytes(),
         auth_tag,
+        Some(auth_event.created_at.as_secs()),
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
@@ -514,12 +549,8 @@ async fn authenticate_media_read(
     Ok(MediaReadAuth { tenant })
 }
 
-fn blob_cache_control(require_auth: bool) -> &'static str {
-    if require_auth {
-        "private, max-age=31536000, immutable"
-    } else {
-        "public, max-age=31536000, immutable"
-    }
+fn blob_cache_control() -> &'static str {
+    "private, max-age=31536000, immutable"
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -623,7 +654,7 @@ pub(crate) async fn serve_blob_for_tenant(
     req_headers: &HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(sha256_ext)?;
-    let cache_control = blob_cache_control(state.config.require_media_get_auth);
+    let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
@@ -751,6 +782,77 @@ pub(crate) async fn serve_blob_for_tenant(
     }
 }
 
+/// Passive raster image formats safe to render inline in a browser, keyed by
+/// content sniff of the stored bytes. SVG is intentionally excluded: it is an
+/// active document that can execute script.
+fn verified_inline_image_type(bytes: &[u8]) -> Option<&'static str> {
+    match infer::get(bytes).map(|kind| kind.mime_type()) {
+        Some("image/png") => Some("image/png"),
+        Some("image/jpeg") => Some("image/jpeg"),
+        Some("image/gif") => Some("image/gif"),
+        Some("image/webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// The browser-facing response policy for a feedback attachment, derived solely
+/// from a content sniff of the stored `prefix` bytes — never the reporter's
+/// `imeta` MIME. Returns the served `Content-Type` and `Content-Disposition`:
+/// verified passive raster renders `inline` with its sniffed type; every other
+/// payload is forced to `application/octet-stream` + `attachment` so the browser
+/// downloads it instead of running it. `X-Content-Type-Options: nosniff` is
+/// always applied by the caller so a forced attachment can never be sniffed back
+/// into an executable type. This is the load-bearing security seam.
+fn feedback_attachment_response_policy(prefix: &[u8]) -> (&'static str, &'static str) {
+    match verified_inline_image_type(prefix) {
+        Some(mime) => (mime, "inline"),
+        None => ("application/octet-stream", "attachment"),
+    }
+}
+
+/// Serve a feedback attachment to an admin operator without ever letting an
+/// attacker-controlled payload execute as a typed document.
+///
+/// Feedback attachment bytes, their `imeta` MIME, and filename are all supplied
+/// by untrusted reporters. The normal media route trusts the stored sidecar
+/// MIME to choose an inline disposition, so a hash-valid HTML or SVG payload
+/// mislabelled `image/*` would open as an executable document on the admin
+/// origin. This wrapper re-derives the served type from a content sniff of the
+/// stored bytes: only verified passive raster images render inline; every other
+/// payload is forced to `application/octet-stream` + `Content-Disposition:
+/// attachment` so the browser downloads it instead of running it. The normal
+/// `/media` route is unchanged.
+pub(crate) async fn serve_feedback_attachment(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256: &str,
+    req_headers: &HeaderMap,
+) -> Result<Response, MediaError> {
+    // infer needs only the leading magic bytes (webp reads through byte 11).
+    const SNIFF_PREFIX_LEN: u64 = 32;
+    let key = resolve_s3_key(&state.media_storage, tenant, sha256).await?;
+    let prefix = state
+        .media_storage
+        .get_range(&key, 0, SNIFF_PREFIX_LEN - 1)
+        .await
+        .unwrap_or_default();
+    let (content_type, disposition) = feedback_attachment_response_policy(&prefix);
+
+    let mut response = serve_blob_for_tenant(state, tenant, sha256, req_headers).await?;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    // A forced attachment must never be sniffed back into an executable type.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
 /// Parse a `Range: bytes=START-END` header value.
 ///
 /// Returns `Some((start, end))` for a valid absolute or suffix range.
@@ -801,10 +903,9 @@ pub async fn head_blob(
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let require_media_get_auth = state.config.require_media_get_auth;
     let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
     let tenant = media_auth.tenant;
-    let cache_control = blob_cache_control(require_media_get_auth);
+    let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
@@ -923,6 +1024,90 @@ mod tests {
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
     #[test]
+    fn serving_write_error_taxonomy_separates_fence_from_backend_failure() {
+        let fenced = anyhow::Error::from(buzz_db::DbError::AccessDenied("fenced".to_string()));
+        assert!(matches!(
+            serving_write_error(fenced),
+            MediaError::CommunityWriteFenced
+        ));
+        let backend = anyhow::Error::from(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut));
+        assert!(matches!(
+            serving_write_error(backend),
+            MediaError::ServiceUnavailable
+        ));
+    }
+
+    #[test]
+    fn feedback_inline_allows_only_sniffed_passive_raster_images() {
+        // Real magic bytes for the four verified passive raster formats.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(verified_inline_image_type(&png), Some("image/png"));
+        assert_eq!(verified_inline_image_type(&jpeg), Some("image/jpeg"));
+        assert_eq!(verified_inline_image_type(&gif), Some("image/gif"));
+        assert_eq!(verified_inline_image_type(&webp), Some("image/webp"));
+
+        // Active documents and non-raster payloads never render inline — a
+        // reporter cannot smuggle script past the sniff, regardless of the
+        // imeta MIME they supplied.
+        assert_eq!(
+            verified_inline_image_type(b"<svg xmlns=\"...\"></svg>"),
+            None
+        );
+        assert_eq!(
+            verified_inline_image_type(b"<!DOCTYPE html><script>alert(1)</script>"),
+            None
+        );
+        assert_eq!(verified_inline_image_type(b"%PDF-1.7"), None);
+        assert_eq!(verified_inline_image_type(b""), None);
+    }
+
+    #[test]
+    fn feedback_attachment_response_policy_pins_browser_facing_contract() {
+        // Verified passive raster is the ONLY payload that serves inline, and it
+        // serves as its sniffed type — never a reporter-controlled MIME.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        for (bytes, mime) in [
+            (&png[..], "image/png"),
+            (&jpeg[..], "image/jpeg"),
+            (&gif[..], "image/gif"),
+            (&webp[..], "image/webp"),
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(bytes),
+                (mime, "inline"),
+                "verified raster must serve inline as its sniffed type"
+            );
+        }
+
+        // Every hostile or unrecognized payload is forced to a non-navigable
+        // download. This is the seam that keeps a hash-valid HTML/SVG feedback
+        // attachment from opening as an executing document on the admin origin.
+        for hostile in [
+            &b"<!DOCTYPE html><script>alert(1)</script>"[..],
+            &b"<svg xmlns=\"...\"><script>alert(1)</script></svg>"[..],
+            &b"%PDF-1.7"[..],
+            &b""[..],       // failed/empty sniff prefix — fail closed to download
+            &b"\x89PN"[..], // short/truncated prefix — not enough to verify
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(hostile),
+                ("application/octet-stream", "attachment"),
+                "hostile/unrecognized bytes must force a download, never inline"
+            );
+        }
+    }
+
+    #[test]
     fn upload_routes_distinguish_standard_and_legacy_modes() {
         assert_eq!(
             upload_route_mode("/upload").expect("standard upload route"),
@@ -946,13 +1131,8 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
-        test_state_with_media_get_auth(false).await
-    }
-
-    async fn test_state_with_media_get_auth(require_media_get_auth: bool) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
-        config.require_media_get_auth = require_media_get_auth;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;
         config.media_max_concurrent_uploads = 2;
@@ -994,8 +1174,8 @@ mod tests {
         Arc::new(state)
     }
 
-    async fn media_get_auth_router(require_media_get_auth: bool) -> axum::Router {
-        let state = test_state_with_media_get_auth(require_media_get_auth).await;
+    async fn media_get_auth_router() -> axum::Router {
+        let state = test_state().await;
         axum::Router::new()
             .route(
                 "/media/{sha256_ext}",
@@ -1041,20 +1221,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_off_allows_unauthenticated_read_until_sidecar_gate() {
-        let response = media_get_auth_router(false)
-            .await
-            .oneshot(media_request("GET", None))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate() {
+    async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
         for method in ["GET", "HEAD"] {
-            let response = media_get_auth_router(true)
+            let response = media_get_auth_router()
                 .await
                 .oneshot(media_request(method, None))
                 .await
@@ -1065,10 +1234,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_valid_server_scoped_token_reaches_sidecar_gate() {
+    async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let response = media_get_auth_router(true)
+        let response = media_get_auth_router()
             .await
             .oneshot(media_request("GET", Some(auth)))
             .await
@@ -1078,7 +1247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_rejects_upload_verb_wrong_server_and_wrong_x() {
+    async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
         let expiration = (now + 300).to_string();
@@ -1102,7 +1271,7 @@ mod tests {
 
         for tags in cases {
             let auth = media_get_auth_header(&keys, tags);
-            let response = media_get_auth_router(true)
+            let response = media_get_auth_router()
                 .await
                 .oneshot(media_request("GET", Some(auth)))
                 .await
@@ -1119,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_accepts_range_header_only_after_auth() {
+    async fn media_read_accepts_range_header_only_after_auth() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
         let mut request = media_request("GET", Some(auth));
@@ -1127,7 +1296,7 @@ mod tests {
             .headers_mut()
             .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
 
-        let response = media_get_auth_router(true)
+        let response = media_get_auth_router()
             .await
             .oneshot(request)
             .await

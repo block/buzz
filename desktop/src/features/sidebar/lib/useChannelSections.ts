@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundChannelSectionsStore,
   DEFAULT_STORE,
   readChannelSectionsStore,
   storageKey,
@@ -45,7 +46,7 @@ export function useChannelSections(
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -54,7 +55,7 @@ export function useChannelSections(
     setStore(readChannelSectionsStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSectionSyncManager(pubkey);
+    managerRef.current = new ChannelSectionSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -102,18 +103,16 @@ export function useChannelSections(
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSections().then((remote) => {
+    const local = readChannelSectionsStore(pubkey, relayUrl);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSectionsStore(pubkey, relayUrl);
-        if (local.sections.length > 0) {
-          managerRef.current?.publishSections(local);
-        }
+      if (result.action === "apply-remote") {
+        setStore(applyRemote(result.data));
       }
+      // "hold": seed already performed by bootstrap (if first-sync), or
+      // blocked (failed fetch / prior watermark). Hook does nothing.
     });
     return () => {
       cancelled = true;
@@ -146,10 +145,10 @@ export function useChannelSections(
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSections().then((remote) => {
+      void managerRef.current?.fetchRemoteSections().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {
@@ -183,10 +182,10 @@ export function useChannelSections(
         order: maxOrder + 1,
       };
       setStore((current) => {
-        const next: ChannelSectionStore = {
+        const next = boundChannelSectionsStore({
           ...current,
           sections: [...current.sections, section],
-        };
+        });
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return current;
         managerRef.current?.publishSections(next);
         return next;
@@ -303,10 +302,13 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
-        const next: ChannelSectionStore = {
+        const assignments = { ...prev.assignments };
+        delete assignments[channelId];
+        assignments[channelId] = sectionId;
+        const next = boundChannelSectionsStore({
           ...prev,
-          assignments: { ...prev.assignments, [channelId]: sectionId },
-        };
+          assignments,
+        });
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }

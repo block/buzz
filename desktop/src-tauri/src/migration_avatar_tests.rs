@@ -25,6 +25,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         },
     ];
     let definition = crate::managed_agents::AgentDefinition {
+        description: None,
         id: "builtin:fizz".to_string(),
         display_name: "Fizz".to_string(),
         avatar_url: Some(old_fizz.to_string()),
@@ -35,8 +36,11 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         name_pool: vec!["Fizzy".to_string()],
         is_builtin: true,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),

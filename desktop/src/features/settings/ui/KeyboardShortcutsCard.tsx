@@ -3,7 +3,11 @@ import {
   getPlatformKeys,
   type KeyboardShortcut,
 } from "@/shared/lib/keyboard-shortcuts";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+  SettingsOptionRow,
+} from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 function KeyCombo({ shortcut }: { shortcut: KeyboardShortcut }) {
@@ -38,33 +42,31 @@ export function KeyboardShortcutsCard() {
         description="All available keyboard shortcuts. Shortcuts are read-only."
       />
 
-      <div className="space-y-4">
+      <SettingsOptionGroupList>
         {[...categories.entries()].map(([category, shortcuts]) => (
-          <div key={category}>
-            <h2 className="mb-2 text-lg font-semibold tracking-tight">
-              {category}
-            </h2>
-            <SettingsOptionGroup>
-              {shortcuts.map((shortcut) => (
-                <SettingsOptionRow
-                  className="min-h-12 px-3 py-2"
-                  key={shortcut.id}
-                >
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-foreground">
-                      {shortcut.label}
-                    </span>
-                    <span className="ml-2 text-muted-foreground">
-                      {shortcut.description}
-                    </span>
-                  </div>
-                  <KeyCombo shortcut={shortcut} />
-                </SettingsOptionRow>
-              ))}
-            </SettingsOptionGroup>
-          </div>
+          <SettingsOptionGroup key={category} title={category}>
+            {shortcuts.map((shortcut) => (
+              <SettingsOptionRow
+                className="min-h-12 px-3 py-2"
+                key={shortcut.id}
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="text-sm font-medium text-foreground">
+                    {shortcut.label}
+                  </span>
+                  <span
+                    className="ml-2 text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
+                    {shortcut.description}
+                  </span>
+                </div>
+                <KeyCombo shortcut={shortcut} />
+              </SettingsOptionRow>
+            ))}
+          </SettingsOptionGroup>
         ))}
-      </div>
+      </SettingsOptionGroupList>
     </section>
   );
 }

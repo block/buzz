@@ -63,6 +63,7 @@ function isDocumentVisible() {
 export function useSidebarRelayConnectionCard(
   errorMessage?: string,
   relayUrl?: string | null,
+  relayLifecycleKey = relaySuccessKey(relayUrl),
 ) {
   const relayConnectionState = useRelayConnection();
   const hasRelayUnreachableError = errorMessage
@@ -79,7 +80,6 @@ export function useSidebarRelayConnectionCard(
     relayConnectionState === "stalled" ||
     (relayConnectionState === "disconnected" && !hasNonUnreachableError);
   const isRelayConnectionConnected = relayConnectionState === "connected";
-  const isRelayConnectionDisconnected = relayConnectionState === "disconnected";
   const [isDismissed, setIsDismissed] = React.useState(false);
   const hasSuccess = React.useSyncExternalStore(
     subscribeRelayConnectivitySuccess,
@@ -95,6 +95,8 @@ export function useSidebarRelayConnectionCard(
   const isRelayConnectionSuccess = hasSuccess && isRelayConnectionConnected;
   const canShow = isRelayConnectionActuallyDegraded || isRelayConnectionSuccess;
   const show = canShow && !isDismissed;
+  const outageActiveRef = React.useRef(false);
+  const outageRelayLifecycleKeyRef = React.useRef(relayLifecycleKey);
   const wasProblemCardVisibleRef = React.useRef(false);
   const {
     isPending: isReconnectPending,
@@ -111,30 +113,41 @@ export function useSidebarRelayConnectionCard(
     isReconnectPending || connectivityAction === "relay-connection";
 
   React.useEffect(() => {
-    if (!isRelayConnectionActuallyDegraded && !isRelayConnectionSuccess) {
+    if (outageRelayLifecycleKeyRef.current !== relayLifecycleKey) {
+      outageRelayLifecycleKeyRef.current = relayLifecycleKey;
+      outageActiveRef.current = false;
+      wasProblemCardVisibleRef.current = false;
       setIsDismissed(false);
     }
-  }, [isRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
 
-  React.useEffect(() => {
-    if (isRelayConnectionStateDegraded || isRelayConnectionDisconnected) {
-      setRelayConnectivitySuccess(relayUrl, false);
+    if (relayConnectionState === "idle") {
+      outageActiveRef.current = false;
+      wasProblemCardVisibleRef.current = false;
       setIsDismissed(false);
+      return;
     }
-  }, [isRelayConnectionDisconnected, isRelayConnectionStateDegraded, relayUrl]);
 
-  React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {
+      if (!outageActiveRef.current) {
+        outageActiveRef.current = true;
+        setRelayConnectivitySuccess(relayUrl, false);
+        setIsDismissed(false);
+      }
       wasProblemCardVisibleRef.current = show && !isRelayConnectionSuccess;
       return;
     }
 
-    if (wasProblemCardVisibleRef.current && isRelayConnectionConnected) {
-      wasProblemCardVisibleRef.current = false;
-      setRelayConnectivitySuccess(relayUrl, true);
+    if (outageActiveRef.current && isRelayConnectionConnected) {
+      outageActiveRef.current = false;
+      if (wasProblemCardVisibleRef.current) {
+        wasProblemCardVisibleRef.current = false;
+        setRelayConnectivitySuccess(relayUrl, true);
+      }
     }
   }, [
     isRelayConnectionSuccess,
+    relayLifecycleKey,
+    relayConnectionState,
     relayUrl,
     show,
     isRelayConnectionActuallyDegraded,

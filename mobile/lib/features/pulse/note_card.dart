@@ -10,7 +10,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'compose_note_page.dart';
 import 'pulse_actions.dart';
@@ -75,6 +75,7 @@ class NoteCard extends HookConsumerWidget {
                   color: context.colors.onPrimaryContainer,
                 ),
               ),
+              isAgent: profile?.ownerPubkey != null,
             ),
           ),
           const SizedBox(width: Grid.xs),
@@ -89,31 +90,45 @@ class NoteCard extends HookConsumerWidget {
                         onTap: () => showUserProfileSheet(context, note.pubkey),
                         child: Row(
                           children: [
-                            Flexible(
-                              child: Text(
-                                displayName,
-                                style: context.textTheme.labelMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                overflow: TextOverflow.ellipsis,
+                            Expanded(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      displayName,
+                                      maxLines: 1,
+                                      style: messageUsernameTextStyle,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (isAgent) ...[
+                                    const SizedBox(width: Grid.half),
+                                    Icon(
+                                      LucideIcons.bot,
+                                      size: 13,
+                                      color: context.colors.primary,
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
-                            if (isAgent) ...[
-                              const SizedBox(width: Grid.half),
-                              Icon(
-                                LucideIcons.bot,
-                                size: 13,
-                                color: context.colors.primary,
+                            const SizedBox(width: Grid.xxs),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxWidth: Grid.xl,
                               ),
-                            ],
+                              child: Text(
+                                formatPulseRelativeTime(note.createdAt),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: messageTimestampTextStyle.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                    ),
-                    Text(
-                      formatPulseRelativeTime(note.createdAt),
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.onSurfaceVariant,
                       ),
                     ),
                     if (canFollow) ...[
@@ -142,14 +157,20 @@ class NoteCard extends HookConsumerWidget {
                   ),
                 ],
                 const SizedBox(height: Grid.half),
-                MessageContent(content: note.content, tags: note.tags),
+                MessageContent(
+                  content: note.content,
+                  tags: note.tags,
+                  baseStyle: messageBodyTextStyle.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
                 const SizedBox(height: Grid.xxs),
                 Row(
                   children: [
                     _ActionButton(
                       icon: effectiveUpvoted
                           ? Icons.favorite
-                          : Icons.favorite_border,
+                          : LucideIcons.heart,
                       label: effectiveCount > 0 ? '$effectiveCount' : null,
                       color: effectiveUpvoted ? Colors.redAccent : null,
                       onTap: () async {

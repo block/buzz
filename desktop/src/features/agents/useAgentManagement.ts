@@ -301,7 +301,11 @@ export function useAgentManagement() {
     ...createdAgentAttachment,
     isPending,
     runtimes: runtimesQuery.data ?? [],
-    runtimesLoading: runtimesQuery.isLoading,
+    runtimeCatalogStatus: runtimesQuery.isLoading
+      ? ("loading" as const)
+      : runtimesQuery.isError
+        ? ("error" as const)
+        : ("ready" as const),
     submitCreate,
     submitUpdate,
     dismiss,

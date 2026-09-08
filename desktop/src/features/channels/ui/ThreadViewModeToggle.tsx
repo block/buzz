@@ -7,6 +7,11 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
+/** Preserve focus only when activation did not come from a pointer click. */
+export function shouldRestoreThreadToggleFocus(clickDetail: number): boolean {
+  return clickDetail === 0;
+}
+
 /**
  * Both glyphs depict the layout the button switches *to*, never the current one.
  *
@@ -50,7 +55,7 @@ const THREAD_VIEW_MODE_TOGGLE = {
 export function ThreadViewModeToggle({
   onChange,
 }: {
-  onChange: (mode: ThreadViewMode) => void;
+  onChange: (mode: ThreadViewMode, restoreFocus: boolean) => void;
 }) {
   const viewMode = useThreadViewMode();
   const { icon: Icon, label, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
@@ -62,7 +67,9 @@ export function ThreadViewModeToggle({
           aria-label={label}
           className="shrink-0"
           data-testid="thread-view-mode-toggle"
-          onClick={() => onChange(target)}
+          onClick={(event) =>
+            onChange(target, shouldRestoreThreadToggleFocus(event.detail))
+          }
           size="icon"
           type="button"
           variant="ghost"

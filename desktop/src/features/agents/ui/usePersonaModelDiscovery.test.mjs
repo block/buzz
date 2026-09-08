@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getDiscoveredPersonaModelOptions } from "./usePersonaModelDiscovery.ts";
+import {
+  deriveModelDiscoveryPending,
+  getDiscoveredPersonaModelOptions,
+  isCacheableDiscoveryResponse,
+  isSuccessfulEmptyDiscovery,
+  synthesizeEmptyDiscoveryStatus,
+} from "./usePersonaModelDiscovery.ts";
 
 function response(overrides = {}) {
   return {
@@ -109,4 +115,327 @@ test("returns null when discovery is unsupported or empty", () => {
     null,
   );
   assert.equal(getDiscoveredPersonaModelOptions(null, ""), null);
+});
+
+// ── synthesizeEmptyDiscoveryStatus ────────────────────────────────────────────
+
+test("synthesizeEmptyDiscoveryStatus_emptyModels_producesWarningStatus", () => {
+  const status = synthesizeEmptyDiscoveryStatus(
+    response({ models: [], agentName: "Claude Code" }),
+    "",
+  );
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Claude Code/);
+  assert.match(status?.message ?? "", /reported no models/);
+});
+
+test("synthesizeEmptyDiscoveryStatus_supportsSwitchingFalse_producesWarningStatus", () => {
+  const status = synthesizeEmptyDiscoveryStatus(
+    response({
+      supportsSwitching: false,
+      models: [{ id: "gpt-4", name: "GPT-4", description: null }],
+      agentName: "Codex",
+    }),
+    "",
+  );
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Codex/);
+});
+
+test("synthesizeEmptyDiscoveryStatus_withUsableModels_returnsNull", () => {
+  assert.equal(
+    synthesizeEmptyDiscoveryStatus(
+      response({
+        models: [
+          { id: "claude-sonnet-5", name: "Claude Sonnet 5", description: null },
+        ],
+        agentName: "Claude Code",
+      }),
+      "",
+    ),
+    null,
+  );
+});
+
+test("synthesizeEmptyDiscoveryStatus_emptyAgentName_usesGenericFallback", () => {
+  const status = synthesizeEmptyDiscoveryStatus(
+    response({ models: [], agentName: "" }),
+    "",
+  );
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /This agent/);
+});
+
+// ── isCacheableDiscoveryResponse ──────────────────────────────────────────────
+
+test("isCacheableDiscoveryResponse_withUsableModels_returnsTrue", () => {
+  assert.equal(
+    isCacheableDiscoveryResponse(
+      response({
+        models: [
+          { id: "claude-sonnet-5", name: "Claude Sonnet 5", description: null },
+        ],
+      }),
+      "",
+    ),
+    true,
+  );
+});
+
+test("isCacheableDiscoveryResponse_emptyModels_returnsFalse", () => {
+  // An empty-result response must not be cached so close→reopen retries
+  // discovery after the user installs or signs into the CLI.
+  assert.equal(
+    isCacheableDiscoveryResponse(response({ models: [] }), ""),
+    false,
+  );
+});
+
+test("isCacheableDiscoveryResponse_supportsSwitchingFalse_returnsFalse", () => {
+  assert.equal(
+    isCacheableDiscoveryResponse(
+      response({
+        supportsSwitching: false,
+        models: [{ id: "gpt-4", name: "GPT-4", description: null }],
+      }),
+      "",
+    ),
+    false,
+  );
+});
+
+// ── deriveModelDiscoveryPending ────────────────────────────────────────────────
+
+test("deriveModelDiscoveryPending_stillLoading_isTrue", () => {
+  assert.equal(
+    deriveModelDiscoveryPending({
+      modelDiscoveryLoading: true,
+      modelDiscoveryKey: "key",
+      activeModelDiscoveryData: null,
+      activeModelDiscoveryStatus: null,
+    }),
+    true,
+  );
+});
+
+test("deriveModelDiscoveryPending_keySetDataNullStatusNull_isTrue", () => {
+  // A key is set but neither data nor status has arrived yet → still pending.
+  assert.equal(
+    deriveModelDiscoveryPending({
+      modelDiscoveryLoading: false,
+      modelDiscoveryKey: "key",
+      activeModelDiscoveryData: null,
+      activeModelDiscoveryStatus: null,
+    }),
+    true,
+  );
+});
+
+test("deriveModelDiscoveryPending_resolvedEmptyResponse_isNotPending", () => {
+  // A resolved-but-empty response sets data non-null and status to a warning.
+  // Neither condition for pending is met — the hook must not spin forever.
+  const emptyResponse = response({ models: [] });
+  const warningStatus = { message: "no models", tone: "warning" };
+  assert.equal(
+    deriveModelDiscoveryPending({
+      modelDiscoveryLoading: false,
+      modelDiscoveryKey: "key",
+      activeModelDiscoveryData: emptyResponse,
+      activeModelDiscoveryStatus: warningStatus,
+    }),
+    false,
+  );
+});
+
+test("deriveModelDiscoveryPending_noKey_isNotPending", () => {
+  // key=null means discovery is not expected (e.g. dialog closed).
+  assert.equal(
+    deriveModelDiscoveryPending({
+      modelDiscoveryLoading: false,
+      modelDiscoveryKey: null,
+      activeModelDiscoveryData: null,
+      activeModelDiscoveryStatus: null,
+    }),
+    false,
+  );
+});
+
+// ── isSuccessfulEmptyDiscovery ────────────────────────────────────────────────
+
+test("isSuccessfulEmptyDiscovery_resolvedEmptyResponse_isTrue", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: response({ models: [] }),
+      discoveredModelOptions: null,
+      modelDiscoveryPending: false,
+    }),
+    true,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_thrownFailure_isFalse", () => {
+  // Failure path leaves data null — must not be treated as successful empty.
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: null,
+      discoveredModelOptions: null,
+      modelDiscoveryPending: false,
+    }),
+    false,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_withUsableModels_isFalse", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: response({
+        models: [
+          { id: "claude-sonnet-5", name: "Claude Sonnet 5", description: null },
+        ],
+      }),
+      discoveredModelOptions: [
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+      ],
+      modelDiscoveryPending: false,
+    }),
+    false,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: null,
+      discoveredModelOptions: null,
+      modelDiscoveryPending: true,
+    }),
+    false,
+  );
+});
+
+// ── Discovered rows resolve through the shared label resolver ────────────────
+// Discovery can return a Databricks endpoint with a null or blank `name`
+// (v1 catalogs, and any harness that echoes IDs only). Those rows must still
+// show the curated registry name rather than the raw endpoint ID.
+
+test("discoveredRow_knownDatabricksIdWithNullName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [{ id: "databricks-gpt-5-5", name: null, description: null }],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5" },
+  ]);
+});
+
+test("discoveredRow_knownDatabricksIdWithBlankName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-claude-opus-4-7", name: "   ", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-claude-opus-4-7", label: "Claude Opus 4.7" },
+  ]);
+});
+
+test("discoveredRow_unknownCustomEndpointWithNoName_showsRawId", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-team-2025-01", name: null, description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-team-2025-01", label: "databricks-team-2025-01" },
+  ]);
+});
+
+test("discoveredRow_nonblankDiscoveredName_winsOverRegistry", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-gpt-5-5", name: "Workspace GPT", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "Workspace GPT" },
+  ]);
+});
+
+// ── Real buzz-agent discovery shape: name echoes the id ─────────────────────
+// buzz-agent's Databricks discovery emits {id, name: id} on every path (the
+// API has no display-name field). The echoed name must not short-circuit the
+// registry tier, so a known id still shows its curated label.
+
+test("discoveredRow_knownDatabricksIdEchoedName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-gpt-5-5",
+          name: "databricks-gpt-5-5",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5" },
+  ]);
+});
+
+test("discoveredRow_unknownDatabricksIdEchoedName_showsRawId", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-team-2025-01",
+          name: "databricks-team-2025-01",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-team-2025-01", label: "databricks-team-2025-01" },
+  ]);
+});
+
+test("discoveredRow_defaultCatalogSuffixedName_winsOverRegistry", () => {
+  // The auth-empty fallback carries a distinct curated+suffixed name; tier 1
+  // correctly keeps it rather than re-deriving the bare label.
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-gpt-5-5",
+          name: "GPT-5.5 (default catalog)",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5 (default catalog)" },
+  ]);
 });

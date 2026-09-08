@@ -1,10 +1,6 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
-import type {
-  Channel,
-  ManagedAgent,
-  PresenceLookup,
-  RelayAgent,
-} from "@/shared/api/types";
+import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type { AgentAvailabilityReader } from "./useAgentAvailability";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type DeleteManagedAgentInput = {
@@ -23,7 +19,7 @@ type ManagedAgentChannelContext = {
 };
 
 type ManagedAgentActionContext = ManagedAgentChannelContext & {
-  presenceLookup?: PresenceLookup | null;
+  getAvailability: AgentAvailabilityReader;
 };
 
 export type ManagedAgentActionResult = {
@@ -31,6 +27,7 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
+/** Lifecycle action routing only; deployed is a retained receipt, not presence. */
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
@@ -44,7 +41,7 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
     return "Stop";
   }
 
-  return agent.status === "stopped" ? "Respawn" : "Spawn";
+  return "Start agent";
 }
 
 export function resolveManagedAgentChannelId(
@@ -92,13 +89,18 @@ export async function respawnManagedAgentWithRules({
   agent,
   startManagedAgent,
   stopManagedAgent,
+  onStopped,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  /** Called after a successful stop and before start begins — use this to
+   * clear stale working badges at the right boundary. */
+  onStopped?: () => void;
 }) {
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
+    onStopped?.();
   }
 
   await startManagedAgent(agent.pubkey);
@@ -128,7 +130,8 @@ export async function stopManagedAgentWithRules({
       agent.pubkey,
     ]);
     return {
-      noticeMessage: "Shutdown command sent. Agent will stop shortly.",
+      noticeMessage:
+        "Shutdown requested. This does not confirm the agent has stopped.",
     };
   }
 
@@ -141,7 +144,7 @@ export async function deleteManagedAgentWithRules({
   channels,
   deleteManagedAgent,
   preferredChannelId,
-  presenceLookup,
+  getAvailability,
   relayAgents,
   skipRemoteDeleteConfirm = false,
 }: {
@@ -150,7 +153,7 @@ export async function deleteManagedAgentWithRules({
   skipRemoteDeleteConfirm?: boolean;
 } & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
   if (agent.backend.type === "provider" && agent.backendAgentId) {
-    const presence = presenceLookup?.[normalizePubkey(agent.pubkey)];
+    const availability = getAvailability(agent.pubkey);
     const channelId = resolveManagedAgentChannelId(agent, {
       channels,
       preferredChannelId,
@@ -158,14 +161,19 @@ export async function deleteManagedAgentWithRules({
     });
 
     if (channelId) {
-      if (presence === "online" || presence === "away") {
+      // Only established Offline preserves the intentional no-request path.
+      // Unknown is not evidence that shutdown can safely be skipped.
+      if (availability !== "offline") {
         await sendChannelMessage(channelId, "!shutdown", undefined, undefined, [
           agent.pubkey,
         ]);
 
         if (!skipRemoteDeleteConfirm) {
           const confirmed = window.confirm(
-            "Shutdown command sent, but the agent may still be running. " +
+            (availability === undefined
+              ? "This agent’s availability is unknown. "
+              : "") +
+              "Shutdown requested, but the agent may still be running. " +
               "Deleting now removes the local record — the remote deployment " +
               "will be orphaned if shutdown hasn't completed. Continue?",
           );
@@ -188,7 +196,7 @@ export async function deleteManagedAgentWithRules({
       if (!skipRemoteDeleteConfirm) {
         const confirmed = window.confirm(
           "This agent is deployed but not in any channel. " +
-            "Deleting will orphan the remote deployment (it will keep running). Continue?",
+            "Deleting removes the local management record; the remote deployment may still be running. Continue?",
         );
         if (!confirmed) {
           return { cancelled: true };

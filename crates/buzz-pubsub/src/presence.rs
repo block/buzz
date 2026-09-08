@@ -1,7 +1,7 @@
 //! Presence tracking — online/away status with TTL.
 //!
-//! Stored as `SET buzz:{community}:presence:{pubkey_hex} "online" EX 90`.
-//! TTL is 3x the 30s heartbeat interval so a single missed heartbeat doesn't
+//! Stored as `SET buzz:{community}:presence:{pubkey_hex} "online" EX 180`.
+//! TTL is 3x the 60s heartbeat interval so a single missed heartbeat doesn't
 //! cause presence flap. Clean disconnect deletes immediately.
 
 use buzz_core::TenantContext;
@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use crate::error::PubSubError;
 use crate::topic::BUZZ_PREFIX;
 
-/// 3x the 30s heartbeat — single missed heartbeat won't cause presence flap.
-pub const PRESENCE_TTL_SECS: u64 = 90;
+/// 3x the 60s heartbeat — single missed heartbeat won't cause presence flap.
+pub const PRESENCE_TTL_SECS: u64 = 180;
 
 /// Returns the Redis key for the presence entry of `pubkey` under `ctx`.
 pub fn presence_key(ctx: &TenantContext, pubkey: &PublicKey) -> String {
@@ -107,6 +107,32 @@ mod tests {
 
     fn ctx(id: u128, host: &str) -> TenantContext {
         TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), host)
+    }
+
+    #[tokio::test]
+    async fn get_presence_bulk_surfaces_connection_failure_as_error() {
+        // A backend outage must surface as `Err`, not a silently-empty `Ok`.
+        // `synthesize_presence` relies on this to return an error response
+        // rather than a fake-empty "all offline" snapshot on a Redis failure.
+        // Pool points at a closed port so the connection attempt fails.
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool builds lazily");
+        let ctx = ctx(0xaaaa, "a.example");
+        let pubkey = make_pubkey();
+
+        let result = get_presence_bulk(&pool, &ctx, &[pubkey]).await;
+
+        assert!(
+            result.is_err(),
+            "a connection failure must surface as Err, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn presence_ttl_is_three_one_minute_heartbeat_windows() {
+        assert_eq!(PRESENCE_TTL_SECS, 180);
+        assert_eq!(PRESENCE_TTL_SECS, 3 * 60);
     }
 
     #[test]

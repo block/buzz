@@ -1,4 +1,6 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   type AttachManagedAgentToChannelResult,
@@ -12,23 +14,24 @@ import {
   useStopManagedAgentMutation,
   useDeleteManagedAgentMutation,
 } from "@/features/agents/hooks";
+import {
+  agentPresenceStartBlockReason,
+  useAgentAvailabilityLookup,
+} from "../lib/useAgentAvailability";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
-import { usePresenceQuery } from "@/features/presence/hooks";
-import type {
-  AgentPersona,
-  Channel,
-  CreateManagedAgentResponse,
-  ManagedAgent,
-} from "@/shared/api/types";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
+import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
+  respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
+import { clearActiveTurnsForAgentOnStop } from "../managedAgentRuntimeHooks";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
@@ -36,6 +39,7 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
+  const queryClient = useQueryClient();
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -50,12 +54,13 @@ export function useManagedAgentActions() {
   const [isCreateOpen, setIsCreateOpen] = React.useState(false);
   const [agentToAddToChannel, setAgentToAddToChannel] =
     React.useState<ManagedAgent | null>(null);
-  const [createdAgent, setCreatedAgent] =
-    React.useState<CreateManagedAgentResponse | null>(null);
   const [startingPersonaIds, setStartingPersonaIds] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
   const startingPersonaIdsRef = React.useRef(new Set<string>());
+  const [restartingAgentPubkey, setRestartingAgentPubkey] = React.useState<
+    string | null
+  >(null);
   const [logAgentPubkey, setLogAgentPubkey] = React.useState<string | null>(
     null,
   );
@@ -99,7 +104,16 @@ export function useManagedAgentActions() {
     [managedAgents],
   );
 
-  const managedPresenceQuery = usePresenceQuery(managedPubkeyList);
+  const { query: managedPresenceQuery, getAvailability } =
+    useAgentAvailabilityLookup(managedPubkeyList);
+
+  function assertStartNotBlockedByPresence(agent: ManagedAgent) {
+    const reason = agentPresenceStartBlockReason(
+      isManagedAgentActive(agent),
+      getAvailability(agent.pubkey),
+    );
+    if (reason) throw new Error(reason);
+  }
 
   const channelsByPubkey = React.useMemo(() => {
     const map: Record<string, { id: string; name: string }[]> = {};
@@ -162,6 +176,7 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((c) => c.pubkey === pubkey);
       if (!agent) return;
+      assertStartNotBlockedByPresence(agent);
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startMutation.mutateAsync,
@@ -170,6 +185,31 @@ export function useManagedAgentActions() {
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
+    }
+  }
+
+  async function handleRestart(pubkey: string) {
+    if (restartingAgentPubkey) return;
+    clearFeedback();
+    setRestartingAgentPubkey(pubkey);
+    try {
+      const agent = managedAgents.find(
+        (candidate) => candidate.pubkey === pubkey,
+      );
+      if (!agent) return;
+      assertStartNotBlockedByPresence(agent);
+      await respawnManagedAgentWithRules({
+        agent,
+        startManagedAgent: startMutation.mutateAsync,
+        stopManagedAgent: stopMutation.mutateAsync,
+        onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
+      });
+    } catch (error) {
+      setActionErrorMessage(
+        error instanceof Error ? error.message : "Failed to restart agent.",
+      );
+    } finally {
+      setRestartingAgentPubkey(null);
     }
   }
 
@@ -200,13 +240,11 @@ export function useManagedAgentActions() {
       const input = await buildInstanceInputForDefinition(persona, runtime);
 
       const created = await createAgentMutation.mutateAsync(input);
-      setCreatedAgent(created);
+      toast.success("Agent created");
       const notices = [...warnings];
 
       if (created.spawnError) {
         setActionErrorMessage(created.spawnError);
-      } else {
-        notices.push(`Started ${created.agent.name}.`);
       }
 
       if (created.profileSyncError) {
@@ -248,6 +286,9 @@ export function useManagedAgentActions() {
         relayAgents: relayAgentsQuery.data ?? [],
         stopManagedAgent: stopMutation.mutateAsync,
       });
+      if (agent.backend.type === "local") {
+        clearActiveTurnsForAgentOnStop(pubkey);
+      }
       if (result.noticeMessage) {
         setActionNoticeMessage(result.noticeMessage);
       }
@@ -272,6 +313,9 @@ export function useManagedAgentActions() {
     await Promise.allSettled(
       channelIds.map((channelId) => removeChannelMember(channelId, pubkey)),
     );
+    // Direct writes bypass the member mutations' invalidation; without this,
+    // the deleted agent stays in cached rosters for the freshness window.
+    await invalidateChannelMembersRosters(queryClient, channelIds);
   }
 
   async function handleDelete(pubkey: string) {
@@ -284,7 +328,7 @@ export function useManagedAgentActions() {
         agent,
         channels,
         deleteManagedAgent: deleteMutation.mutateAsync,
-        presenceLookup: managedPresenceQuery.data,
+        getAvailability,
         relayAgents: relayAgentsQuery.data ?? [],
       });
       if (result.cancelled) return;
@@ -368,17 +412,22 @@ export function useManagedAgentActions() {
       managedAgents.filter((a) => isManagedAgentActive(a)),
       "Stop",
       "stop",
-      (a) =>
-        stopManagedAgentWithRules({
+      async (a) => {
+        await stopManagedAgentWithRules({
           agent: a,
           channels: channelsQuery.data ?? [],
           relayAgents: relayAgentsQuery.data ?? [],
           stopManagedAgent: stopMutation.mutateAsync,
-        }),
+        });
+        if (a.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(a.pubkey);
+        }
+      },
     );
   }
 
   const isPending =
+    restartingAgentPubkey !== null ||
     createAgentMutation.isPending ||
     startMutation.isPending ||
     stopMutation.isPending ||
@@ -394,6 +443,7 @@ export function useManagedAgentActions() {
     managedAgentsQuery,
     managedAgentLogQuery,
     managedPresenceQuery,
+    getAvailability,
     managedAgents,
     managedPubkeys,
     channelIdToName,
@@ -403,8 +453,6 @@ export function useManagedAgentActions() {
     setIsCreateOpen,
     agentToAddToChannel,
     setAgentToAddToChannel,
-    createdAgent,
-    setCreatedAgent,
     logAgentPubkey,
     setLogAgentPubkey,
     actionNoticeMessage,
@@ -412,8 +460,10 @@ export function useManagedAgentActions() {
     actionErrorMessage,
     setActionErrorMessage,
     startingAgentPubkey,
+    restartingAgentPubkey,
     startingPersonaIds,
     handleStart,
+    handleRestart,
     handleStartPersona,
     handleStop,
     handleDelete,

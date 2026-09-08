@@ -6,9 +6,13 @@ import { cn } from "@/shared/lib/cn";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/shared/ui/popover";
 
-const HOVER_OPEN_DELAY_MS = 500;
 const HOVER_CLOSE_DELAY_MS = 200;
 
 type PubKeyProps = {
@@ -25,6 +29,8 @@ type PubKeyProps = {
    * decisions must be made against the whole key.
    */
   variant?: "compact" | "full";
+  /** Render compact keys as text when a parent row owns the interaction. */
+  interactive?: boolean;
   className?: string;
   testId?: string;
 };
@@ -77,6 +83,7 @@ function PubKeyDetails({ pubkey }: { pubkey: string }) {
 export function PubKey({
   pubkey,
   variant = "compact",
+  interactive = true,
   className,
   testId,
 }: PubKeyProps) {
@@ -96,7 +103,7 @@ export function PubKey({
     clearHoverTimer();
     hoverTimerRef.current = setTimeout(() => {
       setOpen(true);
-    }, HOVER_OPEN_DELAY_MS);
+    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
   }, [clearHoverTimer]);
 
   const handleMouseLeave = React.useCallback(() => {
@@ -135,6 +142,14 @@ export function PubKey({
             <PubKeyDetails pubkey={pubkey} />
           </PopoverContent>
         </Popover>
+      </span>
+    );
+  }
+
+  if (!interactive) {
+    return (
+      <span className={cn("font-mono", className)} data-testid={testId}>
+        {truncatePubkey(pubkey)}
       </span>
     );
   }

@@ -5,6 +5,7 @@ import {
   normalizeProjectBranchName,
   projectBranchNameError,
 } from "@/features/projects/lib/projectBranches";
+import { projectBranchErrorMessage } from "@/features/projects/lib/projectBranchErrors";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -24,14 +25,6 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-
-function errorMessage(error: unknown, fallback: string) {
-  if (!(error instanceof Error)) return fallback;
-  if (error.message.includes("no channel binding")) {
-    return "This repository is owned by another identity and is not linked to a project channel.";
-  }
-  return error.message;
-}
 
 export function CreateProjectBranchDialog({
   existingBranches,
@@ -69,7 +62,9 @@ export function CreateProjectBranchDialog({
       await onCreate(branch);
       onOpenChange(false);
     } catch (error) {
-      setSubmitError(errorMessage(error, "Failed to create branch."));
+      setSubmitError(
+        projectBranchErrorMessage(error, "Failed to create branch."),
+      );
     }
   }
 
@@ -165,7 +160,9 @@ export function DeleteProjectBranchDialog({
       await onDelete();
       onOpenChange(false);
     } catch (error) {
-      setSubmitError(errorMessage(error, "Failed to delete branch."));
+      setSubmitError(
+        projectBranchErrorMessage(error, "Failed to delete branch."),
+      );
     }
   }
 

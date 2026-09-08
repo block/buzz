@@ -41,15 +41,11 @@ const CLIENT_CONSOLE_PORT: u16 = 13132;
 async fn main() -> anyhow::Result<()> {
     let model = std::env::var("MESH_SMOKE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     eprintln!("[smoke] model: {model}");
-    let cache = mesh_llm_sdk::native_runtime::native_runtime_cache(None)?;
-    let current = mesh_llm_sdk::native_runtime::CURRENT_MESH_VERSION;
-    if !cache
-        .installed()?
-        .iter()
-        .any(|runtime| runtime.mesh_version == current)
-    {
-        anyhow::bail!("MeshLLM native runtime for MeshLLM {current} is not installed; run `just mesh-e2e-hardware` to prepare it");
-    }
+    // No cache precondition: `initialize_host_runtime` installs the signed
+    // release runtime itself when none is present, which is how the desktop
+    // gets one too. The guard that used to stand here refused before reaching
+    // this line and told the reader to run the very recipe that runs this
+    // example.
     mesh_llm_host_runtime::initialize_host_runtime()
         .await
         .map_err(|error| anyhow::anyhow!("MeshLLM host runtime init failed: {error}"))?;

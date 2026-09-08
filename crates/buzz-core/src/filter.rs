@@ -185,6 +185,28 @@ mod tests {
     }
 
     #[test]
+    fn h_tag_multi_value_filter_matches_any_channel() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let stored = stored_with_tag(Tag::parse(["h", &channel_b.to_string()]).unwrap());
+        let filter = Filter::new().custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+
+        assert!(filters_match(&[filter], &stored));
+    }
+
+    #[test]
+    fn empty_h_tag_filter_matches_nothing() {
+        let channel_id = uuid::Uuid::new_v4();
+        let stored = stored_with_tag(Tag::parse(["h", &channel_id.to_string()]).unwrap());
+        let filter: Filter = serde_json::from_value(serde_json::json!({ "#h": [] })).unwrap();
+
+        assert!(!filters_match(&[filter], &stored));
+    }
+
+    #[test]
     fn h_tag_fallback_uses_stored_channel_id() {
         // Reactions (kind:7) and deletions (kind:5) don't carry h-tags —
         // they derive their channel from the target event. The filter

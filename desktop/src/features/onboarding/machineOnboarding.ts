@@ -36,15 +36,27 @@ function clearMachineOnboardingCompletion(pubkey: string | null) {
 }
 
 function forceMachineOnboarding() {
-  if (!import.meta.env.DEV || typeof window === "undefined") return false;
+  if (!import.meta.env?.DEV || typeof window === "undefined") return false;
   return (
     new URL(window.location.href).searchParams.get("machineOnboarding") === "1"
   );
 }
 
-function migrateMachineOnboardingCompletion(
+/** @internal Exported for unit testing only. */
+export function migrateMachineOnboardingCompletion(
   pubkey: string,
-  hasConfiguredCommunity: boolean,
+  /**
+   * The `pubkey` field of the active community from localStorage, or
+   * `undefined` if no community is configured. Community-creation paths stamp
+   * the current identity's pubkey on write; absent pubkey (`null`) therefore
+   * indicates a legacy entry that pre-dates the stamp and is NOT treated as a
+   * voucher. Pass `undefined` when there is no active community at all.
+   *
+   * Using the community's own pubkey prevents a freshly generated post-reset
+   * key from being vouched for by a stale community entry that survived the
+   * webview wipe.
+   */
+  activeCommunityPubkey: string | null | undefined,
   isSharedIdentity: boolean,
 ) {
   if (forceMachineOnboarding()) return false;
@@ -54,9 +66,20 @@ function migrateMachineOnboardingCompletion(
     window.localStorage.getItem(
       completionKey(LEGACY_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
     ) === "true";
+
+  // A community entry vouches for the current pubkey only when its recorded
+  // pubkey matches. Absent pubkey (legacy entries predating the stamp) and
+  // no community at all (undefined) do not vouch — after community creation
+  // paths stamp pubkey on write, absent means the entry pre-dates the stamp
+  // and cannot be trusted to identify which identity created it.
+  const communityVouchesForPubkey =
+    activeCommunityPubkey !== undefined &&
+    activeCommunityPubkey !== null &&
+    activeCommunityPubkey === pubkey;
+
   if (
     !completedLegacyOnboarding &&
-    !hasConfiguredCommunity &&
+    !communityVouchesForPubkey &&
     !isSharedIdentity
   ) {
     return false;
@@ -74,10 +97,10 @@ function identitySettled(status: QueryStatus, isFetching: boolean) {
 }
 
 export function useMachineOnboardingState({
-  hasConfiguredCommunity,
+  activeCommunityPubkey,
   isSharedIdentity,
 }: {
-  hasConfiguredCommunity: boolean;
+  activeCommunityPubkey: string | null | undefined;
   isSharedIdentity: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -130,7 +153,7 @@ export function useMachineOnboardingState({
     if (
       migrateMachineOnboardingCompletion(
         currentPubkey,
-        hasConfiguredCommunity,
+        activeCommunityPubkey,
         isSharedIdentity,
       )
     ) {
@@ -139,7 +162,7 @@ export function useMachineOnboardingState({
     setEvaluatedPubkey(currentPubkey);
   }, [
     currentPubkey,
-    hasConfiguredCommunity,
+    activeCommunityPubkey,
     identityLost,
     identityQuery.status,
     isSharedIdentity,
@@ -153,6 +176,11 @@ export function useMachineOnboardingState({
         completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
         "true",
       );
+      // Clear the "continuing" marker so completion actually settles the flow.
+      // Imported/recovered identities set continuingPubkeyRef to pin the stage
+      // to "onboarding" until setup finishes; leaving it set after complete()
+      // keeps the stage pinned forever, so Skip/Next appear to do nothing.
+      continuingPubkeyRef.current = null;
       setCompletedPubkey(pubkey);
     },
     [currentPubkey],
@@ -160,6 +188,12 @@ export function useMachineOnboardingState({
 
   const continueWithIdentity = React.useCallback((pubkey: string) => {
     continuingPubkeyRef.current = pubkey;
+  }, []);
+
+  const continueWithRecoveredIdentity = React.useCallback((pubkey: string) => {
+    continuingPubkeyRef.current = pubkey;
+    setBootedLost(false);
+    setBootedLocked(false);
   }, []);
 
   const reopen = React.useCallback(() => {
@@ -201,7 +235,11 @@ export function useMachineOnboardingState({
       continuingPubkeyRef.current !== currentPubkey)
   ) {
     stage = "blocking";
-  } else if (identityLost || !hasCompletedCurrentPubkey) {
+  } else if (
+    identityLost ||
+    continuingPubkeyRef.current === currentPubkey ||
+    !hasCompletedCurrentPubkey
+  ) {
     stage = "onboarding";
   } else {
     stage = "ready";
@@ -210,6 +248,7 @@ export function useMachineOnboardingState({
   return {
     complete,
     continueWithIdentity,
+    continueWithRecoveredIdentity,
     currentPubkey,
     identityLost,
     queryClient,

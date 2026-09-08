@@ -1,4 +1,4 @@
-import '../read_state/read_state_format.dart';
+import '../../../shared/read_state/read_state_format.dart';
 
 class ObservedUnreadEvent {
   final String id;

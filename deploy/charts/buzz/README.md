@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.0 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -29,11 +29,26 @@ intent marker surfaced in NOTES.txt; the bundled services are opted in via the
 four `*.enabled` flags above (see `ci/quickstart-values.yaml` for the exact set
 CI installs). Eval-only: every bundled service is a single replica with no HA.
 
+For immutable delivery, pin the OCI digest instead of a tag. `image.digest`
+overrides `image.tag` when both are present:
+
+```yaml
+image:
+  repository: ghcr.io/block/buzz
+  digest: sha256:<64-lowercase-hex-characters>
+```
+
 ## Production (GitOps)
 
 The chart is designed for ArgoCD and Flux. Both render charts with `helm template`, in which mode Helm's `lookup` function returns empty — any chart-side `randAlphaNum` call would regenerate secrets on every sync. The chart-managed Secret path is **only** safe for `helm install` / `helm upgrade`.
 
 Production deploys MUST use `secrets.existingSecret:`. The Secret is consumed for any keys present and ignored for keys missing — extras are harmless.
+
+To enable relay-proxied KLIPY search, add `BUZZ_KLIPY_API_KEY` to that Secret.
+The key stays in the relay pod; clients discover the public `buzz-gif`
+extension and `gif` descriptor in NIP-11, then receive KLIPY-hosted media URLs.
+See [`docs/gif-search.md`](../../../docs/gif-search.md) for the protocol and
+security boundaries.
 
 See:
 
@@ -51,6 +66,178 @@ See:
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
+
+## S3 URL addressing
+
+Buzz uses one URL style for both media and Git/CAS object-store requests:
+
+| `s3.addressingStyle` | Request shape | Use for |
+|---|---|---|
+| `path` (default) | `https://endpoint/bucket/key` | Bundled MinIO and endpoints whose DNS does not resolve bucket subdomains |
+| `virtual` | `https://bucket.endpoint/key` | AWS-style providers and new Railway Storage Buckets |
+
+The chart always renders `s3.addressingStyle` as
+`BUZZ_S3_ADDRESSING_STYLE` and `s3.region` as `BUZZ_S3_REGION`. The region
+defaults to `us-east-1`, keeping bundled MinIO and the in-pod
+`buzz-admin deletions` workflow operable without an ambient `AWS_REGION`.
+Production providers must set their credential region explicitly when it
+differs. Existing releases that previously omitted `s3.region` will begin
+rendering `BUZZ_S3_REGION=us-east-1` after upgrade, even if an image or
+`relay.extraEnv` entry supplied `AWS_REGION`; set `s3.region` to the provider's
+actual credential region before upgrading. Only `path` and `virtual` addressing
+styles are accepted; invalid
+values fail chart rendering and relay startup. The bundled MinIO quickstart
+deliberately keeps `path` because its Service DNS resolves one endpoint
+hostname, not arbitrary `<bucket>.<service>` names.
+
+For a Railway Storage Bucket, map its variables to chart values in the service
+or generated Helm configuration:
+
+```yaml
+s3:
+  endpoint: "${{Object Storage.ENDPOINT}}"
+  bucket: "${{Object Storage.BUCKET}}"
+  region: "${{Object Storage.REGION}}"
+  addressingStyle: virtual
+```
+
+Store `BUZZ_S3_ACCESS_KEY=${{Object Storage.ACCESS_KEY_ID}}` and
+`BUZZ_S3_SECRET_KEY=${{Object Storage.SECRET_ACCESS_KEY}}` in the Secret named by
+`secrets.existingSecret`. Railway's Credentials tab is authoritative for older
+buckets, which may still require `path`. The setting changes request routing and
+SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
+`ENDPOINT` and `BUCKET` separately.
+
+Object storage is contacted during relay startup only when
+`BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is
+startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
+disables that probe through `relay.extraEnv`, `/_readiness` does not test object
+storage; configuration is still parsed strictly, but reachability and addressing
+errors surface on the first storage operation.
+
+### Early-startup telemetry contract
+
+`buzz_process_lifecycle` JSON records are the authoritative history for the
+fixed phases `crypto_init`, `tracing_init`, `config_load`, `key_load`, and
+`metrics_bind`, plus the aggregate `process_telemetry` result. They use bounded
+status/reason values and never contain raw configuration, keys, URLs, or errors.
+These phases intentionally do not emit metrics. Most run before the Prometheus
+exporter exists, and one uniform log-only contract preserves every phase's real
+event time and failure without assigning an eventual scrape time to earlier work.
+
+### Readiness telemetry contract
+
+Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
+rollout readiness telemetry. The compatibility `/_readiness` route on the public
+app listener returns health but does not change these metrics.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` from the closed readiness-reason set |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only |
+| `buzz_readiness_state` | gauge | `check` only; latest publishable generation |
+
+The schema has a ceiling of 99 raw Prometheus series per pod: 12 overall
+reasons, 11 valid dependency/outcome pairs, 72 histogram series, and 4 gauges.
+Do not add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant,
+user, community, pubkey, header, query, or other request-controlled labels.
+Shutdown without dependency evaluation increments only
+`buzz_readiness_checks_total{reason="shutting_down"}` and sets the overall
+state to zero; it does not fabricate dependency failures or latency samples.
+
+### Operation-aware database pool acquisition contract
+
+The operation-aware families separate three questions: who is waiting now,
+how completed/abandoned attempts ended, and how long checkout waits took.
+Outcome remains on the terminal counter for historical deployment comparison;
+it is intentionally absent from the expensive duration histogram.
+
+These families cover the explicitly routed deployment-critical operations
+listed below; they are not a count of every SQLx checkout in Buzz. In
+particular, a zero operation waiter does not prove that the shared SQLx pool
+has no uninstrumented waiter. Interpret it beside the pool active, idle, and
+maximum gauges when diagnosing total capacity pressure.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_acquire_duration_seconds` | histogram | `pool_role`, `operation` |
+| `buzz_db_pool_acquire_attempts_total` | counter | `pool_role`, `operation`, `outcome` |
+| `buzz_db_pool_waiters` | gauge | `pool_role`, `operation`; tracked operations only, periodically refreshed including zero |
+
+Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
+`bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
+`authorization`, `subscription_history`, `event_write`, and `maintenance`.
+Only the following eleven pairs are valid:
+
+```text
+writer/bootstrap                 reader/bootstrap
+writer/readiness
+writer/tenant_resolution
+writer/authentication
+writer/authorization             reader/authorization
+writer/subscription_history      reader/subscription_history
+writer/event_write
+writer/maintenance
+```
+
+Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
+series per valid pair. The new contract therefore has a hard ceiling of 187
+raw Prometheus series per pod: `11 × (12 + 4 + 1)`. The two legacy acquisition
+families remain temporarily for dashboard compatibility and are not part of
+that new-family budget. No `other` operation or request-controlled/sensitive
+label is valid.
+
+## Relay Pod extensions
+
+The chart exposes narrow extension points for init containers, volumes, relay
+volume mounts, and image command/argument overrides. `extraManifests` creates
+independent Kubernetes resources but cannot modify the chart-managed relay
+Deployment. These extension values insert fields into that Deployment, avoiding
+duplication of its environment, probes, security context, secrets, and
+chart-owned volumes.
+
+For example, an init container can copy a wrapper binary into a shared volume
+and make that wrapper the relay entrypoint:
+
+```yaml
+extraInitContainers:
+  - name: install-wrapper
+    image: example.com/wrapper-init:v1
+    args: [/opt/wrapper/wrapper]
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+    volumeMounts:
+      - name: wrapper
+        mountPath: /opt/wrapper
+
+extraVolumes:
+  - name: wrapper
+    emptyDir: {}
+
+relay:
+  command: [/opt/wrapper/wrapper]
+  args: [/usr/local/bin/buzz-relay]
+  extraVolumeMounts:
+    - name: wrapper
+      mountPath: /opt/wrapper
+```
+
+These values are raw Kubernetes fragments rendered with `toYaml`, not `tpl`.
+The chart does not validate cross-field relationships: extension names must not
+collide with chart-owned containers or volumes, mounts must reference existing
+volumes, and each init container must define an appropriate security context
+and resources. Empty `relay.command` and `relay.args` arrays preserve the image
+defaults; non-empty values override its entrypoint and arguments respectively.
 
 ## Device pairing relay
 
@@ -105,6 +292,8 @@ default so long-lived WebSocket connections have time to drain.
 ## Upgrades
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

@@ -13,7 +13,11 @@ import {
   getPresenceLabel,
 } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
-import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
+import {
+  DEFAULT_USER_STATUS_EMOJI,
+  StatusEmoji,
+} from "@/features/user-status/ui/StatusEmoji";
+import type { UserStatusInput } from "@/features/user-status/types";
 import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -28,8 +32,10 @@ interface ProfilePopoverProps {
   isStatusPending?: boolean;
   userStatusText?: string;
   userStatusEmoji?: string;
+  userStatusExpiresAt?: number;
+  userStatusUpdatedAt?: number;
   onSetStatus: (status: PresenceStatus) => void;
-  onSetUserStatus: (text: string, emoji: string) => void;
+  onSetUserStatus: (status: UserStatusInput) => void;
   onClearUserStatus: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
   onSendFeedback?: () => void;
@@ -38,9 +44,8 @@ interface ProfilePopoverProps {
   // Used when auxiliary triggers (avatar, status text) live alongside the
   // primary PopoverTrigger and toggle the popover via controlled `open`.
   triggerContainerRef?: React.RefObject<HTMLElement | null>;
-  // Optional slot rendered between the identity block and the menu items.
-  // Used by the sidebar to surface the community/relay selector inside the
-  // profile menu instead of on the sidebar card.
+  // Optional slot rendered before the profile actions. Used by the sidebar to
+  // surface active-community actions inside the profile menu.
   communitySwitcherSlot?: React.ReactNode;
 }
 
@@ -59,6 +64,8 @@ export function ProfilePopover({
   isStatusPending,
   userStatusText,
   userStatusEmoji,
+  userStatusExpiresAt,
+  userStatusUpdatedAt,
   onSetStatus,
   onSetUserStatus,
   onClearUserStatus,
@@ -211,15 +218,20 @@ export function ProfilePopover({
                 role="menuitem"
                 type="button"
               >
-                <Smile className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {hasUserStatus ? (
+                  <StatusEmoji
+                    className="size-4 shrink-0 text-base"
+                    showTitle={false}
+                    value={userStatusEmoji || DEFAULT_USER_STATUS_EMOJI}
+                  />
+                ) : (
+                  <Smile
+                    aria-hidden="true"
+                    className="h-4 w-4 shrink-0 text-muted-foreground"
+                  />
+                )}
                 {hasUserStatus ? (
                   <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-popover-foreground">
-                    {userStatusEmoji ? (
-                      <StatusEmoji
-                        className="w-5 shrink-0 text-base"
-                        value={userStatusEmoji}
-                      />
-                    ) : null}
                     <span className="truncate">{userStatusText}</span>
                   </span>
                 ) : (
@@ -230,7 +242,34 @@ export function ProfilePopover({
               </button>
             </div>
 
-            <hr className="my-1 h-px border-0 bg-border" />
+            <hr className="my-1 h-px border-0 bg-border/60" />
+
+            {communitySwitcherSlot ? (
+              <>
+                {/* ── Community actions ──────────────────────────── */}
+                <div className="py-1" data-testid="profile-popover-community">
+                  {communitySwitcherSlot}
+                </div>
+                <hr className="my-1 h-px border-0 bg-border/60" />
+              </>
+            ) : null}
+
+            {onSendFeedback ? (
+              <button
+                className={MENU_ITEM_CLASS}
+                data-testid="profile-popover-send-feedback"
+                onClick={() => {
+                  closePopover();
+                  window.requestAnimationFrame(() => {
+                    onSendFeedback();
+                  });
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <span className="flex-1">Send feedback</span>
+              </button>
+            ) : null}
 
             {/* ── Settings ───────────────────────────────────────── */}
             <button
@@ -250,33 +289,6 @@ export function ProfilePopover({
                 {settingsShortcutLabel}
               </kbd>
             </button>
-
-            {onSendFeedback ? (
-              <button
-                className={MENU_ITEM_CLASS}
-                data-testid="profile-popover-send-feedback"
-                onClick={() => {
-                  closePopover();
-                  window.requestAnimationFrame(() => {
-                    onSendFeedback();
-                  });
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <span className="flex-1">Send feedback</span>
-              </button>
-            ) : null}
-
-            {communitySwitcherSlot ? (
-              <>
-                <hr className="my-1 h-px border-0 bg-border" />
-                {/* ── Community / relay selector ─────────────────── */}
-                <div data-testid="profile-popover-community">
-                  {communitySwitcherSlot}
-                </div>
-              </>
-            ) : null}
           </div>
         </PopoverContent>
       </Popover>
@@ -284,7 +296,9 @@ export function ProfilePopover({
       <SetStatusDialog
         hasExistingStatus={hasUserStatus}
         initialEmoji={userStatusEmoji}
+        initialExpiresAt={userStatusExpiresAt}
         initialText={userStatusText}
+        initialUpdatedAt={userStatusUpdatedAt}
         onClear={onClearUserStatus}
         onOpenChange={setStatusDialogOpen}
         onSave={onSetUserStatus}

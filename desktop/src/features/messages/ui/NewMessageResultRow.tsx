@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
@@ -113,6 +114,7 @@ export function NewMessageResultRow({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={name}
+          shape={user.isAgent ? "squircle" : "circle"}
         />
         <div className="min-w-0 flex-1">
           {user.isAgent ? (
@@ -132,6 +134,10 @@ export function NewMessageResultRow({
                   />
                   agent
                 </span>
+                <AgentManagementMarker
+                  pubkey={user.pubkey}
+                  ownerPubkey={user.ownerPubkey}
+                />
               </div>
               {ownerLabel ? (
                 <span className="block truncate text-xs text-muted-foreground">

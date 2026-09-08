@@ -1,4 +1,9 @@
-import { allowedActorsForRoot, getAllTags, getTag } from "./projectIssues.mjs";
+import {
+  allowedActorsForRoot,
+  getAllTags,
+  getImetaTags,
+  getTag,
+} from "./projectIssues.mjs";
 
 // Updates and status changes rewrite the PR's tip commit, clone URLs, and
 // lifecycle state, so they are only honored when signed by the PR author or
@@ -95,7 +100,7 @@ export function projectPullRequestReviewSummary(pullRequest) {
   const changeRequestCount = pullRequest.changeRequests.length;
   const isDraft = pullRequest.status === "Draft";
   const state = isDraft
-    ? "This pull request is still a work in progress."
+    ? "This review is still a work in progress."
     : changeRequestCount > 0
       ? `${changeRequestCount} reviewer${changeRequestCount === 1 ? "" : "s"} requested changes.`
       : pullRequest.reviewers.length > 0
@@ -106,7 +111,7 @@ export function projectPullRequestReviewSummary(pullRequest) {
     approvalCount,
     changeRequestCount,
     detail: isDraft
-      ? "Draft pull requests cannot be merged."
+      ? "Draft reviews cannot be merged."
       : approvalCount === 0 && changeRequestCount === 0
         ? "Approvals from reviewers will show up here."
         : null,
@@ -135,6 +140,7 @@ function eventToPullRequestUpdate(event) {
   return {
     id: event.id,
     content: event.content,
+    tags: getImetaTags(event),
     author: event.pubkey,
     createdAt: event.created_at,
     commit: getTag(event, "c") ?? null,
@@ -180,7 +186,7 @@ function eventToPullRequestComment(event) {
   const parsedLine =
     lineTag && /^[1-9]\d*$/.test(lineTag) ? Number(lineTag) : Number.NaN;
   const anchor =
-    isReviewRequest || isApproval || isChangeRequest
+    isReviewRequest || isApproval
       ? null
       : normalizeProjectPullRequestCommentAnchor({
           line: parsedLine,
@@ -190,6 +196,7 @@ function eventToPullRequestComment(event) {
   return {
     id: event.id,
     content: event.content,
+    tags: getImetaTags(event),
     author: event.pubkey,
     createdAt: event.created_at,
     commit: getTag(event, "c") ?? null,
@@ -340,7 +347,7 @@ export function eventToProjectPullRequest(
   const title =
     getTag(pullRequest, "subject") ||
     pullRequest.content.split("\n")[0] ||
-    "Untitled pull request";
+    "Untitled review";
   const reviewDecisions = reviewDecisionsForPullRequest(
     comments,
     trustedActors,
@@ -352,9 +359,12 @@ export function eventToProjectPullRequest(
     id: pullRequest.id,
     title,
     content: pullRequest.content,
+    tags: getImetaTags(pullRequest),
     author: pullRequest.pubkey,
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,
+    channelId: getTag(pullRequest, "h") ?? null,
+    originAgentName: getTag(pullRequest, "buzz-origin-agent") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
     reviewers,

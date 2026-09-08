@@ -271,6 +271,13 @@ test("recipient_import_navigates_to_agents_and_opens_preview", async ({
 
   // Decoded display name must appear.
   await expect(dialog).toContainText("Imported Agent");
+  const metadata = dialog.getByTestId("agent-definition-metadata");
+  await expect(metadata).toContainText("Type");
+  await expect(metadata).toContainText("Built-in agent");
+  await expect(metadata).toContainText("Preferred model");
+  await expect(metadata).toContainText("claude-opus-4-5");
+  await expect(metadata).toContainText("Preferred runtime");
+  await expect(metadata).toContainText("goose");
 });
 
 // ── Confirm imports the agent ─────────────────────────────────────────────────

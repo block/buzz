@@ -369,6 +369,55 @@ fn extract_ext_from_media_url(url: &str) -> Option<&str> {
     }
 }
 
+/// Validate an authored link-preview media URL/hash pair.
+///
+/// Empty pairs are allowed. Non-empty media must be an exact, credential-free
+/// URL on this tenant's media origin with a content-addressed image path.
+pub fn validate_local_image_media_pair(
+    media_url: &str,
+    sha256: &str,
+    media_base_url: &str,
+) -> bool {
+    const IMAGE_EXTS: &[&str] = &["jpg", "png", "gif", "webp"];
+    if media_url.is_empty() && sha256.is_empty() {
+        return true;
+    }
+    if media_url.is_empty()
+        || sha256.len() != 64
+        || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+    {
+        return false;
+    }
+
+    let Ok(parsed) = url::Url::parse(media_url) else {
+        return false;
+    };
+    let Ok(base) = url::Url::parse(media_base_url) else {
+        return false;
+    };
+    if parsed.scheme() != base.scheme()
+        || parsed.host_str() != base.host_str()
+        || parsed.port_or_known_default() != base.port_or_known_default()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+
+    let Some(filename) = parsed.path().strip_prefix("/media/") else {
+        return false;
+    };
+    let Some((path_hash, ext)) = filename.split_once('.') else {
+        return false;
+    };
+    !filename.contains('/')
+        && !filename.contains('%')
+        && path_hash == sha256
+        && IMAGE_EXTS.contains(&ext)
+}
+
 /// Validate that a URL references a valid local media blob path.
 fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
     // A safe extension token: 1–8 lowercase alphanumeric chars. Covers media
@@ -422,6 +471,48 @@ mod tests {
 
     const HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     const BASE: &str = "https://relay.example.com/media";
+
+    #[test]
+    fn link_preview_media_pair_requires_exact_local_image_url_and_hash() {
+        let hash = HASH;
+        let valid = format!("{BASE}/{hash}.png");
+        assert!(validate_local_image_media_pair(&valid, hash, BASE));
+        assert!(!validate_local_image_media_pair(
+            &format!("https://evil.example/media/{hash}.png"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png?token=leak"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png#fragment"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("https://user@relay.example.com/media/{hash}.png"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.svg"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png/extra"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png"),
+            &"0".repeat(64),
+            BASE
+        ));
+    }
 
     #[test]
     fn test_local_media_url_relative() {

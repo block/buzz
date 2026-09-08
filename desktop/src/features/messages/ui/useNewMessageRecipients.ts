@@ -111,6 +111,7 @@ export function useNewMessageRecipients({
       : null;
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
       currentPubkey,
+      eligibilityScope: { type: "community" },
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
         (agent) => agent.pubkey,
       ),
@@ -177,7 +178,7 @@ export function useNewMessageRecipients({
           displayName: agent.name,
           avatarUrl: null,
           nip05Handle: null,
-          ownerPubkey: null,
+          ownerPubkey: agent.ownerPubkey,
           isAgent: true,
         },
         { includeSelected: deferredSearchQuery.length > 0 },

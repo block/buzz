@@ -142,7 +142,11 @@ test("mapping carries the runtime and definition fields", async () => {
   assert.equal(input.name, "Test Agent");
   assert.equal(input.acpCommand, "buzz-acp");
   assert.equal(input.agentCommand, "goose-cmd");
-  assert.deepEqual(input.agentArgs, ["--acp"]);
+  // B-5: agentArgs is intentionally empty at create time — spawn reads args
+  // live from the definition on every start so definition edits take effect
+  // without recreating the agent. Seeding from runtime.defaultArgs here would
+  // freeze args at create-time and silently ignore later definition edits.
+  assert.deepEqual(input.agentArgs, []);
   assert.equal(input.mcpCommand, "goose-mcp");
   assert.equal(input.personaId, "p-1");
   assert.equal(input.systemPrompt, "prompt");
@@ -156,6 +160,8 @@ test("mapping carries the runtime and definition fields", async () => {
 test("no backend intent is byte-identical to the pre-intent mapping", async () => {
   // The 3 pre-B5 call sites (useManagedAgentActions, usePersonaActions,
   // UserProfilePanel) pass no intent; their output must not move.
+  // B-5: agentArgs is [] — args are NOT seeded from the definition at create
+  // time. Spawn reads live args from the definition on every start.
   const input = await buildInstanceInputForDefinition(persona(), gooseRuntime);
   assert.deepEqual(input, {
     name: "Test Agent",
@@ -164,7 +170,7 @@ test("no backend intent is byte-identical to the pre-intent mapping", async () =
     avatarUrl: "https://example.com/a.png",
     acpCommand: "buzz-acp",
     agentCommand: "goose-cmd",
-    agentArgs: ["--acp"],
+    agentArgs: [],
     mcpCommand: "goose-mcp",
     harnessOverride: true,
     model: undefined,

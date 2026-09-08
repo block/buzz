@@ -38,6 +38,11 @@ keypair.
   migrations.
 - The stack uses Postgres, Redis, MinIO, and a git data volume because
   those are real Buzz dependencies today. Minimal mode can simplify this later.
+- The bundled Compose stack fixes the relay endpoint to `http://minio:9000` and
+  `BUZZ_S3_ADDRESSING_STYLE=path`: Docker DNS resolves `minio`, not
+  `<bucket>.minio`. It is not configurable for an external S3 provider through
+  `.env`; use the Helm chart or a custom Compose configuration for providers
+  such as new Railway Storage Buckets that require `virtual` addressing.
 
 Run `./run.sh backup-hint` for the backup checklist.
 

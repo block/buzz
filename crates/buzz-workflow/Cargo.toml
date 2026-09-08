@@ -10,6 +10,7 @@ description = "YAML-as-code workflow engine for Buzz"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-db   = { workspace = true }
+buzz-deletion = { workspace = true }
 hex         = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

@@ -11,7 +11,11 @@ const AVATAR_IMAGE_TYPES = [
 ];
 
 type UseAvatarUploadOptions = {
+  fallbackErrorMessage?: string;
+  onUploadStart?: (file: File) => void;
+  onUploadSettled?: () => void;
   onUploadSuccess: (url: string) => void;
+  processImage?: (file: File) => Promise<string>;
 };
 
 type UseAvatarUploadReturn = {
@@ -25,7 +29,11 @@ type UseAvatarUploadReturn = {
 };
 
 export function useAvatarUpload({
+  fallbackErrorMessage = "Could not upload that avatar.",
+  onUploadStart,
+  onUploadSettled,
   onUploadSuccess,
+  processImage,
 }: UseAvatarUploadOptions): UseAvatarUploadReturn {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = React.useState(false);
@@ -49,31 +57,41 @@ export function useAvatarUpload({
       flushSync(() => {
         setIsUploading(true);
         setErrorMessage(null);
+        onUploadStart?.(file);
       });
 
       try {
-        const buffer = await file.arrayBuffer();
-        const uploaded = await uploadMediaBytes([...new Uint8Array(buffer)]);
-        // The shared upload path is now generic (accepts any non-denied file),
-        // so the browser-provided `file.type` check above is no longer a
-        // backstop. Verify the server-detected MIME is actually an image before
-        // accepting it as an avatar — defends against spoofed/blank picker MIME.
-        if (!uploaded.type.startsWith("image/")) {
-          setErrorMessage("Choose a PNG, JPG, GIF, or WebP image.");
-          return;
+        if (processImage) {
+          onUploadSuccess(await processImage(file));
+        } else {
+          const buffer = await file.arrayBuffer();
+          const uploaded = await uploadMediaBytes([...new Uint8Array(buffer)]);
+          // The shared upload path is now generic (accepts any non-denied file),
+          // so the browser-provided `file.type` check above is no longer a
+          // backstop. Verify the server-detected MIME is actually an image before
+          // accepting it as an avatar — defends against spoofed/blank picker MIME.
+          if (!uploaded.type.startsWith("image/")) {
+            setErrorMessage("Choose a PNG, JPG, GIF, or WebP image.");
+            return;
+          }
+          onUploadSuccess(uploaded.url);
         }
-        onUploadSuccess(uploaded.url);
       } catch (error) {
         setErrorMessage(
-          error instanceof Error
-            ? error.message
-            : "Could not upload that avatar.",
+          error instanceof Error ? error.message : fallbackErrorMessage,
         );
       } finally {
         setIsUploading(false);
+        onUploadSettled?.();
       }
     },
-    [onUploadSuccess],
+    [
+      fallbackErrorMessage,
+      onUploadSettled,
+      onUploadStart,
+      onUploadSuccess,
+      processImage,
+    ],
   );
 
   const handleFileChange = React.useCallback(

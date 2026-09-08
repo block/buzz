@@ -76,8 +76,11 @@ test("normalizeRelayUrl_empty_returns_null", () => {
   assert.equal(normalizeRelayUrl("   "), null);
 });
 
-test("normalizeRelayUrl_bare_hostname_returns_null", () => {
-  assert.equal(normalizeRelayUrl("relay.example.com"), null);
+test("normalizeRelayUrl_bare_hostname_adds_secure_scheme", () => {
+  assert.equal(
+    normalizeRelayUrl("relay.example.com"),
+    "wss://relay.example.com",
+  );
 });
 
 test("normalizeRelayUrl_ftp_scheme_returns_null", () => {

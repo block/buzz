@@ -289,6 +289,271 @@ void main() {
       expect(otherChannelState.transcript, isEmpty);
     },
   );
+
+  test('expands batch envelopes through ordering and dedupe', () async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final relaySession = _RecordingRelaySession();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relaySession),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    const channelId = 'test-channel';
+    final key = (channelId: channelId, agentPubkey: agentKeychain.public);
+    container.read(observerSubscriptionProvider(key));
+    await Future<void>.delayed(Duration.zero);
+
+    final laterFrame = _observerFrameJson(
+      seq: 2,
+      channelId: channelId,
+      turnId: 'turn-2',
+    );
+    final earlierFrame = _observerFrameJson(
+      seq: 1,
+      channelId: channelId,
+      turnId: 'turn-1',
+    );
+    relaySession.emit(
+      _observerEvent(
+        ownerKeychain: ownerKeychain,
+        agentKeychain: agentKeychain,
+        payload: {
+          'seq': 2,
+          'timestamp': '2026-04-30T12:00:02.000Z',
+          'kind': 'batch',
+          'channelId': channelId,
+          'turnId': 'turn-2',
+          'payload': {
+            'events': [laterFrame, earlierFrame, earlierFrame],
+          },
+        },
+      ),
+    );
+
+    final relayState = container.read(observerRelayProvider);
+    final frames = relayState.framesByAgent[agentKeychain.public];
+    expect(frames?.map((frame) => frame.seq), [1, 2]);
+
+    final state = container.read(observerSubscriptionProvider(key));
+    expect(state.connection, ObserverConnectionState.open);
+    expect(state.transcript, hasLength(2));
+    expect(state.transcript.map((item) => item.id), [
+      'turn:turn-1',
+      'turn:turn-2',
+    ]);
+
+    final otherChannelState = container.read(
+      observerSubscriptionProvider((
+        channelId: 'other-channel',
+        agentPubkey: agentKeychain.public,
+      )),
+    );
+    expect(otherChannelState.transcript, isEmpty);
+  });
+
+  test('publishes one open-state update for a changed batch', () async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final relaySession = _RecordingRelaySession();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relaySession),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(
+      observerSubscriptionProvider((
+        channelId: 'test-channel',
+        agentPubkey: agentKeychain.public,
+      )),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    var openStateUpdates = 0;
+    final listener = container.listen(observerRelayProvider, (_, next) {
+      if (next.connection == ObserverConnectionState.open) {
+        openStateUpdates += 1;
+      }
+    });
+    addTearDown(listener.close);
+
+    final event = _observerEvent(
+      ownerKeychain: ownerKeychain,
+      agentKeychain: agentKeychain,
+      payload: {
+        'seq': 2,
+        'timestamp': '2026-04-30T12:00:02.000Z',
+        'kind': 'batch',
+        'channelId': 'test-channel',
+        'turnId': 'turn-2',
+        'payload': {
+          'events': [
+            _observerFrameJson(
+              seq: 1,
+              channelId: 'test-channel',
+              turnId: 'turn-1',
+            ),
+            _observerFrameJson(
+              seq: 2,
+              channelId: 'test-channel',
+              turnId: 'turn-2',
+            ),
+          ],
+        },
+      },
+    );
+
+    relaySession.emit(event);
+    expect(openStateUpdates, 1);
+
+    relaySession.emit(event);
+    expect(openStateUpdates, 1);
+  });
+
+  test('keeps malformed batch envelopes as singleton frames', () async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final relaySession = _RecordingRelaySession();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relaySession),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(
+      observerSubscriptionProvider((
+        channelId: 'test-channel',
+        agentPubkey: agentKeychain.public,
+      )),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    relaySession.emit(
+      _observerEvent(
+        ownerKeychain: ownerKeychain,
+        agentKeychain: agentKeychain,
+        payload: {
+          'seq': 3,
+          'timestamp': '2026-04-30T12:00:03.000Z',
+          'kind': 'batch',
+          'channelId': 'test-channel',
+          'payload': <String, dynamic>{},
+        },
+      ),
+    );
+
+    final state = container.read(observerRelayProvider);
+    expect(state.connection, ObserverConnectionState.open);
+    expect(state.errorMessage, isNull);
+    expect(state.framesByAgent[agentKeychain.public], hasLength(1));
+    expect(state.framesByAgent[agentKeychain.public]!.single.kind, 'batch');
+  });
+
+  test(
+    'rejects invalid inner batch frames without partial ingestion',
+    () async {
+      final ownerKeychain = nostr.Keys.generate();
+      final agentKeychain = nostr.Keys.generate();
+      final relaySession = _RecordingRelaySession();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relaySession),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(
+        observerSubscriptionProvider((
+          channelId: 'test-channel',
+          agentPubkey: agentKeychain.public,
+        )),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      relaySession.emit(
+        _observerEvent(
+          ownerKeychain: ownerKeychain,
+          agentKeychain: agentKeychain,
+          payload: {
+            'seq': 2,
+            'timestamp': '2026-04-30T12:00:02.000Z',
+            'kind': 'batch',
+            'channelId': 'test-channel',
+            'payload': {
+              'events': [
+                _observerFrameJson(
+                  seq: 1,
+                  channelId: 'test-channel',
+                  turnId: 'turn-1',
+                ),
+                {'seq': 'invalid'},
+              ],
+            },
+          },
+        ),
+      );
+
+      final state = container.read(observerRelayProvider);
+      expect(state.connection, ObserverConnectionState.error);
+      expect(state.errorMessage, contains('Observer event decrypt failed'));
+      expect(state.framesByAgent[agentKeychain.public], isNull);
+    },
+  );
+}
+
+Map<String, dynamic> _observerFrameJson({
+  required int seq,
+  required String channelId,
+  required String turnId,
+}) => {
+  'seq': seq,
+  'timestamp': '2026-04-30T12:00:0$seq.000Z',
+  'kind': 'turn_started',
+  'channelId': channelId,
+  'turnId': turnId,
+  'payload': {
+    'triggeringEventIds': ['$seq'],
+  },
+};
+
+NostrEvent _observerEvent({
+  required nostr.Keys ownerKeychain,
+  required nostr.Keys agentKeychain,
+  required Map<String, dynamic> payload,
+}) {
+  final conversationKey = getConversationKey(
+    agentKeychain.secret,
+    ownerKeychain.public,
+  );
+  final event = nostr.Event.from(
+    kind: EventKind.agentObserverFrame,
+    content: nip44Encrypt(conversationKey, jsonEncode(payload)),
+    tags: [
+      ['p', ownerKeychain.public],
+      ['agent', agentKeychain.public],
+      ['frame', 'telemetry'],
+    ],
+    secretKey: agentKeychain.secret,
+    verify: false,
+  );
+  return NostrEvent.fromJson(event.toMap());
 }
 
 class _RecordingRelaySession extends RelaySessionNotifier {

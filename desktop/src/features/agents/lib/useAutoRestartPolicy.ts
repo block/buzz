@@ -5,12 +5,14 @@ import {
   managedAgentsQueryKey,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import {
   startManagedAgent,
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import { listManagedAgents } from "@/shared/api/tauri";
 import type { ManagedAgent } from "@/shared/api/types";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { getAgentObserverSnapshot } from "../observerRelayStore";
 import { getAgentWorkingState } from "../agentWorkingSignal";
 import {
@@ -39,13 +41,17 @@ export function useAutoRestartPolicy() {
   const edgesRef = React.useRef(new Map<string, AutoRestartEdgeState>());
   const inFlightRef = React.useRef(new Set<string>());
   const [, setTick] = React.useState(0);
+  const documentVisible = useDocumentVisible();
 
   // Re-evaluate on an interval so the quiescence clock advances even when
   // summaries and observer stores are quiet.
   React.useEffect(() => {
+    if (!documentVisible) return;
+
+    setTick((t) => t + 1);
     const timer = setInterval(() => setTick((t) => t + 1), POLICY_TICK_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [documentVisible]);
 
   // No dependency array by design: the tick pattern re-runs this effect
   // every render so it reads live store state; all mutation is ref-local.
@@ -109,6 +115,7 @@ export function useAutoRestartPolicy() {
             return;
           }
           await stopManagedAgent(agent.pubkey);
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
           await startManagedAgent(agent.pubkey);
         } catch {
           // Failed attempt: edge stays consumed — badge-only until the

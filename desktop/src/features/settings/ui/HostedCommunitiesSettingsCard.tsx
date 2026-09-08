@@ -28,6 +28,8 @@ import {
   type HostedNostrIdentity as NostrIdentity,
   VALID_HOSTED_COMMUNITY_NAME as VALID_NAME,
 } from "@/features/communities/hostedCommunityApi";
+import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -52,8 +54,18 @@ import {
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
+function relayHost(url: string | null | undefined) {
+  if (!url) return null;
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export function HostedCommunitiesSettingsCard() {
   const onboarding = useCommunityOnboarding();
+  const { activeCommunity } = useCommunities();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
@@ -423,7 +435,10 @@ export function HostedCommunitiesSettingsCard() {
       ) : !auth ? (
         <div className="rounded-xl border border-border/70 p-5">
           <h3 className="font-medium">Sign in to manage hosted communities</h3>
-          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          <p
+            className="mt-2 max-w-2xl text-sm text-muted-foreground/70"
+            data-settings-subcopy
+          >
             Authentication opens in your browser and returns securely to Buzz.
             You can use every other part of the app without signing in.
           </p>
@@ -466,7 +481,10 @@ export function HostedCommunitiesSettingsCard() {
               <h3 className="font-medium">
                 Link this account to your Buzz identity
               </h3>
-              <p className="mt-2 text-sm text-muted-foreground">
+              <p
+                className="mt-2 text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 This Builderlab account isn&apos;t linked to a Buzz identity
                 yet. Connect this device&apos;s key to create and own
                 communities under it — Buzz signs a one-time challenge locally,
@@ -491,7 +509,10 @@ export function HostedCommunitiesSettingsCard() {
                   <h3 className="font-medium">
                     This account is connected to a different Buzz identity
                   </h3>
-                  <p className="mt-2 text-sm text-muted-foreground">
+                  <p
+                    className="mt-2 text-sm text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
                     Your Builderlab account owns communities under another Buzz
                     key, so connecting them here would join a relay this device
                     isn&apos;t a member of. Creating and connecting are paused
@@ -573,6 +594,10 @@ export function HostedCommunitiesSettingsCard() {
                       community={community}
                       busy={busy}
                       canConnect={!identityMismatch}
+                      showIconPicker={
+                        relayHost(relayUrl(community)) ===
+                        relayHost(activeCommunity?.relayUrl)
+                      }
                       onConnect={() => {
                         const url = relayUrl(community);
                         if (url)
@@ -597,7 +622,10 @@ export function HostedCommunitiesSettingsCard() {
           >
             <div>
               <h3 className="font-medium">Create a community</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p
+                className="mt-1 text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Choose the address your team will use to connect.
               </p>
             </div>
@@ -719,6 +747,7 @@ function CommunityRow({
   onArchive,
   onUnarchive,
   onTransfer,
+  showIconPicker,
 }: {
   community: HostedCommunity;
   busy: boolean;
@@ -727,6 +756,7 @@ function CommunityRow({
   onArchive: () => void;
   onUnarchive: () => void;
   onTransfer: (npub: string) => Promise<boolean>;
+  showIconPicker: boolean;
 }) {
   const [confirmArchive, setConfirmArchive] = React.useState(false);
   const [confirmUnarchive, setConfirmUnarchive] = React.useState(false);
@@ -740,13 +770,20 @@ function CommunityRow({
       className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 p-4 ${
         archived ? "opacity-70" : ""
       }`}
+      data-testid="hosted-community-row"
     >
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{displayName}</p>
-        <p className="text-xs text-muted-foreground">
-          {community.normalized_host}
-          {archived ? " · Archived" : ""}
-        </p>
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        {showIconPicker ? <CommunityIconSettingsCard compact /> : null}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{displayName}</p>
+          <p
+            className="truncate text-xs text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            {community.normalized_host}
+            {archived ? " · Archived" : ""}
+          </p>
+        </div>
       </div>
 
       {archived ? (

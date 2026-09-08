@@ -1,7 +1,13 @@
 import * as React from "react";
 
 import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
-import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
+import { runLocationForBackend } from "@/features/agents/lib/agentAccessWarning";
+import { showAgentProfileSyncWarning } from "@/features/agents/ui/agentProfileSyncWarning";
+import {
+  CreateAgentRespondToField,
+  OWNER_ONLY_ACCESS_DISABLED_REASON,
+} from "@/features/agents/ui/RespondToField";
 import type { ManagedAgent, RespondToMode } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -24,6 +30,10 @@ export function EditRespondToDialog({
   open: boolean;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
+  const accessLocked = agentAccessOwnerOnly === true;
   const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     [],
@@ -41,12 +51,13 @@ export function EditRespondToDialog({
 
   async function handleSave() {
     if (!agent) return;
-    await updateMutation.mutateAsync({
+    const result = await updateMutation.mutateAsync({
       pubkey: agent.pubkey,
       respondTo,
       respondToAllowlist:
         respondTo === "allowlist" ? respondToAllowlist : undefined,
     });
+    showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
     onOpenChange(false);
   }
 
@@ -54,18 +65,22 @@ export function EditRespondToDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Edit respond-to</DialogTitle>
+          <DialogTitle>Manage agent access</DialogTitle>
           <DialogDescription>
-            Choose who {agent?.name ?? "this agent"} responds to.
+            Choose who can send instructions to {agent?.name ?? "this agent"}.
           </DialogDescription>
         </DialogHeader>
         <CreateAgentRespondToField
-          allowlist={respondToAllowlist}
-          disabled={updateMutation.isPending}
-          mode={respondTo}
+          allowlist={accessLocked ? [] : respondToAllowlist}
+          disabled={updateMutation.isPending || accessLocked}
+          disabledReason={
+            accessLocked ? OWNER_ONLY_ACCESS_DISABLED_REASON : undefined
+          }
+          mode={accessLocked ? "owner-only" : respondTo}
           onAllowlistChange={setRespondToAllowlist}
           onModeChange={setRespondTo}
           ownerPubkey={currentPubkey}
+          runLocation={runLocationForBackend(agent?.backend)}
         />
         {updateMutation.error instanceof Error ? (
           <p className="text-sm text-destructive">
@@ -82,12 +97,14 @@ export function EditRespondToDialog({
             Cancel
           </Button>
           <Button
-            disabled={!respondToValid || updateMutation.isPending}
+            disabled={
+              !respondToValid || updateMutation.isPending || accessLocked
+            }
             onClick={() => void handleSave()}
             size="sm"
             type="button"
           >
-            {updateMutation.isPending ? "Saving..." : "Save"}
+            {updateMutation.isPending ? "Saving..." : "Save access"}
           </Button>
         </div>
       </DialogContent>

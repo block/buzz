@@ -475,6 +475,17 @@ mod tests {
     }
 
     #[test]
+    fn pointer_writer_is_covered_by_deletion_taxonomy() {
+        let community = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
+        let owner = "a".repeat(64);
+        let key = pointer_key(community, &owner, "repo");
+        let prefixes = buzz_media::tenant_prefixes(*community.as_uuid());
+
+        assert!(prefixes.iter().any(|prefix| key.starts_with(prefix)));
+        assert!(buzz_media::is_tenant_owned_key(*community.as_uuid(), &key));
+    }
+
+    #[test]
     fn pointer_key_strips_dot_git() {
         let c = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
         assert_eq!(

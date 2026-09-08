@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
-    KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -24,15 +24,15 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-use super::ingest::{IngestAuth, IngestError};
+use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
 /// Increment the rejection counter with a bounded reason label.
 fn reject(reason: &'static str) {
-    metrics::counter!("buzz_events_rejected_total", "reason" => reason).increment(1);
+    reject_with_transport("ws", reason);
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
-fn bounded_kind_label(kind: u32) -> String {
+pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
@@ -46,7 +46,7 @@ fn bounded_kind_label(kind: u32) -> String {
         44200 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
-        48001 | 48100..=48103 | 48106 => kind.to_string(),
+        48001 | 48100..=48104 | 48106 => kind.to_string(),
         49001 => kind.to_string(),
         _ => "other".to_string(),
     }
@@ -145,6 +145,29 @@ pub async fn filter_fanout_by_access(
                     .conn_manager
                     .pubkey_for_conn(*conn_id)
                     .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    // Shared-read gate (fan-out): SHARED_GATED_KINDS events fan out to all
+    // connections only when carrying ["shared","true"]. Unshared ones are
+    // delivered only to the author's own connections, matching REQ semantics.
+    let matches = if buzz_core::kind::is_shared_gated_kind(event_kind_u32(&stored_event.event)) {
+        let author = stored_event.event.pubkey.to_bytes();
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                let Some(pk) = state.conn_manager.pubkey_for_conn(*conn_id) else {
+                    return false;
+                };
+                // Author always receives their own events.
+                if pk == author {
+                    return true;
+                }
+                // Foreign connection: allowed only if the event is shared.
+                !is_unshared_gated_event(&stored_event.event, &pk)
             })
             .collect()
     } else {
@@ -598,7 +621,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // Rationale: bounded_kind_label passes through all 10k values in
     // 20000..=29999 (client-controlled ephemeral range). Crossing kind ×
     // community would produce up to millions of series. Keep kind fleet-wide.
-    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    metrics::counter!("buzz_events_received_total", "kind" => kind_str).increment(1);
     // Per-community volume counter: community-only, no kind tag.
     // Use this for per-community throughput graphs; the fleet counter above
     // for per-kind breakdowns.
@@ -682,16 +705,49 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        handle_ephemeral_event(
+        match buzz_deletion::store(&state.db)
+            .is_serving_active(conn.tenant.community())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                reject("restricted");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: community writes are fenced",
+                ));
+                return;
+            }
+            Err(error) => {
+                reject("error");
+                tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "error: internal server error",
+                ));
+                return;
+            }
+        }
+        match handle_ephemeral_event(
             event,
             conn_id,
-            &event_id_hex,
             pubkey_bytes,
             auth_pubkey,
-            conn,
+            Arc::clone(&conn),
             state,
         )
-        .await;
+        .await
+        {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            }
+            Err(message) => {
+                reject("invalid");
+                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            }
+        }
         return;
     }
 
@@ -705,9 +761,8 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                // Fleet-wide stored counter: kind-only, no community tag.
-                // Same cardinality rationale as buzz_events_received_total above.
-                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
+                // buzz_events_stored_total is emitted inside ingest_event()
+                // (shared WS/HTTP seam), not here.
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,
@@ -740,33 +795,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 async fn handle_ephemeral_event(
     event: Event,
     conn_id: uuid::Uuid,
-    event_id_hex: &str,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
-) {
+) -> Result<(), String> {
     let event_clone = event.clone();
+    let event_id = event.id.to_hex();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
 
     match verify_result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
-            return;
-        }
-        Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
-            return;
-        }
+        Ok(Err(e)) => return Err(format!("invalid: {e}")),
+        Err(_) => return Err("error: internal error".to_string()),
     }
 
     // Special handling for presence events (kind:20001).
@@ -807,18 +848,8 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        if let Err(msg) = super::ingest::check_channel_membership(
-            &conn.tenant,
-            &state,
-            ch_id,
-            &pubkey_bytes,
-            None,
-        )
-        .await
-        {
-            conn.send(RelayMessage::ok(event_id_hex, false, &msg));
-            return;
-        }
+        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
+            .await?;
 
         // Mark as local before Redis publish to prevent double-delivery when
         // the event comes back through the Redis subscriber loop.
@@ -832,7 +863,7 @@ async fn handle_ephemeral_event(
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral publish failed: {e}");
+            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers, through the guarded send path
@@ -860,7 +891,7 @@ async fn handle_ephemeral_event(
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers through the guarded send path.
@@ -871,7 +902,7 @@ async fn handle_ephemeral_event(
         fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     }
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1437,6 +1468,7 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
@@ -2076,6 +2108,7 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
@@ -2401,6 +2434,7 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                None,
                 CancellationToken::new(),
                 community_id,
                 Arc::new(AtomicU8::new(0)),

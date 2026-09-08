@@ -1,6 +1,8 @@
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
+export const MAX_CHANNEL_SECTIONS = 100;
+export const MAX_CHANNEL_SECTION_ASSIGNMENTS = 1_000;
 
 export type ChannelSection = {
   id: string;
@@ -37,6 +39,28 @@ export function storageKey(pubkey: string, relayUrl?: string): string {
   return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalized)}`;
 }
 
+export function boundChannelSectionsStore(
+  store: ChannelSectionStore,
+): ChannelSectionStore {
+  const sections = store.sections
+    .slice()
+    .sort((left, right) => left.order - right.order)
+    .slice(-MAX_CHANNEL_SECTIONS);
+  const sectionIds = new Set(sections.map((section) => section.id));
+  const assignments = Object.fromEntries(
+    Object.entries(store.assignments)
+      .filter(([, sectionId]) => sectionIds.has(sectionId))
+      .slice(-MAX_CHANNEL_SECTION_ASSIGNMENTS),
+  );
+  if (
+    sections.length === store.sections.length &&
+    Object.keys(assignments).length === Object.keys(store.assignments).length
+  ) {
+    return store;
+  }
+  return { ...store, sections, assignments };
+}
+
 export function stripOrphanedAssignments(
   store: ChannelSectionStore,
 ): ChannelSectionStore {
@@ -44,9 +68,11 @@ export function stripOrphanedAssignments(
   const cleaned = Object.fromEntries(
     Object.entries(store.assignments).filter(([, sid]) => sectionIds.has(sid)),
   );
-  if (Object.keys(cleaned).length === Object.keys(store.assignments).length)
-    return store;
-  return { ...store, assignments: cleaned };
+  const stripped =
+    Object.keys(cleaned).length === Object.keys(store.assignments).length
+      ? store
+      : { ...store, assignments: cleaned };
+  return boundChannelSectionsStore(stripped);
 }
 
 export function parseChannelSectionPayload(
@@ -161,7 +187,7 @@ export function writeChannelSectionsStore(
   try {
     window.localStorage.setItem(
       storageKey(pubkey, relayUrl),
-      JSON.stringify(store),
+      JSON.stringify(boundChannelSectionsStore(store)),
     );
     return true;
   } catch {

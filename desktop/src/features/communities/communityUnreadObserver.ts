@@ -1,5 +1,6 @@
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
+  forcedUnreadMarker,
   forcedUnreadStore,
   type ForcedUnreadMap,
 } from "@/features/channels/forcedUnreadStore";
@@ -238,7 +239,9 @@ export async function fetchCommunityUnread(args: {
     // runs while the community is active, so the store may not be pruned for
     // inactive communities).
     if (!hasUnread && Object.hasOwn(forcedUnreadMap, channel.id)) {
-      const markerAtWhenForced = forcedUnreadMap[channel.id];
+      const markerAtWhenForced = forcedUnreadMarker(
+        forcedUnreadMap[channel.id],
+      );
       if (
         readAt === null ||
         (markerAtWhenForced !== null && readAt <= markerAtWhenForced)
