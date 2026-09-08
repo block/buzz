@@ -35,6 +35,22 @@ pub enum AuditError {
     #[error("unknown audit action in database")]
     UnknownAction,
 
+    /// The entry uses an encoding this verifier does not support.
+    #[error("unsupported audit hash version {version}")]
+    UnsupportedHashVersion {
+        /// Version stored with the entry.
+        version: i16,
+    },
+
+    /// A field violates the encoding's structural requirements.
+    #[error("invalid audit entry at seq {seq}: {field}")]
+    InvalidField {
+        /// Per-community sequence number.
+        seq: i64,
+        /// Static field description, never the untrusted field value.
+        field: &'static str,
+    },
+
     /// A JSON serialization error occurred (e.g. while canonicalising `detail`).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
