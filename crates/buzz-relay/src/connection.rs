@@ -1747,4 +1747,152 @@ pub(crate) mod tests {
             "B3: expiry denial frame (pos {denial_pos}) must precede Close frame (pos {close_pos})"
         );
     }
+
+    // ── F3: bootstrap deadline witness — root WS route ──────────────────────────
+    //
+    // Fix 3: the NIP-FI gate and expiry task are created BEFORE the
+    // `is_community_active` bootstrap await in `handle_connection`, so a
+    // session deadline that fires during a slow DB check still terminates the
+    // root WebSocket connection on time.
+    //
+    // This test passes a pre-built already-expired gate + a pre-fired expiry
+    // task to `handle_active_connection` via `pre_built = Some(...)`.
+    // The expiry task fires immediately (deadline in the past), queues the
+    // denial NOTICE on the terminal channel, and cancels the token.
+    // The test asserts the client receives the auth challenge, then the
+    // authorization-denied NOTICE, all within 2 s.
+    //
+    // Mutation oracle:
+    //   Remove the `if let Some((gate, tx, rx, expiry)) = pre_built` branch
+    //   from `handle_active_connection` (always use the else branch) → the
+    //   pre-built terminal channel carrying the denial frame is discarded →
+    //   the send_loop drains a fresh (empty) terminal channel → denial NOTICE
+    //   never appears → `received_denial` stays false → assertion panics.
+    #[tokio::test]
+    async fn f3_root_pre_built_expired_gate_terminates_connection() {
+        use axum::{routing::get, Router};
+        use buzz_auth::VerifiedAssertion;
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::connect_async;
+
+        let key = nostr::Keys::generate();
+
+        // Deadline in the past — expiry fires immediately on spawn.
+        let deadline = Utc::now() - Duration::seconds(1);
+        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+
+        let state = crate::state::tests::test_state().await;
+        let tenant = TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            "test.local".to_string(),
+        );
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let state_c = Arc::clone(&state);
+        let tenant_c = tenant.clone();
+        let assertion_c = assertion.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("F3-root: bind listener");
+        let addr = listener.local_addr().expect("F3-root: local addr");
+
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/",
+                get({
+                    let state_i = Arc::clone(&state_c);
+                    let tenant_i = tenant_c.clone();
+                    let assertion_i = assertion_c.clone();
+                    move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let state_i = Arc::clone(&state_i);
+                        let tenant_i = tenant_i.clone();
+                        let assertion_i = assertion_i.clone();
+                        let conn_time = chrono::Utc::now();
+                        let conn_id = uuid::Uuid::new_v4();
+                        async move {
+                            ws.on_upgrade(move |socket| async move {
+                                let conn_cancel = CancellationToken::new();
+
+                                // Build pre-built bundle: gate + expiry pre-fired
+                                // (simulates handle_connection arming before bootstrap).
+                                let (pre_tx, pre_rx) = mpsc::channel::<WsMessage>(1);
+                                let pre_gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                                    deadline,
+                                    conn_cancel.clone(),
+                                );
+                                let pre_expiry = crate::nip_fi_session::spawn_nip_fi_expiry_task(
+                                    deadline,
+                                    Arc::clone(&pre_gate),
+                                    pre_tx.clone(),
+                                    crate::nip_fi_session::NipFiWsRoute::Root,
+                                );
+
+                                let control =
+                                    crate::state::CommunityConnectionControl::new(conn_cancel);
+                                handle_active_connection(
+                                    socket,
+                                    state_i,
+                                    "127.0.0.1:9999".parse().unwrap(),
+                                    tenant_i,
+                                    conn_id,
+                                    control,
+                                    Some(assertion_i),
+                                    conn_time,
+                                    Some((pre_gate, pre_tx, pre_rx, Some(pre_expiry))),
+                                )
+                                .await
+                            })
+                        }
+                    }
+                }),
+            );
+
+            let _ = ready_tx.send(());
+            axum::serve(listener, app).await.expect("test server");
+        });
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ready_rx)
+            .await
+            .expect("F3-root: server ready");
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("F3-root: connect");
+
+        // The root WS path sends an AUTH challenge first, then the pre-fired
+        // expiry drains through the send_loop as authorization-denied NOTICE.
+        let mut received_denial = false;
+
+        for _ in 0..5 {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.next()).await;
+
+            match frame {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))))
+                    if t.contains("authorization denied") =>
+                {
+                    received_denial = true;
+                    break;
+                }
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))))
+                | Ok(Some(Err(_)))
+                | Ok(None)
+                | Err(_) => break,
+                _ => {}
+            }
+        }
+
+        assert!(
+            received_denial,
+            "F3-root: must receive authorization denied NOTICE before close;\n             Mutation oracle: remove pre_built branch from handle_active_connection \
+             → pre-built terminal channel discarded → denial never sent → \
+             assertion panics"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
 }

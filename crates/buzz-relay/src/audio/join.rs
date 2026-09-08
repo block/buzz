@@ -3244,4 +3244,77 @@ mod tests {
             other => panic!("expected Goodbye(SessionEnded), got {other:?}"),
         }
     }
+
+    /// Fix 7 / F7b: `HuddleOwnerRegistry::release` is generation-fenced.
+    ///
+    /// When a pending peer fails and the room becomes empty,
+    /// `commit_participant_join`'s error paths call
+    /// `mesh.owners.release(channel_id, generation)`.  A stale call with
+    /// the wrong generation must NOT cancel the renewer, so a newer epoch that
+    /// a re-acquire installed after room-empty is not torn down.  A call with
+    /// the correct generation MUST cancel the renewer (releasing the lease
+    /// cleanly) and remove the entry.
+    ///
+    /// ## Mutation oracle
+    ///
+    /// A) Remove the `entry.generation == generation` guard from
+    ///    `HuddleOwnerRegistry::release` → the stale-generation call cancels
+    ///    the entry → `registry.entries.get(&session_id_1).is_some()` panics
+    ///    (entry removed by the wrong caller).
+    ///
+    /// B) Replace the `release` body with a no-op → the correct-generation
+    ///    call has no effect → `registry.entries.get(&session_id_2).is_none()`
+    ///    panics (entry still present after correct release).
+    #[tokio::test]
+    async fn f7b_owner_registry_release_is_generation_fenced() {
+        let registry = HuddleOwnerRegistry::new();
+
+        let session_id_1 = Uuid::new_v4();
+        let session_id_2 = Uuid::new_v4();
+
+        // ── Install entry 1 (generation 10) ──────────────────────────────────
+        let dir_1 = Arc::new(FakeDir::with_renew_script(
+            [HuddleRenewOutcome::Renewed(lease_for(session_id_1, 10))],
+            HuddleReleaseOutcome::Released,
+        ));
+        let lease_1 = lease_for(session_id_1, 10);
+        let _signals_1 = registry.attach_signals(session_id_1, dir_1, lease_1);
+
+        // ── Install entry 2 (generation 5) ───────────────────────────────────
+        let dir_2 = Arc::new(FakeDir::with_renew_script(
+            [HuddleRenewOutcome::Renewed(lease_for(session_id_2, 5))],
+            HuddleReleaseOutcome::Released,
+        ));
+        let lease_2 = lease_for(session_id_2, 5);
+        let _signals_2 = registry.attach_signals(session_id_2, dir_2, lease_2);
+
+        assert_eq!(registry.entries.len(), 2, "both entries installed");
+
+        // ── Stale release: wrong generation for session_1 ────────────────────
+        registry.release(session_id_1, 99); // wrong generation — must be a no-op
+        assert!(
+            registry.entries.get(&session_id_1).is_some(),
+            "F7b: release with wrong generation must NOT remove the entry; \
+             stale teardown tore down a live epoch\n\
+             Mutation oracle A: remove the generation guard from `release` → panics"
+        );
+
+        // ── Correct release: right generation for session_2 ──────────────────
+        registry.release(session_id_2, 5);
+        tokio::task::yield_now().await; // let spawned renewer see cancellation
+        assert!(
+            registry.entries.get(&session_id_2).is_none(),
+            "F7b: release with correct generation must remove the entry\n\
+             Mutation oracle B: no-op `release` body → entry stays → panics"
+        );
+
+        // ── session_1's entry must be unaffected ─────────────────────────────
+        assert!(
+            registry.entries.get(&session_id_1).is_some(),
+            "F7b: releasing session_2 must not affect session_1's entry"
+        );
+
+        // Cleanup
+        registry.release(session_id_1, 10);
+    }
 }

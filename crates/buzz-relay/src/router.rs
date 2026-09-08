@@ -1881,4 +1881,132 @@ mod tests {
             "B4: Connection-only request (no Upgrade header) must not be denied 503 by NIP-FI gate"
         );
     }
+
+    // ── F6: document fallback (postgres-only) ───────────────────────────────────
+    //
+    // A no-`Accept` plain GET / to a successfully mapped host must bypass the
+    // NIP-FI gate, pass `bind_community`, and reach the NIP-11 document fallback
+    // at `router.rs:493`. The test seeds a community, fires a plain GET with the
+    // community's host, and asserts 200 + NIP-11 JSON content.
+    //
+    // A lazy-pool state cannot seed the community — this test belongs in the
+    // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
+    // does not run in the unit-test lane where no DB is available.
+    mod postgres_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        async fn real_db_state() -> Option<Arc<AppState>> {
+            let db_url = crate::test_support::database_url();
+            let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
+
+            let mut config = {
+                let _g = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+                crate::config::Config::from_env().expect("default config loads")
+            };
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config.database_url = db_url;
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Some(Arc::new(state))
+        }
+
+        /// F6: a no-Accept plain GET to a mapped host returns 200 + NIP-11 JSON.
+        ///
+        /// The test seeds a community, sends a plain GET with the community's
+        /// host (no Accept header), and asserts 200. This proves the no-Accept
+        /// path reaches the NIP-11 document fallback (`router.rs:493`) and that
+        /// the NIP-FI gate does not intercept plain GET traffic.
+        ///
+        /// ## Mutation oracle
+        ///
+        /// A) Move the document fallback behind an additional NIP-FI gate check →
+        ///    plain GET is denied (401/503) → assertion panics.
+        ///
+        /// B) Remove `bind_community` from the router path → every plain GET
+        ///    returns 404 regardless of the host → 200 assertion panics.
+        ///
+        /// C) Serve plain GET from a different code path (e.g., gate fires before
+        ///    `bind_community`) → 401 is returned → 200 assertion panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn f6_plain_get_mapped_host_returns_nip11_200() {
+            use axum::body::Body;
+            use axum::http::Request;
+            use tower::ServiceExt;
+            use uuid::Uuid;
+
+            let state = real_db_state()
+                .await
+                .expect("F6: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres");
+            let pool = state.db.pool().clone();
+
+            // Seed a community with a unique host.
+            let community_id = Uuid::new_v4();
+            let host = format!("f6-test-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("F6: seed community");
+
+            // Plain GET / with the community's host — no Accept header.
+            let req = Request::get("/")
+                .header(axum::http::header::HOST, &host)
+                .body(Body::empty())
+                .expect("F6: build request");
+
+            let response = build_router(state)
+                .oneshot(req)
+                .await
+                .expect("F6: router response");
+
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::OK,
+                "F6: plain GET to a mapped host must return 200 (NIP-11 document fallback);\n                 Mutation oracle A: gate intercepts plain GET → 401/503 → panics.\n                 Mutation oracle B: bind_community removed → 404 → panics."
+            );
+
+            // Assert the body is NIP-11 JSON (has `supported_nips` field).
+            let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 64)
+                .await
+                .expect("F6: read body");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_bytes).expect("F6: body must be valid JSON");
+            assert!(
+                body.get("supported_nips").is_some(),
+                "F6: response body must be NIP-11 JSON with `supported_nips` field; got {body}"
+            );
+        }
+    }
 }

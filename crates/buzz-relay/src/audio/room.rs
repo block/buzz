@@ -997,6 +997,68 @@ mod tests {
         ));
     }
 
+    /// Fix 7 / F7a: a pending (pre-commit) peer must NOT appear in
+    /// `roster_snapshot`; only after `mark_committed` is the peer visible.
+    ///
+    /// This is the direct witness for the ghost-peer-leak fix: before the fix,
+    /// `roster_snapshot` included every peer regardless of commit status, so an
+    /// admission snapshot taken between `add_peer` and `commit_participant_join`
+    /// could broadcast a pending peer to existing clients. After the fix, the
+    /// snapshot is empty until the commit calls `mark_committed`.
+    ///
+    /// ## Mutation oracle
+    ///
+    /// A) Remove the `filter(|e| e.committed)` from `Room::roster_snapshot` →
+    ///    the first assertion (`snapshot.peers.is_empty()`) panics: the pending
+    ///    peer appears in the snapshot before commit.
+    ///
+    /// B) Remove the `committed: false` initialisation from `Room::add_peer` /
+    ///    `add_peer_at_index` → the peer starts committed, so the pending check
+    ///    is bypassed — same effect as (A).
+    ///
+    /// C) Remove `mark_committed` from `commit_participant_join` (or from
+    ///    `Room::mark_committed` itself) → the peer stays pending even after a
+    ///    real commit; all subsequent snapshots are empty →
+    ///    the second assertion (`snapshot.peers.len() == 1`) panics.
+    #[test]
+    fn f7a_pending_peer_excluded_from_snapshot_until_committed() {
+        let room = fresh_room();
+
+        // Add a peer — it starts in the pending (pre-commit) state.
+        let (peer_id, peer_index, _, _, _, _) =
+            room.add_peer("alice".to_string(), 2).expect("alice admits");
+
+        // Snapshot taken while peer is still pending must be empty.
+        let snapshot_before = room.roster_snapshot();
+        assert!(
+            snapshot_before.peers.is_empty(),
+            "F7a: a pending (pre-commit) peer must not appear in roster_snapshot; \
+             got {snapshot_before:?}\n\
+             Mutation oracle: remove `filter(|e| e.committed)` from \
+             `Room::roster_snapshot` → this assertion panics"
+        );
+
+        // Commit the peer — now it is visible in snapshots.
+        room.mark_committed(peer_id);
+        let snapshot_after = room.roster_snapshot();
+        assert_eq!(
+            snapshot_after.peers.len(),
+            1,
+            "F7a: after mark_committed the peer must appear in roster_snapshot; \
+             got {snapshot_after:?}\n\
+             Mutation oracle: remove the `mark_committed` call from \
+             `commit_participant_join` → snapshot stays empty → this assertion panics"
+        );
+        assert_eq!(
+            snapshot_after.peers[0].pubkey, "alice",
+            "F7a: committed peer in snapshot must carry the correct pubkey"
+        );
+        assert_eq!(
+            snapshot_after.peers[0].peer_index, peer_index,
+            "F7a: committed peer in snapshot must carry the correct peer_index"
+        );
+    }
+
     /// Per Sami/Perci's review: when a room is both at-capacity AND the
     /// joiner's protocol version doesn't match the pin, the error must be
     /// `Full` — not `VersionMismatch`. A client that couldn't get a seat
