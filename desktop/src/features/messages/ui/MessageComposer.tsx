@@ -55,6 +55,7 @@ import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadError } from "./ComposerUploadError";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
+import { useComposerScrollToBottom } from "./useComposerScrollToBottom";
 import { useComposerVoiceNote } from "./useComposerVoiceNote";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
@@ -273,13 +274,7 @@ function MessageComposerImpl({
     ((info: LinkSelectionInfo | null) => void) | null
   >(null);
   const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
-  const scrollComposerToBottom = React.useCallback(() => {
-    window.requestAnimationFrame(() => {
-      const scrollElement = composerScrollRef.current;
-      if (!scrollElement) return;
-      scrollElement.scrollTop = scrollElement.scrollHeight;
-    });
-  }, []);
+  const scrollComposerToBottom = useComposerScrollToBottom(composerScrollRef);
   const computedPlaceholder = editTarget
     ? "Edit your message"
     : (placeholder ??
