@@ -1,3 +1,7 @@
+import {
+  getMentionSelectionHistory,
+  resetMentionSelectionHistory,
+} from "../messages/lib/mentionSelectionHistory.ts";
 // Admission against existing root query evidence, without membership freshness production.
 // Real mention and picker hooks; Tauri policy/classification are fixture evidence.
 import assert from "node:assert/strict";
@@ -246,6 +250,7 @@ async function setup(overrides = {}) {
 }
 afterEach(async () => {
   if (root) await act(async () => root.unmount());
+  resetMentionSelectionHistory();
   client?.clear();
   document.body.replaceChildren();
 });
@@ -326,6 +331,7 @@ test("retained explicit pin rejects latest policy denial without draft effects",
   assert.equal(rows().length, 1, "denial does not move the displayed row");
   await act(async () => oldPin(row));
   assert.deepEqual(effects, []);
+  assert.deepEqual(getMentionSelectionHistory(VIEWER, CHANNEL), []);
   assert.deepEqual(mention.knownNames, []);
 });
 
@@ -349,6 +355,7 @@ for (const returnToOrigin of [false, true]) {
       edit = oldInsert(row, 1);
     });
     assert.deepEqual(effects, []);
+    assert.deepEqual(getMentionSelectionHistory(VIEWER, CHANNEL), []);
     assert.equal(edit.insertText, "");
     assert.deepEqual(mention.knownNames, []);
   });
@@ -592,6 +599,9 @@ test("background membership/search updates leave visible same-name rows and Tab 
     mention.getDraftMentionRefs(edit.insertText)[0].pubkey,
     selected.pubkey,
   );
+  assert.deepEqual(getMentionSelectionHistory(VIEWER, CHANNEL), [
+    selected.pubkey,
+  ]);
   await act(async () => mention.updateMentionQuery("@Scou", 5));
   await settle();
   assert.equal(mention.suggestions.length, 3);
@@ -719,6 +729,7 @@ for (const condition of ["denied", "missing", "failed", "cold-failed"]) {
       assert.equal(outcome.suggestion, undefined);
     }
     assert.deepEqual(effects, []);
+    assert.deepEqual(getMentionSelectionHistory(VIEWER, CHANNEL), []);
     assert.deepEqual(mention.knownNames, []);
   });
 }

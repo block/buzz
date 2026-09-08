@@ -1,3 +1,4 @@
+import { resetMentionSelectionHistory } from "@/features/messages/lib/mentionSelectionHistory";
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -58,6 +59,7 @@ async function resetCommunityState({
   resetAvatarState: boolean;
 }): Promise<void> {
   relayClient.disconnect();
+  resetMentionSelectionHistory();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();

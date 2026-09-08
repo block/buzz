@@ -1,9 +1,15 @@
-import { isMentionActionable, type MentionAction } from "./mentionPresentation";
+import {
+  isMentionActionable,
+  type MentionAction,
+  type MentionPresence,
+} from "./mentionPresentation";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
   displayName: string | null;
   action?: MentionAction;
+  isOwned?: boolean;
+  presence?: MentionPresence;
   isAgent: boolean;
   isActiveAgent?: boolean;
   isMember: boolean;
@@ -116,10 +122,11 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   query: string,
   activePersonaIds: ReadonlySet<string> = new Set(),
+  recentExplicitPubkeys: readonly string[] = [],
 ): RankedMentionCandidate<T>[] {
   const lowerQuery = query.toLowerCase();
 
-  return candidates
+  const ranked = candidates
     .map((candidate, order) => {
       const pubkeyLower = candidate.pubkey
         ? normalizePubkey(candidate.pubkey)
@@ -160,4 +167,43 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
       (a, b) =>
         a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
     );
+  // Reorder only comparable same-name agent slots. A conditional pairwise
+  // comparator against unrelated rows creates cycles (A<B, B<C, C<A).
+  const groups = new Map<string, number[]>();
+  ranked.forEach((item, index) => {
+    if (
+      item.candidate.kind !== "identity" ||
+      !item.candidate.pubkey ||
+      !item.candidate.isAgent ||
+      !isMentionActionable(item.candidate)
+    )
+      return;
+    const group = `${item.groupRank}:${item.score}:${item.label.trim().toLowerCase()}`;
+    groups.set(group, [...(groups.get(group) ?? []), index]);
+  });
+  const recent = new Map(
+    recentExplicitPubkeys.map((key, index) => [normalizePubkey(key), index]),
+  );
+  const presenceRank = (value?: MentionPresence) =>
+    value === "online" ? 0 : value === "away" ? 1 : 2;
+  for (const indexes of groups.values()) {
+    if (indexes.length < 2) continue;
+    const sorted = indexes
+      .map((index) => ranked[index])
+      .sort((a, b) => {
+        const left = a.candidate,
+          right = b.candidate;
+        return (
+          (recent.get(normalizePubkey(left.pubkey ?? "")) ?? Infinity) -
+            (recent.get(normalizePubkey(right.pubkey ?? "")) ?? Infinity) ||
+          Number(right.isOwned === true) - Number(left.isOwned === true) ||
+          presenceRank(left.presence) - presenceRank(right.presence) ||
+          (left.pubkey ?? "").localeCompare(right.pubkey ?? "")
+        );
+      });
+    indexes.forEach((index, i) => {
+      ranked[index] = sorted[i];
+    });
+  }
+  return ranked;
 }
