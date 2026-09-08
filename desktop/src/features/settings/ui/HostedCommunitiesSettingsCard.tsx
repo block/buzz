@@ -30,7 +30,7 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { safeNpub } from "@/shared/lib/nostrUtils";
+import { canonicalNpub, UNAVAILABLE_KEY_LABEL } from "@/shared/lib/pubkey";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
   AlertDialog,
@@ -213,7 +213,13 @@ export function HostedCommunitiesSettingsCard() {
       localPubkey &&
       boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
   );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  // Identity rows display npubs; an unencodable or non-identity-length key
+  // renders the neutral label instead of leaking raw hex. The hosted metadata
+  // is server-provided, so its npub spelling is validated too — a malformed
+  // hosted npub never renders raw and falls back to the hex-derived npub.
+  const localNpub = localPubkey ? canonicalNpub(localPubkey) : null;
+  const boundNpub = boundPubkey ? canonicalNpub(boundPubkey) : null;
+  const hostedNpub = identity?.npub ? canonicalNpub(identity.npub) : null;
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -522,12 +528,14 @@ export function HostedCommunitiesSettingsCard() {
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">Account uses</dt>
                       <dd className="font-mono">
-                        {identity.npub ?? boundPubkey}
+                        {hostedNpub ?? boundNpub ?? UNAVAILABLE_KEY_LABEL}
                       </dd>
                     </div>
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">This device</dt>
-                      <dd className="font-mono">{localNpub ?? localPubkey}</dd>
+                      <dd className="font-mono">
+                        {localNpub ?? UNAVAILABLE_KEY_LABEL}
+                      </dd>
                     </div>
                   </dl>
                 </div>
@@ -548,8 +556,8 @@ export function HostedCommunitiesSettingsCard() {
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" /> Buzz
                 identity connected
-                {identity.npub ? (
-                  <span className="font-mono text-xs">{identity.npub}</span>
+                {hostedNpub ? (
+                  <span className="font-mono text-xs">{hostedNpub}</span>
                 ) : null}
               </div>
               <UnpairIdentityButton
