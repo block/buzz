@@ -79,18 +79,38 @@ enum Bech32 {
     return bytes
   }
 
-  /// The canonical npub for a public key supplied as 64-digit hex or as an
-  /// existing npub (including the uppercase bech32 form, which BIP-173
-  /// decoders must accept). Returns nil for anything else; callers must fall
-  /// back to a neutral label rather than raw key material.
+  /// The canonical npub for a public key supplied as exactly 64 ASCII hex
+  /// digits or as an existing npub (including the uppercase bech32 form,
+  /// which BIP-173 decoders must accept). Returns nil for anything else;
+  /// callers must fall back to a neutral label rather than raw key material.
   static func canonicalNpub(from identifier: String) -> String? {
-    if let bytes = VerifiedNostrEvent.hexBytes(identifier.lowercased()), bytes.count == 32 {
+    if isHexKey(identifier),
+      let bytes = VerifiedNostrEvent.hexBytes(identifier.lowercased()), bytes.count == 32
+    {
       return npub(from: bytes)
     }
     return npubBytes(from: identifier).flatMap { npub(from: $0) }
   }
 
   // MARK: Internals
+
+  /// Whether `value` is exactly 64 ASCII hex digits (0-9, A-F, a-f).
+  ///
+  /// `VerifiedNostrEvent.hexBytes` parses pairs with `UInt8(_:radix: 16)`,
+  /// which also accepts a leading sign — "+a" parses as 10 and "-0" as 0 —
+  /// so strings like "+a"×32 would otherwise decode to 32 bytes. The hex
+  /// branch of `canonicalNpub` gates on this literal key shape before any
+  /// hex parsing or allocation; every other input must arrive as a strictly
+  /// checksummed npub.
+  private static func isHexKey(_ value: String) -> Bool {
+    guard value.count == 64 else { return false }
+    return value.allSatisfy { character in
+      guard let ascii = character.asciiValue else { return false }
+      return (48...57).contains(ascii)  // 0-9
+        || (65...70).contains(ascii)  // A-F
+        || (97...102).contains(ascii)  // a-f
+    }
+  }
 
   private static func isPrintableASCII(_ string: String) -> Bool {
     !string.isEmpty && string.allSatisfy { (33...126).contains($0.asciiValue ?? 0) }

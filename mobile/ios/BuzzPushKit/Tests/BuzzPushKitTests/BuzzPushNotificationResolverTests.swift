@@ -171,6 +171,25 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.senderPubkey, "author-pubkey")
   }
 
+  func testDecodeResolutionUsesNeutralIdentityForSignedChunkSenderKey() {
+    // Impostors like "+a"×32 parse through radix-16 hex pairs ("+a"→10,
+    // "-0"→0) without being 64 ASCII hex digits: the presentation contract
+    // still demands the neutral identity, while internal payload fields —
+    // sender pubkey, thread, body — pass through untouched.
+    for impostor in [String(repeating: "+a", count: 32), String(repeating: "-0", count: 32)] {
+      let result = BuzzPushNotificationResolver.decodeResolution(
+        events: [event(pubkey: impostor, content: "Preview")],
+        community: community()
+      )
+
+      XCTAssertEqual(result?.0.title, "Someone", "impostor: \(impostor)")
+      XCTAssertEqual(result?.0.body, "Preview", "impostor: \(impostor)")
+      XCTAssertEqual(result?.0.subtitle, "Community", "impostor: \(impostor)")
+      XCTAssertEqual(result?.0.senderPubkey, impostor, "impostor: \(impostor)")
+      XCTAssertEqual(result?.0.threadIdentifier, "community-id", "impostor: \(impostor)")
+    }
+  }
+
   func testShortPubkeyRendersCompactNpub() {
     // First 8 and last 4 characters of the entire npub string.
     XCTAssertEqual(
@@ -195,6 +214,9 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       "author-pubkey",
       String(repeating: "a", count: 63),
       String(repeating: "ab", count: 33),
+      // Signed radix-16 chunks ("+a"→10, "-0"→0) are not literal hex keys.
+      String(repeating: "+a", count: 32),
+      String(repeating: "-0", count: 32),
       // Valid npub with a mutated checksum character.
       "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujma",
       // Valid checksums that are not keys: wrong payload length or hrp.

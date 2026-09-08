@@ -53,6 +53,13 @@ final class Bech32Tests: XCTestCase {
       Bech32.canonicalNpub(
         from: "NPUB14F8USEJL26TWX0DHUXJH9CAS7KEAV9VR0V8NVTWTRJQX3VYCC76QQH9NSY"),
       "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy")
+    // Letter case within a hex key stays valid input; digits are caseless,
+    // so mixed-case letters still canonicalize to the lowercase npub.
+    let mixedCaseHex = String(
+      Self.npubVectors[0].hex.enumerated().map {
+        $0.offset.isMultiple(of: 2) ? $0.element : Character($0.element.uppercased())
+      })
+    XCTAssertEqual(Bech32.canonicalNpub(from: mixedCaseHex), Self.npubVectors[0].npub)
   }
 
   func testCanonicalNpubRejectsInvalidAndLookalikeKeys() {
@@ -65,6 +72,11 @@ final class Bech32Tests: XCTestCase {
       // Hex that is not a 32-byte key.
       String(repeating: "ab", count: 31),
       String(repeating: "ab", count: 33),
+      // Signed radix-16 chunks ("+a"→10, "-0"→0) parse via UInt8(_:radix:)
+      // but are not literal ASCII hex digits, so never 32-byte keys.
+      String(repeating: "+a", count: 32),
+      String(repeating: "+A", count: 32),
+      String(repeating: "-0", count: 32),
       // Valid npub with the checksum's final character mutated.
       "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujma",
       // Mixed case is never valid bech32.
