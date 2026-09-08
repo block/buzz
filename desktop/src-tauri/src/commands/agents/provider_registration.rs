@@ -1,5 +1,7 @@
 //! Capability-gated provider registration and NIP-OA activation.
 
+use std::{future::Future, sync::Arc};
+
 use tauri::AppHandle;
 
 use crate::{
@@ -100,8 +102,53 @@ fn attestation_agent(
     })
 }
 
-fn attestation_pending_after(was_pending: bool, succeeded: bool) -> bool {
-    was_pending && !succeeded
+fn provider_operation_lock(
+    state: &AppState,
+    pubkey: &str,
+) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+    let mut locks = state
+        .provider_operation_locks
+        .lock()
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::clone(
+        locks
+            .entry(pubkey.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    ))
+}
+
+fn attestation_state_after(
+    was_pending: bool,
+    result: &Result<(), String>,
+) -> (bool, Option<String>) {
+    (
+        was_pending && result.is_err(),
+        result.as_ref().err().cloned(),
+    )
+}
+
+async fn run_serialized_provider_operation<
+    T,
+    ReachedBoundary,
+    BoundaryFuture,
+    Operation,
+    OperationFuture,
+>(
+    state: &AppState,
+    pubkey: &str,
+    reached_boundary: ReachedBoundary,
+    operation: Operation,
+) -> Result<T, String>
+where
+    ReachedBoundary: FnOnce() -> BoundaryFuture,
+    BoundaryFuture: Future<Output = ()>,
+    Operation: FnOnce() -> OperationFuture,
+    OperationFuture: Future<Output = Result<T, String>>,
+{
+    let operation_lock = provider_operation_lock(state, pubkey)?;
+    reached_boundary().await;
+    let _operation_guard = operation_lock.lock().await;
+    operation().await
 }
 
 /// Attest the saved record in one community and persist a visible error if
@@ -118,7 +165,38 @@ pub(super) async fn attest(
     provider_config: &serde_json::Value,
     community_relay: &ScopedWorkspaceRelay,
 ) -> Result<(), String> {
-    let (auth_tag, was_pending) = {
+    run_serialized_provider_operation(
+        state,
+        pubkey,
+        || async {},
+        || async {
+            attest_serialized(
+                app,
+                state,
+                pubkey,
+                provider_id,
+                provider_config,
+                community_relay,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Run while holding the per-agent provider-operation fence. Snapshot,
+/// provider I/O, and result persistence must stay inside this one operation;
+/// otherwise a slower failure can land after a newer success and reopen global
+/// attestation while overwriting its error state.
+async fn attest_serialized(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    provider_id: &str,
+    provider_config: &serde_json::Value,
+    community_relay: &ScopedWorkspaceRelay,
+) -> Result<(), String> {
+    let auth_tag = {
         let _guard = state
             .managed_agents_store_lock
             .lock()
@@ -128,14 +206,11 @@ pub(super) async fn attest(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        (
-            record
-                .auth_tag
-                .clone()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| format!("agent {pubkey} has no auth tag"))?,
-            record.provider_attestation_pending,
-        )
+        record
+            .auth_tag
+            .clone()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("agent {pubkey} has no auth tag"))?
     };
 
     let binary = resolve_provider_binary(provider_id)?;
@@ -153,11 +228,13 @@ pub(super) async fn attest(
     let mut records = load_managed_agents(app)?;
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     record.updated_at = now_iso();
-    record.last_error = result.as_ref().err().cloned();
+    let (pending, last_error) =
+        attestation_state_after(record.provider_attestation_pending, &result);
+    record.last_error = last_error;
     // A failed first attest leaves activation pending. A later community's
     // enrollment failure must not make an already activated agent globally
     // undeployed; the scoped Start call still returns the failure to its caller.
-    record.provider_attestation_pending = attestation_pending_after(was_pending, result.is_ok());
+    record.provider_attestation_pending = pending;
     save_managed_agents(app, &records)?;
     result
 }
@@ -165,7 +242,10 @@ pub(super) async fn attest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::build_app_state;
     use crate::relay::bind_expected_relay_scope;
+    use tokio::sync::{Barrier, Notify};
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn attestation_payload_binds_the_target_community() {
@@ -185,12 +265,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn concurrent_attestation_attempts_are_serialized_per_agent() {
+        let state = Arc::new(build_app_state());
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let first_state = Arc::clone(&state);
+        let first_entered_task = Arc::clone(&first_entered);
+        let release_first_task = Arc::clone(&release_first);
+        let first = tokio::spawn(async move {
+            run_serialized_provider_operation(
+                &first_state,
+                "agent-pubkey",
+                || async {},
+                || async {
+                    first_entered_task.notify_one();
+                    release_first_task.notified().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        });
+        first_entered.notified().await;
+
+        let second_at_boundary = Arc::new(Barrier::new(2));
+        let second_entered = Arc::new(Notify::new());
+        let second_state = Arc::clone(&state);
+        let second_at_boundary_task = Arc::clone(&second_at_boundary);
+        let second_entered_task = Arc::clone(&second_entered);
+        let second = tokio::spawn(async move {
+            run_serialized_provider_operation(
+                &second_state,
+                "agent-pubkey",
+                || async {
+                    second_at_boundary_task.wait().await;
+                },
+                || async {
+                    second_entered_task.notify_one();
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        second_at_boundary.wait().await;
+        assert!(
+            timeout(Duration::from_millis(100), second_entered.notified())
+                .await
+                .is_err()
+        );
+        release_first.notify_one();
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
     #[test]
-    fn later_community_failure_does_not_reopen_global_attestation() {
-        assert!(attestation_pending_after(true, false));
-        assert!(!attestation_pending_after(true, true));
-        assert!(!attestation_pending_after(false, false));
-        assert!(!attestation_pending_after(false, true));
+    fn serialized_attestation_results_preserve_the_authoritative_completion() {
+        let success = Ok(());
+        let failure = Err("later community failed".to_string());
+
+        let (pending, error) = attestation_state_after(true, &success);
+        assert!(!pending);
+        assert_eq!(error, None);
+        let (pending, error) = attestation_state_after(pending, &failure);
+        assert!(!pending);
+        assert_eq!(error.as_deref(), Some("later community failed"));
+
+        let (pending, error) = attestation_state_after(true, &failure);
+        assert!(pending);
+        assert_eq!(error.as_deref(), Some("later community failed"));
+        let (pending, error) = attestation_state_after(pending, &success);
+        assert!(!pending);
+        assert_eq!(error, None);
     }
 
     #[test]

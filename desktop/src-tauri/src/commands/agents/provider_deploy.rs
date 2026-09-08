@@ -53,7 +53,7 @@ pub(crate) async fn deploy_to_provider(
 ) -> Result<(), String> {
     let deploy_lock = {
         let mut locks = state
-            .provider_deploy_locks
+            .provider_operation_locks
             .lock()
             .map_err(|error| error.to_string())?;
         Arc::clone(
