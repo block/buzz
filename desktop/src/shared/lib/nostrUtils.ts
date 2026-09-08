@@ -31,7 +31,9 @@ const HEX_PUBKEY_REGEX = /^[0-9a-f]{64}$/;
  * anything else (does NOT throw — intended for live form validation).
  *
  * The input is trimmed first; surrounding whitespace from copy-paste is
- * tolerated.
+ * tolerated. The npub payload must decode to exactly a 64-char hex identity
+ * key: `npubEncode` also encodes degenerate short payloads (even `""`), which
+ * are never valid identities.
  */
 export function parsePubkeyInput(input: string): string | null {
   const trimmed = input.trim().toLowerCase();
@@ -41,7 +43,7 @@ export function parsePubkeyInput(input: string): string | null {
   if (trimmed.startsWith("npub1")) {
     try {
       const decoded = decode(trimmed);
-      if (decoded.type === "npub") {
+      if (decoded.type === "npub" && HEX_PUBKEY_REGEX.test(decoded.data)) {
         return decoded.data;
       }
     } catch {

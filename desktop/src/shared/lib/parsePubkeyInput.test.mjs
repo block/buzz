@@ -42,6 +42,13 @@ describe("parsePubkeyInput", () => {
     assert.equal(parsePubkeyInput(`${HEX}0`), null);
   });
 
+  it("rejects degenerate npubs whose payload is not a 64-char identity", () => {
+    // `npubEncode` happily encodes short payloads with valid checksums —
+    // those are not identity keys and must never bind as one.
+    assert.equal(parsePubkeyInput("npub1m6kmamcvty5gd"), null);
+    assert.equal(parsePubkeyInput("npub106246s"), null);
+  });
+
   it("rejects non-hex non-npub input", () => {
     assert.equal(parsePubkeyInput(""), null);
     assert.equal(parsePubkeyInput("alice"), null);

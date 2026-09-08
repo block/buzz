@@ -189,6 +189,10 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieNameTrigger.click();
   await expect(charlieKeyPopover).toBeVisible();
   await expect(charliePubkey).toContainText("npub1");
+  // The shared PubKey widget is npub-only — no hex text or hex copy row in
+  // the widget itself. (D1a boundary: the chip's legacy raw-hex popover line
+  // is removed with the chip change in the descendant slice.)
+  await expect(charliePubkey).not.toContainText(TEST_IDENTITIES.charlie.pubkey);
   await expect(charlieKeyPopover).toContainText(TEST_IDENTITIES.charlie.pubkey);
   await waitForAnimations(page);
   await page.getByTestId("new-message-page").screenshot({
