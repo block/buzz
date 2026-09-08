@@ -7,7 +7,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  shouldStartManagedAgent,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -428,7 +428,7 @@ export function ProfileSummaryView({
           agentStartBlockReason={
             managedAgent
               ? agentPresenceStartBlockReason(
-                  isManagedAgentActive(managedAgent),
+                  !shouldStartManagedAgent(managedAgent),
                   presenceStatus,
                 )
               : undefined
@@ -439,8 +439,7 @@ export function ProfileSummaryView({
               : undefined
           }
           agentActionLive={
-            managedAgent?.status === "running" ||
-            managedAgent?.status === "deployed"
+            managedAgent ? !shouldStartManagedAgent(managedAgent) : false
           }
           onAgentPrimaryAction={
             isOwner === true && managedAgent

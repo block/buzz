@@ -31,7 +31,9 @@ pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
 mod pending;
 #[cfg(test)]
 use pending::build_agent_archive_request;
-pub(crate) use pending::{retain_managed_agent_pending, tombstone_managed_agent_pending};
+pub(crate) use pending::{
+    retain_managed_agent_pending, retain_managed_agent_pending_at, tombstone_managed_agent_pending,
+};
 
 /// Build a summary from fresh disk state (personas, teams, global config).
 /// For one-shot command paths only — the 5s list poll calls
@@ -348,12 +350,12 @@ pub async fn create_managed_agent(
     // provider negotiation or registration can await. A workspace switch
     // writes those values separately; reading without the fence could pair one
     // community with another community's owner authorization.
-    let (attestation_relay, owner_keys) = {
+    let (attestation_relay, owner_keys, creation_retention_scope) = {
         let _workspace_guard = state.workspace_apply_lock.lock().await;
-        (
-            crate::relay::bind_expected_relay_scope(None, relay_ws_url_with_override(&state))?,
-            state.signing_keys()?,
-        )
+        let scope = crate::managed_agents::retention::active_retention_scope(&app, &state)?;
+        let relay = crate::relay::bind_expected_relay_scope(None, scope.relay_url.clone())?;
+        let owner_keys = scope.owner_keys.clone();
+        (relay, owner_keys, scope)
     };
     let name = input.name.trim().to_string();
     let requested_persona_id = input
@@ -799,7 +801,9 @@ pub async fn create_managed_agent(
         // Publish the agent to the relay. Inside the Phase-3 lock, after save,
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
-        retain_managed_agent_pending(&app, &state, record);
+        if let Err(error) = retain_managed_agent_pending_at(&creation_retention_scope, record) {
+            eprintln!("buzz-desktop: agent-retain: {error}");
+        }
         // Effective owner-authored description for the kind:0 `about`.
         let profile_about = crate::managed_agents::record_effective_description(record, &personas);
         (
@@ -860,8 +864,10 @@ pub async fn create_managed_agent(
     } else {
         None
     };
-    profile_sync_error =
-        super::agent_models::flush_managed_agent_policy(&app, &state, profile_sync_error).await;
+    profile_sync_error = super::agent_models::merge_managed_agent_policy_error(
+        profile_sync_error,
+        super::agent_models::flush_managed_agent_policy_at(&state, &creation_retention_scope).await,
+    );
 
     let spawn_error = if provider_uses_registration {
         let BackendKind::Provider { ref id, ref config } = input.backend else {

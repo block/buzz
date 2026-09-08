@@ -144,13 +144,24 @@ pub(crate) fn stamp_record_updated_at(
     record.updated_at = crate::util::now_iso();
 }
 
-/// Flush a retained managed-agent policy, preserving any earlier profile error.
-pub(crate) async fn flush_managed_agent_policy(
-    app: &AppHandle,
+pub(crate) async fn flush_managed_agent_policy_at(
     state: &AppState,
+    scope: &crate::managed_agents::retention::RetentionScope,
+) -> Result<u32, String> {
+    crate::managed_agents::persona_events::flush_pending_events_at(
+        &scope.db_path,
+        state,
+        &scope.relay_url,
+        &scope.owner_keys,
+    )
+    .await
+}
+
+pub(crate) fn merge_managed_agent_policy_error(
     existing_error: Option<String>,
+    result: Result<u32, String>,
 ) -> Option<String> {
-    match crate::managed_agents::persona_events::flush_active_pending_events(app, state).await {
+    match result {
         Ok(_) => existing_error,
         Err(error) => Some(match existing_error {
             Some(profile_error) => {

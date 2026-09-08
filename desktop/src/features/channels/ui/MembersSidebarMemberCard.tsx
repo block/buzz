@@ -17,7 +17,8 @@ import {
 
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  needsProviderEnrollmentRetry,
+  shouldStartManagedAgent,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -227,16 +228,18 @@ export function MembersSidebarMemberCard({
                   ? agentCommunityAvailability(managedAgentRuntime) === "Here"
                     ? "default"
                     : "secondary"
-                  : managedAgent && isManagedAgentActive(managedAgent)
+                  : managedAgent && !shouldStartManagedAgent(managedAgent)
                     ? "default"
                     : "secondary"
               }
             >
               {managedAgentRuntime
                 ? agentCommunityAvailability(managedAgentRuntime)
-                : managedAgent && isManagedAgentActive(managedAgent)
-                  ? "Running"
-                  : "Stopped"}
+                : managedAgent && needsProviderEnrollmentRetry(managedAgent)
+                  ? "Enrollment failed"
+                  : managedAgent && !shouldStartManagedAgent(managedAgent)
+                    ? "Running"
+                    : "Stopped"}
             </Badge>
             {managedAgent ? (
               <Badge
@@ -353,7 +356,9 @@ function MemberActionsMenu({
 
   const startBlockReason = managedAgent
     ? agentPresenceStartBlockReason(
-        pairAction ? pairAction === "stop" : isManagedAgentActive(managedAgent),
+        pairAction
+          ? pairAction === "stop"
+          : !shouldStartManagedAgent(managedAgent),
         availability,
       )
     : undefined;
@@ -530,7 +535,7 @@ function getPairActionIcon(action: ManagedAgentPairAction) {
 }
 
 function getManagedAgentActionIcon(agent: ManagedAgent) {
-  if (isManagedAgentActive(agent)) {
+  if (!shouldStartManagedAgent(agent)) {
     return <Square className="h-4 w-4" />;
   }
 

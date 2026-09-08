@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyReusableAgentAccessPolicy } from "./channelAgents.ts";
+import {
+  applyReusableAgentAccessPolicy,
+  attachManagedAgentToChannel,
+} from "./channelAgents.ts";
 
 const AGENT_PUBKEY = "a".repeat(64);
 const ALLOWED_PUBKEY = "b".repeat(64);
@@ -39,6 +42,7 @@ function rawAgent(overrides = {}) {
     log_path: null,
     start_on_app_launch: false,
     backend: { type: "local" },
+    key_custody: "local",
     backend_agent_id: null,
     respond_to: "owner-only",
     respond_to_allowlist: [],
@@ -146,4 +150,72 @@ test("the write is reported even when the update hands back an unchanged record"
   assert.equal(result.wrote, true);
   assert.equal(result.agent.respondTo, agent.respondTo);
   assert.deepEqual(result.agent.respondToAllowlist, agent.respondToAllowlist);
+});
+
+test("attaching a deployed provider-custodied agent enrolls the active community", async (t) => {
+  const calls = [];
+  t.after(
+    installTauriInvoke((command, args) => {
+      calls.push([command, args]);
+      if (command === "add_channel_members") {
+        return Promise.resolve({ added: [], errors: [] });
+      }
+      if (command === "start_managed_agent") {
+        return Promise.resolve(
+          rawAgent({
+            backend: { type: "provider", id: "remote", config: {} },
+            backend_agent_id: "agent-123",
+            key_custody: "provider",
+            status: "deployed",
+          }),
+        );
+      }
+      throw new Error(`unexpected command: ${command}`);
+    }),
+  );
+
+  const providerAgent = managedAgent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "deployed",
+  });
+  const result = await attachManagedAgentToChannel("community-b", {
+    agent: providerAgent,
+  });
+
+  assert.equal(result.started, true);
+  assert.deepEqual(
+    calls.map(([command]) => command),
+    ["add_channel_members", "start_managed_agent"],
+  );
+});
+
+test("a failed later-community enrollment can be retried by attaching again", async (t) => {
+  let starts = 0;
+  t.after(
+    installTauriInvoke((command) => {
+      if (command === "add_channel_members") {
+        return Promise.resolve({ added: [], errors: [] });
+      }
+      if (command === "start_managed_agent") {
+        starts += 1;
+        if (starts === 1) return Promise.reject(new Error("enrollment failed"));
+        return Promise.resolve(rawAgent());
+      }
+      throw new Error(`unexpected command: ${command}`);
+    }),
+  );
+  const providerAgent = managedAgent({
+    backend: { type: "provider", id: "remote", config: {} },
+    keyCustody: "provider",
+    status: "deployed",
+  });
+
+  await assert.rejects(
+    attachManagedAgentToChannel("community-b", { agent: providerAgent }),
+    /enrollment failed/,
+  );
+  await attachManagedAgentToChannel("community-b", { agent: providerAgent });
+  assert.equal(starts, 2);
 });

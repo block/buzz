@@ -12,6 +12,7 @@ import {
 import {
   respawnManagedAgentWithRules,
   isManagedAgentActive,
+  shouldStartManagedAgent,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -187,7 +188,7 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent)) {
+      if (!shouldStartManagedAgent(agent)) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,

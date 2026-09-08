@@ -27,19 +27,30 @@ pub(crate) fn retain_managed_agent_pending(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {
-    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
-
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let conn = open_retention_db(&scope.db_path)?;
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        retain_managed_agent_pending_at(&scope, record)
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
     }
+}
+
+/// Retain a managed-agent projection in a scope captured before asynchronous
+/// work began. Creation uses this after provider registration so a workspace
+/// switch during that call cannot redirect the new agent into another
+/// community's retention database or signing identity.
+pub(crate) fn retain_managed_agent_pending_at(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+
+    let conn = open_retention_db(&scope.db_path)?;
+    // Shared engine with the boot-time reconcile: projection content diff
+    // (no republish for runtime-only churn) + monotonic created_at bump
+    // past the retained head (NIP-AP step 3).
+    retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
 }
 
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
@@ -228,12 +239,92 @@ mod tests {
     use super::*;
     use crate::managed_agents::retention::{
         get_pending_sync, get_retained_event, open_retention_db, retain_event, RetainedEvent,
+        RetentionScope,
     };
+    use crate::managed_agents::AgentDefinition;
     use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+    use std::collections::BTreeMap;
 
     // A valid 32-byte x-only pubkey hex — the folded archive request derives an
     // owner auth tag, which parses `agent_pubkey`, so it must be well-formed.
     const AGENT_PUBKEY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn agent_record() -> ManagedAgentRecord {
+        let mut record = AgentDefinition {
+            id: "provider-agent".to_string(),
+            display_name: "Provider Agent".to_string(),
+            avatar_url: None,
+            description: None,
+            system_prompt: "Help the team".to_string(),
+            runtime: Some("remote".to_string()),
+            model: None,
+            provider: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
+            env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            parallelism: None,
+            created_at: "2026-09-09T00:00:00Z".to_string(),
+            updated_at: "2026-09-09T00:00:00Z".to_string(),
+        }
+        .into_agent_record();
+        record.pubkey = AGENT_PUBKEY.to_string();
+        record
+    }
+
+    #[test]
+    fn delayed_registration_completion_retains_only_in_pinned_creation_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner_a = nostr::Keys::generate();
+        let owner_b = nostr::Keys::generate();
+        let scope_a = RetentionScope {
+            db_path: dir.path().join("community-a.db"),
+            relay_url: "wss://community-a.example".to_string(),
+            owner_keys: owner_a.clone(),
+        };
+        let scope_b = RetentionScope {
+            db_path: dir.path().join("community-b.db"),
+            relay_url: "wss://community-b.example".to_string(),
+            owner_keys: owner_b.clone(),
+        };
+
+        // Registration began in A. B represents the active workspace by the
+        // time the delayed provider call completes; the production completion
+        // seam receives the captured A scope rather than resolving B.
+        retain_managed_agent_pending_at(&scope_a, &agent_record()).unwrap();
+
+        let a = open_retention_db(&scope_a.db_path).unwrap();
+        assert!(
+            get_retained_event(
+                &a,
+                KIND_MANAGED_AGENT,
+                &owner_a.public_key().to_hex(),
+                AGENT_PUBKEY,
+            )
+            .unwrap()
+            .is_some(),
+            "the created projection stays in community A"
+        );
+        let b = open_retention_db(&scope_b.db_path).unwrap();
+        assert!(
+            get_retained_event(
+                &b,
+                KIND_MANAGED_AGENT,
+                &owner_b.public_key().to_hex(),
+                AGENT_PUBKEY,
+            )
+            .unwrap()
+            .is_none(),
+            "the created projection must not follow a later switch to B"
+        );
+    }
 
     /// Seed a retained 30177 agent head dated `created_at` seconds since epoch.
     /// The tombstone helper reads only the head's `created_at`, so the content

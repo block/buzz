@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
+  shouldStartManagedAgent,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -34,12 +36,41 @@ function agent(overrides = {}) {
     logPath: null,
     startOnAppLaunch: false,
     backend: { type: "local" },
+    keyCustody: "local",
     backendAgentId: null,
     respondTo: "owner-only",
     respondToAllowlist: [],
     ...overrides,
   };
 }
+
+test("a failed later-community enrollment exposes a retry without revoking deployment", () => {
+  const providerAgent = agent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "deployed",
+    lastError: "provider attest failed: enrollment failed",
+  });
+
+  assert.equal(shouldStartManagedAgent(providerAgent), true);
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(providerAgent),
+    "Retry enrollment",
+  );
+});
+
+test("a healthy provider-custodied deployment retains its shutdown action", () => {
+  const providerAgent = agent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "deployed",
+  });
+
+  assert.equal(shouldStartManagedAgent(providerAgent), false);
+  assert.equal(getManagedAgentPrimaryActionLabel(providerAgent), "Shutdown");
+});
 
 test("relay-mesh agents delegate start to the backend preflight", async () => {
   const meshAgent = agent({
