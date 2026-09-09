@@ -262,9 +262,49 @@ bool _isImageViewerHeroEnabled(WidgetTester tester) {
   return tester.widget<HeroMode>(_imageViewerHeroMode()).enabled;
 }
 
+/// Whether any placeholder span in the tree contains a further placeholder.
+///
+/// This is the shape that renders as nothing on iOS: a token component's
+/// `WidgetSpan` nested inside the `WidgetSpan` a link is already drawn in.
+/// Each placeholder becomes its own paragraph, so a paragraph that both sits
+/// under another paragraph's placeholder and holds a placeholder of its own is
+/// the defect.
+bool _hasNestedPlaceholder(WidgetTester tester) {
+  for (final rich in tester.widgetList<RichText>(_anyRichText())) {
+    var placeholders = 0;
+    rich.text.visitChildren((span) {
+      if (span is PlaceholderSpan) placeholders++;
+      return true;
+    });
+    if (placeholders == 0) continue;
+    // A paragraph holding a placeholder is fine on its own — the message body
+    // does that for every link. It is only a defect when that paragraph is
+    // itself inside another paragraph's placeholder.
+    final ancestors = find.ancestor(
+      of: find.byWidget(rich),
+      matching: _anyRichText(),
+    );
+    if (ancestors.evaluate().isNotEmpty) return true;
+  }
+  return false;
+}
+
+/// Matches every `RichText` in the tree, including subclasses.
+///
+/// gpt_markdown renders body paragraphs through `BidiRichText`, a `RichText`
+/// subclass. `find.byType` matches the exact runtime type only, so it silently
+/// skips those paragraphs — an assertion that text is rendered then fails, and
+/// an assertion that text is absent then passes for the wrong reason.
+Finder _anyRichText() {
+  return find.byWidgetPredicate(
+    (widget) => widget is RichText,
+    description: 'any RichText (including subclasses)',
+  );
+}
+
 /// Extracts all plain text from all RichText widgets in the tree.
 String _allRichText(WidgetTester tester) {
-  final richTexts = tester.widgetList<RichText>(find.byType(RichText));
+  final richTexts = tester.widgetList<RichText>(_anyRichText());
   return richTexts.map((rt) => rt.text.toPlainText()).join('\n');
 }
 
@@ -279,7 +319,7 @@ Finder _findRich(String text) {
 /// Checks that the given text appears as bold (fontWeight >= w600) in some
 /// TextSpan within any RichText widget.
 bool _hasBoldSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -293,7 +333,7 @@ bool _hasBoldSpan(WidgetTester tester, String text) {
 }
 
 bool _hasItalicSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(rt.text, text, (s) => s.fontStyle == FontStyle.italic)) {
       return true;
     }
@@ -302,7 +342,7 @@ bool _hasItalicSpan(WidgetTester tester, String text) {
 }
 
 bool _hasStrikethroughSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -2780,6 +2820,89 @@ Photos
 
         expect(_allRichText(tester), contains('https://example.com/docs#frag'));
         expect(find.text('#frag'), findsNothing);
+      });
+    });
+
+    // Regression: https://github.com/block/buzz/issues/6124
+    //
+    // gpt_markdown renders a link's label by recursing with
+    // `MarkdownScope.linkLabel`. A token component that claims the label
+    // returns a WidgetSpan, which then sits inside the link's own WidgetSpan
+    // — and a placeholder nested in a placeholder does not paint on iOS, so
+    // the whole link disappears. The components opt out of that scope; these
+    // tests fail if any of the `scopes` overrides is removed.
+    group('authored link labels', () {
+      testWidgets('a #channel label stays link text, not a channel pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [#2959](https://example.com/x) for details.',
+              // Known name and generic token both reach the component; use the
+              // known one so the pill would definitely render if not excluded.
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('#2959'), findsOneWidget);
+        expect(find.byIcon(LucideIcons.hash), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('an @mention label stays link text, not a mention pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask [@Alice](https://example.com/x) about it.',
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        expect(_findRich('@Alice'), findsOneWidget);
+        // The pill splits the label into a separate '@' and name; the link
+        // must not.
+        expect(find.text('@'), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('a label with no token renders unchanged', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [ticket 2959](https://example.com/x) for details.',
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('ticket 2959'), findsOneWidget);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('tokens outside a link label still render as pills', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See #2959 and @Alice, plus [#2959](https://x.test/y).',
+              channelNames: {'2959': 'ch-id-1'},
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        // Excluding the link-label scope must not disable the components
+        // everywhere else: the bare tokens keep their pills.
+        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
+        expect(_findRich('#2959'), findsOneWidget);
       });
     });
 
