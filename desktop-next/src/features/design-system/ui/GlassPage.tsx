@@ -18,7 +18,12 @@ function ChromePill() {
         <Tabs.Indicator />
       </Tabs.List>
       {items.map((label) => (
-        <Tabs.Panel key={label} value={label} className="bui-sr-only">
+        <Tabs.Panel
+          key={label}
+          value={label}
+          tabIndex={-1}
+          className="bui-sr-only"
+        >
           {label} surface selected in this material preview.
         </Tabs.Panel>
       ))}

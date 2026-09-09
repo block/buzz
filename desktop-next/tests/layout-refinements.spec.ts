@@ -70,6 +70,7 @@ test("Glass navigation shares selection motion and keyboard semantics", async ({
   await page.goto("/design/glass");
   const tabs = page.getByRole("tablist", { name: "Glass navigation preview" });
   const indicator = tabs.locator(".bui-tab-indicator");
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("tabindex", "-1");
   await expect(
     tabs.getByRole("tab", { name: "Messages", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
