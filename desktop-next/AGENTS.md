@@ -196,10 +196,8 @@ time as the product repeats something — see DESIGN.md § Components.
 
 Deliberately, so nobody assumes it was forgotten:
 
-- **Spacing, radius, and motion tokens.** Their `/design` pages state what is
-  still to decide rather than pretending to a system. Typography has landed;
-  spacing is next.
-- **Any product component.** No Button, no Dialog, no input layer.
+- **Product integration.** Tokens and shared primitives are built before product surfaces.
+- **Relay-backed product workflows.** The shared component catalog uses local fixtures.
 - **Tauri.** This is a web app for now; the native shell comes with the app shell.
 - **Relay, auth, event handling.** None of it. When it arrives it comes from the
   shared Rust crates, not a reimplementation.
@@ -223,3 +221,7 @@ Two rules that matter from day one:
 - **Do not create a capability speculatively.** The bar is a durable product
   identity and real composition pressure from two surfaces. Building a clean
   codebase is not a licence to relax it.
+
+## Portable foundations
+
+Color and typography source live in packages/design-tokens/src; desktop style files import them. The local registry re-exports the package registry. Geometry and motion derive from foundations.ts through build.mjs. Shared components are intentionally built before product adoption; the original repeated-use threshold does not apply to this foundational catalog.

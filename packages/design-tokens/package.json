@@ -1,0 +1,24 @@
+{
+  "name": "@buzz/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    "./tokens.css": "./src/tokens.css",
+    "./typography.css": "./src/typography.css",
+    "./foundations.css": "./src/foundations.css",
+    "./registry": "./src/registry.ts",
+    "./foundations": "./src/foundations.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "devDependencies": {
+    "tailwindcss": "4.3.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

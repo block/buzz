@@ -5,14 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build && tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "lint": "biome lint .",
-    "check": "biome check . && node scripts/check-type.mjs && node scripts/check-contrast.mjs",
+    "check": "biome check . && node scripts/check-type.mjs && node scripts/check-contrast.mjs && pnpm check:tokens && pnpm test",
     "format": "biome format --write .",
     "check:type": "node scripts/check-type.mjs",
-    "check:contrast": "node scripts/check-contrast.mjs"
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:tokens": "node ../packages/design-tokens/build.mjs --check",
+    "tokens:build": "node ../packages/design-tokens/build.mjs",
+    "test": "pnpm --filter @buzz/design-tokens test"
   },
   "dependencies": {
     "@base-ui-components/react": "1.0.0-rc.0",
@@ -20,7 +23,8 @@
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@tanstack/react-router": "^1.168.10",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "@buzz/design-tokens": "workspace:*"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.0",

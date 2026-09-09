@@ -1,0 +1,231 @@
+/*
+ * Buzz typography tokens.
+ *
+ * Same three layers as colour, and only the role layer is ever used when
+ * building a screen:
+ *
+ *   LAYER 1  private ramps    --type-size-*, --type-leading-*, --type-tracking-*
+ *   LAYER 2  public roles     --text-body, --text-title, ...
+ *   LAYER 3  components       text-body, text-title  (Tailwind utilities)
+ *
+ * Rules, matching the colour system:
+ *   - Literal sizes exist only in the ramp. A role points at a step; a component
+ *     points at a role. No component holds a size.
+ *   - A role carries its whole typographic setting — size, line height, letter
+ *     spacing, weight — because those four are one decision, not four. Tailwind
+ *     v4 supports this via the `--text-<name>--<property>` convention, so
+ *     `text-body` alone produces correctly set text.
+ *   - Every size is relative. Nothing here may be expressed in px: fixed pixel
+ *     text freezes against zoom and breaks the person's font-size preference.
+ *     This is the one rule the existing client already learned the hard way.
+ *
+ * Naming note: colour roles are also spelled `--text-*` (`--text-primary`) but
+ * are registered in Tailwind's `--color-*` namespace, while sizes register in
+ * `--text-*`. So `text-primary` is a colour and `text-body` is a setting — the
+ * same split Tailwind itself makes. Size roles are named for editorial jobs
+ * (body, title, caption) and colour roles for emphasis levels (primary,
+ * secondary), so no one name ever means both.
+ *
+ * See DESIGN.md for the judgement these values cannot express.
+ */
+
+/* ============================================================
+   LAYER 1 — PRIVATE RAMPS
+   ============================================================ */
+
+:root {
+  /* --- The zoom and preference dials. -----------------------
+     Two independent controls compose here, as in the existing client:
+
+     - Cmd +/- scales the real root font size, so every rem in the app — text,
+       gaps, radii — grows together. True zoom.
+     - The font-size preference sets --type-scale, nudging only the type ramp
+       below, so text changes size without moving the layout.
+
+     Every size derives from this virtual rem, which is itself rem-relative and
+     therefore rides on top of zoom automatically. At the default preference it
+     equals 1rem, making --type-size-4 read as 14px.                          */
+  --type-scale: 1;
+  --type-rem: calc(1rem * var(--type-scale));
+
+  /* --- Size. Nine steps, each step an editorial job. --------
+     A modern ramp for a dense product: tight and frequent through the working
+     sizes where real interface text lives, opening up at the display end where
+     a step needs to be a visible jump rather than a near-miss.                */
+  --type-size-1: calc(var(--type-rem) * 0.6875); /* 11px  meta        */
+  --type-size-2: calc(var(--type-rem) * 0.75); /*   12px  caption     */
+  --type-size-3: calc(var(--type-rem) * 0.8125); /* 13px  label       */
+  --type-size-4: calc(var(--type-rem) * 0.875); /*  14px  body        */
+  --type-size-5: calc(var(--type-rem) * 1); /*       16px  body large */
+  --type-size-6: calc(var(--type-rem) * 1.125); /*  18px  subheading  */
+  --type-size-7: calc(var(--type-rem) * 1.375); /*  22px  heading     */
+  --type-size-8: calc(var(--type-rem) * 1.75); /*   28px  title       */
+  --type-size-9: calc(var(--type-rem) * 2.25); /*   36px  display     */
+
+  /* --- Line height. Unitless, so it scales with its own size.
+     Tight for display text, generous for anything read in quantity, and exactly
+     1 for single-line meta so a timestamp cannot enlarge its own row.         */
+  --type-leading-flat: 1;
+  --type-leading-tight: 1.2;
+  --type-leading-snug: 1.35;
+  --type-leading-normal: 1.5;
+  --type-leading-relaxed: 1.6;
+
+  /* --- Tracking. An optical correction, not a style. --------
+     Inter is drawn for interface text and needs negative tracking as it grows:
+     spacing that looks correct at 14px looks loose at 36px. The ramp mirrors
+     the size ramp so the correction is applied per step rather than guessed,
+     and turns slightly positive at meta sizes where letters need air to stay
+     legible.                                                                 */
+  --type-tracking-display: -0.022em;
+  --type-tracking-title: -0.019em;
+  --type-tracking-heading: -0.017em;
+  --type-tracking-subheading: -0.014em;
+  --type-tracking-large: -0.011em;
+  --type-tracking-body: -0.006em;
+  --type-tracking-label: -0.003em;
+  --type-tracking-caption: 0em;
+  --type-tracking-meta: 0.005em;
+
+  /* --- Weight. Four, and the gaps are deliberate. -----------
+     Inter Variable can render any weight, which is exactly why the system names
+     only these: 500 and 600 sit far enough apart to read as intent rather than
+     as a rendering artefact.                                                 */
+  --type-weight-normal: 400;
+  --type-weight-medium: 500;
+  --type-weight-semibold: 600;
+  --type-weight-bold: 700;
+}
+
+/* Conversation type contract, carried over from the existing client:
+   13 / 14 / 15px before keyboard zoom. */
+:root[data-font-size="smaller"] {
+  --type-scale: calc(13 / 14);
+}
+
+:root[data-font-size="larger"] {
+  --type-scale: calc(15 / 14);
+}
+
+/* ============================================================
+   LAYER 3 — PUBLIC ROLES, REGISTERED WITH TAILWIND
+
+   Layers 2 and 3 are one block for typography. A colour role can be a bare
+   custom property because a component reads it through `bg-*` or `text-*`; a
+   type role has to be a Tailwind theme key or the paired line height, tracking,
+   and weight cannot travel with the size. So the role IS the registration.
+
+   Named for the job the text does, never for its size — `text-title`, not
+   `text-28`. A size name is a value in disguise and goes stale the moment the
+   ramp moves.
+   ============================================================ */
+
+@theme {
+  --font-sans:
+    "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* --- Display. One per page at most, and many pages need none.
+     The only step that is allowed to be decorative.                          */
+  --text-display: var(--type-size-9);
+  --text-display--line-height: var(--type-leading-tight);
+  --text-display--letter-spacing: var(--type-tracking-display);
+  --text-display--font-weight: var(--type-weight-semibold);
+
+  /* --- Title. The name of the thing you are looking at. ----- */
+  --text-title: var(--type-size-8);
+  --text-title--line-height: var(--type-leading-tight);
+  --text-title--letter-spacing: var(--type-tracking-title);
+  --text-title--font-weight: var(--type-weight-semibold);
+
+  /* --- Heading. A section within a page. ------------------- */
+  --text-heading: var(--type-size-7);
+  --text-heading--line-height: var(--type-leading-snug);
+  --text-heading--letter-spacing: var(--type-tracking-heading);
+  --text-heading--font-weight: var(--type-weight-semibold);
+
+  /* --- Subheading. A group within a section. --------------- */
+  --text-subheading: var(--type-size-6);
+  --text-subheading--line-height: var(--type-leading-snug);
+  --text-subheading--letter-spacing: var(--type-tracking-subheading);
+  --text-subheading--font-weight: var(--type-weight-semibold);
+
+  /* --- Body large. Introductions and reading columns, where a
+     paragraph is the point rather than a description of something else.       */
+  --text-body-lg: var(--type-size-5);
+  --text-body-lg--line-height: var(--type-leading-relaxed);
+  --text-body-lg--letter-spacing: var(--type-tracking-large);
+  --text-body-lg--font-weight: var(--type-weight-normal);
+
+  /* --- Body. The default. If you are unsure, this is it. --- */
+  --text-body: var(--type-size-4);
+  --text-body--line-height: var(--type-leading-normal);
+  --text-body--letter-spacing: var(--type-tracking-body);
+  --text-body--font-weight: var(--type-weight-normal);
+
+  /* --- Label. Interface text that is acted on rather than
+     read: buttons, tabs, menu items, form labels, table headers. Medium weight
+     because a label competes with content around it and needs to hold its edge
+     without going up a size.                                                 */
+  --text-label: var(--type-size-3);
+  --text-label--line-height: var(--type-leading-snug);
+  --text-label--letter-spacing: var(--type-tracking-label);
+  --text-label--font-weight: var(--type-weight-medium);
+
+  /* --- Caption. A sentence about something else: help text,
+     descriptions, empty-state detail.                                        */
+  --text-caption: var(--type-size-2);
+  --text-caption--line-height: var(--type-leading-normal);
+  --text-caption--letter-spacing: var(--type-tracking-caption);
+  --text-caption--font-weight: var(--type-weight-normal);
+
+  /* --- Meta. Timestamps, counts, tracking numbers. Flat line
+     height so a single-line value cannot grow its own row.                    */
+  --text-meta: var(--type-size-1);
+  --text-meta--line-height: var(--type-leading-flat);
+  --text-meta--letter-spacing: var(--type-tracking-meta);
+  --text-meta--font-weight: var(--type-weight-medium);
+
+  /* --- Code. Mono, one step down: at equal size a monospace
+     face reads larger than Inter and pulls the eye off the sentence.          */
+  --text-code: var(--type-size-3);
+  --text-code--line-height: var(--type-leading-normal);
+  --text-code--letter-spacing: var(--type-tracking-caption);
+  --text-code--font-weight: var(--type-weight-normal);
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    /* Every readable surface starts from the body role and steps away from it
+       deliberately. */
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    letter-spacing: var(--text-body--letter-spacing);
+
+    /* Never synthesise a weight Inter Variable can render properly, and never
+       let a font fall back mid-string. */
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    /* Mono digits and letters share one advance width, so a changing value does
+       not shift the text around it. */
+    font-variant-numeric: tabular-nums;
+  }
+}
