@@ -36,20 +36,13 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
-import { useCommunities } from "@/features/communities/useCommunities";
-import { useIdentityQuery } from "@/shared/api/hooks";
 
 export function AgentsView() {
-  const { activeCommunity } = useCommunities();
-  const identityQuery = useIdentityQuery();
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
-  const agents = useManagedAgentActions({
-    expectedRelayUrl: activeCommunity?.relayUrl,
-    expectedSignerPubkey: identityQuery.data?.pubkey,
-  });
+  const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);

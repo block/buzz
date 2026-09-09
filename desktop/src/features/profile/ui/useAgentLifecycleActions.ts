@@ -11,6 +11,7 @@ import {
 } from "@/features/agents/lib/managedAgentControlActions";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
+import { useProviderEnrollmentScope } from "@/features/agents/lib/useProviderEnrollmentScope";
 import type {
   Channel,
   ManagedAgent,
@@ -23,8 +24,6 @@ export function useAgentLifecycleActions({
   channels,
   managedAgent,
   relayAgents,
-  expectedRelayUrl,
-  expectedSignerPubkey,
   startManagedAgent,
   stopManagedAgent,
 }: {
@@ -32,11 +31,11 @@ export function useAgentLifecycleActions({
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
-  expectedRelayUrl?: string | null;
-  expectedSignerPubkey?: string | null;
   startManagedAgent: (input: StartManagedAgentInput) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
+  const { expectedRelayUrl, expectedSignerPubkey } =
+    useProviderEnrollmentScope();
   const handleAgentPrimaryAction = React.useCallback(async () => {
     if (!managedAgent) return;
 
@@ -61,21 +60,17 @@ export function useAgentLifecycleActions({
         const blockReason = agentPresenceStartBlockReason(false, availability);
         if (blockReason) throw new Error(blockReason);
       }
-      const enrollmentRelayUrl = expectedRelayUrl?.trim();
-      const enrollmentSignerPubkey = expectedSignerPubkey?.trim().toLowerCase();
       if (
         isAttestationRecovery &&
-        (!enrollmentRelayUrl || !enrollmentSignerPubkey)
+        (!expectedRelayUrl || !expectedSignerPubkey)
       ) {
         throw new Error("Community enrollment scope is unavailable.");
       }
       await startManagedAgentWithRules({
         agent: managedAgent,
-        expectedRelayUrl: isAttestationRecovery
-          ? enrollmentRelayUrl
-          : undefined,
+        expectedRelayUrl: isAttestationRecovery ? expectedRelayUrl : undefined,
         expectedSignerPubkey: isAttestationRecovery
-          ? enrollmentSignerPubkey
+          ? expectedSignerPubkey
           : undefined,
         startManagedAgent,
       });

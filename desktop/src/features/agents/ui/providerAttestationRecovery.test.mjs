@@ -37,6 +37,7 @@ let screen;
 let waitFor;
 let UnifiedAgentsSection;
 let useCreatedAgentChannelAttachment;
+let useAgentLifecycleActions;
 let useManagedAgentActions;
 
 function rawPendingAgent() {
@@ -126,6 +127,9 @@ before(async () => {
     addEventListener() {},
     removeEventListener() {},
   });
+  dom.window.requestAnimationFrame = (callback) =>
+    dom.window.setTimeout(() => callback(Date.now()), 0);
+  dom.window.cancelAnimationFrame = (id) => dom.window.clearTimeout(id);
   dom.window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
       commands.push([command, args]);
@@ -150,6 +154,9 @@ before(async () => {
   ({ useCreatedAgentChannelAttachment } = await import(
     "@/features/agents/useCreatedAgentChannelAttachment.ts"
   ));
+  ({ useAgentLifecycleActions } = await import(
+    "@/features/profile/ui/useAgentLifecycleActions.ts"
+  ));
   ({ useManagedAgentActions } = await import("./useManagedAgentActions.ts"));
 });
 
@@ -161,11 +168,24 @@ afterEach(() => {
   }
   commands.length = 0;
   handlers.clear();
+  localStorage.clear();
 });
 
 after(() => dom.window.close());
 
 async function exerciseRecovery(availability) {
+  localStorage.setItem(
+    "buzz-communities",
+    JSON.stringify([
+      {
+        id: "community-a",
+        name: "Community A",
+        relayUrl: RELAY_URL,
+        addedAt: "2026-09-09T00:00:00Z",
+      },
+    ]),
+  );
+  localStorage.setItem("buzz-active-community-id", "community-a");
   const agent = fromRawManagedAgent(rawPendingAgent());
   const creation = renderHook(() => useCreatedAgentChannelAttachment());
   await act(async () => {
@@ -192,6 +212,10 @@ async function exerciseRecovery(availability) {
     },
   });
   clients.push(client);
+  client.setQueryData(["identity"], {
+    pubkey: OWNER_PUBKEY,
+    displayName: "Owner",
+  });
   client.setQueryData(["managed-agents"], [agent]);
   client.setQueryData(["relay-agents"], []);
   client.setQueryData(["channels"], []);
@@ -209,10 +233,7 @@ async function exerciseRecovery(availability) {
   handlers.set("start_managed_agent", () => rawPendingAgent());
 
   function Surface() {
-    const actions = useManagedAgentActions({
-      expectedRelayUrl: RELAY_URL,
-      expectedSignerPubkey: OWNER_PUBKEY,
-    });
+    const actions = useManagedAgentActions();
     return createElement(UnifiedAgentsSection, sectionProps(actions));
   }
 
@@ -244,6 +265,37 @@ async function exerciseRecovery(availability) {
     pubkey: AGENT_PUBKEY,
     replayFloorUnix: null,
   });
+
+  const profileStarts = [];
+  const profile = renderHook(
+    () =>
+      useAgentLifecycleActions({
+        availability,
+        channels: [],
+        managedAgent: agent,
+        relayAgents: [],
+        startManagedAgent: async (input) => {
+          profileStarts.push(input);
+        },
+        stopManagedAgent: async () => {},
+      }),
+    {
+      wrapper: ({ children }) =>
+        createElement(
+          QueryClientProvider,
+          { client },
+          createElement(CommunitiesProvider, null, children),
+        ),
+    },
+  );
+  await act(async () => profile.result.current.handleAgentPrimaryAction());
+  assert.deepEqual(profileStarts, [
+    {
+      expectedRelayUrl: RELAY_URL,
+      expectedSignerPubkey: OWNER_PUBKEY,
+      pubkey: AGENT_PUBKEY,
+    },
+  ]);
 }
 
 for (const availability of ["online", "away"]) {

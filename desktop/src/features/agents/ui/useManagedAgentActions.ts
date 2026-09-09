@@ -33,17 +33,17 @@ import {
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
 import { clearActiveTurnsForAgentOnStop } from "../managedAgentRuntimeHooks";
+import { useProviderEnrollmentScope } from "../lib/useProviderEnrollmentScope";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "../lib/instanceInputForDefinition";
 
-export function useManagedAgentActions(scope?: {
-  expectedRelayUrl?: string | null;
-  expectedSignerPubkey?: string | null;
-}) {
+export function useManagedAgentActions() {
   const queryClient = useQueryClient();
+  const { expectedRelayUrl, expectedSignerPubkey } =
+    useProviderEnrollmentScope();
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -184,10 +184,6 @@ export function useManagedAgentActions(scope?: {
       if (!isAttestationRecovery) {
         assertStartNotBlockedByPresence(agent);
       }
-      const expectedRelayUrl = scope?.expectedRelayUrl?.trim();
-      const expectedSignerPubkey = scope?.expectedSignerPubkey
-        ?.trim()
-        .toLowerCase();
       if (
         isAttestationRecovery &&
         (!expectedRelayUrl || !expectedSignerPubkey)
