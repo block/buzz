@@ -32,8 +32,6 @@ export function assignmentCanvas(
 ): string {
   if (!/^[a-f0-9]{64}$/i.test(pubkey)) throw new Error("Invalid agent pubkey");
   const existing = taskAssignee(content);
-  if (existing && existing.pubkey !== pubkey)
-    throw new Error("Task is already assigned");
   const { doc, body } = document(content);
   if (!existing) doc.set("assignee", doc.createNode({}));
   doc.setIn(["assignee", "pubkey"], pubkey);

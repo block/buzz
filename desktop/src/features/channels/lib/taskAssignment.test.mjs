@@ -21,16 +21,16 @@ test("assignment preserves unrelated frontmatter, comments and body", () => {
   });
 });
 
-test("retry retains operation and refuses another assignee", () => {
+test("retry retains operation and reassignment replaces notification state", () => {
   const pending = assignmentCanvas(canvas, pubkey, "operation", "pending");
   assert.equal(
     taskAssignee(assignmentCanvas(pending, pubkey, "operation", "sent"))
       .notification.status,
     "sent",
   );
-  assert.throws(
-    () => assignmentCanvas(pending, "b".repeat(64), "new", "pending"),
-    /already assigned/,
+  assert.deepEqual(
+    taskAssignee(assignmentCanvas(pending, "b".repeat(64), "new", "pending")),
+    { pubkey: "b".repeat(64), notification: { id: "new", status: "pending" } },
   );
   assert.throws(
     () => assignmentCanvas(canvas, "bad", "new", "pending"),

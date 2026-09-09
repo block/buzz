@@ -38,7 +38,11 @@ export function AssignTask({
     setPending(true);
     setError("");
     try {
-      const operationId = assignee?.notification?.id ?? crypto.randomUUID();
+      const operationId =
+        assignee?.pubkey === pubkey &&
+        assignee.notification?.status === "pending"
+          ? assignee.notification.id
+          : crypto.randomUUID();
       const result = await invokeTauri<{
         assigned: boolean;
         notified: boolean;
@@ -72,13 +76,20 @@ export function AssignTask({
 
   return (
     <div className="ml-auto flex items-center gap-2 text-xs">
-      {assignee ? (
+      {assignee && !choosing ? (
         <>
-          <span title={assignee.pubkey}>
+          <button
+            type="button"
+            title="Change assignee"
+            aria-label="Change assignee"
+            disabled={pending}
+            onClick={() => setChoosing(true)}
+            className="rounded px-2 py-1 hover:bg-accent disabled:opacity-50"
+          >
             Assigned to{" "}
             {agents.data?.find((agent) => agent.pubkey === assignee.pubkey)
               ?.name ?? "agent"}
-          </span>
+          </button>
           {assignee.notification?.status === "pending" && (
             <button
               type="button"
@@ -92,6 +103,11 @@ export function AssignTask({
         </>
       ) : choosing ? (
         <>
+          {assignee && (
+            <span className="text-muted-foreground">
+              Reassigning does not stop the previous agent.
+            </span>
+          )}
           <select
             aria-label="Assign task to agent"
             disabled={pending}
@@ -103,7 +119,11 @@ export function AssignTask({
               {agents.isLoading ? "Loading agents…" : "Choose agent…"}
             </option>
             {agents.data?.map((agent) => (
-              <option key={agent.pubkey} value={agent.pubkey}>
+              <option
+                key={agent.pubkey}
+                value={agent.pubkey}
+                disabled={agent.pubkey === assignee?.pubkey}
+              >
                 {agent.name}
               </option>
             ))}

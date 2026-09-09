@@ -87,7 +87,19 @@ test("review modal shows latest intent results and conservative freshness", asyn
   await expect(dialog).toBeVisible();
   await expect(
     dialog.locator("summary").filter({ hasText: "builderbot" }),
-  ).toHaveText("builderbot1 findings · Same commit");
+  ).toContainText("1 finding");
+  await expect(
+    dialog.locator("summary").filter({ hasText: "builderbot" }),
+  ).toContainText("Same commit");
+  await expect(dialog.getByTestId("review-result-builderbot")).toHaveClass(
+    /text-amber-600/,
+  );
+  await expect(dialog.getByTestId("review-result-pr-template")).toHaveClass(
+    /text-green-600/,
+  );
+  await expect(dialog.getByTestId("review-result-dead-code")).toHaveClass(
+    /text-red-600/,
+  );
   await expect(
     dialog.locator("summary").filter({ hasText: "pr-template" }),
   ).toContainText("PR metadata changed");
@@ -120,7 +132,10 @@ test("assign saves the task and retains notification retry after navigating away
 }) => {
   await installMockBridge(page, {
     canvasContent: TASK_CANVAS,
-    managedAgents: [{ pubkey: "a".repeat(64), name: "Sol", status: "stopped" }],
+    managedAgents: [
+      { pubkey: "a".repeat(64), name: "Sol", status: "stopped" },
+      { pubkey: "b".repeat(64), name: "Luna", status: "stopped" },
+    ],
   });
   await page.goto("/");
   await expect(page.getByTestId("channel-engineering")).toBeVisible();
@@ -134,16 +149,19 @@ test("assign saves the task and retains notification retry after navigating away
         ) => Promise<unknown>;
       };
       __ASSIGN_CALLS__: number;
+      __ASSIGN_OPERATIONS__: string[];
     };
     const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
     let content: string | undefined;
     let channel: string | undefined;
     w.__ASSIGN_CALLS__ = 0;
+    w.__ASSIGN_OPERATIONS__ = [];
     w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
       if (command === "get_canvas" && content && payload.channelId === channel)
         return { content };
       if (command === "assign_task_channel") {
         w.__ASSIGN_CALLS__++;
+        w.__ASSIGN_OPERATIONS__.push(payload.operationId);
         channel = payload.channelId;
         content =
           w.__ASSIGN_CALLS__ === 1
@@ -185,6 +203,20 @@ test("assign saves the task and retains notification retry after navigating away
           .__ASSIGN_CALLS__,
     ),
   ).toBe(2);
+  await page.getByRole("button", { name: "Change assignee" }).click();
+  await page
+    .getByRole("combobox", { name: "Assign task to agent" })
+    .selectOption("b".repeat(64));
+  await expect(page.getByTestId("task-overview")).toContainText(
+    "Assigned to Luna",
+  );
+  const operations = await page.evaluate(
+    () =>
+      (window as typeof window & { __ASSIGN_OPERATIONS__: string[] })
+        .__ASSIGN_OPERATIONS__,
+  );
+  expect(operations[0]).toBe(operations[1]);
+  expect(operations[2]).not.toBe(operations[0]);
 });
 
 test("loading a corrected canvas refreshes the sidebar task metadata", async ({

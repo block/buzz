@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ClipboardCheck } from "lucide-react";
+import {
+  CircleCheck,
+  CircleHelp,
+  CircleX,
+  ClipboardCheck,
+  Clock3,
+  TriangleAlert,
+} from "lucide-react";
 import type { ChannelBackedTask } from "../lib/channelBackedTask";
 import { useTaskBranchStatus } from "../useTaskBranchStatus";
 import { invokeTauri } from "@/shared/api/tauri";
@@ -80,6 +87,29 @@ export function TaskReviewModal({
           <p>No attributable local runs found for this branch.</p>
         )}
         {[...latest].map(([name, { run, review }]) => {
+          const count =
+            review.finding_count ?? review.verdict?.findings?.length;
+          const failed = review.invocation_ok === false;
+          const clear = review.invocation_ok === true && count === 0;
+          const ResultIcon = failed
+            ? CircleX
+            : count && count > 0
+              ? TriangleAlert
+              : clear
+                ? CircleCheck
+                : CircleHelp;
+          const resultColor = failed
+            ? "text-red-600 dark:text-red-400"
+            : count && count > 0
+              ? "text-amber-600 dark:text-amber-400"
+              : clear
+                ? "text-green-600 dark:text-green-400"
+                : "text-muted-foreground";
+          const resultLabel = failed
+            ? "Run failed"
+            : count !== undefined
+              ? `${count} ${count === 1 ? "finding" : "findings"}`
+              : "Result unknown";
           const freshness =
             name === "pr-template"
               ? typeof run.pr_metadata?.title !== "string" ||
@@ -98,15 +128,16 @@ export function TaskReviewModal({
           return (
             <details key={name} className="rounded-lg border p-3 text-sm">
               <summary className="cursor-pointer">
+                <ResultIcon
+                  aria-hidden="true"
+                  data-testid={`review-result-${name}`}
+                  className={`mr-2 inline-block size-4 align-text-bottom ${resultColor}`}
+                />
                 <span className="font-medium">{name}</span>
-                <span className="ml-2 text-muted-foreground">
-                  {review.invocation_ok === false
-                    ? "Run failed"
-                    : review.finding_count !== undefined ||
-                        review.verdict?.findings
-                      ? `${review.finding_count ?? review.verdict?.findings?.length} findings`
-                      : "Result unknown"}{" "}
-                  · {freshness}
+                <span className={`ml-2 ${resultColor}`}>{resultLabel}</span>
+                <span className="mt-1 flex items-center gap-1 pl-6 text-xs text-muted-foreground">
+                  <Clock3 aria-hidden="true" className="size-3" />
+                  {freshness}
                 </span>
               </summary>
               <div className="mt-3 space-y-2">
