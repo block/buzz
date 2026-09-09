@@ -1417,7 +1417,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::connection::{AuthState, ConnectionState};
     use std::collections::HashMap;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::Mutex;
 
     /// Helper: create a ConnectionManager with one registered connection.
     /// Returns (manager, conn_id, receiver, ctrl_receiver, cancel,
@@ -1476,6 +1476,17 @@ pub(crate) mod tests {
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
+        build_test_state(config, pool).await
+    }
+
+    /// Build test state around a caller-owned writer pool. Production-path
+    /// lifecycle tests use this to hold the sole connection as a deterministic
+    /// barrier while AUTH waits in the real database acquisition path.
+    pub(crate) async fn test_state_with_database_pool(pool: sqlx::PgPool) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.read_database_url = None;
         build_test_state(config, pool).await
     }
 
@@ -1708,7 +1719,7 @@ pub(crate) mod tests {
                 "test.local".to_string(),
             ),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
-            auth_state: RwLock::new(AuthState::Failed),
+            auth_state: std::sync::Mutex::new(AuthState::Failed),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),
             ctrl_tx,

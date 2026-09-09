@@ -37,10 +37,10 @@ pub(crate) enum AuthOutcome {
     Invalid,
     Banned,
     BanCheckError,
+    AllowlistCheckError,
     AllowlistDenied,
+    RelayMembershipCheckError,
     NotRelayMember,
-    Duplicate,
-    AlreadyFailed,
     Timeout,
     Disconnect,
     Shutdown,
@@ -52,10 +52,10 @@ impl AuthOutcome {
         Self::Invalid,
         Self::Banned,
         Self::BanCheckError,
+        Self::AllowlistCheckError,
         Self::AllowlistDenied,
+        Self::RelayMembershipCheckError,
         Self::NotRelayMember,
-        Self::Duplicate,
-        Self::AlreadyFailed,
         Self::Timeout,
         Self::Disconnect,
         Self::Shutdown,
@@ -67,13 +67,33 @@ impl AuthOutcome {
             Self::Invalid => "invalid",
             Self::Banned => "banned",
             Self::BanCheckError => "ban_check_error",
+            Self::AllowlistCheckError => "allowlist_check_error",
             Self::AllowlistDenied => "allowlist_denied",
+            Self::RelayMembershipCheckError => "relay_membership_check_error",
             Self::NotRelayMember => "not_relay_member",
-            Self::Duplicate => "duplicate",
-            Self::AlreadyFailed => "already_failed",
             Self::Timeout => "timeout",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+/// Bounded state of an AUTH frame received after the issued challenge had
+/// already reached a terminal. These frames are protocol misuse, not recovery
+/// lifecycles, and therefore stay outside rollout-gating attempts/outcomes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthPostTerminalState {
+    Authenticated,
+    Failed,
+}
+
+impl AuthPostTerminalState {
+    pub(crate) const ALL: [Self; 2] = [Self::Authenticated, Self::Failed];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authenticated => "authenticated",
+            Self::Failed => "failed",
         }
     }
 }
@@ -317,7 +337,7 @@ pub(crate) fn describe_db_pool_metrics() {
 pub(crate) fn describe_auth_metrics() {
     metrics::describe_counter!(
         "buzz_auth_attempts_total",
-        "WebSocket authentication attempts started by bounded method"
+        "NIP-42 challenge lifecycles issued to WebSocket clients by bounded method"
     );
     metrics::describe_counter!(
         "buzz_auth_outcomes_total",
@@ -332,9 +352,13 @@ pub(crate) fn describe_auth_metrics() {
         "buzz_ws_authenticated_connections_active",
         "Current WebSocket connections that completed authentication on this pod"
     );
+    metrics::describe_counter!(
+        "buzz_auth_post_terminal_frames_total",
+        "AUTH frames received after the issued challenge reached a terminal, by bounded state"
+    );
 }
 
-/// Publish zero-valued counter/gauge series at process start.
+/// Publish zero-valued authentication series at process start.
 ///
 /// Counters are never idle-evicted by the configured recorder. The active
 /// gauge is refreshed alongside the other lifecycle-relative gauges in
@@ -353,11 +377,29 @@ pub(crate) fn initialize_auth_metric_series() {
             "outcome" => outcome.as_str()
         )
         .increment(0);
+        // Register the fixed-label histogram without recording a fake sample.
+        // Prometheus then exports zero buckets, `_sum`, and `_count` at boot.
+        let _ = metrics::histogram!(
+            "buzz_auth_duration_seconds",
+            "method" => AUTH_METHOD_NIP42,
+            "outcome" => outcome.as_str()
+        );
+    }
+    for state in AuthPostTerminalState::ALL {
+        metrics::counter!(
+            "buzz_auth_post_terminal_frames_total",
+            "state" => state.as_str()
+        )
+        .increment(0);
     }
     metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
 }
 
-/// Record the start of one authentication attempt.
+/// Record one issued NIP-42 challenge after it enters the connection writer.
+///
+/// Before this lifecycle contract, `buzz_auth_attempts_total` incremented only
+/// when an AUTH frame reached the pending handler. It now uses one consistent,
+/// recovery-oriented unit: challenges successfully queued to the connection.
 pub(crate) fn record_auth_attempt_started() {
     metrics::counter!(
         "buzz_auth_attempts_total",
@@ -382,15 +424,13 @@ pub(crate) fn record_auth_outcome(outcome: AuthOutcome, duration: Duration) {
     .record(duration.as_secs_f64());
 }
 
-/// Record an AUTH frame received after the connection already reached a
-/// terminal authentication state. It is a new, immediately terminal attempt.
-pub(crate) fn record_terminal_auth_retry(outcome: AuthOutcome) {
-    debug_assert!(matches!(
-        outcome,
-        AuthOutcome::Duplicate | AuthOutcome::AlreadyFailed
-    ));
-    record_auth_attempt_started();
-    record_auth_outcome(outcome, Duration::ZERO);
+/// Record protocol noise after the issued challenge already terminalized.
+pub(crate) fn record_post_terminal_auth_frame(state: AuthPostTerminalState) {
+    metrics::counter!(
+        "buzz_auth_post_terminal_frames_total",
+        "state" => state.as_str()
+    )
+    .increment(1);
 }
 
 #[cfg(test)]
@@ -589,11 +629,39 @@ mod contract_tests {
             super::AuthOutcome::ALL.len(),
             "every bounded outcome must exist before the first attempt:\n{stable_zero_scrape}"
         );
+        let zero_duration_counts = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_count{") && line.ends_with(" 0")
+            })
+            .count();
+        let zero_duration_sums = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_sum{") && line.ends_with(" 0")
+            })
+            .count();
+        let zero_duration_buckets = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_bucket{") && line.ends_with(" 0")
+            })
+            .count();
+        assert_eq!(zero_duration_counts, super::AuthOutcome::ALL.len());
+        assert_eq!(zero_duration_sums, super::AuthOutcome::ALL.len());
+        assert_eq!(
+            zero_duration_buckets,
+            super::AuthOutcome::ALL.len() * 11,
+            "every fixed outcome must export all zero buckets before traffic:\n{stable_zero_scrape}"
+        );
 
         metrics::with_local_recorder(&recorder, || {
             super::record_auth_attempt_started();
             for outcome in super::AuthOutcome::ALL {
                 super::record_auth_outcome(outcome, Duration::from_millis(20));
+            }
+            for state in super::AuthPostTerminalState::ALL {
+                super::record_post_terminal_auth_frame(state);
             }
             let active = metrics::gauge!("buzz_ws_authenticated_connections_active");
             active.increment(1.0);
@@ -612,12 +680,13 @@ mod contract_tests {
                 line.starts_with("buzz_auth_attempts_total{")
                     || line.starts_with("buzz_auth_outcomes_total{")
                     || line.starts_with("buzz_auth_duration_seconds")
+                    || line.starts_with("buzz_auth_post_terminal_frames_total{")
                     || line.starts_with("buzz_ws_authenticated_connections_active ")
             })
             .collect::<Vec<_>>();
-        // 1 attempt + 11 outcomes + 1 active gauge +, for each outcome,
+        // 1 challenge + 11 outcomes + 2 post-terminal states + 1 active gauge +, for each outcome,
         // 11 histogram buckets (including +Inf), sum, and count.
-        assert_eq!(raw_series.len(), 156, "unexpected raw scrape:\n{scrape}");
+        assert_eq!(raw_series.len(), 158, "unexpected raw scrape:\n{scrape}");
 
         for line in raw_series {
             let keys = label_keys(line);
@@ -625,6 +694,8 @@ mod contract_tests {
                 assert_eq!(keys, BTreeSet::from(["method"]));
             } else if line.starts_with("buzz_auth_outcomes_total{") {
                 assert_eq!(keys, BTreeSet::from(["method", "outcome"]));
+            } else if line.starts_with("buzz_auth_post_terminal_frames_total{") {
+                assert_eq!(keys, BTreeSet::from(["state"]));
             } else if line.starts_with("buzz_auth_duration_seconds_bucket{") {
                 assert_eq!(keys, BTreeSet::from(["le", "method", "outcome"]));
             } else if line.starts_with("buzz_auth_duration_seconds") {

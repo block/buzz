@@ -57,8 +57,7 @@ pub async fn handle_req(
     state: Arc<AppState>,
 ) {
     let (conn_id, pubkey_bytes, token_channel_ids) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
+        match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => {
                 if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
                     conn.send(RelayMessage::notice("restricted: insufficient scope"));

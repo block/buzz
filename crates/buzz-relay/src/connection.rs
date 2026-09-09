@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
@@ -29,6 +29,10 @@ use crate::state::{
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum time the writer may spend flushing terminal frames after cancellation.
+/// This stays well inside the process-wide 30-second hard drain.
+const WS_TERMINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
@@ -58,7 +62,7 @@ pub enum AuthState {
 }
 
 /// Per-connection state split by access pattern:
-/// - `auth_state`: RwLock (read-heavy after initial auth)
+/// - `auth_state`: synchronous mutex (short, non-awaiting transitions; drop-safe cleanup)
 /// - `subscriptions`: Mutex (write-heavy during REQ/CLOSE)
 /// - `send_tx`, `ctrl_tx`, `cancel`: outside any lock (Clone+Send, no coordination needed)
 pub struct ConnectionState {
@@ -71,7 +75,7 @@ pub struct ConnectionState {
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
     /// Current NIP-42 authentication state.
-    pub auth_state: RwLock<AuthState>,
+    pub auth_state: StdMutex<AuthState>,
     /// Active subscriptions keyed by subscription ID.
     pub subscriptions: ConnectionSubscriptions,
     /// Sender for outbound data messages (EVENT, NOTICE, OK, etc.).
@@ -91,8 +95,19 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
-    async fn transition_pending_auth(&self, next: AuthState, outcome: AuthOutcome) -> bool {
-        let mut auth = self.auth_state.write().await;
+    fn lock_auth_state(&self) -> std::sync::MutexGuard<'_, AuthState> {
+        self.auth_state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Snapshot the current authentication state without holding its lock over an await.
+    pub(crate) fn auth_state_snapshot(&self) -> AuthState {
+        self.lock_auth_state().clone()
+    }
+
+    fn transition_pending_auth(&self, next: AuthState, outcome: AuthOutcome) -> bool {
+        let mut auth = self.lock_auth_state();
         let AuthState::Pending { started_at, .. } = &*auth else {
             return false;
         };
@@ -110,22 +125,20 @@ impl ConnectionState {
     }
 
     /// Atomically finish the initial challenge as authenticated.
-    pub(crate) async fn authenticate(&self, auth_context: AuthContext) -> bool {
+    pub(crate) fn authenticate(&self, auth_context: AuthContext) -> bool {
         self.transition_pending_auth(AuthState::Authenticated(auth_context), AuthOutcome::Success)
-            .await
     }
 
     /// Atomically finish the initial challenge with a bounded denial.
-    pub(crate) async fn reject_auth(&self, outcome: AuthOutcome) -> bool {
+    pub(crate) fn reject_auth(&self, outcome: AuthOutcome) -> bool {
         debug_assert!(!matches!(outcome, AuthOutcome::Success));
         self.transition_pending_auth(AuthState::Failed, outcome)
-            .await
     }
 
     /// Finish a pending challenge on timeout and preserve the historical rule
     /// that an already-failed connection is closed when its timeout expires.
-    async fn expire_auth(&self) -> bool {
-        let mut auth = self.auth_state.write().await;
+    fn expire_auth(&self) -> bool {
+        let mut auth = self.lock_auth_state();
         match &*auth {
             AuthState::Pending { started_at, .. } => {
                 let duration = started_at.elapsed();
@@ -143,12 +156,12 @@ impl ConnectionState {
     /// Replacing the state with `Failed` makes cleanup idempotent: an
     /// authenticated gauge can be decremented at most once, and a pending
     /// attempt can receive at most one disconnect/shutdown terminal.
-    async fn finish_auth_on_close(&self, outcome: AuthOutcome) -> Option<AuthContext> {
+    fn finish_auth_on_close(&self, outcome: AuthOutcome) -> Option<AuthContext> {
         debug_assert!(matches!(
             outcome,
             AuthOutcome::Disconnect | AuthOutcome::Shutdown
         ));
-        let mut auth = self.auth_state.write().await;
+        let mut auth = self.lock_auth_state();
         match std::mem::replace(&mut *auth, AuthState::Failed) {
             AuthState::Pending { started_at, .. } => {
                 crate::metrics::record_auth_outcome(outcome, started_at.elapsed());
@@ -160,6 +173,24 @@ impl ConnectionState {
             }
             AuthState::Failed => None,
         }
+    }
+
+    /// Let the cancellation watcher claim only a still-pending attempt.
+    /// Authenticated cleanup remains owned by `AuthLifecycleGuard`, which must
+    /// retain the authentication context for presence cleanup after task joins.
+    fn finish_pending_auth_on_cancel(&self, outcome: AuthOutcome) -> bool {
+        debug_assert!(matches!(
+            outcome,
+            AuthOutcome::Disconnect | AuthOutcome::Shutdown
+        ));
+        let mut auth = self.lock_auth_state();
+        let AuthState::Pending { started_at, .. } = &*auth else {
+            return false;
+        };
+        let duration = started_at.elapsed();
+        *auth = AuthState::Failed;
+        crate::metrics::record_auth_outcome(outcome, duration);
+        true
     }
 
     /// Sends a data message to this connection's outbound channel.
@@ -189,6 +220,37 @@ impl ConnectionState {
                 debug!(conn_id = %self.conn_id, "send channel closed");
                 false
             }
+        }
+    }
+}
+
+/// Owns authentication accounting for exactly the lifetime of the production
+/// connection future. Explicit teardown selects the precise close outcome;
+/// aborts and panics fall back to `disconnect` and cancel child tasks.
+struct AuthLifecycleGuard {
+    conn: Arc<ConnectionState>,
+    finished: bool,
+}
+
+impl AuthLifecycleGuard {
+    fn new(conn: Arc<ConnectionState>) -> Self {
+        Self {
+            conn,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: AuthOutcome) -> Option<AuthContext> {
+        self.finished = true;
+        self.conn.finish_auth_on_close(outcome)
+    }
+}
+
+impl Drop for AuthLifecycleGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.conn.cancel.cancel();
+            self.conn.finish_auth_on_close(AuthOutcome::Disconnect);
         }
     }
 }
@@ -258,7 +320,7 @@ async fn handle_active_connection(
         conn_id,
         tenant,
         remote_addr: addr,
-        auth_state: RwLock::new(AuthState::Pending {
+        auth_state: StdMutex::new(AuthState::Pending {
             challenge: challenge.clone(),
             started_at: Instant::now(),
         }),
@@ -291,6 +353,7 @@ async fn handle_active_connection(
     // don't leak. Decremented in the cleanup path below.
     metrics::gauge!("buzz_ws_connections_active").increment(1.0);
     crate::metrics::record_auth_attempt_started();
+    let mut auth_lifecycle = AuthLifecycleGuard::new(Arc::clone(&conn));
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -330,7 +393,7 @@ async fn handle_active_connection(
     let auth_timeout_task = tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep(AUTH_TIMEOUT) => {
-                if auth_timeout_conn.expire_auth().await {
+                if auth_timeout_conn.expire_auth() {
                     warn!(
                         conn_id = %auth_timeout_conn.conn_id,
                         timeout_secs = AUTH_TIMEOUT.as_secs(),
@@ -344,6 +407,22 @@ async fn handle_active_connection(
         }
     });
 
+    // Cancellation races database-backed AUTH work. This watcher claims the
+    // pending lifecycle under the same lock as success/denial transitions, so
+    // whichever terminal happens first wins and a late handler cannot overwrite it.
+    let auth_cancel_conn = Arc::clone(&conn);
+    let auth_cancel_state = Arc::clone(&state);
+    let auth_cancel_token = cancel.clone();
+    let auth_cancel_task = tokio::spawn(async move {
+        auth_cancel_token.cancelled().await;
+        let outcome = if auth_cancel_state.shutting_down.load(Ordering::Acquire) {
+            AuthOutcome::Shutdown
+        } else {
+            AuthOutcome::Disconnect
+        };
+        auth_cancel_conn.finish_pending_auth_on_cancel(outcome);
+    });
+
     recv_loop(
         ws_recv,
         Arc::clone(&conn),
@@ -354,16 +433,19 @@ async fn handle_active_connection(
     .await;
 
     cancel.cancel();
-    let _ = send_task.await;
-    let _ = heartbeat_task.await;
-    let _ = auth_timeout_task.await;
-
     let close_outcome = if state.shutting_down.load(Ordering::Acquire) {
         AuthOutcome::Shutdown
     } else {
         AuthOutcome::Disconnect
     };
-    let authenticated = conn.finish_auth_on_close(close_outcome).await;
+    // Terminalize before joining writer/heartbeat tasks. A blocked socket sink
+    // must not keep the authenticated gauge high during shutdown.
+    let authenticated = auth_lifecycle.finish(close_outcome);
+
+    let _ = send_task.await;
+    let _ = heartbeat_task.await;
+    let _ = auth_timeout_task.await;
+    let _ = auth_cancel_task.await;
 
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         if removed.scope.is_global() {
@@ -423,6 +505,93 @@ async fn send_loop(
     .await;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterStep {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+async fn send_or_cancel<S>(
+    sink: &mut S,
+    message: WsMessage,
+    cancel: &CancellationToken,
+) -> WriterStep
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => WriterStep::Cancelled,
+        result = sink.send(message) => {
+            if result.is_ok() { WriterStep::Completed } else { WriterStep::Failed }
+        }
+    }
+}
+
+async fn feed_or_cancel<S>(
+    sink: &mut S,
+    message: WsMessage,
+    cancel: &CancellationToken,
+) -> WriterStep
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => WriterStep::Cancelled,
+        result = sink.feed(message) => {
+            if result.is_ok() { WriterStep::Completed } else { WriterStep::Failed }
+        }
+    }
+}
+
+async fn flush_or_cancel<S>(sink: &mut S, cancel: &CancellationToken) -> WriterStep
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => WriterStep::Cancelled,
+        result = sink.flush() => {
+            if result.is_ok() { WriterStep::Completed } else { WriterStep::Failed }
+        }
+    }
+}
+
+/// Best-effort terminal delivery with one shared deadline. A socket that never
+/// becomes writable cannot retain its connection task or semaphore permit.
+async fn flush_terminal_frames<S>(
+    sink: &mut S,
+    ctrl_rx: &mut mpsc::Receiver<WsMessage>,
+    disconnect_reason: &watch::Receiver<Option<CommunityDisconnectReason>>,
+    first_ctrl: Option<WsMessage>,
+) where
+    S: Sink<WsMessage> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + WS_TERMINAL_FLUSH_TIMEOUT;
+    if let Some(ctrl_msg) = first_ctrl {
+        if !matches!(
+            tokio::time::timeout_at(deadline, sink.send(ctrl_msg)).await,
+            Ok(Ok(()))
+        ) {
+            return;
+        }
+    }
+    while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
+        if !matches!(
+            tokio::time::timeout_at(deadline, sink.send(ctrl_msg)).await,
+            Ok(Ok(()))
+        ) {
+            return;
+        }
+    }
+    let close = disconnect_reason
+        .borrow()
+        .map_or(WsMessage::Close(None), |reason| reason.close_message());
+    let _ = tokio::time::timeout_at(deadline, sink.send(close)).await;
+}
+
 async fn send_loop_inner<S>(
     mut ws_send: S,
     mut data_rx: mpsc::Receiver<WsMessage>,
@@ -436,8 +605,19 @@ async fn send_loop_inner<S>(
     loop {
         // Priority: drain all pending control frames before data.
         while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
-            if ws_send.send(ctrl_msg).await.is_err() {
-                return;
+            match send_or_cancel(&mut ws_send, ctrl_msg.clone(), &cancel).await {
+                WriterStep::Completed => {}
+                WriterStep::Cancelled => {
+                    flush_terminal_frames(
+                        &mut ws_send,
+                        &mut ctrl_rx,
+                        &disconnect_reason,
+                        Some(ctrl_msg),
+                    )
+                    .await;
+                    return;
+                }
+                WriterStep::Failed => return,
             }
         }
 
@@ -447,13 +627,16 @@ async fn send_loop_inner<S>(
             // cancellation can fall back to an unacknowledged close.
             biased;
             Some(restart) = restart_rx.recv() => {
-                let sent = ws_send
-                    .send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                let sent = matches!(
+                    tokio::time::timeout(
+                        WS_TERMINAL_FLUSH_TIMEOUT,
+                        ws_send.send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                         code: axum::extract::ws::close_code::RESTART,
                         reason: axum::extract::ws::Utf8Bytes::from_static("relay restarting"),
-                    })))
-                    .await
-                    .is_ok();
+                        }))),
+                    ).await,
+                    Ok(Ok(()))
+                );
                 let _ = restart.flushed.send(sent);
                 break;
             }
@@ -464,33 +647,58 @@ async fn send_loop_inner<S>(
                 // would send Close first and the client would never learn why
                 // (the top-of-loop drain does not run again after we break).
                 // This makes "queue frame on ctrl, then cancel" a safe idiom.
-                while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
-                    if ws_send.send(ctrl_msg).await.is_err() {
-                        break;
-                    }
-                }
-                let close = disconnect_reason
-                    .borrow()
-                    .map_or(WsMessage::Close(None), |reason| reason.close_message());
-                let _ = ws_send.send(close).await;
+                flush_terminal_frames(&mut ws_send, &mut ctrl_rx, &disconnect_reason, None).await;
                 break;
             }
             Some(ctrl_msg) = ctrl_rx.recv() => {
-                if ws_send.send(ctrl_msg).await.is_err() {
-                    break;
+                match send_or_cancel(&mut ws_send, ctrl_msg.clone(), &cancel).await {
+                    WriterStep::Completed => {}
+                    WriterStep::Cancelled => {
+                        flush_terminal_frames(
+                            &mut ws_send,
+                            &mut ctrl_rx,
+                            &disconnect_reason,
+                            Some(ctrl_msg),
+                        )
+                        .await;
+                        break;
+                    }
+                    WriterStep::Failed => break,
                 }
             }
             Some(msg) = data_rx.recv() => {
                 let mut batched = 1usize;
-                if ws_send.feed(msg).await.is_err() {
-                    break;
+                match feed_or_cancel(&mut ws_send, msg, &cancel).await {
+                    WriterStep::Completed => {}
+                    WriterStep::Cancelled => {
+                        flush_terminal_frames(
+                            &mut ws_send,
+                            &mut ctrl_rx,
+                            &disconnect_reason,
+                            None,
+                        )
+                        .await;
+                        break;
+                    }
+                    WriterStep::Failed => break,
                 }
 
                 while batched < MAX_WS_SEND_BATCH {
                     match data_rx.try_recv() {
                         Ok(next) => {
-                            if ws_send.feed(next).await.is_err() {
-                                return;
+                            match feed_or_cancel(&mut ws_send, next, &cancel).await {
+                                WriterStep::Completed => {}
+                                WriterStep::Cancelled => {
+                                    flush_terminal_frames(
+                                        &mut ws_send,
+                                        &mut ctrl_rx,
+                                        &disconnect_reason,
+                                        None,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                WriterStep::Failed => return,
                             }
                             batched += 1;
                         }
@@ -499,8 +707,19 @@ async fn send_loop_inner<S>(
                     }
                 }
 
-                if ws_send.flush().await.is_err() {
-                    break;
+                match flush_or_cancel(&mut ws_send, &cancel).await {
+                    WriterStep::Completed => {}
+                    WriterStep::Cancelled => {
+                        flush_terminal_frames(
+                            &mut ws_send,
+                            &mut ctrl_rx,
+                            &disconnect_reason,
+                            None,
+                        )
+                        .await;
+                        break;
+                    }
+                    WriterStep::Failed => break,
                 }
                 metrics::histogram!("buzz_ws_send_batch_size").record(batched as f64);
             }
@@ -639,11 +858,15 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
 
     match msg {
         ClientMessage::Auth(event) => {
-            // Auth is synchronous in the WS loop — no span context is lost.
+            // AUTH remains inline so only one frame can race the connection's
+            // pending lifecycle, but cancellation can preempt dependency waits.
             let span = tracing::info_span!("ws.auth", conn_id = %conn.conn_id);
-            handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state))
-                .instrument(span)
-                .await;
+            tokio::select! {
+                biased;
+                _ = conn.cancel.cancelled() => {}
+                _ = handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state))
+                    .instrument(span) => {}
+            }
         }
         ClientMessage::Event(event) => {
             let conn = Arc::clone(&conn);
@@ -733,11 +956,15 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use axum::{extract::ws::WebSocketUpgrade, routing::get, Router};
     use metrics_util::debugging::DebugValue;
     use std::sync::{Arc, Mutex};
 
     use buzz_auth::AuthMethod;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     /// A connection whose outbound frames a test can read back.
     ///
@@ -755,7 +982,7 @@ pub(crate) mod tests {
                 "test.local".to_string(),
             ),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
-            auth_state: RwLock::new(auth),
+            auth_state: StdMutex::new(auth),
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             send_tx,
             ctrl_tx,
@@ -818,6 +1045,46 @@ pub(crate) mod tests {
             .unwrap_or_default()
     }
 
+    fn labeled_counter_value(
+        snapshot: &MetricSnapshot,
+        name: &str,
+        label_key: &str,
+        label_value: &str,
+    ) -> u64 {
+        snapshot
+            .iter()
+            .find_map(|(key, _, _, value)| {
+                (key.key().name() == name
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == label_key && label.value() == label_value))
+                .then(|| match value {
+                    DebugValue::Counter(value) => *value,
+                    _ => panic!("{name} must be a counter"),
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    fn labeled_gauge_value(snapshot: &MetricSnapshot, name: &str, labels: &[(&str, &str)]) -> f64 {
+        snapshot
+            .iter()
+            .find_map(|(key, _, _, value)| {
+                let matches = key.key().name() == name
+                    && labels.iter().all(|(expected_key, expected_value)| {
+                        key.key().labels().any(|label| {
+                            label.key() == *expected_key && label.value() == *expected_value
+                        })
+                    });
+                matches.then(|| match value {
+                    DebugValue::Gauge(value) => value.into_inner(),
+                    _ => panic!("{name} must be a gauge"),
+                })
+            })
+            .unwrap_or_default()
+    }
+
     fn authenticated_gauge(snapshot: &MetricSnapshot) -> f64 {
         snapshot
             .iter()
@@ -852,19 +1119,21 @@ pub(crate) mod tests {
 
         crate::metrics::record_auth_attempt_started();
         let (success, _rx) = test_conn_with_auth(pending_state());
-        assert!(success.authenticate(auth_context()).await);
+        assert!(success.authenticate(auth_context()));
         assert!(
-            !success.authenticate(auth_context()).await,
+            !success.authenticate(auth_context()),
             "a terminal attempt cannot authenticate twice"
+        );
+        assert!(
+            !success.finish_pending_auth_on_cancel(AuthOutcome::Disconnect),
+            "the cancellation watcher must leave authenticated context for lifecycle cleanup"
         );
         assert!(success
             .finish_auth_on_close(AuthOutcome::Disconnect)
-            .await
             .is_some());
         assert!(
             success
                 .finish_auth_on_close(AuthOutcome::Shutdown)
-                .await
                 .is_none(),
             "cleanup must be idempotent"
         );
@@ -873,39 +1142,33 @@ pub(crate) mod tests {
             AuthOutcome::Invalid,
             AuthOutcome::Banned,
             AuthOutcome::BanCheckError,
+            AuthOutcome::AllowlistCheckError,
             AuthOutcome::AllowlistDenied,
+            AuthOutcome::RelayMembershipCheckError,
             AuthOutcome::NotRelayMember,
         ] {
             crate::metrics::record_auth_attempt_started();
             let (denied, _rx) = test_conn_with_auth(pending_state());
-            assert!(denied.reject_auth(outcome).await);
-            assert!(
-                !denied.reject_auth(outcome).await,
-                "a denial cannot record twice"
-            );
+            assert!(denied.reject_auth(outcome));
+            assert!(!denied.reject_auth(outcome), "a denial cannot record twice");
             assert!(denied
                 .finish_auth_on_close(AuthOutcome::Disconnect)
-                .await
                 .is_none());
         }
 
         crate::metrics::record_auth_attempt_started();
         let (timed_out, _rx) = test_conn_with_auth(pending_state());
-        assert!(timed_out.expire_auth().await);
+        assert!(timed_out.expire_auth());
         assert!(timed_out
             .finish_auth_on_close(AuthOutcome::Disconnect)
-            .await
             .is_none());
 
         for outcome in [AuthOutcome::Disconnect, AuthOutcome::Shutdown] {
             crate::metrics::record_auth_attempt_started();
             let (closed, _rx) = test_conn_with_auth(pending_state());
-            assert!(closed.finish_auth_on_close(outcome).await.is_none());
-            assert!(closed.finish_auth_on_close(outcome).await.is_none());
+            assert!(closed.finish_auth_on_close(outcome).is_none());
+            assert!(closed.finish_auth_on_close(outcome).is_none());
         }
-
-        crate::metrics::record_terminal_auth_retry(AuthOutcome::Duplicate);
-        crate::metrics::record_terminal_auth_retry(AuthOutcome::AlreadyFailed);
 
         let snapshot = snapshotter.snapshot().into_vec();
         let attempts = counter_value(&snapshot, "buzz_auth_attempts_total", None);
@@ -930,6 +1193,299 @@ pub(crate) mod tests {
         assert_eq!(attempts, AuthOutcome::ALL.len() as u64);
         assert_eq!(attempts, outcomes);
         assert_eq!(authenticated_gauge(&snapshot), 0.0);
+    }
+
+    /// Post-terminal AUTH floods traverse the production frame dispatcher but
+    /// cannot mint rollout-gating challenge lifecycles or outcomes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_flood_after_terminal_only_increments_protocol_noise_metric() {
+        const FRAMES_PER_STATE: u64 = 64;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = crate::state::tests::test_state().await;
+        let mut authoritative_attempts = 0;
+        let mut authoritative_outcomes = 0;
+
+        for (auth_state, expected_state) in [
+            (
+                authenticated_state(),
+                crate::metrics::AuthPostTerminalState::Authenticated,
+            ),
+            (
+                AuthState::Failed,
+                crate::metrics::AuthPostTerminalState::Failed,
+            ),
+        ] {
+            let (conn, mut rx) = test_conn_with_auth(auth_state);
+            for sequence in 0..FRAMES_PER_STATE {
+                let event = EventBuilder::new(Kind::Authentication, format!("noise-{sequence}"))
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign AUTH noise event");
+                let raw = serde_json::json!(["AUTH", event]).to_string();
+                handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+                let frame = read_frame(&mut rx);
+                assert_eq!(frame[2], false);
+            }
+            assert!(!conn.cancel.is_cancelled());
+            let snapshot = snapshotter.snapshot().into_vec();
+            authoritative_attempts += counter_value(&snapshot, "buzz_auth_attempts_total", None);
+            authoritative_outcomes += counter_value(&snapshot, "buzz_auth_outcomes_total", None);
+            assert_eq!(
+                labeled_counter_value(
+                    &snapshot,
+                    "buzz_auth_post_terminal_frames_total",
+                    "state",
+                    expected_state.as_str(),
+                ),
+                FRAMES_PER_STATE
+            );
+        }
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        authoritative_attempts += counter_value(&snapshot, "buzz_auth_attempts_total", None);
+        authoritative_outcomes += counter_value(&snapshot, "buzz_auth_outcomes_total", None);
+        assert_eq!(
+            authoritative_attempts, 0,
+            "post-terminal protocol noise cannot create authoritative attempts"
+        );
+        assert_eq!(
+            authoritative_outcomes, 0,
+            "post-terminal protocol noise cannot create authoritative outcomes"
+        );
+    }
+
+    /// Aborting the production lifecycle owner must synchronously terminalize
+    /// pending accounting and release an authenticated gauge exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_lifecycle_owner_is_drop_safe() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        crate::metrics::record_auth_attempt_started();
+        let (authenticated, _rx) = test_conn_with_auth(pending_state());
+        assert!(authenticated.authenticate(auth_context()));
+        let authenticated_started = Arc::new(Notify::new());
+        let task = {
+            let conn = Arc::clone(&authenticated);
+            let started = Arc::clone(&authenticated_started);
+            tokio::spawn(async move {
+                let _guard = AuthLifecycleGuard::new(conn);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            })
+        };
+        authenticated_started.notified().await;
+        task.abort();
+        assert!(task.await.expect_err("task was aborted").is_cancelled());
+
+        crate::metrics::record_auth_attempt_started();
+        let (pending, _rx) = test_conn_with_auth(pending_state());
+        let pending_started = Arc::new(Notify::new());
+        let task = {
+            let conn = Arc::clone(&pending);
+            let started = Arc::clone(&pending_started);
+            tokio::spawn(async move {
+                let _guard = AuthLifecycleGuard::new(conn);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            })
+        };
+        pending_started.notified().await;
+        task.abort();
+        assert!(task.await.expect_err("task was aborted").is_cancelled());
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(
+            counter_value(&snapshot, "buzz_auth_attempts_total", None),
+            2
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::Success.as_str()),
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::Disconnect.as_str()),
+            ),
+            1
+        );
+        assert_eq!(authenticated_gauge(&snapshot), 0.0);
+        assert!(matches!(pending.auth_state_snapshot(), AuthState::Failed));
+    }
+
+    /// Drive the real upgraded WebSocket lifecycle until AUTH is waiting for
+    /// the sole database connection. Production shutdown must claim the
+    /// pending attempt before that dependency is released, and the late DB
+    /// result must not turn the terminal into success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_terminalizes_auth_stalled_on_database_before_late_success() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        // Occupy the pool's only connection attempt with a fake PostgreSQL
+        // endpoint that accepts TCP and never completes the startup handshake.
+        // The production AUTH query then waits for the pool permit without
+        // requiring a developer database or relying on timing alone.
+        let fake_database = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake PostgreSQL endpoint");
+        let database_url = format!(
+            "postgres://buzz@{}/buzz",
+            fake_database.local_addr().expect("fake database address")
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect_lazy(&database_url)
+            .expect("create lifecycle test pool");
+        let blocker_pool = pool.clone();
+        let blocker = tokio::spawn(async move { blocker_pool.acquire().await });
+        let (blocked_database_stream, _) = fake_database
+            .accept()
+            .await
+            .expect("pool reached fake PostgreSQL endpoint");
+        let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+        let tenant = TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            "test.local".to_owned(),
+        );
+        let expected_relay_url: RelayUrl =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant)
+                .parse()
+                .expect("expected NIP-42 relay URL");
+
+        let connection_finished = Arc::new(Notify::new());
+        let route_state = Arc::clone(&state);
+        let route_tenant = tenant.clone();
+        let route_finished = Arc::clone(&connection_finished);
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let state = Arc::clone(&route_state);
+                let tenant = route_tenant.clone();
+                let finished = Arc::clone(&route_finished);
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let cancel = CancellationToken::new();
+                        let control = CommunityConnectionControl::new(cancel);
+                        handle_active_connection(
+                            socket,
+                            state,
+                            "127.0.0.1:1234".parse().expect("client address"),
+                            tenant,
+                            Uuid::new_v4(),
+                            control,
+                        )
+                        .await;
+                        finished.notify_one();
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind lifecycle WebSocket listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve lifecycle WebSocket");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{address}/"))
+            .await
+            .expect("connect lifecycle WebSocket");
+        let challenge_frame = client
+            .next()
+            .await
+            .expect("challenge frame")
+            .expect("read challenge");
+        let Message::Text(challenge_text) = challenge_frame else {
+            panic!("expected text challenge")
+        };
+        let challenge_json: serde_json::Value =
+            serde_json::from_str(&challenge_text).expect("parse challenge");
+        assert_eq!(challenge_json[0], "AUTH");
+        let challenge = challenge_json[1].as_str().expect("challenge string");
+        let auth_event = EventBuilder::auth(challenge, expected_relay_url)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign NIP-42 AUTH");
+        client
+            .send(Message::Text(
+                serde_json::json!(["AUTH", auth_event]).to_string().into(),
+            ))
+            .await
+            .expect("send NIP-42 AUTH");
+
+        let attempts_before_shutdown = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut attempts = 0;
+            loop {
+                let snapshot = snapshotter.snapshot().into_vec();
+                attempts += counter_value(&snapshot, "buzz_auth_attempts_total", None);
+                if labeled_gauge_value(
+                    &snapshot,
+                    "buzz_db_pool_waiters",
+                    &[("pool_role", "writer"), ("operation", "authorization")],
+                ) >= 1.0
+                {
+                    break attempts;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("AUTH reached the blocked production DB acquisition");
+        assert_eq!(
+            attempts_before_shutdown, 1,
+            "the production-issued challenge must own the attempt start"
+        );
+
+        state.begin_shutdown();
+        assert_eq!(state.conn_manager.drain_all(), 1);
+        tokio::time::timeout(Duration::from_secs(2), connection_finished.notified())
+            .await
+            .expect("production connection lifecycle finishes after shutdown");
+
+        // Release the dependency only after production shutdown has claimed
+        // the pending lifecycle, then prove no late handler result can win.
+        drop(blocked_database_stream);
+        blocker.abort();
+        let _ = blocker.await;
+        pool.close().await;
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::Shutdown.as_str()),
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::Success.as_str()),
+            ),
+            0,
+            "releasing the dependency after shutdown must not record late success"
+        );
+        assert_eq!(authenticated_gauge(&snapshot), 0.0);
+
+        drop(client);
+        server.abort();
+        let _ = server.await;
     }
 
     /// Drives the real `handle_text_message` with every handler permit held, so
@@ -1085,6 +1641,41 @@ pub(crate) mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NeverReadySink {
+        ready_polled: Arc<Notify>,
+    }
+
+    impl Sink<WsMessage> for NeverReadySink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.ready_polled.notify_one();
+            std::task::Poll::Pending
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _item: WsMessage) -> Result<(), Self::Error> {
+            panic!("a never-ready sink must not accept a frame")
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
     fn ordinary_disconnect_reason() -> watch::Receiver<Option<CommunityDisconnectReason>> {
         let (_tx, rx) = watch::channel(None);
         rx
@@ -1104,6 +1695,40 @@ pub(crate) mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
+    }
+
+    /// Cancellation must break a writer blocked in `poll_ready`, and terminal
+    /// close delivery gets one bounded best-effort window before teardown wins.
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_never_ready_sink_cannot_retain_writer_task() {
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let ready_polled = Arc::new(Notify::new());
+        data_tx
+            .send(WsMessage::Text("blocked".into()))
+            .await
+            .expect("queue blocked frame");
+
+        let writer = tokio::spawn(send_loop_inner(
+            NeverReadySink {
+                ready_polled: Arc::clone(&ready_polled),
+            },
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            cancel.clone(),
+            ordinary_disconnect_reason(),
+        ));
+
+        ready_polled.notified().await;
+        cancel.cancel();
+        tokio::task::yield_now().await;
+        tokio::time::advance(WS_TERMINAL_FLUSH_TIMEOUT + Duration::from_millis(1)).await;
+        writer
+            .await
+            .expect("writer exits after bounded terminal flush");
     }
 
     #[tokio::test]

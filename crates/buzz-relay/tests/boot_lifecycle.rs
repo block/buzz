@@ -196,6 +196,50 @@ fn assert_no_startup_lifecycle_metrics(scrape: &str) {
     }
 }
 
+fn assert_auth_metrics_have_stable_boot_zeros(scrape: &str) {
+    const OUTCOMES: [&str; 11] = [
+        "success",
+        "invalid",
+        "banned",
+        "ban_check_error",
+        "allowlist_check_error",
+        "allowlist_denied",
+        "relay_membership_check_error",
+        "not_relay_member",
+        "timeout",
+        "disconnect",
+        "shutdown",
+    ];
+
+    assert!(scrape.contains("# TYPE buzz_auth_attempts_total counter"));
+    assert!(scrape.contains("buzz_auth_attempts_total{method=\"nip42\"} 0"));
+    assert!(scrape.contains("# TYPE buzz_auth_outcomes_total counter"));
+    assert!(scrape.contains("# TYPE buzz_auth_duration_seconds histogram"));
+    assert!(scrape.contains("# TYPE buzz_auth_post_terminal_frames_total counter"));
+    assert!(scrape.contains("buzz_auth_post_terminal_frames_total{state=\"authenticated\"} 0"));
+    assert!(scrape.contains("buzz_auth_post_terminal_frames_total{state=\"failed\"} 0"));
+    assert!(scrape.contains("buzz_ws_authenticated_connections_active 0"));
+
+    for outcome in OUTCOMES {
+        assert!(scrape.contains(&format!(
+            "buzz_auth_outcomes_total{{method=\"nip42\",outcome=\"{outcome}\"}} 0"
+        )));
+        assert!(scrape.contains(&format!(
+            "buzz_auth_duration_seconds_count{{method=\"nip42\",outcome=\"{outcome}\"}} 0"
+        )));
+        assert!(scrape.contains(&format!(
+            "buzz_auth_duration_seconds_sum{{method=\"nip42\",outcome=\"{outcome}\"}} 0"
+        )));
+        assert!(scrape.lines().any(|line| {
+            line.starts_with("buzz_auth_duration_seconds_bucket{")
+                && line.contains("le=\"+Inf\"")
+                && line.contains("method=\"nip42\"")
+                && line.contains(&format!("outcome=\"{outcome}\""))
+                && line.ends_with(" 0")
+        }));
+    }
+}
+
 fn lifecycle_events(output: &Output) -> Vec<Value> {
     let mut events: Vec<Value> = output
         .stdout
@@ -444,6 +488,7 @@ fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
     ]);
     let scrape = wait_for_relay_metrics(&mut process, port);
     assert_no_startup_lifecycle_metrics(&scrape);
+    assert_auth_metrics_have_stable_boot_zeros(&scrape);
 
     let output = process.terminate();
     let events = lifecycle_events(&output);

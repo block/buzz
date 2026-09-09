@@ -15,7 +15,7 @@ use axum::extract::ws::Message as WsMessage;
 use tracing::{debug, info, warn};
 
 use crate::connection::{AuthState, ConnectionState};
-use crate::metrics::AuthOutcome;
+use crate::metrics::{AuthOutcome, AuthPostTerminalState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
@@ -24,6 +24,36 @@ enum BanOutcome {
     Clear,
     Banned,
     DbError,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicyCheck<T> {
+    Allowed(T),
+    Denied,
+    DependencyError,
+}
+
+fn classify_allowlist<E>(result: Result<bool, E>) -> PolicyCheck<()> {
+    match result {
+        Ok(true) => PolicyCheck::Allowed(()),
+        Ok(false) => PolicyCheck::Denied,
+        Err(_) => PolicyCheck::DependencyError,
+    }
+}
+
+fn classify_relay_membership(
+    result: Result<crate::api::relay_members::MembershipDecision, String>,
+) -> PolicyCheck<Option<nostr::PublicKey>> {
+    use crate::api::relay_members::MembershipDecision;
+
+    match result {
+        Ok(MembershipDecision::OpenRelay | MembershipDecision::Member) => {
+            PolicyCheck::Allowed(None)
+        }
+        Ok(MembershipDecision::ViaOwner(owner)) => PolicyCheck::Allowed(Some(owner)),
+        Ok(MembershipDecision::Denied) => PolicyCheck::Denied,
+        Err(_) => PolicyCheck::DependencyError,
+    }
 }
 
 fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOutcome)> {
@@ -67,12 +97,13 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
 pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let event_id_hex = event.id.to_hex();
     let (challenge, conn_id) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
-            AuthState::Pending { challenge, .. } => (challenge.clone(), conn.conn_id),
+        match conn.auth_state_snapshot() {
+            AuthState::Pending { challenge, .. } => (challenge, conn.conn_id),
             AuthState::Authenticated(_) => {
                 debug!(conn_id = %conn.conn_id, "AUTH received but already authenticated");
-                crate::metrics::record_terminal_auth_retry(AuthOutcome::Duplicate);
+                crate::metrics::record_post_terminal_auth_frame(
+                    AuthPostTerminalState::Authenticated,
+                );
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
@@ -82,7 +113,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             AuthState::Failed => {
                 debug!(conn_id = %conn.conn_id, "AUTH received after failed auth");
-                crate::metrics::record_terminal_auth_retry(AuthOutcome::AlreadyFailed);
+                crate::metrics::record_post_terminal_auth_frame(AuthPostTerminalState::Failed);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
@@ -178,7 +209,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
-                    if !conn.reject_auth(auth_outcome).await {
+                    if !conn.reject_auth(auth_outcome) {
                         return;
                     }
                     // Decision 4: banned ⇒ OK false + immediate WebSocket close.
@@ -198,56 +229,85 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if state.config.pubkey_allowlist_enabled
                 && auth_ctx.auth_method == buzz_auth::AuthMethod::Nip42
             {
-                let allowed = match state
+                let allowlist = state
                     .db
                     .is_pubkey_allowed(conn.tenant.community(), pubkey.as_bytes())
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                    .await;
+                if let Err(e) = &allowlist {
+                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
                               "allowlist DB lookup failed, denying (fail-closed)");
-                        false
-                    }
-                };
-                if !allowed {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
-                    metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
-                        .increment(1);
-                    if !conn.reject_auth(AuthOutcome::AllowlistDenied).await {
+                }
+                match classify_allowlist(allowlist) {
+                    PolicyCheck::Allowed(()) => {}
+                    PolicyCheck::Denied => {
+                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
+                        metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
+                            .increment(1);
+                        if !conn.reject_auth(AuthOutcome::AllowlistDenied) {
+                            return;
+                        }
+                        conn.send(RelayMessage::ok(
+                            &event_id_hex,
+                            false,
+                            "auth-required: verification failed",
+                        ));
                         return;
                     }
-                    conn.send(RelayMessage::ok(
-                        &event_id_hex,
-                        false,
-                        "auth-required: verification failed",
-                    ));
-                    return;
+                    PolicyCheck::DependencyError => {
+                        metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_check_error")
+                            .increment(1);
+                        if !conn.reject_auth(AuthOutcome::AllowlistCheckError) {
+                            return;
+                        }
+                        conn.send(RelayMessage::ok(
+                            &event_id_hex,
+                            false,
+                            "error: internal error checking allowlist",
+                        ));
+                        return;
+                    }
                 }
             }
 
             // Relay membership gate — uses the shared helper with NIP-OA fallback.
-            let nip_oa_owner = match crate::api::relay_members::enforce_relay_membership(
+            let membership = crate::api::relay_members::check_relay_membership(
                 &state,
                 conn.tenant.community(),
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
                 Some(signed_auth_created_at),
             )
-            .await
-            {
-                Ok(owner) => owner,
-                Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
+            .await;
+            if let Err(e) = &membership {
+                warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                    "relay membership DB lookup failed, denying (fail-closed)");
+            }
+            let nip_oa_owner = match classify_relay_membership(membership) {
+                PolicyCheck::Allowed(owner) => owner,
+                PolicyCheck::Denied => {
+                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
-                    if !conn.reject_auth(AuthOutcome::NotRelayMember).await {
+                    if !conn.reject_auth(AuthOutcome::NotRelayMember) {
                         return;
                     }
                     conn.send(RelayMessage::ok(
                         &event_id_hex,
                         false,
                         "restricted: not a relay member",
+                    ));
+                    return;
+                }
+                PolicyCheck::DependencyError => {
+                    metrics::counter!("buzz_auth_failures_total", "reason" => "relay_membership_check_error")
+                        .increment(1);
+                    if !conn.reject_auth(AuthOutcome::RelayMembershipCheckError) {
+                        return;
+                    }
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        "error: internal error checking relay membership",
                     ));
                     return;
                 }
@@ -292,7 +352,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
-            if !conn.authenticate(auth_ctx).await {
+            if !conn.authenticate(auth_ctx) {
                 return;
             }
             state
@@ -303,7 +363,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Err(e) => {
             warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
             metrics::counter!("buzz_auth_failures_total", "reason" => "nip42_invalid").increment(1);
-            if !conn.reject_auth(AuthOutcome::Invalid).await {
+            if !conn.reject_auth(AuthOutcome::Invalid) {
                 return;
             }
             conn.send(RelayMessage::ok(
@@ -317,9 +377,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
 #[cfg(test)]
 mod tests {
-    use super::{ban_denial, extract_auth_tag_json, handle_auth, BanOutcome};
+    use super::{
+        ban_denial, classify_allowlist, classify_relay_membership, extract_auth_tag_json,
+        handle_auth, BanOutcome, PolicyCheck,
+    };
+    use crate::api::relay_members::MembershipDecision;
     use crate::connection::{tests::test_conn_with_auth, AuthState};
-    use crate::metrics::AuthOutcome;
+    use crate::metrics::{AuthOutcome, AuthPostTerminalState};
     use metrics_util::debugging::DebugValue;
     use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
     use std::time::Instant;
@@ -431,11 +495,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dependency_failures_are_distinct_from_policy_denials() {
+        assert_eq!(
+            classify_allowlist(Ok::<_, &str>(true)),
+            PolicyCheck::Allowed(())
+        );
+        assert_eq!(
+            classify_allowlist(Ok::<_, &str>(false)),
+            PolicyCheck::Denied
+        );
+        assert_eq!(
+            classify_allowlist(Err::<bool, _>("database unavailable")),
+            PolicyCheck::DependencyError
+        );
+
+        let owner = Keys::generate().public_key();
+        assert_eq!(
+            classify_relay_membership(Ok(MembershipDecision::OpenRelay)),
+            PolicyCheck::Allowed(None)
+        );
+        assert_eq!(
+            classify_relay_membership(Ok(MembershipDecision::Member)),
+            PolicyCheck::Allowed(None)
+        );
+        assert_eq!(
+            classify_relay_membership(Ok(MembershipDecision::ViaOwner(owner))),
+            PolicyCheck::Allowed(Some(owner))
+        );
+        assert_eq!(
+            classify_relay_membership(Ok(MembershipDecision::Denied)),
+            PolicyCheck::Denied
+        );
+        assert_eq!(
+            classify_relay_membership(Err("database unavailable".to_owned())),
+            PolicyCheck::DependencyError
+        );
+    }
+
     /// The handler owns retry classification, so drive its real terminal-state
     /// branches rather than calling the metric helper directly. A malformed
     /// signature also traverses the real NIP-42 verifier before terminalizing.
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_accounts_duplicate_failed_and_invalid_signature_attempts() {
+    async fn handler_separates_post_terminal_frames_from_invalid_attempts() {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
@@ -477,28 +579,38 @@ mod tests {
         assert_eq!(invalid_frame[2], false);
         assert_eq!(invalid_frame[3], "auth-required: verification failed");
         assert!(matches!(
-            *invalid_conn.auth_state.read().await,
+            invalid_conn.auth_state_snapshot(),
             AuthState::Failed
         ));
 
         let snapshot = snapshotter.snapshot().into_vec();
         let attempts = metric_counter(&snapshot, "buzz_auth_attempts_total", None);
-        let outcomes = [
-            AuthOutcome::Duplicate,
-            AuthOutcome::AlreadyFailed,
-            AuthOutcome::Invalid,
-        ]
-        .into_iter()
-        .map(|outcome| {
+        assert_eq!(attempts, 1);
+        assert_eq!(
             metric_counter(
                 &snapshot,
                 "buzz_auth_outcomes_total",
-                Some(outcome.as_str()),
-            )
-        })
-        .sum::<u64>();
-        assert_eq!(attempts, 3);
-        assert_eq!(attempts, outcomes);
+                Some(AuthOutcome::Invalid.as_str()),
+            ),
+            1
+        );
+        for state in AuthPostTerminalState::ALL {
+            let count = snapshot
+                .iter()
+                .find_map(|(key, _, _, value)| {
+                    (key.key().name() == "buzz_auth_post_terminal_frames_total"
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "state" && label.value() == state.as_str()))
+                    .then(|| match value {
+                        DebugValue::Counter(value) => *value,
+                        _ => panic!("post-terminal frame metric must be a counter"),
+                    })
+                })
+                .unwrap_or_default();
+            assert_eq!(count, 1, "{} post-terminal frame", state.as_str());
+        }
     }
 
     /// A verified signature followed by an unavailable restriction database
@@ -527,7 +639,7 @@ mod tests {
 
         handle_auth(event, conn.clone(), state).await;
 
-        assert!(matches!(*conn.auth_state.read().await, AuthState::Failed));
+        assert!(matches!(conn.auth_state_snapshot(), AuthState::Failed));
         assert!(conn.cancel.is_cancelled());
         let snapshot = snapshotter.snapshot().into_vec();
         assert_eq!(

@@ -57,8 +57,7 @@ pub(crate) async fn enforce_ws_admission(
     }
 
     let (pubkey, is_agent) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
+        match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
             _ => return true,
         }
