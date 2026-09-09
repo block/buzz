@@ -555,30 +555,53 @@ for (const { incoming, savedFirst } of [
       await navigate(roots[0]);
       await expect(input).toHaveText("new authored text");
     }
-    await input.fill("");
-    expect(await sourceRecord()).toBeNull();
-    // Read, don't poll: use the existing expando round trip to capture the
-    // actual PM document after native deletion. Assert only AFTER switching,
-    // so proof of deletion cannot wait away a rapid scope-cleanup race.
-    const deleted = await input.evaluate((el) => {
+    // Native fill can return before DOMObserver dispatches the PM edit.
+    // Arm before deletion; observe the first update FROM the authored document,
+    // not eventual emptiness/storage quiescence. Production onUpdate was
+    // registered first and synchronously owns empty-authority persistence.
+    const deletion = await input.evaluateHandle((el, root) => {
       el.setAttribute("data-lifecycle-host", "retained");
       const editor = (
         el as HTMLElement & { editor: import("@tiptap/core").Editor }
       ).editor;
       return {
-        dom: el.textContent,
-        doc: editor.getJSON(),
-        from: editor.state.selection.from,
-        to: editor.state.selection.to,
+        completed: new Promise((resolve) => {
+          const onUpdate = ({
+            transaction,
+          }: import("@tiptap/core").EditorEvents["update"]) => {
+            if (transaction.before.textContent !== "new authored text") return;
+            editor.off("update", onUpdate);
+            const key = Object.keys(localStorage).find((key) =>
+              key.startsWith("buzz-drafts.v2"),
+            );
+            resolve({
+              dom: el.textContent,
+              doc: editor.getJSON(),
+              from: editor.state.selection.from,
+              to: editor.state.selection.to,
+              source: key
+                ? (JSON.parse(localStorage.getItem(key) ?? "{}")[
+                    `thread:${root}`
+                  ] ?? null)
+                : "draft storage scope missing",
+            });
+          };
+          editor.on("update", onUpdate);
+        }),
       };
-    });
+    }, roots[0]);
+    await input.fill("");
+    const deleted = await deletion.evaluate(({ completed }) => completed);
+    // No assertion/poll between action completion and outgoing-key cleanup.
     await navigate(roots[1]);
     expect(deleted).toEqual({
       dom: "",
       doc: { type: "doc", content: [{ type: "paragraph" }] },
       from: 1,
       to: 1,
+      source: null,
     });
+    await deletion.dispose();
     await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
     await expect(input).toHaveText(incoming);
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
