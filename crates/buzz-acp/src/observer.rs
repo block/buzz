@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 
 use serde::Serialize;
@@ -40,6 +41,8 @@ struct ObserverInner {
     tx: broadcast::Sender<ObserverEvent>,
     buffer: Mutex<VecDeque<ObserverEvent>>,
     seq: AtomicU64,
+    monotonic_origin: Instant,
+    latency: Mutex<crate::latency::LatencyCollector>,
 }
 
 fn new_observer_handle() -> ObserverHandle {
@@ -49,6 +52,8 @@ fn new_observer_handle() -> ObserverHandle {
             tx,
             buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
             seq: AtomicU64::new(1),
+            monotonic_origin: Instant::now(),
+            latency: Mutex::new(crate::latency::LatencyCollector::default()),
         }),
     }
 }
@@ -59,6 +64,11 @@ fn new_observer_handle() -> ObserverHandle {
 pub struct ObserverEvent {
     /// Monotonic process-local sequence number.
     pub seq: u64,
+    /// Milliseconds since this process-local observer feed was created.
+    ///
+    /// This clock is authoritative for durations between events from the same
+    /// harness process. It must not be compared across processes.
+    pub monotonic_ms: u64,
     /// RFC3339 UTC timestamp.
     pub timestamp: String,
     /// Observer event kind, for example `acp_read` or `turn_started`.
@@ -110,6 +120,8 @@ impl ObserverHandle {
     ) {
         let event = ObserverEvent {
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
+            monotonic_ms: u64::try_from(self.inner.monotonic_origin.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
             timestamp: chrono::Utc::now().to_rfc3339(),
             kind: kind.into(),
             agent_index,
@@ -132,7 +144,27 @@ impl ObserverHandle {
             }
         }
 
-        let _ = self.inner.tx.send(event);
+        let _ = self.inner.tx.send(event.clone());
+
+        // Build content-free mention-to-reply traces synchronously from the
+        // semantic observer boundaries. Synchronous ingestion preserves the
+        // source event order and guarantees the derived sample is buffered
+        // immediately after the event that completed it.
+        let completed = match self.inner.latency.lock() {
+            Ok(mut latency) => latency.ingest(&event),
+            Err(error) => {
+                tracing::warn!(target: "observer", "latency collector lock poisoned: {error}");
+                None
+            }
+        };
+        if let Some(completed) = completed {
+            self.emit(
+                "mention_reply_latency",
+                completed.agent_index,
+                &completed.context,
+                completed.payload,
+            );
+        }
     }
 }
 
@@ -162,5 +194,106 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observer_serializes_process_local_monotonic_time() {
+        let observer = ObserverHandle::in_process();
+        observer.emit(
+            "first",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "second",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+
+        let events = observer.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].monotonic_ms <= events[1].monotonic_ms);
+        assert_eq!(
+            serde_json::to_value(&events[0]).unwrap()["monotonicMs"],
+            events[0].monotonic_ms
+        );
+    }
+
+    #[test]
+    fn observer_emits_derived_latency_sample() {
+        let observer = ObserverHandle::in_process();
+        let channel_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let trigger_context = context_for(Some(channel_id), None, None);
+        let turn_context = context_for_turn(
+            Some(channel_id),
+            Some("session-1".into()),
+            "turn-1".into(),
+            "2026-07-22T00:00:00Z".into(),
+        );
+
+        observer.emit(
+            "event_received",
+            None,
+            &trigger_context,
+            serde_json::json!({"eventId": "trigger-1", "receiptToObserverMs": 0}),
+        );
+        observer.emit(
+            "event_queued",
+            None,
+            &trigger_context,
+            serde_json::json!({"eventId": "trigger-1"}),
+        );
+        observer.emit(
+            "turn_started",
+            Some(0),
+            &turn_context,
+            serde_json::json!({"triggeringEventIds": ["trigger-1"]}),
+        );
+        observer.emit(
+            "session_resolved",
+            Some(0),
+            &turn_context,
+            serde_json::json!({"isNewSession": false}),
+        );
+        observer.emit(
+            "prompt_dispatched",
+            Some(0),
+            &turn_context,
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "turn_first_output",
+            Some(0),
+            &turn_context,
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "reply_observed",
+            Some(0),
+            &turn_context,
+            serde_json::json!({"eventId": "reply-1"}),
+        );
+        observer.emit(
+            "turn_completed",
+            Some(0),
+            &turn_context,
+            serde_json::json!({}),
+        );
+
+        let events = observer.snapshot();
+        let sample = events
+            .iter()
+            .find(|event| event.kind == "mention_reply_latency")
+            .expect("derived latency sample");
+        assert_eq!(sample.payload["traceId"], "trigger-1");
+        assert_eq!(sample.payload["path"], "warm");
+        assert_eq!(sample.payload["summary"]["windowSize"], 1);
     }
 }
