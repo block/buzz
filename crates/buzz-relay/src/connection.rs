@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -19,6 +19,7 @@ use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
 use crate::handlers;
+use crate::metrics::AuthOutcome;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::rejection::{enforce_ws_admission, request_rejection_message, RejectionTarget};
 use crate::state::{
@@ -47,6 +48,8 @@ pub enum AuthState {
     Pending {
         /// The random challenge string sent to the client.
         challenge: String,
+        /// When the challenge was delivered and this attempt began.
+        started_at: Instant,
     },
     /// Client has successfully authenticated.
     Authenticated(AuthContext),
@@ -88,6 +91,77 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
+    async fn transition_pending_auth(&self, next: AuthState, outcome: AuthOutcome) -> bool {
+        let mut auth = self.auth_state.write().await;
+        let AuthState::Pending { started_at, .. } = &*auth else {
+            return false;
+        };
+        let duration = started_at.elapsed();
+        let became_authenticated = matches!(next, AuthState::Authenticated(_));
+        *auth = next;
+        crate::metrics::record_auth_outcome(outcome, duration);
+        if became_authenticated {
+            // Keep the gauge update under the same state lock as the
+            // Pending -> Authenticated transition. Cleanup must never observe
+            // Authenticated before its increment and decrement first.
+            metrics::gauge!("buzz_ws_authenticated_connections_active").increment(1.0);
+        }
+        true
+    }
+
+    /// Atomically finish the initial challenge as authenticated.
+    pub(crate) async fn authenticate(&self, auth_context: AuthContext) -> bool {
+        self.transition_pending_auth(AuthState::Authenticated(auth_context), AuthOutcome::Success)
+            .await
+    }
+
+    /// Atomically finish the initial challenge with a bounded denial.
+    pub(crate) async fn reject_auth(&self, outcome: AuthOutcome) -> bool {
+        debug_assert!(!matches!(outcome, AuthOutcome::Success));
+        self.transition_pending_auth(AuthState::Failed, outcome)
+            .await
+    }
+
+    /// Finish a pending challenge on timeout and preserve the historical rule
+    /// that an already-failed connection is closed when its timeout expires.
+    async fn expire_auth(&self) -> bool {
+        let mut auth = self.auth_state.write().await;
+        match &*auth {
+            AuthState::Pending { started_at, .. } => {
+                let duration = started_at.elapsed();
+                *auth = AuthState::Failed;
+                crate::metrics::record_auth_outcome(AuthOutcome::Timeout, duration);
+                true
+            }
+            AuthState::Failed => true,
+            AuthState::Authenticated(_) => false,
+        }
+    }
+
+    /// Finalize authentication accounting when a connection closes.
+    ///
+    /// Replacing the state with `Failed` makes cleanup idempotent: an
+    /// authenticated gauge can be decremented at most once, and a pending
+    /// attempt can receive at most one disconnect/shutdown terminal.
+    async fn finish_auth_on_close(&self, outcome: AuthOutcome) -> Option<AuthContext> {
+        debug_assert!(matches!(
+            outcome,
+            AuthOutcome::Disconnect | AuthOutcome::Shutdown
+        ));
+        let mut auth = self.auth_state.write().await;
+        match std::mem::replace(&mut *auth, AuthState::Failed) {
+            AuthState::Pending { started_at, .. } => {
+                crate::metrics::record_auth_outcome(outcome, started_at.elapsed());
+                None
+            }
+            AuthState::Authenticated(auth_context) => {
+                metrics::gauge!("buzz_ws_authenticated_connections_active").decrement(1.0);
+                Some(auth_context)
+            }
+            AuthState::Failed => None,
+        }
+    }
+
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
@@ -186,6 +260,7 @@ async fn handle_active_connection(
         remote_addr: addr,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
+            started_at: Instant::now(),
         }),
         subscriptions: Arc::clone(&subscriptions),
         send_tx: tx.clone(),
@@ -215,6 +290,7 @@ async fn handle_active_connection(
     // Gauge incremented AFTER challenge send succeeds — early disconnects
     // don't leak. Decremented in the cleanup path below.
     metrics::gauge!("buzz_ws_connections_active").increment(1.0);
+    crate::metrics::record_auth_attempt_started();
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -254,11 +330,7 @@ async fn handle_active_connection(
     let auth_timeout_task = tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep(AUTH_TIMEOUT) => {
-                let authenticated = matches!(
-                    *auth_timeout_conn.auth_state.read().await,
-                    AuthState::Authenticated(_)
-                );
-                if !authenticated {
+                if auth_timeout_conn.expire_auth().await {
                     warn!(
                         conn_id = %auth_timeout_conn.conn_id,
                         timeout_secs = AUTH_TIMEOUT.as_secs(),
@@ -286,6 +358,13 @@ async fn handle_active_connection(
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
 
+    let close_outcome = if state.shutting_down.load(Ordering::Acquire) {
+        AuthOutcome::Shutdown
+    } else {
+        AuthOutcome::Disconnect
+    };
+    let authenticated = conn.finish_auth_on_close(close_outcome).await;
+
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         if removed.scope.is_global() {
             state
@@ -301,7 +380,7 @@ async fn handle_active_connection(
         }
     }
     state.conn_manager.deregister(conn.conn_id);
-    if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
+    if let Some(auth_ctx) = authenticated {
         let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
             conn.tenant.community(),
             auth_ctx.pubkey.to_bytes().as_slice(),
@@ -654,6 +733,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use metrics_util::debugging::DebugValue;
     use std::sync::{Arc, Mutex};
 
     use buzz_auth::AuthMethod;
@@ -688,13 +768,69 @@ pub(crate) mod tests {
 
     /// An authenticated connection — the only state admission quotas apply to.
     pub(crate) fn authenticated_state() -> AuthState {
-        AuthState::Authenticated(AuthContext {
+        AuthState::Authenticated(auth_context())
+    }
+
+    fn auth_context() -> AuthContext {
+        AuthContext {
             pubkey: Keys::generate().public_key(),
             scopes: Vec::new(),
             channel_ids: None,
             auth_method: AuthMethod::Nip42,
             agent_owner_pubkey: None,
-        })
+        }
+    }
+
+    fn pending_state() -> AuthState {
+        AuthState::Pending {
+            challenge: "test-challenge".to_owned(),
+            started_at: Instant::now(),
+        }
+    }
+
+    type MetricSnapshot = Vec<(
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    )>;
+
+    fn counter_value(snapshot: &MetricSnapshot, name: &str, outcome: Option<&str>) -> u64 {
+        snapshot
+            .iter()
+            .find_map(|(key, _, _, value)| {
+                if key.key().name() != name {
+                    return None;
+                }
+                let labels = key.key().labels().collect::<Vec<_>>();
+                if outcome.is_some_and(|expected| {
+                    !labels
+                        .iter()
+                        .any(|label| label.key() == "outcome" && label.value() == expected)
+                }) {
+                    return None;
+                }
+                let DebugValue::Counter(value) = value else {
+                    panic!("{name} must be a counter");
+                };
+                Some(*value)
+            })
+            .unwrap_or_default()
+    }
+
+    fn authenticated_gauge(snapshot: &MetricSnapshot) -> f64 {
+        snapshot
+            .iter()
+            .find_map(|(key, _, _, value)| {
+                if key.key().name() != "buzz_ws_authenticated_connections_active" {
+                    return None;
+                }
+                let DebugValue::Gauge(value) = value else {
+                    panic!("authenticated connections must be a gauge");
+                };
+                Some(value.into_inner())
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn read_frame(rx: &mut mpsc::Receiver<WsMessage>) -> serde_json::Value {
@@ -702,6 +838,98 @@ pub(crate) mod tests {
             WsMessage::Text(text) => serde_json::from_str(&text).expect("valid JSON frame"),
             other => panic!("unexpected websocket message: {other:?}"),
         }
+    }
+
+    /// Exercise the real state-transition methods for every terminal. The
+    /// attempt counter must reconcile with exactly one terminal per completed
+    /// attempt, and repeated/racing terminal calls must not drive the active
+    /// authenticated gauge below zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        crate::metrics::record_auth_attempt_started();
+        let (success, _rx) = test_conn_with_auth(pending_state());
+        assert!(success.authenticate(auth_context()).await);
+        assert!(
+            !success.authenticate(auth_context()).await,
+            "a terminal attempt cannot authenticate twice"
+        );
+        assert!(success
+            .finish_auth_on_close(AuthOutcome::Disconnect)
+            .await
+            .is_some());
+        assert!(
+            success
+                .finish_auth_on_close(AuthOutcome::Shutdown)
+                .await
+                .is_none(),
+            "cleanup must be idempotent"
+        );
+
+        for outcome in [
+            AuthOutcome::Invalid,
+            AuthOutcome::Banned,
+            AuthOutcome::BanCheckError,
+            AuthOutcome::AllowlistDenied,
+            AuthOutcome::NotRelayMember,
+        ] {
+            crate::metrics::record_auth_attempt_started();
+            let (denied, _rx) = test_conn_with_auth(pending_state());
+            assert!(denied.reject_auth(outcome).await);
+            assert!(
+                !denied.reject_auth(outcome).await,
+                "a denial cannot record twice"
+            );
+            assert!(denied
+                .finish_auth_on_close(AuthOutcome::Disconnect)
+                .await
+                .is_none());
+        }
+
+        crate::metrics::record_auth_attempt_started();
+        let (timed_out, _rx) = test_conn_with_auth(pending_state());
+        assert!(timed_out.expire_auth().await);
+        assert!(timed_out
+            .finish_auth_on_close(AuthOutcome::Disconnect)
+            .await
+            .is_none());
+
+        for outcome in [AuthOutcome::Disconnect, AuthOutcome::Shutdown] {
+            crate::metrics::record_auth_attempt_started();
+            let (closed, _rx) = test_conn_with_auth(pending_state());
+            assert!(closed.finish_auth_on_close(outcome).await.is_none());
+            assert!(closed.finish_auth_on_close(outcome).await.is_none());
+        }
+
+        crate::metrics::record_terminal_auth_retry(AuthOutcome::Duplicate);
+        crate::metrics::record_terminal_auth_retry(AuthOutcome::AlreadyFailed);
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let attempts = counter_value(&snapshot, "buzz_auth_attempts_total", None);
+        let outcomes = AuthOutcome::ALL
+            .iter()
+            .map(|outcome| {
+                let value = counter_value(
+                    &snapshot,
+                    "buzz_auth_outcomes_total",
+                    Some(outcome.as_str()),
+                );
+                assert_eq!(
+                    value,
+                    1,
+                    "{} terminal must be recorded exactly once",
+                    outcome.as_str()
+                );
+                value
+            })
+            .sum::<u64>();
+
+        assert_eq!(attempts, AuthOutcome::ALL.len() as u64);
+        assert_eq!(attempts, outcomes);
+        assert_eq!(authenticated_gauge(&snapshot), 0.0);
     }
 
     /// Drives the real `handle_text_message` with every handler permit held, so

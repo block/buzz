@@ -15,8 +15,32 @@ use axum::extract::ws::Message as WsMessage;
 use tracing::{debug, info, warn};
 
 use crate::connection::{AuthState, ConnectionState};
+use crate::metrics::AuthOutcome;
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BanOutcome {
+    Clear,
+    Banned,
+    DbError,
+}
+
+fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOutcome)> {
+    match outcome {
+        BanOutcome::Clear => None,
+        BanOutcome::Banned => Some((
+            "banned",
+            "blocked: you are banned from this community",
+            AuthOutcome::Banned,
+        )),
+        BanOutcome::DbError => Some((
+            "ban_check_error",
+            "error: internal error checking restriction state",
+            AuthOutcome::BanCheckError,
+        )),
+    }
+}
 
 /// Extract a NIP-OA `auth` tag from a verified AUTH event and serialize it as
 /// the JSON-array string that [`buzz_sdk::nip_oa::verify_auth_tag`] expects.
@@ -45,9 +69,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     let (challenge, conn_id) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
-            AuthState::Pending { challenge } => (challenge.clone(), conn.conn_id),
+            AuthState::Pending { challenge, .. } => (challenge.clone(), conn.conn_id),
             AuthState::Authenticated(_) => {
                 debug!(conn_id = %conn.conn_id, "AUTH received but already authenticated");
+                crate::metrics::record_terminal_auth_retry(AuthOutcome::Duplicate);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
@@ -57,6 +82,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             AuthState::Failed => {
                 debug!(conn_id = %conn.conn_id, "AUTH received after failed auth");
+                crate::metrics::record_terminal_auth_retry(AuthOutcome::AlreadyFailed);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
                     false,
@@ -81,8 +107,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     let relay_url =
         crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
     let auth_svc = Arc::clone(&state.auth);
-
-    metrics::counter!("buzz_auth_attempts_total", "method" => "nip42").increment(1);
 
     // Pure NIP-42 verification — crypto only, no DB lookups.
     match auth_svc
@@ -111,12 +135,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 // pinning `Failed` for the connection's life on a false premise.
                 // `Banned` claims the ban; `DbError` denies with `error: internal`
                 // (mirrors the ingest write-path gate).
-                enum BanOutcome {
-                    Clear,
-                    Banned,
-                    DbError,
-                }
-
                 let mut outcome = match state
                     .db
                     .moderation_restriction_state(conn.tenant.community(), pubkey.as_bytes())
@@ -156,22 +174,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     }
                 }
 
-                let denial: Option<(&str, &str)> = match outcome {
-                    BanOutcome::Clear => None,
-                    BanOutcome::Banned => {
-                        Some(("banned", "blocked: you are banned from this community"))
-                    }
-                    BanOutcome::DbError => Some((
-                        "ban_check_error",
-                        "error: internal error checking restriction state",
-                    )),
-                };
-
-                if let Some((metric_reason, deny_reason)) = denial {
+                if let Some((metric_reason, deny_reason, auth_outcome)) = ban_denial(outcome) {
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
-                    *conn.auth_state.write().await = AuthState::Failed;
+                    if !conn.reject_auth(auth_outcome).await {
+                        return;
+                    }
                     // Decision 4: banned ⇒ OK false + immediate WebSocket close.
                     // Route the reason frame on the control channel (not `send`,
                     // which uses the data channel and would race the cancel), so
@@ -205,7 +214,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
                         .increment(1);
-                    *conn.auth_state.write().await = AuthState::Failed;
+                    if !conn.reject_auth(AuthOutcome::AllowlistDenied).await {
+                        return;
+                    }
                     conn.send(RelayMessage::ok(
                         &event_id_hex,
                         false,
@@ -230,7 +241,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
-                    *conn.auth_state.write().await = AuthState::Failed;
+                    if !conn.reject_auth(AuthOutcome::NotRelayMember).await {
+                        return;
+                    }
                     conn.send(RelayMessage::ok(
                         &event_id_hex,
                         false,
@@ -279,7 +292,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
-            *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
+            if !conn.authenticate(auth_ctx).await {
+                return;
+            }
             state
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
@@ -288,7 +303,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Err(e) => {
             warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
             metrics::counter!("buzz_auth_failures_total", "reason" => "nip42_invalid").increment(1);
-            *conn.auth_state.write().await = AuthState::Failed;
+            if !conn.reject_auth(AuthOutcome::Invalid).await {
+                return;
+            }
             conn.send(RelayMessage::ok(
                 &event_id_hex,
                 false,
@@ -300,8 +317,49 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
 #[cfg(test)]
 mod tests {
-    use super::extract_auth_tag_json;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use super::{ban_denial, extract_auth_tag_json, handle_auth, BanOutcome};
+    use crate::connection::{tests::test_conn_with_auth, AuthState};
+    use crate::metrics::AuthOutcome;
+    use metrics_util::debugging::DebugValue;
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
+    use std::time::Instant;
+
+    type MetricSnapshot = Vec<(
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    )>;
+
+    fn metric_counter(snapshot: &MetricSnapshot, name: &str, outcome: Option<&str>) -> u64 {
+        snapshot
+            .iter()
+            .find_map(|(key, _, _, value)| {
+                if key.key().name() != name {
+                    return None;
+                }
+                let labels = key.key().labels().collect::<Vec<_>>();
+                if outcome.is_some_and(|expected| {
+                    !labels
+                        .iter()
+                        .any(|label| label.key() == "outcome" && label.value() == expected)
+                }) {
+                    return None;
+                }
+                let DebugValue::Counter(value) = value else {
+                    panic!("{name} must be a counter");
+                };
+                Some(*value)
+            })
+            .unwrap_or_default()
+    }
+
+    fn pending(challenge: &str) -> AuthState {
+        AuthState::Pending {
+            challenge: challenge.to_owned(),
+            started_at: Instant::now(),
+        }
+    }
 
     /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
     /// `auth` tag lives inside the signed event exactly as the git and
@@ -350,5 +408,147 @@ mod tests {
             Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
         ]);
         assert_eq!(extract_auth_tag_json(&event), None);
+    }
+
+    #[test]
+    fn ban_decisions_map_to_bounded_public_outcomes() {
+        assert_eq!(ban_denial(BanOutcome::Clear), None);
+        assert_eq!(
+            ban_denial(BanOutcome::Banned),
+            Some((
+                "banned",
+                "blocked: you are banned from this community",
+                AuthOutcome::Banned,
+            ))
+        );
+        assert_eq!(
+            ban_denial(BanOutcome::DbError),
+            Some((
+                "ban_check_error",
+                "error: internal error checking restriction state",
+                AuthOutcome::BanCheckError,
+            ))
+        );
+    }
+
+    /// The handler owns retry classification, so drive its real terminal-state
+    /// branches rather than calling the metric helper directly. A malformed
+    /// signature also traverses the real NIP-42 verifier before terminalizing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_accounts_duplicate_failed_and_invalid_signature_attempts() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = crate::state::tests::test_state().await;
+
+        let (authenticated, mut authenticated_rx) =
+            test_conn_with_auth(crate::connection::tests::authenticated_state());
+        let duplicate = signed_event_with_tags(Vec::new());
+        handle_auth(duplicate, authenticated, state.clone()).await;
+        let duplicate_frame = crate::connection::tests::read_frame(&mut authenticated_rx);
+        assert_eq!(duplicate_frame[2], false);
+        assert_eq!(duplicate_frame[3], "auth-required: already authenticated");
+
+        let (failed, mut failed_rx) = test_conn_with_auth(AuthState::Failed);
+        let after_failure = signed_event_with_tags(Vec::new());
+        handle_auth(after_failure, failed, state.clone()).await;
+        let failed_frame = crate::connection::tests::read_frame(&mut failed_rx);
+        assert_eq!(failed_frame[2], false);
+        assert_eq!(
+            failed_frame[3],
+            "auth-required: authentication already failed"
+        );
+
+        let challenge = "invalid-signature-challenge";
+        let (invalid_conn, mut invalid_rx) = test_conn_with_auth(pending(challenge));
+        crate::metrics::record_auth_attempt_started();
+        let relay_url: RelayUrl = crate::api::bridge::nip42_expected_relay_url(
+            &state.config.relay_url,
+            &invalid_conn.tenant,
+        )
+        .parse()
+        .expect("test relay URL");
+        let mut invalid = EventBuilder::auth(challenge, relay_url)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event");
+        invalid.content.push('x');
+        handle_auth(invalid, invalid_conn.clone(), state).await;
+        let invalid_frame = crate::connection::tests::read_frame(&mut invalid_rx);
+        assert_eq!(invalid_frame[2], false);
+        assert_eq!(invalid_frame[3], "auth-required: verification failed");
+        assert!(matches!(
+            *invalid_conn.auth_state.read().await,
+            AuthState::Failed
+        ));
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let attempts = metric_counter(&snapshot, "buzz_auth_attempts_total", None);
+        let outcomes = [
+            AuthOutcome::Duplicate,
+            AuthOutcome::AlreadyFailed,
+            AuthOutcome::Invalid,
+        ]
+        .into_iter()
+        .map(|outcome| {
+            metric_counter(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(outcome.as_str()),
+            )
+        })
+        .sum::<u64>();
+        assert_eq!(attempts, 3);
+        assert_eq!(attempts, outcomes);
+    }
+
+    /// A verified signature followed by an unavailable restriction database
+    /// must deny fail-closed and expose a dependency error, not mislabel the
+    /// principal as banned or let the attempt disappear.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_accounts_ban_check_database_error() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = crate::state::tests::test_state_with_database_url(
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+        )
+        .await;
+
+        let challenge = "ban-check-error-challenge";
+        let (conn, _rx) = test_conn_with_auth(pending(challenge));
+        crate::metrics::record_auth_attempt_started();
+        let relay_url: RelayUrl =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant)
+                .parse()
+                .expect("test relay URL");
+        let event = EventBuilder::auth(challenge, relay_url)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event");
+
+        handle_auth(event, conn.clone(), state).await;
+
+        assert!(matches!(*conn.auth_state.read().await, AuthState::Failed));
+        assert!(conn.cancel.is_cancelled());
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(
+            metric_counter(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::BanCheckError.as_str()),
+            ),
+            1
+        );
+        assert_eq!(
+            metric_counter(
+                &snapshot,
+                "buzz_auth_outcomes_total",
+                Some(AuthOutcome::Banned.as_str()),
+            ),
+            0
+        );
+        assert_eq!(
+            metric_counter(&snapshot, "buzz_auth_attempts_total", None),
+            1
+        );
     }
 }
