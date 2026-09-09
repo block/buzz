@@ -48,8 +48,9 @@ pub(crate) use runtime::{
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, channel, channel_members,
-    community, deletion, dm, event, feed, git_repo, moderation, partition, product_feedback, push,
-    reaction, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
+    community, deletion, dm, event, feed, founderportal_bridge, git_repo, moderation, partition,
+    product_feedback, push, reaction, relay_admin_actions, relay_invite, relay_members,
+    relay_operators, reminder,
     replaceable, thread, usage, user, workflow,
 };
 

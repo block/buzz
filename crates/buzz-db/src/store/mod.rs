@@ -22,6 +22,8 @@ pub mod dm;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// FounderPortal-owned cross-system collaboration mapping persistence.
+pub mod founderportal_bridge;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
