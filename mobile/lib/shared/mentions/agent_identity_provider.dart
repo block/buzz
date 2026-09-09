@@ -19,6 +19,7 @@ part 'agent_authorization.dart';
 class AgentDirectoryEntry {
   final String pubkey;
   final String? displayName;
+
   /// Owner authenticated by the agent's verified NIP-OA kind:0 attestation,
   /// not a runtime ownership claim. Null means no authenticated owner here.
   final String? ownerPubkey;
