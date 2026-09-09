@@ -310,12 +310,12 @@ importers:
 
   desktop-next:
     dependencies:
-      '@base-ui-components/react':
-        specifier: 1.0.0-rc.0
-        version: 1.0.0-rc.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@buzz/design-tokens':
         specifier: workspace:*
         version: link:../packages/design-tokens
+      '@buzz/ui':
+        specifier: workspace:*
+        version: link:../packages/ui
       '@fontsource-variable/inter':
         specifier: ^5.2.8
         version: 5.2.8
@@ -325,6 +325,9 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.168.10
         version: 1.170.7(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      lucide-react:
+        specifier: ^1.0.0
+        version: 1.16.0(react@19.2.8)
       react:
         specifier: ^19.1.0
         version: 19.2.8
@@ -332,6 +335,9 @@ importers:
         specifier: ^19.1.0
         version: 19.2.8(react@19.2.8)
     devDependencies:
+      '@playwright/test':
+        specifier: ^1.58.2
+        version: 1.60.0
       '@tailwindcss/postcss':
         specifier: ^4.3.0
         version: 4.3.0
@@ -362,6 +368,49 @@ importers:
       tailwindcss:
         specifier: 4.3.0
         version: 4.3.0
+
+  packages/ui:
+    dependencies:
+      '@base-ui/react':
+        specifier: 1.7.0
+        version: 1.7.0(@date-fns/tz@1.5.0)(@types/react@19.2.18)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@buzz/design-tokens':
+        specifier: workspace:*
+        version: link:../design-tokens
+      '@daypicker/react':
+        specifier: ^10.0.1
+        version: 10.0.1(@types/react@19.2.18)(react@19.2.8)
+      lucide-react:
+        specifier: ^1.0.0
+        version: 1.16.0(react@19.2.8)
+      react-resizable-panels:
+        specifier: ^4.12.4
+        version: 4.12.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+    devDependencies:
+      '@tailwindcss/postcss':
+        specifier: ^4.3.0
+        version: 4.3.0
+      '@types/react':
+        specifier: ^19.1.8
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: ^19.1.6
+        version: 19.2.4(@types/react@19.2.18)
+      react:
+        specifier: ^19.1.0
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.1.0
+        version: 19.2.8(react@19.2.8)
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
+      typescript:
+        specifier: ~6.0.0
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.0
+        version: 8.0.16(@types/node@25.6.0)(jiti@2.7.0)(yaml@2.9.0)
 
   web:
     dependencies:
@@ -568,21 +617,25 @@ packages:
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
 
-  '@base-ui-components/react@1.0.0-rc.0':
-    resolution: {integrity: sha512-9lhUFbJcbXvc9KulLev1WTFxS/alJRBWDH/ibKSQaNvmDwMFS2gKp1sTeeldYSfKuS/KC1w2MZutc0wHu2hRHQ==}
+  '@base-ui/react@1.7.0':
+    resolution: {integrity: sha512-j+8QjX44C32jrXD/qyEAGpFr70FRpGL2CY61mQd9nBPWN737CK0xxD1ceJ055rW4RtdvFDT1e7otzdlfxvsYug==}
     engines: {node: '>=14.0.0'}
-    deprecated: Package was renamed to @base-ui/react
     peerDependencies:
+      '@date-fns/tz': ^1.2.0
       '@types/react': ^17 || ^18 || ^19
+      date-fns: ^4.0.0
       react: ^17 || ^18 || ^19
       react-dom: ^17 || ^18 || ^19
     peerDependenciesMeta:
+      '@date-fns/tz':
+        optional: true
       '@types/react':
         optional: true
+      date-fns:
+        optional: true
 
-  '@base-ui-components/utils@0.2.2':
-    resolution: {integrity: sha512-rNJCD6TFy3OSRDKVHJDzLpxO3esTV1/drRtWNUpe7rCpPN9HZVHUCuP+6rdDYDGWfXnQHbqi05xOyRP2iZAlkw==}
-    deprecated: Package was renamed to @base-ui/utils
+  '@base-ui/utils@0.3.2':
+    resolution: {integrity: sha512-oWy1aq/I2GmYjpl4PhEAhzflF8VPGKgZeq0xAWTbfD5KBWyxcN0ZP2+WHSUm/5Z6lVMBDLReLcoXwSYoRc/zNQ==}
     peerDependencies:
       '@types/react': ^17 || ^18 || ^19
       react: ^17 || ^18 || ^19
@@ -686,6 +739,16 @@ packages:
 
   '@date-fns/tz@1.5.0':
     resolution: {integrity: sha512-lwYN/vDPeNRULcepoE/LO2Pgx+7/RV+S9ARfbc9lr2DtGkOD7pAiruHvbR1RX3Qyf6ja47EWJDMsNK5vK08DJg==}
+
+  '@daypicker/react@10.0.1':
+    resolution: {integrity: sha512-lH4YQz4iMBWP8hsI1bD9Eg0T7t503IkSUR/WDGGkV5mKZvwVv+ukCkJz7yN+uVFBv7vHTK+ww7a5EvlkeFwPYQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@types/react': '>=16.8.0'
+      react: '>=16.8.0'
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
 
   '@dnd-kit/accessibility@3.1.1':
     resolution: {integrity: sha512-2P+YgaXF+gRsIihwwY1gCsQSYnu9Zyj2py8kY5fFvUM1qm2WA2u639R6YNVfU4GWr+ZM5mqEsfHZZLoRONbemw==}
@@ -3309,6 +3372,12 @@ packages:
       '@types/react':
         optional: true
 
+  react-resizable-panels@4.12.4:
+    resolution: {integrity: sha512-SOsSj4e9U7vxL15MbgTfl35IO4vxSW4Xb0b1gtJVbRPWv7FOezcgOA00Mi0jP8XqC3y7jOQxpsGs/9zLKHPitA==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
+
   react-style-singleton@2.2.3:
     resolution: {integrity: sha512-b6jSvxvVnyptAiLjbkWLE/lOnR4lfTtDAl+eUC7RZy+QQWc6wRzIV2CE6xBuMmDxc2qIihtDCZD5NPOFl7fRBQ==}
     engines: {node: '>=10'}
@@ -3482,9 +3551,6 @@ packages:
 
   symbol-tree@3.2.4:
     resolution: {integrity: sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==}
-
-  tabbable@6.5.0:
-    resolution: {integrity: sha512-wieBHXygIm7OyQOu5hQlkk62/WyCFYGlWg7L6/ZCUZwx0o398Zkn4pVmMyfYhfMG8kGrj/Krt8eIk6UKC6VzwA==}
 
   tailwind-merge@3.6.0:
     resolution: {integrity: sha512-uxL7qAVQriqRQPAyK3pj66VqskWqoZ37PW94jwOTwNfq/z9oyu1V+eqrZqtR2+fCiXdYOZe/Modt8GtvqNzu+w==}
@@ -3963,21 +4029,21 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@base-ui-components/react@1.0.0-rc.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@base-ui/react@1.7.0(@date-fns/tz@1.5.0)(@types/react@19.2.18)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       '@babel/runtime': 7.29.7
-      '@base-ui-components/utils': 0.2.2(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@base-ui/utils': 0.3.2(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@floating-ui/react-dom': 2.1.9(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@floating-ui/utils': 0.2.12
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
-      reselect: 5.3.0
-      tabbable: 6.5.0
       use-sync-external-store: 1.6.0(react@19.2.8)
     optionalDependencies:
+      '@date-fns/tz': 1.5.0
       '@types/react': 19.2.18
+      date-fns: 4.4.0
 
-  '@base-ui-components/utils@0.2.2(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@base-ui/utils@0.3.2(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       '@babel/runtime': 7.29.7
       '@floating-ui/utils': 0.2.12
@@ -4048,6 +4114,13 @@ snapshots:
   '@csstools/css-tokenizer@4.0.0': {}
 
   '@date-fns/tz@1.5.0': {}
+
+  '@daypicker/react@10.0.1(@types/react@19.2.18)(react@19.2.8)':
+    dependencies:
+      react: 19.2.8
+      react-day-picker: 10.0.1(@types/react@19.2.18)(react@19.2.8)
+    optionalDependencies:
+      '@types/react': 19.2.18
 
   '@dnd-kit/accessibility@3.1.1(react@19.2.8)':
     dependencies:
@@ -6758,6 +6831,11 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.2.18
 
+  react-resizable-panels@4.12.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+    dependencies:
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
+
   react-style-singleton@2.2.3(@types/react@19.2.18)(react@19.2.8):
     dependencies:
       get-nonce: 1.0.1
@@ -6967,8 +7045,6 @@ snapshots:
       inline-style-parser: 0.2.7
 
   symbol-tree@3.2.4: {}
-
-  tabbable@6.5.0: {}
 
   tailwind-merge@3.6.0: {}
 

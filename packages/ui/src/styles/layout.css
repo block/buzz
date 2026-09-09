@@ -1,0 +1,150 @@
+@layer components {
+  .bui-number-group {
+    display: flex;
+    padding: 0;
+    overflow: hidden;
+    width: fit-content;
+  }
+  .bui-number-input {
+    width: 5rem;
+    min-width: 0;
+    text-align: center;
+    background: transparent;
+    border: 0;
+  }
+  .bui-icon-control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-control-gap);
+    border-radius: var(--radius-control);
+    cursor: pointer;
+    min-width: var(--control-sm);
+    min-height: var(--control-sm);
+  }
+  .bui-icon-control:hover {
+    background: var(--bg-hover);
+  }
+  .bui-icon-control svg {
+    width: 1rem;
+    height: 1rem;
+  }
+  .bui-otp-input {
+    width: 2.5rem;
+    text-align: center;
+    padding: var(--space-control-gap);
+  }
+  .bui-scroll-area {
+    position: relative;
+    height: 12rem;
+  }
+  .bui-scroll-viewport {
+    height: 100%;
+    border-radius: inherit;
+    overscroll-behavior: contain;
+  }
+  .bui-scrollbar {
+    display: flex;
+    width: 0.5rem;
+    margin: 0.25rem;
+    border-radius: var(--radius-pill);
+    background: var(--bg-inset);
+  }
+  .bui-scroll-thumb {
+    width: 100%;
+    background: var(--border-primary);
+    border-radius: inherit;
+  }
+  .bui-toast-viewport {
+    position: fixed;
+    bottom: var(--space-panel-inset);
+    right: var(--space-panel-inset);
+    width: min(22rem, calc(100vw - 3rem));
+    z-index: var(--layer-toast);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-control-gap);
+  }
+  .bui-toast {
+    background: var(--bg-float);
+    border: 1px solid var(--border-secondary);
+    border-radius: var(--radius-menu);
+    padding: var(--space-control-inset);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+  }
+  .bui-skeleton {
+    min-height: var(--control-md);
+    border-radius: var(--radius-control);
+    background: var(--bg-inset);
+    animation: bui-pulse 2s ease-in-out infinite;
+  }
+  .bui-spin {
+    animation: bui-spin 1s linear infinite;
+  }
+  .bui-empty {
+    display: grid;
+    justify-items: center;
+    text-align: center;
+    gap: var(--space-control-inset);
+    padding: var(--space-page-inset);
+  }
+  .bui-table-scroll {
+    overflow-x: auto;
+  }
+  .bui-table {
+    @apply text-body;
+    border-collapse: collapse;
+    width: 100%;
+    text-align: start;
+  }
+  .bui-table th {
+    @apply text-label text-secondary;
+  }
+  .bui-table th,
+  .bui-table td {
+    padding: var(--space-control-inset);
+    border-bottom: 1px solid var(--border-tertiary);
+    white-space: nowrap;
+  }
+  .bui-table caption {
+    text-align: start;
+    margin-bottom: var(--space-control-inset);
+  }
+  .bui-breadcrumb {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-control-gap);
+    list-style: none;
+    padding: 0;
+  }
+  .bui-breadcrumb li + li::before {
+    content: "/";
+    color: var(--text-tertiary);
+    padding-inline-end: var(--space-control-gap);
+  }
+  .bui-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: var(--space-control-inset);
+    border-radius: var(--radius-container);
+    background: var(--bg-inset);
+  }
+  .bui-sidebar a {
+    @apply text-label;
+    padding: var(--space-control-gap) var(--space-control-inset);
+    border-radius: var(--radius-control);
+  }
+  .bui-sidebar a[aria-current="page"] {
+    background: var(--bg-panel);
+  }
+  .bui-context-target {
+    border: 1px dashed var(--border-primary);
+    border-radius: var(--radius-menu);
+    padding: var(--space-page-inset);
+    text-align: center;
+  }
+}
