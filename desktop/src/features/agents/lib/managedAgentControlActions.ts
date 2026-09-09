@@ -34,12 +34,12 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
 
 /** Provider enrollment is community-local, so it stays independently retryable. */
 export function canEnrollManagedAgentInCommunity(
-  agent: Pick<ManagedAgent, "backend" | "keyCustody" | "status">,
+  agent: Pick<ManagedAgent, "backend" | "backendAgentId" | "keyCustody">,
 ) {
   return (
     agent.backend.type === "provider" &&
     agent.keyCustody === "provider" &&
-    agent.status === "deployed"
+    Boolean(agent.backendAgentId)
   );
 }
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyReusableAgentAccessPolicy,
   attachManagedAgentToChannel,
+  provisionChannelManagedAgent,
 } from "./channelAgents.ts";
 
 const AGENT_PUBKEY = "a".repeat(64);
@@ -218,4 +219,36 @@ test("a failed later-community enrollment can be retried by attaching again", as
   );
   await attachManagedAgentToChannel("community-b", { agent: providerAgent });
   assert.equal(starts, 2);
+});
+
+test("channel provisioning forwards the template custody decision", async (t) => {
+  const calls = [];
+  t.after(
+    installTauriInvoke((command, args) => {
+      calls.push([command, args]);
+      if (command === "create_managed_agent") {
+        return Promise.resolve({
+          agent: rawAgent({
+            backend: { type: "provider", id: "legacy-provider", config: {} },
+          }),
+          private_key_nsec: "nsec1test",
+          profile_sync_error: null,
+          spawn_error: null,
+        });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    }),
+  );
+
+  await provisionChannelManagedAgent({
+    runtime: { id: "runtime-1", command: "agent", label: "Agent" },
+    name: "Template Agent",
+    backend: { type: "provider", id: "legacy-provider", config: {} },
+    expectedKeyCustody: "local",
+    forceNewInstance: true,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "create_managed_agent");
+  assert.equal(calls[0][1].input.expectedKeyCustody, "local");
 });

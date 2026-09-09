@@ -86,6 +86,8 @@ export type CreateChannelManagedAgentInput = {
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
   backend?: ManagedAgentBackend;
+  /** Custody mode already disclosed by the creation surface. */
+  expectedKeyCustody?: "local" | "provider";
   /**
    * Inbound author gate mode. Omitted = linked persona default, then
    * `"owner-only"` when the persona leaves it unset or no persona is linked.
@@ -409,6 +411,7 @@ export async function provisionChannelManagedAgent(
     spawnAfterCreate: isProviderMode,
     startOnAppLaunch: isProviderMode ? false : undefined,
     backend: input.backend,
+    expectedKeyCustody: input.expectedKeyCustody,
     respondTo: input.respondTo,
     respondToAllowlist: input.respondToAllowlist,
   });

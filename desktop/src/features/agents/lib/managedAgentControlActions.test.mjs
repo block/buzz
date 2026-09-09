@@ -65,6 +65,17 @@ test("community enrollment remains reachable after another community clears the 
   assert.equal(enrolled, providerAgent.pubkey);
 });
 
+test("pending provider attestation remains community-retryable after registration", () => {
+  const providerAgent = agent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "not_deployed",
+  });
+
+  assert.equal(canEnrollManagedAgentInCommunity(providerAgent), true);
+});
+
 test("relay-mesh agents delegate start to the backend preflight", async () => {
   const meshAgent = agent({
     envVars: {

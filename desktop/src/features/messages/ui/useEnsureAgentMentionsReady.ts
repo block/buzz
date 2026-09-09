@@ -123,7 +123,8 @@ export function useEnsureAgentMentionsReady({
           if (participants.has(pubkey)) {
             if (
               (isProviderBackedAgent(readyAgent) &&
-                readyAgent.status !== "deployed") ||
+                (readyAgent.keyCustody === "provider" ||
+                  readyAgent.status !== "deployed")) ||
               (!isProviderBackedAgent(readyAgent) &&
                 !isManagedAgentRunning(readyAgent))
             ) {

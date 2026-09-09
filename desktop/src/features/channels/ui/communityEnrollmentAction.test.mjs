@@ -34,7 +34,7 @@ let render;
 let useMembersSidebarActions;
 let enrollmentPromise;
 
-function rawAgent() {
+function rawAgent(overrides = {}) {
   return {
     pubkey: AGENT_PUBKEY,
     name: "Provider Agent",
@@ -68,6 +68,7 @@ function rawAgent() {
     backend_agent_id: "agent-123",
     respond_to: "owner-only",
     respond_to_allowlist: [],
+    ...overrides,
   };
 }
 
@@ -143,8 +144,8 @@ afterEach(() => {
 
 after(() => dom.window.close());
 
-test("the visible community enrollment action pins relay and signer scope", async () => {
-  const managedAgent = fromRawManagedAgent(rawAgent());
+async function exerciseEnrollmentAction({ availability, agentOverrides = {} }) {
+  const managedAgent = fromRawManagedAgent(rawAgent(agentOverrides));
   const member = {
     pubkey: AGENT_PUBKEY,
     role: "bot",
@@ -163,13 +164,13 @@ test("the visible community enrollment action pins relay and signer scope", asyn
       channelId: "channel-b",
       controllableManagedBots: [managedAgent],
       currentPubkey: OWNER_B,
-      getAvailability: () => null,
+      getAvailability: () => availability,
       onOpenChange: () => {},
       relayUrl: RELAY_B,
       removableManagedBots: [managedAgent],
     });
     return createElement(MemberActionsMenu, {
-      availability: undefined,
+      availability,
       canChangeRole: false,
       canModerateMember: false,
       canRemoveMember: false,
@@ -223,4 +224,17 @@ test("the visible community enrollment action pins relay and signer scope", asyn
     pubkey: AGENT_PUBKEY,
     replayFloorUnix: null,
   });
+}
+
+test("the visible community enrollment action pins relay and signer scope", async () => {
+  await exerciseEnrollmentAction({ availability: undefined });
 });
+
+for (const availability of ["online", "away"]) {
+  test(`pending attestation remains retryable while the agent is ${availability}`, async () => {
+    await exerciseEnrollmentAction({
+      availability,
+      agentOverrides: { status: "not_deployed" },
+    });
+  });
+}
