@@ -24,6 +24,13 @@
   .bui-skeleton {
     animation: none;
   }
+  .bui-toast[data-starting-style],
+  .bui-toast[data-ending-style] {
+    transform: none;
+  }
+  .bui-tab-indicator {
+    transition: none;
+  }
   .bui-popup,
   .bui-popover,
   .bui-button,

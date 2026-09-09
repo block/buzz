@@ -11,7 +11,7 @@ From the repository root:
 . ./bin/activate-hermit
 pnpm install --frozen-lockfile
 pnpm --filter buzz-desktop-next dev
-# Open http://localhost:5173/design
+# Open http://localhost:1430/design
 pnpm --filter @buzz/ui build
 ```
 
@@ -52,6 +52,11 @@ Behavioral Root, Portal, and state helpers are direct exports, preserving generi
 refs, controlled state, and events. Styled parts merge both string and state-function
 class names. The underlying libraries own focus management, keyboard navigation,
 ARIA semantics, and dismissal. Caller-supplied labels and composition still matter.
+
+Place `Tabs.Indicator` inside `Tabs.List` for a sliding selection pill. Pointer
+selection retargets the shared 120ms transition; keyboard focus and reduced motion
+keep selection immediate. Panels update immediately. Toasts use the shared
+180ms entrance and 120ms exit transitions, with no movement under reduced motion.
 
 Button variants: primary, secondary, outline, ghost, danger, link. Sizes: sm, md,
 lg. Loading disables duplicate activation while preserving the accessible name.

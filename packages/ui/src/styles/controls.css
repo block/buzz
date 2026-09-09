@@ -108,6 +108,8 @@
     cursor: not-allowed;
   }
   .bui-tabs-list {
+    position: relative;
+    isolation: isolate;
     display: flex;
     gap: 0.25rem;
     background: var(--bg-inset);
@@ -116,6 +118,21 @@
     width: fit-content;
     max-width: 100%;
     overflow-x: auto;
+  }
+  .bui-tab-indicator {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: var(--bg-panel);
+    clip-path: inset(
+      var(--active-tab-top) var(--active-tab-right) var(--active-tab-bottom)
+        var(--active-tab-left) round var(--radius-pill)
+    );
+    transition: clip-path var(--duration-state) var(--ease-standard);
+  }
+  .bui-tabs-list:has(.bui-tab:focus-visible) .bui-tab-indicator {
+    transition: none;
   }
   .bui-tab,
   .bui-toggle,
@@ -143,8 +160,15 @@
     background: var(--bg-hover);
     color: var(--text-primary);
   }
+  .bui-tabs-list:has(.bui-tab-indicator) .bui-tab[data-active] {
+    background: transparent;
+  }
   .bui-tab-panel {
     padding-block: var(--space-control-inset);
+  }
+  .bui-accordion {
+    display: grid;
+    gap: 0;
   }
   .bui-accordion-item {
     border-bottom: 1px solid var(--border-tertiary);
@@ -155,7 +179,8 @@
     justify-content: space-between;
     align-items: center;
     width: 100%;
-    padding-block: var(--space-control-inset);
+    min-height: var(--control-md);
+    padding-block: var(--space-control-gap);
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
@@ -171,6 +196,6 @@
   }
   .bui-accordion-panel {
     @apply text-body text-secondary;
-    padding-block: var(--space-control-gap);
+    padding-block: 0 var(--space-control-inset);
   }
 }

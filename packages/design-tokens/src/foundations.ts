@@ -22,6 +22,11 @@ export const FOUNDATION_GROUPS = [
     roles: [
       ["space-control-gap", "0.5rem", "Space between a label and its icon."],
       ["space-control-inset", "0.75rem", "Compact control padding."],
+      [
+        "space-heading-gap",
+        "1rem",
+        "Space between a heading and its description.",
+      ],
       ["space-section-gap", "1.5rem", "Space between related groups."],
       ["space-panel-inset", "1.5rem", "Padding inside a panel."],
       ["space-page-inset", "2rem", "Outer reading gutter."],

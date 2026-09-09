@@ -160,6 +160,7 @@ export function CompositionsPage() {
             <Tabs.List aria-label="Settings section">
               <Tabs.Tab value="profile">Profile</Tabs.Tab>
               <Tabs.Tab value="notifications">Notifications</Tabs.Tab>
+              <Tabs.Indicator />
             </Tabs.List>
             <Tabs.Panel value="profile">
               <form

@@ -29,3 +29,8 @@ repository's `waitForAnimations` helper. Overview light/dark and composed exampl
 are different states; compare hashes before including images in a PR. Use the root
 `scripts/post-screenshots.sh` workflow for PR image hosting. Do not commit reports,
 traces, or screenshots to the source branch.
+
+Spacing and motion regressions exercise command empty-state recovery, dialog heading
+gaps, accordion density, toast entrance/exit, interrupted tab selection, and reduced
+motion in the production catalog. Animation checks stretch duration for frame
+inspection without adding transition properties that could mask missing motion.

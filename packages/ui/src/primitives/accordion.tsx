@@ -6,7 +6,9 @@ function StyledRoot({
   className,
   ...props
 }: ComponentProps<typeof Primitive.Root>) {
-  return <Primitive.Root {...props} className={skin("bui-stack", className)} />;
+  return (
+    <Primitive.Root {...props} className={skin("bui-accordion", className)} />
+  );
 }
 
 function StyledItem({

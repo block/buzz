@@ -91,7 +91,10 @@ function StyledEmpty({
   ...props
 }: ComponentProps<typeof Primitive.Empty>) {
   return (
-    <Primitive.Empty {...props} className={skin("bui-empty", className)} />
+    <Primitive.Empty
+      {...props}
+      className={skin("bui-option-empty", className)}
+    />
   );
 }
 

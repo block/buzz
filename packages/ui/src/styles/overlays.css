@@ -66,6 +66,11 @@
     padding: 0;
     list-style: none;
   }
+  /* Keep the live region mounted; only its content receives spacing. */
+  .bui-option-empty:not(:empty) {
+    @apply text-caption text-secondary;
+    padding: var(--space-control-inset);
+  }
   .bui-group-label {
     @apply text-meta text-tertiary;
     padding: var(--space-control-inset);
@@ -117,6 +122,15 @@
     box-shadow: var(--shadow-sm);
     z-index: var(--layer-dialog);
     outline: none;
+  }
+  .bui-dialog:has(> .bui-title + .bui-description) {
+    row-gap: var(--space-heading-gap);
+  }
+  .bui-dialog > .bui-title + .bui-description + * {
+    margin-block-start: calc(
+      var(--space-section-gap) -
+      var(--space-heading-gap)
+    );
   }
   .bui-dialog-viewport .bui-dialog {
     position: relative;

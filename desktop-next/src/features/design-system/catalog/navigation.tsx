@@ -65,6 +65,7 @@ export function TabsDemo() {
         <Tabs.Tab value="overview">Overview</Tabs.Tab>
         <Tabs.Tab value="activity">Activity</Tabs.Tab>
         <Tabs.Tab value="files">Files</Tabs.Tab>
+        <Tabs.Indicator />
       </Tabs.List>
       <Tabs.Panel value="overview">
         People and agents building together.
