@@ -1,23 +1,20 @@
-import { PageHeader, Section, Stub } from "./primitives";
-
+import { FOUNDATION_GROUPS } from "@buzz/design-tokens/foundations";
+import { PageHeader, Section } from "./primitives";
 export function RadiusPage() {
+  const group = FOUNDATION_GROUPS[1];
   return (
     <>
-      <PageHeader
-        title="Radius"
-        status="not started"
-        intro="The design exploration is consistently soft — rounded panels, pill-shaped chrome, gently rounded chips — but the specific values have not been pulled into a scale yet."
-      />
-
-      <Section title="What this page will hold">
-        <Stub
-          what="A radius scale, and the named roles that point at it: the panel corner, the control corner, the chip corner, and the fully-round pill."
-          decide={[
-            "How many steps the scale needs",
-            "Which roles exist, and what each one is for",
-            "Whether nested corners follow a rule, so a control inside a panel reads correctly",
-          ]}
-        />
+      <PageHeader title={group.name} intro={group.description} />
+      <Section title="Roles">
+        <dl className="grid gap-6">
+          {group.roles.map(([name, value, use]) => (
+            <div key={name} className="grid gap-2 sm:grid-cols-3">
+              <dt className="text-code font-mono">{name}</dt>
+              <dd className="text-body text-secondary">{value}</dd>
+              <dd className="text-caption text-secondary">{use}</dd>
+            </div>
+          ))}
+        </dl>
       </Section>
     </>
   );

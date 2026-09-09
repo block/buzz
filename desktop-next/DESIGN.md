@@ -24,7 +24,7 @@ Buzz is a place where people build together and bring their agents into the room
 
 ## State
 
-- **The interface has three states, plus disabled where it matters: default, hover, selected.** There is no pressed state: pressed is too fleeting to read and makes an interface feel jumpy.
+- **The interface has three states, plus disabled where it matters: default, hover, selected.** Buttons may use the shared subtle pressed feedback token. Reduced motion removes its scale change; selected remains distinct from pressed.
 - **Hover means one step more contrast, in whichever direction that surface needs.** A light row darkens, a dark chip lightens. Direction lives in the value.
 - **Selected is a persistent statement, not a stronger hover.** It should be legible without a cursor present.
 - **A selected item in a toggle group is not interactive.** Clicking it does nothing, so it gets no hover.
@@ -179,3 +179,7 @@ Every addition lands in `src/shared/tokens/registry.ts` in the same change that 
 - **Use an existing component before creating one, and an existing role before adding one.**
 - **A new visual treatment that repeats belongs in the system, not in the feature.**
 - **If a screen looks right but breaks these rules, the rules are probably wrong — say so.** This document is meant to be argued with, not worked around.
+
+## Open-source component foundation
+
+The shared component library is built proactively for the new client. Public Base UI provides behavior; Buzz owns styling, tokens, and named variants. Use Inter, JetBrains Mono, and Lucide. See OPEN_SOURCE.md for the adaptation contract.

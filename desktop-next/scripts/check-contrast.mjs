@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { apcaContrast, wcagRatio } from "./apca.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const TOKENS = join(ROOT, "src/shared/styles/tokens.css");
+const TOKENS = join(ROOT, "../packages/design-tokens/src/tokens.css");
 
 /** Body text. Anything a person must read to use the product. */
 const TARGET_BODY = 60;
