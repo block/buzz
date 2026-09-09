@@ -109,24 +109,34 @@ export function CodeInput({
       </legend>
       <div className="code-input-group">
         {digits.map((digit, index) => (
-          <input
-            aria-label={`${label} digit ${index + 1} of ${CODE_INPUT_LENGTH}`}
-            autoComplete={index === 0 ? "one-time-code" : "off"}
-            className="code-input-control text-body"
-            inputMode="numeric"
-            key={CODE_INPUT_DIGIT_KEYS[index]}
-            maxLength={1}
-            onChange={(event) => handleChange(index, event)}
-            onFocus={(event) => event.currentTarget.select()}
-            onKeyDown={(event) => handleKeyDown(index, event)}
-            onPaste={(event) => handlePaste(index, event)}
-            pattern="[0-9]*"
-            ref={(element) => {
-              inputs.current[index] = element;
-            }}
-            type="text"
-            value={digit}
-          />
+          <div className="code-input-slot" key={CODE_INPUT_DIGIT_KEYS[index]}>
+            <input
+              aria-label={`${label} digit ${index + 1} of ${CODE_INPUT_LENGTH}`}
+              autoComplete={index === 0 ? "one-time-code" : "off"}
+              className="code-input-control text-body"
+              inputMode="numeric"
+              maxLength={1}
+              onChange={(event) => handleChange(index, event)}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => handleKeyDown(index, event)}
+              onPaste={(event) => handlePaste(index, event)}
+              pattern="[0-9]*"
+              ref={(element) => {
+                inputs.current[index] = element;
+              }}
+              type="text"
+              value={digit}
+            />
+            {digit ? (
+              <span
+                aria-hidden="true"
+                className="code-input-digit text-body font-semibold"
+                key={digit}
+              >
+                {digit}
+              </span>
+            ) : null}
+          </div>
         ))}
       </div>
     </fieldset>

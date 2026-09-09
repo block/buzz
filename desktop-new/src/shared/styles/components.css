@@ -669,34 +669,81 @@
     gap: var(--space-2);
   }
 
-  .code-input-control {
+  .code-input-slot {
+    position: relative;
     width: 3rem;
     height: 3rem;
+    flex: 0 0 auto;
+  }
+
+  .code-input-control {
+    width: 100%;
+    height: 100%;
     min-width: 0;
-    border: 0;
+    border: 1px solid var(--border-primary);
     border-radius: var(--radius-control);
     padding: 0;
-    background: var(--neutral-2);
-    color: var(--text-primary);
+    background: var(--bg-inset);
+    color: transparent;
+    caret-color: transparent;
     font: inherit;
     font-variant-numeric: tabular-nums;
     text-align: center;
-    box-shadow: 0 0 0 1px var(--neutral-2);
     transition:
-      opacity 0.1s ease,
-      background 0.1s ease,
-      box-shadow 0.1s ease;
+      border-color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
   }
 
-  .code-input-control:focus {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--neutral-7);
+  .code-input-control::selection {
+    background: transparent;
+    color: transparent;
+  }
+
+  .code-input-control:hover:not(:disabled) {
+    border-color: var(--neutral-7);
+  }
+
+  html[data-keyboard-navigation] .code-input-control:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
   }
 
   .code-input-control:disabled {
-    color: var(--text-disabled);
-    -webkit-text-fill-color: var(--text-disabled);
+    background: var(--neutral-2);
     cursor: not-allowed;
+  }
+
+  .code-input-digit {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--text-primary);
+    pointer-events: none;
+    animation: code-input-digit-enter var(--duration-state) ease-out;
+  }
+
+  .code-input:disabled .code-input-digit {
+    color: var(--text-disabled);
+  }
+
+  @keyframes code-input-digit-enter {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .code-input-digit {
+      animation: none;
+    }
   }
 
   .navigation-section {
