@@ -113,6 +113,69 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
   });
 }
 
+// AppShell defers usePresenceSession until startup is ready. Observe its
+// initial online sign_event entry before creating the raw query, not a timer
+// or cached presence lookup. This fences that signing count only: it does not
+// establish signing completion, relay delivery, or immunity to later heartbeats.
+async function waitForInitialPresenceSigning(
+  page: import("@playwright/test").Page,
+) {
+  await expect
+    .poll(
+      async () =>
+        (await readCommandPayloadLog(page)).some(({ command, payload }) => {
+          const event = payload as {
+            kind?: number;
+            content?: string;
+            tags?: string[][];
+          } | null;
+          return (
+            command === "sign_event" &&
+            event?.kind === 20001 &&
+            event.content === "online" &&
+            Array.isArray(event.tags) &&
+            event.tags.length === 0
+          );
+        }),
+      {
+        message:
+          "initial online presence sign_event entered before mention probe",
+      },
+    )
+    .toBe(true);
+}
+
+// Capture both logs in one browser turn so diagnostics describe the exact
+// unfiltered command snapshot used by the assertions, including unsigned events.
+async function captureMentionCommandBoundary(
+  page: import("@playwright/test").Page,
+  phase: "baseline" | "final",
+) {
+  const snapshot = await page.evaluate(() => ({
+    capturedAt: Date.now(),
+    commands: [...(window.__BUZZ_E2E_COMMANDS__ ?? [])],
+    payloads: window.__BUZZ_E2E_COMMAND_LOG__ ?? [],
+  }));
+  const counts: Record<string, number> = {
+    add_channel_members: 0,
+    start_managed_agent: 0,
+    attach_managed_agent: 0,
+    sync_agents_to_active_huddle: 0,
+    send_channel_message: 0,
+    sign_event: 0,
+    revalidate_relay_agents: 0,
+    list_relay_agents: 0,
+  };
+  for (const command of snapshot.commands) {
+    counts[command] = (counts[command] ?? 0) + 1;
+  }
+  await test.info().attach(`mention-commands-${phase}`, {
+    body: JSON.stringify({ phase, counts, ...snapshot }),
+    contentType: "application/json",
+  });
+  return snapshot.commands;
+}
+
 async function readOutgoingMentionPubkeys(
   page: import("@playwright/test").Page,
   content: string,
@@ -2191,6 +2254,7 @@ test("cached-visible revoked relay agent selection is denied without a directory
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
 
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
@@ -2207,7 +2271,10 @@ test("cached-visible revoked relay agent selection is denied without a directory
   // The cached directory keeps serving the same eligible row.
   await expect(quinnRow).toBeVisible();
   await expect(quinnRow).toBeEnabled();
-  const baselineCommands = await readCommandLog(page);
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
 
   await quinnRow.click();
   await expect(page.getByTestId("composer-address-lock-status")).toHaveText(
@@ -2216,7 +2283,7 @@ test("cached-visible revoked relay agent selection is denied without a directory
   await expect(input).toHaveText("@quinn");
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 
-  const deniedCommands = await readCommandLog(page);
+  const deniedCommands = await captureMentionCommandBoundary(page, "final");
   // The denial came from the targeted prepare-phase revalidation seam…
   expect(commandCount(deniedCommands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 1,
@@ -2234,9 +2301,10 @@ test("cached-visible revoked relay agent selection is denied without a directory
     "send_channel_message",
     "sign_event",
   ]) {
-    expect(commandCount(deniedCommands, command)).toBe(
-      commandCount(baselineCommands, command),
-    );
+    expect(
+      commandCount(deniedCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
   }
   expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
 
@@ -2322,13 +2390,17 @@ test("navigating to mention Options during a held selection inserts nothing late
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
 
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await expect(quinnRow).toBeEnabled();
-  const baselineCommands = await readCommandLog(page);
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
 
   // Hold the fresh targeted revalidation, then start the selection normally.
   await holdMentionGateCommand(page, "revalidate_relay_agents");
@@ -2363,7 +2435,7 @@ test("navigating to mention Options during a held selection inserts nothing late
   await expect(
     page.getByTestId("composer-address-lock-status"),
   ).not.toContainText("Automatically mentioning");
-  const settledCommands = await readCommandLog(page);
+  const settledCommands = await captureMentionCommandBoundary(page, "final");
   for (const command of [
     "add_channel_members",
     "start_managed_agent",
@@ -2372,9 +2444,10 @@ test("navigating to mention Options during a held selection inserts nothing late
     "send_channel_message",
     "sign_event",
   ]) {
-    expect(commandCount(settledCommands, command)).toBe(
-      commandCount(baselineCommands, command),
-    );
+    expect(
+      commandCount(settledCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
   }
   expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
 });
@@ -2396,6 +2469,7 @@ test("navigating away from the mention row pin during its held revalidation pins
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
 
   const composer = page.getByTestId("message-composer");
   const input = page.getByTestId("message-input");
@@ -2403,7 +2477,10 @@ test("navigating away from the mention row pin during its held revalidation pins
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await expect(quinnRow).toBeEnabled();
-  const baselineCommands = await readCommandLog(page);
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
 
   // Keyboard route into the overlay, no pointer and no test-side focus: the
   // app's editor handler hands focus to the Options trigger, then a native
@@ -2476,7 +2553,7 @@ test("navigating away from the mention row pin during its held revalidation pins
     page.getByTestId("composer-address-lock-status"),
   ).not.toContainText("Automatically mentioning");
   await expect(quinnPinToggle).toHaveAttribute("aria-pressed", "false");
-  const settledCommands = await readCommandLog(page);
+  const settledCommands = await captureMentionCommandBoundary(page, "final");
   for (const command of [
     "add_channel_members",
     "start_managed_agent",
@@ -2485,9 +2562,10 @@ test("navigating away from the mention row pin during its held revalidation pins
     "send_channel_message",
     "sign_event",
   ]) {
-    expect(commandCount(settledCommands, command)).toBe(
-      commandCount(baselineCommands, command),
-    );
+    expect(
+      commandCount(settledCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
   }
   expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
 
@@ -2533,6 +2611,7 @@ for (const change of ["draft", "selection range"] as const) {
     await page.goto("/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForInitialPresenceSigning(page);
 
     const composer = page.getByTestId("message-composer");
     const input = page.getByTestId("message-input");
@@ -2567,7 +2646,10 @@ for (const change of ["draft", "selection range"] as const) {
     await expect(input).toBeFocused();
     const originalCaret = await readCaret();
     expect(originalCaret).toEqual({ anchor: 6, focus: 6, collapsed: true });
-    const baselineCommands = await readCommandLog(page);
+    const baselineCommands = await captureMentionCommandBoundary(
+      page,
+      "baseline",
+    );
 
     await holdMentionGateCommand(page, "revalidate_relay_agents");
     await quinnRow.click();
@@ -2622,7 +2704,7 @@ for (const change of ["draft", "selection range"] as const) {
     ).toHaveCount(0);
     await expect(status).not.toContainText("Checking access");
     await expect(status).not.toContainText("Automatically mentioning");
-    const settledCommands = await readCommandLog(page);
+    const settledCommands = await captureMentionCommandBoundary(page, "final");
     for (const command of [
       "add_channel_members",
       "start_managed_agent",
@@ -2631,9 +2713,10 @@ for (const change of ["draft", "selection range"] as const) {
       "send_channel_message",
       "sign_event",
     ]) {
-      expect(commandCount(settledCommands, command)).toBe(
-        commandCount(baselineCommands, command),
-      );
+      expect(
+        commandCount(settledCommands, command),
+        `${command} must equal baseline`,
+      ).toBe(commandCount(baselineCommands, command));
     }
     expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
   });
