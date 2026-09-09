@@ -819,53 +819,152 @@ test("cold directory expiry waits for required people search before installing c
   );
 });
 
-test("cached allowed expiry blocks every retained choice until fresh retry settles", async () => {
-  await setup({
-    owner: OTHER,
-    visible: true,
-    directoryVisible: true,
-    policy: "anyone",
-  });
-  await act(async () => mention.updateMentionQuery("@Remote", 7));
-  await settle();
-  const retained = rows()[0];
-  assert.equal(retained.action, "mention");
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 5100)));
-  assert.equal(rows()[0].pubkey, retained.pubkey);
-  assert.equal(rows()[0].action, "unavailable");
-  assert.equal(
-    rows()[0].unavailableReason,
-    "Could not verify access. Retry to check again.",
-  );
-  const assertBlocked = async () => {
-    assert.equal(mention.canSelectMention(retained), false);
-    await act(async () => {
-      picker.selectMentionSuggestion(retained);
-      picker.toggleAlwaysAddressAgent(retained);
+for (const visible of [true, false]) {
+  test(`cached allowed ${visible ? "member" : "relay-only nonmember"} expiry blocks every retained choice until fresh retry settles`, async () => {
+    await setup({
+      owner: OTHER,
+      visible,
+      directoryVisible: true,
+      policy: "anyone",
     });
-    for (const key of ["Tab", "Enter", " "]) {
-      let outcome;
+    await act(async () => mention.updateMentionQuery("@Remote", 7));
+    await settle();
+    const retained = rows()[0];
+    assert.equal(retained.action, visible ? "mention" : "invite");
+    const identities = mention.suggestions.map((row) => [
+      row.pubkey,
+      row.personaId,
+      row.teamId,
+      row.displayName,
+    ]);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5100)));
+    assert.equal(rows()[0].pubkey, retained.pubkey);
+    assert.equal(rows()[0].action, "unavailable");
+    assert.equal(
+      rows()[0].unavailableReason,
+      "Could not verify access. Retry to check again.",
+    );
+    const assertBlocked = async () => {
+      assert.equal(mention.canSelectMention(retained), false);
       await act(async () => {
-        outcome = mention.handleMentionKeyDown(keyboard(key));
+        picker.selectMentionSuggestion(retained);
+        picker.toggleAlwaysAddressAgent(retained);
       });
-      assert.equal(outcome.suggestion, undefined);
-    }
-    assert.deepEqual(effects, []);
-    assert.deepEqual(mention.knownNames, []);
-  };
-  await assertBlocked();
-  let release;
-  state.heldDirectory = new Promise((resolve) => {
-    release = resolve;
+      for (const key of ["Tab", "Enter", " "]) {
+        let outcome;
+        await act(async () => {
+          outcome = mention.handleMentionKeyDown(keyboard(key));
+        });
+        assert.equal(outcome.suggestion, undefined);
+      }
+      assert.deepEqual(effects, []);
+      assert.deepEqual(mention.knownNames, []);
+    };
+    await assertBlocked();
+    let release;
+    state.heldDirectory = new Promise((resolve) => {
+      release = resolve;
+    });
+    await act(async () => rows()[0].onRetry());
+    assert.equal(rows()[0].action, "checking");
+    await assertBlocked();
+    state.heldDirectory = null;
+    await act(async () => release([rawAgent()]));
+    await settle();
+    assert.equal(rows()[0].action, visible ? "mention" : "invite");
+    assert.deepEqual(
+      mention.suggestions.map((row) => [
+        row.pubkey,
+        row.personaId,
+        row.teamId,
+        row.displayName,
+      ]),
+      identities,
+    );
+    assert.equal(rows()[0].pubkey, retained.pubkey);
+    assert.equal(mention.mentionSelectedIndex, 0);
+    assert.equal(mention.canSelectMention(retained), true);
   });
-  await act(async () => rows()[0].onRetry());
-  assert.equal(rows()[0].action, "checking");
-  await assertBlocked();
-  state.heldDirectory = null;
-  await act(async () => release([rawAgent()]));
-  await settle();
-  assert.equal(rows()[0].action, "mention");
-  assert.equal(rows()[0].pubkey, retained.pubkey);
-  assert.equal(mention.mentionSelectedIndex, 0);
-  assert.equal(mention.canSelectMention(retained), true);
-});
+}
+
+for (const failure of ["denied", "lookup-failed"]) {
+  test(`installed relay-only nonmember preserves ${failure} reason and held Retry`, async () => {
+    await setup({ owner: OTHER, visible: false, directoryVisible: true });
+    const action = "invite";
+    const retained = rows()[0];
+    assert.equal(retained.action, action);
+    const identities = mention.suggestions.map((row) => [
+      row.pubkey,
+      row.personaId,
+      row.teamId,
+      row.displayName,
+    ]);
+    state.policy = failure === "denied" ? "owner-only" : "anyone";
+    state.failDirectory = failure === "lookup-failed";
+    await act(async () =>
+      client.invalidateQueries({ queryKey: ["relay-agents"] }),
+    );
+    await settle();
+    assert.equal(rows()[0].action, "unavailable");
+    assert.equal(
+      rows()[0].unavailableReason,
+      failure === "denied"
+        ? "This agent does not permit you to mention it here."
+        : "Could not verify access. Retry to check again.",
+    );
+    assert.equal(mention.canSelectMention(retained), false);
+    let release, reject;
+    state.heldDirectory = new Promise((resolve, fail) => {
+      release = resolve;
+      reject = fail;
+    });
+    await act(async () => rows()[0].onRetry());
+    assert.equal(rows()[0].action, "checking");
+    assert.equal(rows()[0].onRetry, undefined);
+    assert.equal(mention.canSelectMention(retained), false);
+    if (failure === "lookup-failed") {
+      await act(async () => reject(new Error("Retry failed")));
+      await settle();
+      assert.equal(rows()[0].action, "unavailable");
+      assert.equal(
+        rows()[0].unavailableReason,
+        "Could not verify access. Retry to check again.",
+      );
+      assert.equal(mention.canSelectMention(retained), false);
+      state.heldDirectory = new Promise((resolve) => {
+        release = resolve;
+      });
+      await act(async () => rows()[0].onRetry());
+      assert.equal(rows()[0].action, "checking");
+    }
+    state.policy = "anyone";
+    state.failDirectory = false;
+    state.heldDirectory = null;
+    await act(async () => release([rawAgent()]));
+    await settle();
+    assert.equal(rows()[0].action, action);
+    assert.equal(mention.canSelectMention(rows()[0]), true);
+    assert.deepEqual(
+      mention.suggestions.map((row) => [
+        row.pubkey,
+        row.personaId,
+        row.teamId,
+        row.displayName,
+      ]),
+      identities,
+    );
+    assert.equal(mention.mentionSelectedIndex, 0);
+    state.policy = "owner-only";
+    await act(async () =>
+      client.invalidateQueries({ queryKey: ["relay-agents"] }),
+    );
+    await settle();
+    await act(async () => mention.updateMentionQuery("@Remote", 7));
+    await settle();
+    assert.deepEqual(
+      rows(),
+      [],
+      "fresh discovery must still exclude denied nonmembers",
+    );
+  });
+}

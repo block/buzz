@@ -53,7 +53,16 @@ export type BuildMentionCandidatesInput = {
  * mention are dropped; identities appearing in several sources are coalesced
  * into a single entry that keeps the richest field from each.
  */
-export function buildMentionCandidates({
+export function buildMentionCandidates(
+  input: BuildMentionCandidatesInput,
+): MentionCandidate[] {
+  return buildMentionCandidateProjection(input).candidates;
+}
+
+/** Project shared live evidence separately from discovery eligibility.
+ * Evidence may update already-installed rows but must not discover new rows.
+ */
+export function buildMentionCandidateProjection({
   activeAgentPubkeys,
   knownAgentPubkeys = new Set(),
   verificationFailed = false,
@@ -80,7 +89,10 @@ export function buildMentionCandidates({
   relayAgentNamesByPubkey,
   relayAgents,
   userSearchResults,
-}: BuildMentionCandidatesInput): MentionCandidate[] {
+}: BuildMentionCandidatesInput): {
+  candidates: MentionCandidate[];
+  evidence: MentionCandidate[];
+} {
   const candidatesByPubkey = new Map<string, MentionCandidate>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
@@ -266,10 +278,10 @@ export function buildMentionCandidates({
       hasEvidence &&
       (mentionableAgentPubkeys.has(key) || memberPolicyAllows);
     const action =
-      isAgent && verificationFailed
-        ? "unavailable"
-        : isAgent && verificationPending
-          ? "checking"
+      isAgent && verificationPending
+        ? "checking"
+        : isAgent && verificationFailed
+          ? "unavailable"
           : !isAgent || allowed
             ? isMember
               ? "mention"
@@ -311,7 +323,7 @@ export function buildMentionCandidates({
   // hidden. Current roster identities and local managed identities are already
   // visible and can explain an unavailable action without granting one.
   const marked = markMentionCollisions([...union, ...personaCandidates]);
-  return marked.filter(
+  const candidates = marked.filter(
     (candidate) =>
       !candidate.isAgent ||
       candidate.kind !== "identity" ||
@@ -320,4 +332,5 @@ export function buildMentionCandidates({
       candidate.action === "mention-without-invite" ||
       (candidate.isManagedAgent && candidate.action === "checking"),
   );
+  return { candidates, evidence: marked };
 }

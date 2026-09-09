@@ -89,5 +89,9 @@ picker's request lifecycle.
 
 Availability labels may resolve from Checking to Mention or Unavailable in place;
 this never replaces an identity, label, order or selected index. Retry starts a
-fresh request. Live access is checked again at selection, including for rows
-whose display snapshot originally permitted mentioning.
+fresh evidence lookup, not a new chooser request: installed rows (including an
+installed empty/error result) are not replaced or reordered. If initial results
+have not yet installed, they still wait for the required discovery to settle.
+Change the completion text or explicitly reopen to discover a new set of choices.
+Live access is checked again at selection, including for rows whose display
+snapshot originally permitted mentioning.

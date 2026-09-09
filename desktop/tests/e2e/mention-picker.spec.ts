@@ -214,6 +214,16 @@ test("already visible checking and denied members remain disabled beside permitt
         name: "Retry access check for Verify pending",
       }),
     ).toBeVisible();
+    // The installed Invite is a relay-only nonmember, not a roster row.
+    // Expiry must retain its exact DOM key and explain verification failure.
+    const retainedInvite = page.getByTestId(`mention-suggestion-${INVITE}`);
+    await expect(retainedInvite).toContainText("Unavailable");
+    await expect(retainedInvite.locator("button").first()).toBeDisabled();
+    await expect(
+      retainedInvite.getByRole("button", { name: /Retry access check/ }),
+    ).toHaveAccessibleDescription(
+      "Could not verify access. Retry to check again.",
+    );
     const identities = await page
       .locator("[data-mention-suggestion-index]")
       .evaluateAll((rows) =>

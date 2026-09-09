@@ -63,9 +63,8 @@ import {
   buildTeamMentionCandidates,
   formatTeamMention,
   sameTeamMentionRecipients,
-  type MentionCandidate,
 } from "./mentionCandidates";
-import { buildMentionCandidates } from "./buildMentionCandidates";
+import { buildMentionCandidateProjection } from "./buildMentionCandidates";
 const MENTION_SUGGESTION_LIMIT = 50;
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
@@ -291,9 +290,9 @@ export function useMentions(
     directoryError: !!relayAgentsQuery.error || !!managedAgentsQuery.error,
     retry: retryDirectory,
   });
-  const mentionCandidates = React.useMemo<MentionCandidate[]>(
+  const candidateProjection = React.useMemo(
     () =>
-      buildMentionCandidates({
+      buildMentionCandidateProjection({
         activeAgentPubkeys,
         knownAgentPubkeys,
         verificationFailed,
@@ -350,6 +349,8 @@ export function useMentions(
       relayAgentsQuery.data,
     ],
   );
+  const { candidates: mentionCandidates, evidence: mentionCandidateEvidence } =
+    candidateProjection;
   const mentionCandidatesWithTeams = React.useMemo(
     () =>
       markMentionCollisions([
@@ -489,11 +490,14 @@ export function useMentions(
   } = mentionSelection;
   // Identity, label and order stay frozen. Availability is live evidence,
   // not part of that snapshot's authority; a checking row can finish or retry
-  // without moving anyone's highlighted recipient.
+  // without moving anyone's highlighted recipient. Identity evidence is read
+  // before discovery filtering, solely to update these already-installed rows.
   const suggestions = React.useMemo<MentionSuggestion[]>(
     () =>
       snapshotSuggestions.map((row) => {
-        const live = mentionCandidatesWithTeams.find((candidate) =>
+        const live = (
+          row.pubkey ? mentionCandidateEvidence : mentionCandidatesWithTeams
+        ).find((candidate) =>
           row.pubkey
             ? candidate.pubkey === row.pubkey
             : row.teamId
@@ -511,7 +515,12 @@ export function useMentions(
             live?.action === "unavailable" || !live ? retryMention : undefined,
         };
       }),
-    [snapshotSuggestions, mentionCandidatesWithTeams, retryMention],
+    [
+      snapshotSuggestions,
+      mentionCandidateEvidence,
+      mentionCandidatesWithTeams,
+      retryMention,
+    ],
   );
   const isMentionOpen = mentionQuery !== null;
   // Recheck against this render's exact-key evidence even if a child retained
