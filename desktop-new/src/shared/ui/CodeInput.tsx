@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
+  useEffect,
   useRef,
   useState,
 } from "react";
@@ -9,6 +10,7 @@ import {
 export type CodeInputProps = {
   label: string;
   labelHidden?: boolean;
+  autoFocus?: boolean;
   defaultValue?: string;
   disabled?: boolean;
   onValueChange?: (value: string) => void;
@@ -33,11 +35,16 @@ function digitsFrom(value: string): string[] {
 export function CodeInput({
   label,
   labelHidden = false,
+  autoFocus = false,
   defaultValue = "",
   disabled = false,
   onValueChange,
 }: CodeInputProps) {
   const [digits, setDigits] = useState(() => digitsFrom(defaultValue));
+  const firstEmptyDigit = digits.findIndex((digit) => !digit);
+  const initialFocusIndex = useRef(
+    firstEmptyDigit === -1 ? CODE_INPUT_LENGTH - 1 : firstEmptyDigit,
+  );
   const [renderedDigits, setRenderedDigits] = useState(() =>
     digitsFrom(defaultValue),
   );
@@ -46,6 +53,12 @@ export function CodeInput({
   );
   const digitsRef = useRef(digits);
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
+
+  useEffect(() => {
+    if (autoFocus && !disabled) {
+      inputs.current[initialFocusIndex.current]?.focus();
+    }
+  }, [autoFocus, disabled]);
 
   const update = (next: string[]) => {
     const previous = digitsRef.current;
