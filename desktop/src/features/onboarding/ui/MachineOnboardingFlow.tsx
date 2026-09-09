@@ -293,6 +293,7 @@ export function MachineOnboardingFlow({
         ? {
             disabled: isPending,
             onClick: () => {
+              setError(null);
               setTransitionDirection("backward");
               setPage("identity");
             },
@@ -412,8 +413,10 @@ export function MachineOnboardingFlow({
         <IdentityKeyIntroduction
           direction={transitionDirection}
           disabled={isPending}
+          error={error}
           onCreate={() => void loadFreshIdentity()}
           onOpenHelp={() => {
+            setError(null);
             setIdentityKeyHelpReturnPage("identity-key-intro");
             setTransitionDirection("forward");
             setPage("identity-key-help");
@@ -503,7 +506,7 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
-                        disabled={isPending}
+                        disabled={isPending || isKeyImporting}
                         onClick={() => {
                           setKeyImportStage("key-entry");
                           setKeyImportDialog("backup");
@@ -516,7 +519,7 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
-                        disabled={isPending}
+                        disabled={isPending || isKeyImporting}
                         onClick={() => {
                           setPhoneRecoveryStep("loading");
                           setKeyImportDialog("phone");

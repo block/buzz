@@ -170,7 +170,11 @@ function renderSetupStep() {
   return { container, root };
 }
 
-function setupStepTree(queryClient) {
+function setupStepTree(
+  queryClient,
+  actions = ACTIONS,
+  onReadyRuntimeIdsChange = NOOP,
+) {
   return React.createElement(
     QueryClientProvider,
     { client: queryClient },
@@ -178,10 +182,10 @@ function setupStepTree(queryClient) {
       TooltipProvider,
       null,
       React.createElement(SetupStep, {
-        actions: ACTIONS,
+        actions,
         direction: "forward",
         initialMethod: "subscription",
-        onReadyRuntimeIdsChange: NOOP,
+        onReadyRuntimeIdsChange,
       }),
     ),
   );
@@ -200,9 +204,19 @@ describe("SetupStep cached-ready revalidation", () => {
     discoverHandler = (args) =>
       args?.force === true ? pending.promise : Promise.resolve([]);
 
+    const nextCalls = [];
+    const readyRuntimeIdSnapshots = [];
+    const actions = {
+      ...ACTIONS,
+      next: (...args) => nextCalls.push(args),
+    };
     const { container, root } = renderSetupStep();
     await act(async () => {
-      root.render(setupStepTree(queryClient));
+      root.render(
+        setupStepTree(queryClient, actions, (runtimeIds) =>
+          readyRuntimeIdSnapshots.push([...runtimeIds]),
+        ),
+      );
     });
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
@@ -213,6 +227,21 @@ describe("SetupStep cached-ready revalidation", () => {
     );
     assert.ok(readyCard, "the cached harness remains visible during recheck");
     assert.equal(readyCard.getAttribute("data-ready"), "true");
+    await act(async () => {
+      readyCard
+        .querySelector('[data-testid="onboarding-runtime-details-codex"]')
+        ?.click();
+    });
+    assert.equal(
+      nextCalls.length,
+      0,
+      "cached readiness cannot navigate while the forced recheck is pending",
+    );
+    assert.deepEqual(
+      readyRuntimeIdSnapshots,
+      [],
+      "pending cached readiness is not exported as confirmed",
+    );
     assert.equal(
       container.querySelector('[data-testid="onboarding-runtime-ready-codex"]'),
       null,
@@ -237,6 +266,11 @@ describe("SetupStep cached-ready revalidation", () => {
         ?.getAttribute("data-ready"),
       "true",
       "the harness remains ready once the warm recheck succeeds",
+    );
+    assert.deepEqual(
+      readyRuntimeIdSnapshots,
+      [["codex"]],
+      "only a successful forced recheck exports cached readiness",
     );
     assert.equal(
       container.querySelector(

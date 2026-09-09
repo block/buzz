@@ -17,8 +17,8 @@
     "windows": [
       {
         "title": "",
-        "width": 900,
-        "height": 650,
+        "width": 800,
+        "height": 600,
         "maximized": true,
         "visible": false,
         "transparent": false,
@@ -30,8 +30,8 @@
           "y": 25
         },
         "backgroundThrottling": "disabled",
-        "minWidth": 900,
-        "minHeight": 650
+        "minWidth": 800,
+        "minHeight": 500
       }
     ],
     "macOSPrivateApi": true,

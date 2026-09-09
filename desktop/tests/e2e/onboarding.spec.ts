@@ -850,6 +850,31 @@ test("key import locks host navigation and ignores rapid duplicate submits", asy
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
+test("key import keeps alternate recovery methods disabled while submitting", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityImportDelayMs: 500 },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("nostr-import-file-button")).toBeDisabled();
+  await expect(page.getByTestId("nostr-import-phone-link")).toBeDisabled();
+  await page.getByTestId("nostr-import-file-button").click({ force: true });
+  await page.getByTestId("nostr-import-phone-link").click({ force: true });
+  await expect(page.getByTestId("nostr-import-nsec-input")).toBeVisible();
+  await expect(page.getByTestId("backup-recovery-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("phone-recovery-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+});
+
 test("imported-key users can skip out of harness setup", async ({ page }) => {
   // Regression: importing an existing key sets the onboarding state machine's
   // "continuing" marker, which pinned the stage to onboarding even after
@@ -1040,7 +1065,7 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   await backupDialog
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
-  await backupDialog.getByTestId("nostr-import-submit").click();
+  await page.getByRole("button", { name: "Next" }).click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
@@ -2348,7 +2373,7 @@ test("connected first-community profile keeps navigation inside the card and bal
     throw new Error("Could not measure community profile navigation controls");
   }
   expect(backBox.x).toBeGreaterThanOrEqual(onboardingCardBox.x + 40);
-  expect(backBox.width).toBe(40);
+  expect(backBox.width).toBe(52);
   expect(nextBox.x + nextBox.width).toBeLessThanOrEqual(
     onboardingCardBox.x + onboardingCardBox.width - 40,
   );
@@ -3854,6 +3879,7 @@ test("same-relay identity replacement rebuilds the community boundary (A→B→A
 test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 800, height: 500 });
   // Produce the relay reconnect card via a relay-unreachable profile save error.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
@@ -3891,6 +3917,30 @@ test("onboarding relay reconnect — click shows Connected then auto-dismisses",
   // Auto-dismiss fires after ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS
   // (2500ms). Allow generous headroom for CI.
   await expect(card).toBeHidden({ timeout: 10_000 });
+});
+
+test("onboarding relay reconnect — dismiss is clickable at minimum size", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 500 });
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  const card = page.getByTestId("onboarding-relay-reconnect-card");
+  await expect(card).toBeVisible();
+  await page
+    .getByRole("button", { name: "Dismiss relay notification" })
+    .click();
+  await expect(card).toHaveCount(0);
 });
 
 test("onboarding relay reconnect — connected without a prior click does not show Connected", async ({

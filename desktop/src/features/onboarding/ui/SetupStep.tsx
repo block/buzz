@@ -981,6 +981,15 @@ function SetupStepContent({
 }: SetupStepContentProps) {
   const cardLayout = useOnboardingCardLayout();
   const { runtimeProviders } = state;
+  const [hasForcedCheckStarted, setHasForcedCheckStarted] =
+    React.useState(false);
+  React.useEffect(() => {
+    if (runtimeProviders.isChecking) setHasForcedCheckStarted(true);
+  }, [runtimeProviders.isChecking]);
+  const readinessConfirmed =
+    hasForcedCheckStarted &&
+    !runtimeProviders.isChecking &&
+    runtimeProviders.errorMessage === null;
   const [stage, setStage] = React.useState<"method" | "list" | "detail">(
     initialMethod ? "list" : "method",
   );
@@ -996,23 +1005,31 @@ function SetupStepContent({
     React.useState<InstallResultsState>({});
   const readyRuntimeIds = React.useMemo(
     () =>
-      getReadyOnboardingRuntimes(runtimeProviders.items).map(
-        (runtime) => runtime.id,
-      ),
-    [runtimeProviders.items],
+      readinessConfirmed
+        ? getReadyOnboardingRuntimes(runtimeProviders.items).map(
+            (runtime) => runtime.id,
+          )
+        : [],
+    [readinessConfirmed, runtimeProviders.items],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
   // The key prevents catalog object refreshes from creating an effect loop
   // when the detected ready IDs have not changed.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by ID content
   React.useEffect(() => {
-    if (runtimeProviders.isChecking && runtimeProviders.items.length === 0) {
+    if (
+      !hasForcedCheckStarted ||
+      runtimeProviders.isChecking ||
+      runtimeProviders.errorMessage !== null
+    ) {
       return;
     }
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [
+    hasForcedCheckStarted,
     onReadyRuntimeIdsChange,
     readyRuntimeIdsKey,
+    runtimeProviders.errorMessage,
     runtimeProviders.isChecking,
     runtimeProviders.items.length,
   ]);
@@ -1020,9 +1037,10 @@ function SetupStepContent({
   const selectedRuntime = runtimeProviders.items.find(
     (runtime) => runtime.id === selectedRuntimeId,
   );
-  const selectedRuntimeIsReady = selectedRuntime
-    ? runtimeIsReadyForOnboarding(selectedRuntime)
-    : false;
+  const selectedRuntimeIsReady =
+    readinessConfirmed && selectedRuntime
+      ? runtimeIsReadyForOnboarding(selectedRuntime)
+      : false;
   const actionsRef = React.useRef(actions);
   actionsRef.current = actions;
   const navigateBack = React.useCallback(() => {
@@ -1067,7 +1085,7 @@ function SetupStepContent({
         (runtime) => runtime.id === "buzz-agent",
       );
       if (buzzRuntime) {
-        if (runtimeIsReadyForOnboarding(buzzRuntime)) {
+        if (readinessConfirmed && runtimeIsReadyForOnboarding(buzzRuntime)) {
           actions.next([buzzRuntime.id], "method");
           return;
         }
@@ -1085,7 +1103,7 @@ function SetupStepContent({
     const runtime = runtimeProviders.items.find(
       (item) => item.id === runtimeId,
     );
-    if (runtime && runtimeIsReadyForOnboarding(runtime)) {
+    if (readinessConfirmed && runtime && runtimeIsReadyForOnboarding(runtime)) {
       actions.next([runtime.id]);
       return;
     }
