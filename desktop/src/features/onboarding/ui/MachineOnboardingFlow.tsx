@@ -382,7 +382,7 @@ export function MachineOnboardingFlow({
                   ) : (
                     <p>
                       Paste your private key to sign in to Buzz. You can also
-                      use a{" "}
+                      {" "}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
@@ -390,7 +390,7 @@ export function MachineOnboardingFlow({
                         onClick={() => setKeyImportDialog("backup")}
                         type="button"
                       >
-                        backup file
+                        import from a file
                       </button>
                       , or{" "}
                       <button
@@ -447,10 +447,10 @@ export function MachineOnboardingFlow({
                 >
                   <div className="mx-auto w-full max-w-[35rem] pb-6 pt-10 text-center max-sm:pb-4 max-sm:pt-6">
                     <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
-                      Restore from a backup file
+                      Import from a file
                     </DialogTitle>
                     <DialogDescription className="mx-auto mt-4 max-w-[28rem] text-sm leading-6 text-foreground/80">
-                      Choose the encrypted backup file you saved from Buzz.
+                      Choose a file containing a private key or a password-protected Buzz backup.
                     </DialogDescription>
                     <NostrKeyImportForm
                       footerMode="inline"

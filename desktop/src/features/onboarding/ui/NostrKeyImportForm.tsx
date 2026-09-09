@@ -39,7 +39,7 @@ type NostrKeyImportFormProps = {
   showBack?: boolean;
   /** Keep password-stage navigation out of the form when the host owns Back. */
   showPasswordStageBack?: boolean;
-  /** Restrict this instance to selecting a backup file instead of typing a key. */
+  /** Restrict this instance to selecting a key/backup file instead of typing a key. */
   mode?: "key" | "backup";
   /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
   footerMode?: "onboarding" | "inline";
@@ -359,7 +359,7 @@ export function NostrKeyImportForm({
       ) : null}
 
       {/* Hidden file input shared by both variants: the default drop zone and
-          the spotlight "Choose a backup file" button both open it. Accepts the
+          the spotlight "Choose file" button both open it. Accepts the
           .ncryptsec backups our own save flow emits alongside raw .key files. */}
       {mode === "backup" || variant !== "spotlight" ? (
         <input
@@ -396,7 +396,7 @@ export function NostrKeyImportForm({
               type="button"
             >
               <FileKey2 aria-hidden="true" className="mr-2 size-4" />
-              Choose a backup file
+              Choose file
             </Button>
             <BackupFileUnlockPreview />
           </div>
@@ -408,7 +408,7 @@ export function NostrKeyImportForm({
             >
               <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
                 <KeyRound aria-hidden="true" className="size-4" />
-                <span>Drop your backup file here</span>
+                <span>Drop file here</span>
               </span>
             </fieldset>
           ) : null}
@@ -596,7 +596,7 @@ export function NostrKeyImportForm({
             : undefined
         }
       >
-        {mode === "key" || isPasswordStage ? (
+        {mode === "key" || isPasswordStage || isValid ? (
           <Button
             className={
               // Only the spotlight (onboarding) treatment gets the docked pill CTA.
