@@ -700,10 +700,6 @@
     color: transparent;
   }
 
-  .code-input-control:hover:not(:disabled) {
-    border-color: var(--neutral-7);
-  }
-
   .code-input-control:focus {
     border-color: var(--neutral-7);
   }
