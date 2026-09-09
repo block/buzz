@@ -614,7 +614,7 @@
      interaction treatment being compared in the design-system specimen. */
   .text-field[data-variant="soft"] .text-field-control {
     border-color: var(--neutral-5);
-    background: var(--neutral-3);
+    background: var(--bg-field-soft);
   }
 
   .text-field[data-variant="soft"] .text-field-control:focus {
@@ -625,7 +625,7 @@
 
   .text-field[data-variant="soft"][data-invalid] .text-field-control {
     border-color: var(--red-8);
-    background: var(--neutral-3);
+    background: var(--bg-field-soft);
     box-shadow: 0 0 0 2px var(--red-8);
   }
 
@@ -646,7 +646,7 @@
 
   .text-field[data-variant="soft"][data-disabled] .text-field-control {
     border-color: var(--neutral-5);
-    background: var(--neutral-3);
+    background: var(--bg-field-soft);
     box-shadow: none;
   }
 
