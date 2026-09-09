@@ -1,35 +1,53 @@
 name: macOS Intel Canary
 
-# Produces an unsigned Intel DMG from trusted main. Its release-equivalent
-# Cargo state warms the distinct x86_64 release target without signing or
-# publishing anything.
+# Produces a SIGNED + NOTARIZED Intel DMG for a pinned source SHA, as a
+# workflow artifact only. It publishes nothing: no tag, no GitHub Release, no
+# updater archive, no latest.json. Distribution stays in release.yml.
+#
+# The build source is pinned by `expected_sha`, not by a branch: a branch is a
+# mutable reference, and this canary exists to prove that one specific reviewed
+# commit produced the binary under test. The job refuses to build when the
+# checked-out HEAD is not exactly that commit.
 on:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Full 40-character commit SHA to build (the job fails if HEAD differs)
+        required: true
+        type: string
 
 permissions:
   contents: read
+  id-token: write # required by block/apple-codesign-action for OIDC
 
 jobs:
   build:
-    name: Build macOS Intel canary
+    name: Build signed macOS Intel canary
     if: github.repository == 'block/buzz'
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       TARGET: x86_64-apple-darwin
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
     steps:
-      - name: Require main
-        env:
-          SOURCE_REF: ${{ github.ref }}
-        run: |
-          if [[ "$SOURCE_REF" != "refs/heads/main" ]]; then
-            echo "::error::Canary builds must run from main; got $SOURCE_REF"
-            exit 1
-          fi
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.expected_sha }}
           persist-credentials: false
+
+      - name: Require the pinned candidate SHA
+        run: |
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha must be a full 40-character SHA; got '$EXPECTED_SHA'"
+            exit 1
+          fi
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "::error::source SHA mismatch: expected $EXPECTED_SHA, checked out $ACTUAL_SHA"
+            exit 1
+          fi
+          echo "SOURCE_SHA=$ACTUAL_SHA" >> "$GITHUB_ENV"
+          echo "SOURCE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -43,6 +61,7 @@ jobs:
         run: |
           BASE_VERSION=$(node -p "require('./desktop/package.json').version")
           VERSION="${BASE_VERSION%%-*}-intel-test.${GITHUB_RUN_NUMBER}"
+          echo "CANARY_VERSION=$VERSION" >> "$GITHUB_ENV"
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
@@ -95,19 +114,82 @@ jobs:
           TAURI_BUNDLER_DMG_IGNORE_CI: "true"
 
       - name: Locate fresh Intel DMG
-        id: artifact
+        id: unsigned
         run: |
           DMG=$(find "desktop/src-tauri/target/${TARGET}/release/bundle/dmg" -name '*.dmg' -type f | head -1)
           [[ -n "$DMG" ]] || { echo "::error::No Intel DMG found"; exit 1; }
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Intel canary
+      # mdx-ios-codesign-helper discovers this file by its exact lowercase basename.
+      - name: Stage signing entitlements
+        run: cp desktop/src-tauri/Entitlements.plist "${RUNNER_TEMP}/entitlements.plist"
+
+      - name: Codesign and Notarize
+        id: codesign
+        uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
+        with:
+          osx-codesign-role: ${{ secrets.OSX_CODESIGN_ROLE }}
+          codesign-s3-bucket: ${{ secrets.CODESIGN_S3_BUCKET }}
+          unsigned-artifact-path: ${{ steps.unsigned.outputs.dmg }}
+          entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
+          artifact-name: buzz-intel-canary-${{ inputs.expected_sha }}-${{ github.run_id }}
+
+      - name: Install the signed app next to the signed DMG
+        env:
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+          UNSIGNED_DMG: ${{ steps.unsigned.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos"
+
+          # The signed/notarized DMG replaces the unsigned one. No updater
+          # archive is rebuilt and no updater key is used: this canary does not
+          # feed the update channel.
+          cp "$SIGNED_DMG" "$UNSIGNED_DMG"
+
+          EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract-x64"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          rm -rf "${APP_DIR}/Buzz.app"
+          mkdir -p "$APP_DIR"
+          cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
+
+      - name: Verify code signature
+        run: |
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz.app"
+          codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+          spctl --assess --type execute --verbose=4 "$APP_DIR"
+          desktop/scripts/verify-macos-entitlements.sh "$APP_DIR"
+
+      - name: Report signed canary provenance
+        env:
+          SIGNED_DMG: ${{ steps.unsigned.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz.app"
+          {
+            echo "SOURCE_SHA=$SOURCE_SHA"
+            echo "SOURCE_TREE=$SOURCE_TREE"
+            echo "TARGET=$TARGET"
+            echo "CANARY_VERSION=$CANARY_VERSION"
+            echo "SIGNED_APP_SHA256=$(shasum -a 256 "$APP_DIR/Contents/MacOS/buzz-desktop" | awk '{print $1}')"
+            echo "SIGNED_DMG_SHA256=$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')"
+            codesign -dv --verbose=2 "$APP_DIR" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Authority)=' || true
+            echo "codesign_verify=PASS"
+            echo "spctl=accepted"
+            echo "entitlements_verify=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signed Intel canary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-macos-intel-canary-${{ github.sha }}
-          path: ${{ steps.artifact.outputs.dmg }}
+          name: buzz-macos-intel-signed-canary-${{ inputs.expected_sha }}
+          path: |
+            ${{ steps.unsigned.outputs.dmg }}
+            ${{ steps.codesign.outputs.signed-artifact-path }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
       - name: Measure release Cargo cache inputs
         if: always()
