@@ -130,3 +130,44 @@ test("global search results join only while global search is enabled", () => {
   assert.equal(searched[0].displayName, "Dana");
   assert.equal(searched[0].isGlobalSearchResult, true);
 });
+
+test("cached allowed agents lose actionability on expiry and during retry", () => {
+  const cached = input({
+    members: [{ pubkey: AGENT_PUBKEY, displayName: "Scout", isAgent: true }],
+    relayAgents: [
+      { pubkey: AGENT_PUBKEY, name: "Scout", ownerPubkey: MEMBER_PUBKEY },
+    ],
+    mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+  });
+  assert.equal(buildMentionCandidates(cached)[0].action, "mention");
+  const expired = buildMentionCandidates({
+    ...cached,
+    verificationFailed: true,
+  })[0];
+  assert.equal(expired.action, "unavailable");
+  assert.equal(
+    expired.unavailableReason,
+    "Could not verify access. Retry to check again.",
+  );
+  assert.equal(
+    buildMentionCandidates({ ...cached, verificationPending: true })[0].action,
+    "checking",
+  );
+  assert.equal(buildMentionCandidates(cached)[0].action, "mention");
+});
+
+test("nonmembers promise Invite only with destination add authority", () => {
+  const nonmember = input({
+    canSearchGlobalUsers: true,
+    userSearchResults: [{ pubkey: SEARCHED_PUBKEY, displayName: "Visitor" }],
+  });
+  assert.equal(
+    buildMentionCandidates(nonmember)[0].action,
+    "mention-without-invite",
+  );
+  assert.equal(
+    buildMentionCandidates({ ...nonmember, canInviteNonMembers: true })[0]
+      .action,
+    "invite",
+  );
+});

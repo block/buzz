@@ -3280,11 +3280,15 @@ test("sent non-member person mention uses the normal mention style", async ({
   const input = page.getByTestId("message-input");
   await input.fill("Loop in @out");
 
+  const baselineCommands = await readCommandLog(page);
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("outsider")).toBeVisible();
+  await expect(dropdown).toContainText("Mention without inviting");
+  await expect(dropdown).not.toContainText("Invite…");
   await dropdown.getByText("outsider", { exact: true }).click();
   await expect(input).toHaveText("Loop in @outsider ");
   await page.keyboard.type(" please");
+  const content = await input.innerText();
   await page.getByTestId("send-message").click();
 
   const mentionChip = page
@@ -3293,6 +3297,24 @@ test("sent non-member person mention uses the normal mention style", async ({
     .locator("[data-mention]", { hasText: "outsider" });
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
+  await expect(page.getByRole("alertdialog")).toBeHidden();
+  expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
+    commandCount(baselineCommands, "add_channel_members"),
+  );
+  const signed = await page.evaluate(
+    (content) =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+        (event) => event.content === content,
+      ),
+    content,
+  );
+  expect(signed?.tags.filter((tag) => tag[0] === "h")).toEqual([
+    ["h", "7eb9f239-9393-50b0-bd76-d85eef0511c7"],
+  ]);
+  expect(await readOutgoingMentionPubkeys(page, content)).toEqual([
+    TEST_IDENTITIES.outsider.pubkey,
+    TEST_IDENTITIES.bob.pubkey,
+  ]);
 });
 
 test("sent managed non-member agent mention uses the agent mention style", async ({
@@ -3972,5 +3994,51 @@ for (const channel of ["general", "watercooler"]) {
     await expect(page.getByTestId("mention-autocomplete-layer")).toBeHidden();
     await input.press("Tab");
     await expect(input).toHaveText("hello @bo");
+  });
+}
+
+for (const action of ["Invite", "Send anyway", "Cancel"]) {
+  test(`private-channel active member nonmember mention: ${action}`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId("channel-secret-projects").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("secret-projects");
+    const baseline = await readCommandLog(page);
+    const input = page.getByTestId("message-input");
+    await input.fill("Private @out");
+    const dropdown = autocomplete(page);
+    await expect(dropdown).toContainText("Invite…");
+    await dropdown.getByText("outsider", { exact: true }).click();
+    const draft = await input.innerText();
+    const content = draft.trim();
+    await page.getByTestId("send-message").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Invite", exact: true }),
+    ).toBeEnabled();
+    if (action === "Cancel") await page.keyboard.press("Escape");
+    else
+      await dialog
+        .getByRole("button", {
+          name: action === "Send anyway" ? "Do nothing" : action,
+          exact: true,
+        })
+        .click();
+    await expect(dialog).toBeHidden();
+    if (action === "Cancel") {
+      await expect(input).toHaveText(draft);
+      expect(await readOutgoingMentionPubkeys(page, content)).toBeNull();
+    } else {
+      await expect(input).toBeEmpty();
+      await expect
+        .poll(() => readOutgoingMentionPubkeys(page, content))
+        .toEqual(action === "Invite" ? [TEST_IDENTITIES.outsider.pubkey] : []);
+    }
+    expect(
+      commandCount(await readCommandLog(page), "add_channel_members") -
+        commandCount(baseline, "add_channel_members"),
+    ).toBe(action === "Invite" ? 1 : 0);
   });
 }

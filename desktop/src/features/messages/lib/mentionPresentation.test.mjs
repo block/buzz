@@ -120,6 +120,7 @@ test("fresh roster removal beats stale directory and channel membership; owned n
       relayAgents: [relay()],
       mentionableAgentPubkeys: new Set([A]),
       memberPubkeys: new Set([A]),
+      canInviteNonMembers: true,
     }),
   );
   assert.equal(row.isMember, false);

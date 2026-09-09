@@ -20,6 +20,8 @@ export type BuildMentionCandidatesInput = {
   activeAgentPubkeys: ReadonlySet<string>;
   knownAgentPubkeys?: ReadonlySet<string>;
   verificationFailed?: boolean;
+  verificationPending?: boolean;
+  canInviteNonMembers?: boolean;
   presenceFresh?: boolean;
   activePersonaById: ReadonlyMap<string, AgentPersona>;
   /** Already narrowed to `isActive` personas. */
@@ -55,6 +57,8 @@ export function buildMentionCandidates({
   activeAgentPubkeys,
   knownAgentPubkeys = new Set(),
   verificationFailed = false,
+  verificationPending = false,
+  canInviteNonMembers = false,
   presenceFresh = true,
   activePersonaById,
   activePersonas,
@@ -262,15 +266,21 @@ export function buildMentionCandidates({
       hasEvidence &&
       (mentionableAgentPubkeys.has(key) || memberPolicyAllows);
     const action =
-      !isAgent || allowed
-        ? isMember
-          ? "mention"
-          : "invite"
-        : ready && hasEvidence
-          ? "unavailable"
-          : verificationFailed
-            ? "unavailable"
-            : "checking";
+      isAgent && verificationFailed
+        ? "unavailable"
+        : isAgent && verificationPending
+          ? "checking"
+          : !isAgent || allowed
+            ? isMember
+              ? "mention"
+              : canInviteNonMembers
+                ? "invite"
+                : "mention-without-invite"
+            : ready && hasEvidence
+              ? "unavailable"
+              : verificationFailed
+                ? "unavailable"
+                : "checking";
     return {
       ...candidate,
       isAgent,
@@ -283,7 +293,7 @@ export function buildMentionCandidates({
       action,
       unavailableReason:
         action === "unavailable"
-          ? ready && hasEvidence
+          ? !verificationFailed && ready && hasEvidence
             ? "This agent does not permit you to mention it here."
             : "Could not verify access. Retry to check again."
           : action === "checking"
@@ -307,6 +317,7 @@ export function buildMentionCandidates({
       candidate.kind !== "identity" ||
       candidate.isMember ||
       candidate.action === "invite" ||
+      candidate.action === "mention-without-invite" ||
       (candidate.isManagedAgent && candidate.action === "checking"),
   );
 }

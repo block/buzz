@@ -1,7 +1,12 @@
 import type { MentionCandidate } from "./mentionCandidates";
 
 /** Presentation only. Publication still performs fresh authorization. */
-export type MentionAction = "mention" | "invite" | "checking" | "unavailable";
+export type MentionAction =
+  | "mention"
+  | "invite"
+  | "mention-without-invite"
+  | "checking"
+  | "unavailable";
 export type MentionPresence = "online" | "away" | "offline" | "unknown";
 
 export function isMentionActionable(candidate: { action?: MentionAction }) {

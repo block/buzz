@@ -10,7 +10,7 @@ import { Button } from "@/shared/ui/button";
 import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
 
 type NonMemberMentionDialogProps = {
-  /** False in a private channel the viewer doesn't own/administer. */
+  /** Whether the destination permits this viewer to add people. */
   canInvite: boolean;
   error: string | null;
   isInvitePending: boolean;

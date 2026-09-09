@@ -2,6 +2,7 @@ import {
   isMentionActionable,
   markMentionCollisions,
 } from "./mentionPresentation";
+import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
 import { useMentionEvidence } from "./useMentionEvidence";
 import * as React from "react";
 import {
@@ -78,6 +79,7 @@ export function useMentions(
   profiles?: UserProfileLookup,
   options?: UseMentionsOptions,
 ) {
+  const canInviteNonMembers = useCanAddChannelMembers(channelId);
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey
     ? normalizePubkey(identityQuery.data.pubkey)
@@ -256,10 +258,15 @@ export function useMentions(
       }),
     [managedAgentPubkeys, members, profiles, relayAgentsQuery.data],
   );
-  const retryDirectory = React.useCallback(() => {
-    void relayAgentsQuery.refetch();
-    void managedAgentsQuery.refetch();
-    void membersQuery.refetch();
+  const retryDirectory = React.useCallback(async () => {
+    const results = await Promise.all([
+      relayAgentsQuery.refetch(),
+      managedAgentsQuery.refetch(),
+      membersQuery.refetch(),
+    ]);
+    if (results.some((result) => result.isError)) {
+      throw new Error("Could not verify mention access");
+    }
   }, [
     relayAgentsQuery.refetch,
     managedAgentsQuery.refetch,
@@ -268,6 +275,7 @@ export function useMentions(
   const {
     knownAgentPubkeys,
     verificationFailed,
+    verificationPending,
     presenceFresh,
     retryVerification,
   } = useMentionEvidence({
@@ -289,6 +297,8 @@ export function useMentions(
         activeAgentPubkeys,
         knownAgentPubkeys,
         verificationFailed,
+        verificationPending,
+        canInviteNonMembers,
         presenceFresh,
         activePersonaById,
         activePersonas,
@@ -315,6 +325,8 @@ export function useMentions(
       activePersonaById,
       knownAgentPubkeys,
       verificationFailed,
+      verificationPending,
+      canInviteNonMembers,
       presenceFresh,
       activeAgentPubkeys,
       activePersonas,
@@ -398,8 +410,7 @@ export function useMentions(
   searchableNamesLowerRef.current = searchableNamesLower;
   const retryMention = React.useCallback(() => {
     retryVerification();
-    query.refresh();
-  }, [retryVerification, query.refresh]);
+  }, [retryVerification]);
   const matchingSuggestions = React.useMemo<MentionSuggestion[]>(() => {
     if (mentionQuery === null) {
       return [];

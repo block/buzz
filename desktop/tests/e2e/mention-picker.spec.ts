@@ -219,9 +219,25 @@ test("already visible checking and denied members remain disabled beside permitt
       .evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-testid")),
       );
-    await page
-      .getByRole("button", { name: "Retry access check for Verify pending" })
-      .click();
+    const retry = page.getByRole("button", {
+      name: "Retry access check for Verify pending",
+    });
+    await expect(retry).toHaveAccessibleDescription(
+      "Could not verify access. Retry to check again.",
+    );
+    await page.getByTestId("message-input").press("Shift+Tab");
+    await expect(page.getByTestId("mention-options-trigger")).toBeFocused();
+    // Ordinary traversal from the existing Options entry, not a second focus stop.
+    for (
+      let step = 0;
+      step < 4 &&
+      !(await retry.evaluate((el) => el === document.activeElement));
+      step++
+    ) {
+      await page.keyboard.press("Tab");
+    }
+    await expect(retry).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(
       page.getByTestId(`mention-suggestion-${UNKNOWN}`),
     ).toContainText("Checking access");

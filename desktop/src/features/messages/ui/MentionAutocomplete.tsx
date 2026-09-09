@@ -115,6 +115,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   const optionsSurfaceRef = React.useRef<HTMLDivElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const optionsId = React.useId();
+  const reasonIdPrefix = React.useId();
   const keepPinnedSwitchId = React.useId();
   const [optionsOpen, setOptionsOpen] = React.useState(false);
   const handledOptionsRequestRef = React.useRef(0);
@@ -348,6 +349,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               suggestion,
               hasNameCollision,
             );
+            const reasonId = `${reasonIdPrefix}-${suggestionKey}-reason`;
             const ownerLabel = suggestion.ownerLabel;
             const collisionNpub =
               hasNameCollision && suggestion.pubkey
@@ -387,7 +389,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 <button
                   aria-label={`${suggestion.action === "invite" ? "Invite" : suggestion.action === "checking" ? "Checking" : suggestion.action === "unavailable" ? "Unavailable" : "Mention"} ${suggestion.displayName}${hasNameCollision && suggestion.pubkey ? ` (${suggestion.pubkey})` : ""}`}
                   disabled={!isMentionActionable(suggestion)}
-                  title={suggestion.unavailableReason}
+                  aria-describedby={
+                    suggestion.unavailableReason ? reasonId : undefined
+                  }
                   className={cn(
                     "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
                     canAlwaysAddress && "pr-11",
@@ -483,9 +487,11 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                               ? "Member · Mention"
                               : suggestion.action === "invite"
                                 ? "Invite…"
-                                : suggestion.action === "checking"
-                                  ? "Checking access…"
-                                  : "Unavailable"}
+                                : suggestion.action === "mention-without-invite"
+                                  ? "Nonmember · Mention without inviting"
+                                  : suggestion.action === "checking"
+                                    ? "Checking access…"
+                                    : "Unavailable"}
                           </span>
                         ) : null}
                         {suggestion.isAgent && suggestion.presence ? (
@@ -513,6 +519,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         ) : null}
                       </span>
                     ) : null}
+                    {suggestion.unavailableReason ? (
+                      <span
+                        id={reasonId}
+                        className="text-2xs text-muted-foreground"
+                      >
+                        {suggestion.unavailableReason}
+                      </span>
+                    ) : null}
                   </span>
                 </button>
                 {suggestion.action === "unavailable" && suggestion.onRetry ? (
@@ -520,8 +534,21 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     type="button"
                     className="px-2 text-xs text-muted-foreground"
                     aria-label={`Retry access check for ${suggestion.displayName}`}
+                    aria-describedby={
+                      suggestion.unavailableReason ? reasonId : undefined
+                    }
                     onMouseDown={(event) => event.preventDefault()}
-                    onClick={suggestion.onRetry}
+                    onClick={() => {
+                      // Retry disappears while checking. Transfer keyboard focus
+                      // before it unmounts so the composer retains its chooser.
+                      rootRef.current
+                        ?.closest("form")
+                        ?.querySelector<HTMLElement>(
+                          '[data-testid="message-input"]',
+                        )
+                        ?.focus();
+                      suggestion.onRetry?.();
+                    }}
                   >
                     Retry
                   </button>

@@ -643,7 +643,7 @@ test("evidence times out, retries explicitly, and forgets classification on scop
   assert.equal(view.result.current.verificationFailed, false);
   act(() => t.mock.timers.tick(1));
   assert.equal(view.result.current.verificationFailed, true);
-  act(() => view.result.current.retryVerification());
+  await act(async () => view.result.current.retryVerification());
   assert.equal(retries, 1);
   assert.equal(view.result.current.verificationFailed, false);
   view.rerender({
@@ -659,4 +659,132 @@ test("evidence times out, retries explicitly, and forgets classification on scop
   assert.equal(view.result.current.presenceFresh, false);
   view.unmount();
   t.mock.timers.reset();
+});
+
+test("unavailable reasons persist and describe both disabled choice and retry", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const { TooltipProvider } = await import("@/shared/ui/tooltip");
+  for (const reason of [
+    "This agent does not permit you to mention it here.",
+    "Could not verify access. Retry to check again.",
+  ]) {
+    const view = render(
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(MentionAutocomplete, {
+          suggestions: [
+            {
+              pubkey: "a",
+              displayName: "Scout",
+              isAgent: true,
+              action: "unavailable",
+              unavailableReason: reason,
+              onRetry: () => {},
+            },
+          ],
+          selectedIndex: 0,
+          composerOwnsFocus: true,
+          onSelect: () => {},
+        }),
+      ),
+    );
+    const choice = view.getByRole("button", { name: "Unavailable Scout" });
+    const retry = view.getByRole("button", {
+      name: "Retry access check for Scout",
+    });
+    const description = view.getByText(reason);
+    assert.equal(choice.getAttribute("aria-describedby"), description.id);
+    assert.equal(retry.getAttribute("aria-describedby"), description.id);
+    assert.equal(choice.tabIndex, -1);
+    assert.equal(choice.disabled, true);
+    assert.equal(retry.tabIndex, 0);
+    assert.equal(description.hidden, false);
+    view.unmount();
+  }
+});
+
+test("retry fences cached evidence until successful lookup settlement", async () => {
+  const { renderHook, act } = await import("@testing-library/react");
+  const { useMentionEvidence } = await import("../lib/useMentionEvidence.ts");
+  let resolve;
+  const lookup = new Promise((done) => {
+    resolve = done;
+  });
+  const view = renderHook(() =>
+    useMentionEvidence({
+      scope: "viewer:room",
+      request: null,
+      agentKeys: new Set(["a"]),
+      directoryUpdatedAt: 10000,
+      directoryError: false,
+      retry: () => lookup,
+    }),
+  );
+  await act(async () => view.result.current.retryVerification());
+  assert.equal(view.result.current.verificationPending, true);
+  view.rerender();
+  assert.equal(
+    view.result.current.verificationPending,
+    true,
+    "unchanged cache cannot settle retry",
+  );
+  await act(async () => resolve());
+  assert.equal(view.result.current.verificationPending, false);
+  assert.equal(view.result.current.verificationFailed, false);
+  view.unmount();
+});
+
+test("retry errors remain unavailable and late settlement cannot clear newer or scoped checks", async () => {
+  const { renderHook, act } = await import("@testing-library/react");
+  const { useMentionEvidence } = await import("../lib/useMentionEvidence.ts");
+  const pending = [];
+  const retry = () =>
+    new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const props = {
+    scope: "viewer:room",
+    request: {},
+    agentKeys: new Set(["a"]),
+    directoryUpdatedAt: Date.now(),
+    directoryError: false,
+    retry,
+  };
+  const view = renderHook((value) => useMentionEvidence(value), {
+    initialProps: props,
+  });
+  await act(async () => view.result.current.retryVerification());
+  await act(async () => pending[0].reject(new Error("lookup failed")));
+  assert.equal(view.result.current.verificationPending, false);
+  assert.equal(view.result.current.verificationFailed, true);
+  view.rerender(props);
+  assert.equal(
+    view.result.current.verificationFailed,
+    true,
+    "cached readiness does not clear failure",
+  );
+  await act(async () => view.result.current.retryVerification());
+  await act(async () => view.result.current.retryVerification());
+  await act(async () => pending[1].resolve());
+  assert.equal(
+    view.result.current.verificationPending,
+    true,
+    "old success cannot settle newer retry",
+  );
+  view.rerender({
+    ...props,
+    scope: "viewer:other",
+    request: {},
+    agentKeys: new Set(),
+  });
+  await act(async () => view.result.current.retryVerification());
+  await act(async () => pending[2].reject(new Error("old scope failed")));
+  assert.equal(view.result.current.verificationPending, true);
+  assert.equal(view.result.current.verificationFailed, false);
+  assert.equal(view.result.current.knownAgentPubkeys.size, 0);
+  await act(async () => pending[3].resolve());
+  assert.equal(view.result.current.verificationPending, false);
+  assert.equal(view.result.current.verificationFailed, false);
+  view.unmount();
 });

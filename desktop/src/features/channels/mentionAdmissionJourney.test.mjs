@@ -818,3 +818,54 @@ test("cold directory expiry waits for required people search before installing c
     OTHER,
   );
 });
+
+test("cached allowed expiry blocks every retained choice until fresh retry settles", async () => {
+  await setup({
+    owner: OTHER,
+    visible: true,
+    directoryVisible: true,
+    policy: "anyone",
+  });
+  await act(async () => mention.updateMentionQuery("@Remote", 7));
+  await settle();
+  const retained = rows()[0];
+  assert.equal(retained.action, "mention");
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 5100)));
+  assert.equal(rows()[0].pubkey, retained.pubkey);
+  assert.equal(rows()[0].action, "unavailable");
+  assert.equal(
+    rows()[0].unavailableReason,
+    "Could not verify access. Retry to check again.",
+  );
+  const assertBlocked = async () => {
+    assert.equal(mention.canSelectMention(retained), false);
+    await act(async () => {
+      picker.selectMentionSuggestion(retained);
+      picker.toggleAlwaysAddressAgent(retained);
+    });
+    for (const key of ["Tab", "Enter", " "]) {
+      let outcome;
+      await act(async () => {
+        outcome = mention.handleMentionKeyDown(keyboard(key));
+      });
+      assert.equal(outcome.suggestion, undefined);
+    }
+    assert.deepEqual(effects, []);
+    assert.deepEqual(mention.knownNames, []);
+  };
+  await assertBlocked();
+  let release;
+  state.heldDirectory = new Promise((resolve) => {
+    release = resolve;
+  });
+  await act(async () => rows()[0].onRetry());
+  assert.equal(rows()[0].action, "checking");
+  await assertBlocked();
+  state.heldDirectory = null;
+  await act(async () => release([rawAgent()]));
+  await settle();
+  assert.equal(rows()[0].action, "mention");
+  assert.equal(rows()[0].pubkey, retained.pubkey);
+  assert.equal(mention.mentionSelectedIndex, 0);
+  assert.equal(mention.canSelectMention(retained), true);
+});
