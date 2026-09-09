@@ -1,6 +1,21 @@
 /** Role-based geometry and motion shared by components and documentation. */
 export const FOUNDATION_GROUPS = [
   {
+    name: "Controls",
+    description: "Shared control dimensions and overlay stacking.",
+    roles: [
+      ["control-sm", "2rem", "Small actions."],
+      ["control-md", "2.5rem", "Standard actions and inputs."],
+      ["control-lg", "3.25rem", "Prominent actions."],
+      ["space-action-inset", "1.25rem", "Standard button horizontal padding."],
+      ["space-tooltip-block", "0.125rem", "Compact tooltip vertical padding."],
+      ["layer-dialog", "80", "Modal surfaces."],
+      ["layer-floating", "100", "Menus and tooltips above their trigger."],
+      ["layer-toast", "120", "Transient status announcements."],
+      ["overlay-scrim", "rgb(0 0 0 / 0.5)", "A modal backdrop."],
+    ],
+  },
+  {
     name: "Spacing",
     description:
       "A four-pixel rhythm, expressed in rem so the entire interface follows zoom.",
