@@ -199,12 +199,16 @@
     z-index: 1;
   }
 
-  .buzz-huddle-speaking-avatar-squircle::after {
-    background: hsl(142 71% 45%);
-    border: 0;
-    clip-path: url("#rounded-squircle-clip");
-    inset: -2px;
-    z-index: -1;
+  .buzz-huddle-speaking-avatar-agent::after {
+    content: none;
+  }
+
+  .buzz-huddle-speaking-squircle {
+    opacity: var(--buzz-huddle-speaker-opacity, 0);
+    transform: scale(1.04);
+    transition: opacity 80ms linear;
+    will-change: opacity;
+    z-index: 1;
   }
 
   @keyframes buzz-huddle-participant-tile-enter {
@@ -248,8 +252,7 @@
       isolation: auto;
     }
 
-    .buzz-huddle-speaking-avatar::after {
-      transform: scale(1.04);
+    .buzz-huddle-speaking-squircle {
       transition: none;
       will-change: auto;
     }
