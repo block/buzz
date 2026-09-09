@@ -1,5 +1,9 @@
 part of '../compose_bar.dart';
 
+class _ComposeAuthorizationCancelled implements Exception {
+  const _ComposeAuthorizationCancelled();
+}
+
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
@@ -49,6 +53,8 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
+  } on _ComposeAuthorizationCancelled {
+    restoreClearedDraft();
   } on StateError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);
