@@ -11,7 +11,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { VoiceRegistryEntry } from "@/features/settings/ui/voiceSettingsLogic";
 import { invokeTauri } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -49,6 +49,13 @@ const MAX_VISIBLE_PARTICIPANTS = 9;
 type ParticipantIdentity = {
   avatarUrl: string | null;
   displayName: string;
+  /**
+   * Label the avatar derives initials from: the authored name when one
+   * exists, otherwise the unprefixed compact key. `displayName` is the
+   * visible "Participant npub1…" fallback, whose word initials would
+   * collapse every unnamed participant onto "PN"/"AN".
+   */
+  initialsLabel: string;
   isActive: boolean;
   isAgent: boolean;
   pubkey: string;
@@ -110,10 +117,10 @@ function buildParticipantIdentities({
     const profile = profiles[normalizedPubkey];
     const isAgent = agentSet.has(normalizedPubkey);
     const agent = agentNames.get(normalizedPubkey);
+    const authoredName = profile?.displayName?.trim() || agent?.name?.trim();
+    const keyLabel = truncateNpub(pubkey);
     const displayName =
-      profile?.displayName?.trim() ||
-      agent?.name?.trim() ||
-      `${isAgent ? "Agent" : "Participant"} ${truncatePubkey(pubkey)}`;
+      authoredName || `${isAgent ? "Agent" : "Participant"} ${keyLabel}`;
     const speakerLevel =
       normalizedSpeakerLevels.get(normalizedPubkey) ??
       (activeSpeakerSet.has(normalizedPubkey) ? 0.55 : 0);
@@ -121,6 +128,7 @@ function buildParticipantIdentities({
     return {
       avatarUrl: profile?.avatarUrl ?? agent?.avatarUrl ?? null,
       displayName,
+      initialsLabel: authoredName || keyLabel,
       isActive: activeSpeakerSet.has(normalizedPubkey) || speakerLevel > 0.04,
       isAgent,
       pubkey,
@@ -453,6 +461,7 @@ function ParticipantAvatar({
       <ProfileAvatar
         avatarUrl={participant.avatarUrl}
         label={participant.displayName}
+        initialsLabel={participant.initialsLabel}
         className="h-full w-full border-2 border-black text-2xs"
         shape={participant.isAgent ? "squircle" : "circle"}
       />
