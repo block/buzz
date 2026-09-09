@@ -444,20 +444,38 @@ test("does not treat an uncapped label's ellipsis as a truncation", () => {
 test("whole compact mention labels are restored only for their declared exact key", () => {
   const key = `150b20bd${"a".repeat(52)}15dc`;
   const label = `Scout (${key}) 2`;
-  const compact = "Scout (150b20bd…15dc) 2";
-  assert.equal(matchChipTextToLabel(compact, label, "@", key), "truncated");
+  // The npub compact a chip renders today, and the hex compact a chip copied
+  // before keys displayed as npub still carries: a whole chip in either
+  // form re-binds; nothing else does.
+  const npubCompact = "Scout (npub1z59…zwkg) 2";
+  const legacyCompact = "Scout (150b20bd…15dc) 2";
+
+  for (const compact of [npubCompact, legacyCompact]) {
+    assert.equal(matchChipTextToLabel(compact, label, "@", key), "truncated");
+    assert.equal(
+      matchChipTextToLabel(`@${compact}`, label, "@", key),
+      "truncated",
+    );
+  }
+  assert.equal(matchChipTextToLabel(npubCompact, label, "@"), "fragment");
   assert.equal(
-    matchChipTextToLabel(`@${compact}`, label, "@", key),
-    "truncated",
-  );
-  assert.equal(matchChipTextToLabel(compact, label, "@"), "fragment");
-  assert.equal(
-    matchChipTextToLabel(compact, label, "@", "b".repeat(64)),
+    matchChipTextToLabel(npubCompact, label, "@", "b".repeat(64)),
     "fragment",
   );
-  assert.equal(matchChipTextToLabel(compact, label, "#", key), "fragment");
+  assert.equal(matchChipTextToLabel(npubCompact, label, "#", key), "fragment");
+  // A different key's compact — npub or legacy hex — is text this record
+  // never declared: tampered text never gains the identity's binding.
   assert.equal(
-    matchChipTextToLabel("Scout (150b20bd…15dc)", label, "@", key),
+    matchChipTextToLabel("Scout (npub1m6k…zuz0) 2", label, "@", key),
+    "fragment",
+  );
+  assert.equal(
+    matchChipTextToLabel("Scout (deadbeef…beef) 2", label, "@", key),
+    "fragment",
+  );
+  // A dropped collision suffix is a partial chip, not a tolerated form.
+  assert.equal(
+    matchChipTextToLabel("Scout (npub1z59…zwkg)", label, "@", key),
     "fragment",
   );
   assert.equal(matchChipTextToLabel("Scout", label, "@", key), "fragment");
