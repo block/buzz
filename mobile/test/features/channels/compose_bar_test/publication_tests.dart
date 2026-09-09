@@ -70,13 +70,18 @@ void _publicationTests() {
     });
   }
 
-  for (final switchCommunity in [false, true]) {
+  for (final (boundary, switchCommunity) in [
+    for (final boundary in ['reader', 'scan', 'scan error', 'prompt'])
+      for (final change in [false, true]) (boundary, change),
+  ]) {
     testWidgets(
-      'authorization cancellation reports scope change only: $switchCommunity',
+      'authorization cancellation $boundary reports scope change only: $switchCommunity',
       (tester) async {
         final key = 'd' * 64;
         final signer = nostr.Keys.generate();
         final pending = Completer<List<AgentDirectoryEntry>>();
+        final members = Completer<List<ChannelMember>>();
+        var scanPending = false;
         var reads = 0;
         var sent = 0;
         await tester.pumpWidget(
@@ -86,9 +91,27 @@ void _publicationTests() {
             relayConfig: () => _SwitchableRelayConfigNotifier(
               RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
             ),
+            membersLoader: () => boundary == 'prompt'
+                ? Future.value(
+                    scanPending
+                        ? []
+                        : [
+                            ChannelMember(
+                              pubkey: 'a' * 64,
+                              displayName: 'Alice',
+                              role: 'member',
+                              joinedAt: DateTime(2025),
+                            ),
+                          ],
+                  )
+                : scanPending
+                ? members.future
+                : Future.value([]),
             relayAgents: [_testAgent(key)],
             channels: [
-              _makeCurrentChannel(channelType: 'dm'),
+              _makeCurrentChannel(
+                channelType: boundary == 'reader' ? 'dm' : 'stream',
+              ),
               _makeSharedMemberChannel(),
             ],
             authorizationReader: (_, _, _, _) {
@@ -105,17 +128,45 @@ void _publicationTests() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        if (boundary == 'prompt') {
+          await tester.enterText(find.byType(TextField), '@Helper Bot @ali');
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Alice'));
+          await tester.pumpAndSettle();
+        } else {
+          await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        }
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        if (boundary != 'reader') {
+          scanPending = true;
+          ProviderScope.containerOf(
+            tester.element(find.byType(ComposeBar)),
+          ).invalidate(channelMembersProvider('channel-1'));
+          await tester.pump();
+        }
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
-        expect(reads, 1);
+        expect(reads, boundary == 'reader' ? 1 : 0);
+        if (boundary == 'prompt') {
+          await tester.pump(const Duration(milliseconds: 300));
+        }
         if (switchCommunity) {
           ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
               .read(relayConfigProvider.notifier)
               .update(baseUrl: 'https://other.example', nsec: signer.nsec);
           await tester.pump();
         } else {
-          await tester.enterText(find.byType(TextField), 'new intent');
+          controller.text = 'new intent';
+        }
+        if (boundary == 'prompt') {
+          await tester.tap(find.text('Invite'));
+        }
+        if (boundary == 'scan error') {
+          members.completeError(StateError('scan unavailable'));
+        } else if (boundary == 'scan') {
+          members.complete([]);
         }
         pending.complete([
           AgentDirectoryEntry(
@@ -131,10 +182,7 @@ void _publicationTests() {
           switchCommunity ? findsOneWidget : findsNothing,
         );
         expect(find.textContaining('Could not authorize'), findsNothing);
-        expect(
-          tester.widget<TextField>(find.byType(TextField)).controller!.text,
-          switchCommunity ? '' : 'new intent',
-        );
+        expect(controller.text, switchCommunity ? '' : 'new intent');
       },
     );
   }

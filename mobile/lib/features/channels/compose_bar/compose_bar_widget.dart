@@ -476,6 +476,7 @@ class ComposeBar extends HookConsumerWidget {
       final attempt = Object();
       authorizationAttempt.value = attempt;
       isSending.value = true;
+      void Function()? checkPreparationCurrent;
       try {
         final submittedDraftRevision = draftRevision.value;
         var authorizationRevision = submittedDraftRevision;
@@ -497,6 +498,8 @@ class ComposeBar extends HookConsumerWidget {
             throw const _ComposeAuthorizationCancelled();
           }
         }
+
+        checkPreparationCurrent = ensureAuthorizationCurrent;
 
         Future<void> authorize(Set<String> keys, {bool prepare = false}) async {
           if (keys.isEmpty) return;
@@ -539,7 +542,7 @@ class ComposeBar extends HookConsumerWidget {
           currentPubkey: currentPubkey,
         );
 
-        if (intendedAgentKeys.isNotEmpty && !isAuthorizationCurrent()) return;
+        if (intendedAgentKeys.isNotEmpty) ensureAuthorizationCurrent();
         // Mentioning humans outside the channel prompts "Invite" / "Do
         // nothing" (send without inviting) — mirrors desktop's
         // NonMemberMentionDialog. Agents keep the existing silent auto-add.
@@ -550,6 +553,7 @@ class ComposeBar extends HookConsumerWidget {
             names: [for (final candidate in scan.humans) candidate.label],
             canInvite: scan.canAddMembers,
           );
+          if (intendedAgentKeys.isNotEmpty) ensureAuthorizationCurrent();
           if (choice == null) {
             return; // Dismissed — keep the draft, send nothing.
           }
@@ -601,7 +605,7 @@ class ComposeBar extends HookConsumerWidget {
           return;
         }
 
-        if (intendedAgentKeys.isNotEmpty && !isAuthorizationCurrent()) return;
+        if (intendedAgentKeys.isNotEmpty) ensureAuthorizationCurrent();
         final draftText = controller.value;
         final draftAttachments = List<_PendingAttachment>.of(attachments.value);
         final draftMentions = Map<String, MentionCandidate>.of(
@@ -652,7 +656,7 @@ class ComposeBar extends HookConsumerWidget {
             await addMentionedNonMembers();
             if (queueGeneration != uploadGeneration.value) return;
             if (preparingAgents) {
-              if (!isAuthorizationCurrent()) return;
+              ensureAuthorizationCurrent();
               clearComposer();
               authorizationRevision = draftRevision.value;
             }
@@ -700,10 +704,25 @@ class ComposeBar extends HookConsumerWidget {
           }
         }());
       } catch (error) {
+        var communityChanged = false;
+        // Failed awaits need the same scope/edit classification as success.
+        try {
+          checkPreparationCurrent?.call();
+          if (error is _ComposeAuthorizationCancelled) return;
+        } on _ComposeAuthorizationCancelled {
+          return;
+        } on StateError {
+          communityChanged = true;
+        }
         if (context.mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            SnackBar(content: Text(_composeSendErrorMessage(error))),
-          );
+          final messenger = ScaffoldMessenger.maybeOf(context);
+          if (communityChanged) {
+            _reportSendCancelledByCommunitySwitch(messenger);
+          } else {
+            messenger?.showSnackBar(
+              SnackBar(content: Text(_composeSendErrorMessage(error))),
+            );
+          }
         }
       } finally {
         if (context.mounted && authorizationAttempt.value == attempt) {

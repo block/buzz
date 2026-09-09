@@ -176,6 +176,7 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  Future<List<ChannelMember>> Function()? membersLoader,
   AgentAuthorizationReader? authorizationReader,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
@@ -210,9 +211,10 @@ Widget _buildComposeBar({
         ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      channelMembersProvider('channel-1').overrideWith(
+        (ref) =>
+            membersLoader?.call() ?? membersFuture ?? Future.value(members),
+      ),
       agentAuthorizationReaderProvider.overrideWithValue(
         authorizationReader ??
             (keys, viewer, channel, current) async => [
