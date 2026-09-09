@@ -76,7 +76,10 @@ import {
   useSidebar,
 } from "@/shared/ui/sidebar";
 import { useProtectedVisibleDirectMessages } from "@protected-feature-components";
-import { useChannelBackedTaskParents } from "@/features/channels/useChannelBackedTaskParents";
+import {
+  useChannelBackedTaskParents,
+  TaskChannelBranches,
+} from "@/features/channels/useChannelBackedTaskParents";
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -309,7 +312,8 @@ export function AppSidebar({
     () => channels.filter((channel) => channel.channelType === "stream"),
     [channels],
   );
-  const taskParentByChannelId = useChannelBackedTaskParents(streamChannels);
+  const { parents: taskParentByChannelId, branches: taskBranches } =
+    useChannelBackedTaskParents(streamChannels);
 
   const sectionBuckets = React.useMemo(() => {
     const bySection: Record<string, Channel[]> = {};
@@ -514,7 +518,7 @@ export function AppSidebar({
     [assignChannel, onBrowseChannels],
   );
 
-  return (
+  const sidebar = (
     <Sidebar
       className="!z-[100] !border-r-0"
       collapsible="offcanvas"
@@ -973,5 +977,10 @@ export function AppSidebar({
       {leaveChannelDialog}
       <SidebarRail />
     </Sidebar>
+  );
+  return (
+    <TaskChannelBranches.Provider value={taskBranches}>
+      {sidebar}
+    </TaskChannelBranches.Provider>
   );
 }

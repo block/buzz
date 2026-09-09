@@ -1,5 +1,6 @@
 import type * as React from "react";
 import { BellOff, ChevronDown, CircleDot, X } from "lucide-react";
+import { TaskChannelStatusGlyph } from "./TaskChannelStatusGlyph";
 
 import {
   ContextMenu,
@@ -358,6 +359,7 @@ export function ChannelMenuButton({
       {hasThreadUnread ? (
         <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
+      <TaskChannelStatusGlyph channelId={channel.id} />
     </SidebarMenuButton>
   );
 

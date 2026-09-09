@@ -14,7 +14,7 @@ branch:
   name: "jtennant/berd-voice-status-sounds"
 ---`;
 
-test("a task canvas turns one channel into task, changes, review, and conversation views", async ({
+test("a task canvas exposes overview and conversation only", async ({
   page,
 }) => {
   await installMockBridge(page, { canvasContent: TASK_CANVAS });
@@ -24,14 +24,15 @@ test("a task canvas turns one channel into task, changes, review, and conversati
   await expect(page.getByTestId("task-overview")).toContainText(
     "Add status sounds to Berd Voice",
   );
-  await page.getByTestId("task-view-changes").click();
-  await expect(page.getByTestId("task-changes")).toContainText(
-    "ProjectDetailScreen.tsx",
+  await expect(page.getByTestId("task-view-changes")).toHaveCount(0);
+  await expect(page.getByTestId("task-view-review")).toHaveCount(0);
+  await expect(page.getByTestId("task-overview")).toContainText(
+    "jtennant/berd-voice-status-sounds",
   );
-  await page.getByTestId("task-view-review").click();
-  await expect(page.getByText("No linked review")).toBeVisible();
+  await expect(page.getByTestId("task-work-tree")).toHaveCount(0);
   await page.getByTestId("task-view-conversation").click();
   await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await expect(page.getByTestId("task-work-navigator")).toHaveCount(0);
 });
 
 test("task canvases nest channels beneath their parents", async ({ page }) => {
@@ -52,6 +53,12 @@ test("task canvases nest channels beneath their parents", async ({ page }) => {
   const list = page.getByTestId("stream-list");
   await expect(list.getByTestId("channel-buzz")).toBeVisible();
   await expect(
+    list.getByTestId("channel-buzz").getByTestId("task-channel-status"),
+  ).toHaveCount(0);
+  await expect(
+    list.getByTestId("channel-engineering").getByTestId("task-channel-status"),
+  ).toBeVisible();
+  await expect(
     list.locator(
       '[data-channel-depth="1"] [data-testid="channel-engineering"]',
     ),
@@ -59,4 +66,8 @@ test("task canvases nest channels beneath their parents", async ({ page }) => {
   await expect(
     list.locator('[data-channel-depth="2"] [data-testid="channel-agents"]'),
   ).toBeVisible();
+  await list.getByTestId("channel-buzz").click();
+  await expect(page.getByTestId("task-work-tree")).toHaveCount(0);
+  await expect(page.getByTestId("task-view-changes")).toHaveCount(0);
+  await expect(page.getByTestId("task-view-review")).toHaveCount(0);
 });
