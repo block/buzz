@@ -61,6 +61,8 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 urlencoding = "2"
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 webbrowser = "1"
 dirs = "6"
 # Cross-process advisory file lock (flock on Unix, LockFileEx on Windows) for

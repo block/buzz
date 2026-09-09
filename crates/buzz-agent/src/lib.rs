@@ -10,6 +10,7 @@ mod llm;
 mod mcp;
 pub mod model_capabilities;
 mod permission;
+pub mod realtime;
 pub mod types;
 mod wire;
 
