@@ -539,6 +539,39 @@ void main() {
     );
   });
 
+  testWidgets('blank cached sender names fall back to the compact npub', (
+    tester,
+  ) async {
+    // Relay profiles can cache blank display names (empty and
+    // whitespace-only) unchanged, so the sender must resolve through the
+    // shared nonblank-name label contract: the row shows the compact npub
+    // of the a11ce key instead of a blank author label. Binds the production
+    // seam — the sender resolves through the user cache exactly as the live
+    // page does.
+    const sender =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    for (final blankName in const ['', '   ']) {
+      await tester.pumpWidget(
+        await buildTestable(
+          users: {
+            ...testUsers,
+            sender: UserProfile(pubkey: sender, displayName: blankName),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(blankName), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('inbox-row-m1')),
+          matching: find.text('npub15yw…ccpw'),
+        ),
+        findsOneWidget,
+      );
+    }
+  });
+
   testWidgets('directory-known Activity authors use agent avatars', (
     tester,
   ) async {

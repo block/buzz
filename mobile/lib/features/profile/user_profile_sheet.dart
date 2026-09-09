@@ -88,7 +88,10 @@ class UserProfileSheet extends HookConsumerWidget {
     // never placed on the clipboard.
     final npub = fullNpub(pubkey);
 
-    final displayName = profile?.displayName;
+    // Routed through the shared label so a blank cached name (empty or
+    // whitespace-only, relay-valid) falls back to the compact npub instead
+    // of an empty heading.
+    final displayName = profile?.label;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
