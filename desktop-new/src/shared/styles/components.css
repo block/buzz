@@ -652,6 +652,53 @@
     box-shadow: none;
   }
 
+  .code-input {
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    padding: 0;
+  }
+
+  .code-input-label {
+    margin: 0 0 var(--space-2);
+    padding: 0;
+  }
+
+  .code-input-group {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .code-input-control {
+    width: 3rem;
+    height: 3rem;
+    min-width: 0;
+    border: 0;
+    border-radius: var(--radius-control);
+    padding: 0;
+    background: var(--neutral-2);
+    color: var(--text-primary);
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    box-shadow: 0 0 0 1px var(--neutral-2);
+    transition:
+      opacity 0.1s ease,
+      background 0.1s ease,
+      box-shadow 0.1s ease;
+  }
+
+  .code-input-control:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--neutral-7);
+  }
+
+  .code-input-control:disabled {
+    color: var(--text-disabled);
+    -webkit-text-fill-color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+
   .navigation-section {
     display: flex;
     flex-direction: column;
