@@ -13,6 +13,7 @@ import { beforeEach, describe, it } from "node:test";
 
 import {
   getAgentCommandCatalog,
+  initAgentCommandCatalog,
   resetAgentCommandCatalogForTests,
 } from "@/features/agents/agentCommandCatalog.ts";
 import {
@@ -79,6 +80,7 @@ describe("ingestArchivedObserverEvents", () => {
   beforeEach(() => {
     resetAgentObserverStore();
     resetAgentCommandCatalogForTests();
+    initAgentCommandCatalog("test-community");
   });
 
   it("test_unknown_agent_drops_event_before_decrypt", async () => {
@@ -119,6 +121,56 @@ describe("ingestArchivedObserverEvents", () => {
       getAgentCommandCatalog(ownerPubkey).get(AGENT_PUBKEY)?.commands,
       [{ name: "review", description: "Review changes" }],
     );
+  });
+
+  it("hydrates the latest catalog from batched archive frames", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const owner = "c".repeat(64);
+    await ingestArchivedObserverEvents(
+      [makeRawEvent()],
+      makeDecrypt(
+        makeObserverEvent({
+          kind: "batch",
+          payload: {
+            events: [
+              makeObserverEvent({
+                kind: "available_commands_captured",
+                payload: { commands: [{ name: "review" }] },
+              }),
+              makeObserverEvent({
+                seq: 2,
+                kind: "available_commands_captured",
+                payload: { commands: [] },
+              }),
+            ],
+          },
+        }),
+      ),
+      async () => owner,
+    );
+    assert.deepEqual(
+      getAgentCommandCatalog(owner).get(AGENT_PUBKEY)?.commands,
+      [],
+    );
+  });
+
+  it("does not restore command catalogs after reset during owner lookup", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const owner = "c".repeat(64);
+    await ingestArchivedObserverEvents(
+      [makeRawEvent()],
+      makeDecrypt(
+        makeObserverEvent({
+          kind: "available_commands_captured",
+          payload: { commands: [{ name: "review" }] },
+        }),
+      ),
+      async () => {
+        resetAgentObserverStore();
+        return owner;
+      },
+    );
+    assert.equal(getAgentCommandCatalog(owner).size, 0);
   });
 
   it("test_mismatched_sender_drops_event_before_decrypt", async () => {

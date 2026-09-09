@@ -316,7 +316,11 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
-      slashCommands.updateQuery(text, cursor);
+      slashCommands.updateQuery(
+        text,
+        cursor,
+        isMentionCodeContext(richText.editor),
+      );
       if (text.trim().length > 0) {
         notifyTyping();
       }

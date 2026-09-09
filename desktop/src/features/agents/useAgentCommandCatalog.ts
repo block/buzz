@@ -5,6 +5,7 @@ import {
   subscribeAgentCommandCatalog,
 } from "./agentCommandCatalog";
 
+/** Subscribe to the current owner's command catalog without copying snapshots. */
 export function useAgentCommandCatalog(ownerPubkey: string | null) {
   return React.useSyncExternalStore(
     subscribeAgentCommandCatalog,

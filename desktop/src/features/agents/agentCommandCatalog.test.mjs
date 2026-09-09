@@ -3,6 +3,8 @@ import { beforeEach, describe, it } from "node:test";
 
 import {
   getAgentCommandCatalog,
+  initAgentCommandCatalog,
+  resetAgentCommandCatalog,
   parseAvailableCommandsPayload,
   recordAvailableCommandsUpdate,
   resetAgentCommandCatalogForTests,
@@ -31,6 +33,7 @@ describe("agent command catalog", () => {
   beforeEach(() => {
     installLocalStorage();
     resetAgentCommandCatalogForTests();
+    initAgentCommandCatalog("test-community");
   });
 
   it("sanitizes, bounds, and deduplicates advertised commands", () => {
@@ -73,6 +76,82 @@ describe("agent command catalog", () => {
     assert.equal(getAgentCommandCatalog(OTHER_OWNER).has(AGENT), false);
   });
 
+  it("rejects hidden controls in command names and removes them from descriptions", () => {
+    assert.deepEqual(
+      parseAvailableCommandsPayload({
+        commands: [
+          { name: "rev\u0000iew" },
+          { name: "rev\u202eiew" },
+          { name: "rev\u200biew" },
+          { name: "review", description: "a\u001bb\u202ec" },
+        ],
+      }),
+      [{ name: "review", description: "a b c" }],
+    );
+  });
+
+  it("enforces count, name, and description bounds", () => {
+    assert.equal(
+      parseAvailableCommandsPayload({
+        commands: Array.from({ length: 300 }, (_, i) => ({ name: `cmd-${i}` })),
+      }).length,
+      256,
+    );
+    assert.deepEqual(
+      parseAvailableCommandsPayload({ commands: [{ name: "a".repeat(129) }] }),
+      [],
+    );
+    assert.equal(
+      parseAvailableCommandsPayload({
+        commands: [{ name: "review", description: "a".repeat(600) }],
+      })[0].description.length,
+      512,
+    );
+  });
+
+  it("ignores malformed snapshots and uses sequence to break timestamp ties", () => {
+    const timestamp = "2026-07-23T08:00:00Z";
+    recordAvailableCommandsUpdate(OWNER, AGENT, {
+      seq: 2,
+      timestamp,
+      payload: { commands: [{ name: "review" }] },
+    });
+    for (const event of [
+      { seq: 3, timestamp, payload: {} },
+      { seq: 3, timestamp: "invalid", payload: { commands: [] } },
+      { seq: 1, timestamp, payload: { commands: [] } },
+    ])
+      assert.equal(recordAvailableCommandsUpdate(OWNER, AGENT, event), false);
+    assert.deepEqual(getAgentCommandCatalog(OWNER).get(AGENT).commands, [
+      { name: "review", description: null },
+    ]);
+  });
+
+  it("re-sanitizes persisted commands and tolerates unavailable storage", () => {
+    window.localStorage.setItem(
+      `buzz-agent-command-catalog.v1:test-community:${OWNER}`,
+      JSON.stringify({
+        version: 1,
+        agents: {
+          [AGENT]: {
+            commands: [{ name: "bad\u202e" }, { name: "review" }],
+            seq: 1,
+            timestamp: "2026-07-23T08:00:00Z",
+          },
+        },
+      }),
+    );
+    assert.deepEqual(getAgentCommandCatalog(OWNER).get(AGENT).commands, [
+      { name: "review", description: null },
+    ]);
+    resetAgentCommandCatalogForTests();
+    initAgentCommandCatalog("test-community");
+    window.localStorage.getItem = () => {
+      throw new Error("storage disabled");
+    };
+    assert.equal(getAgentCommandCatalog(OWNER).size, 0);
+  });
+
   it("treats an empty update as authoritative removal of prior commands", () => {
     recordAvailableCommandsUpdate(OWNER, AGENT, {
       seq: 1,
@@ -95,8 +174,31 @@ describe("agent command catalog", () => {
       payload: { commands: [{ name: "review" }] },
     });
     resetAgentCommandCatalogForTests();
+    initAgentCommandCatalog("test-community");
 
     assert.deepEqual(getAgentCommandCatalog(OWNER).get(AGENT)?.commands, [
+      { name: "review", description: null },
+    ]);
+  });
+
+  it("isolates the same owner and agent across community switches and restores on return", () => {
+    const event = {
+      seq: 1,
+      timestamp: "2026-07-23T08:00:00Z",
+      payload: { commands: [{ name: "review" }] },
+    };
+    recordAvailableCommandsUpdate(OWNER, AGENT, event);
+    resetAgentCommandCatalog();
+    assert.equal(getAgentCommandCatalog(OWNER).size, 0);
+    assert.equal(recordAvailableCommandsUpdate(OWNER, AGENT, event), false);
+    initAgentCommandCatalog("other-community");
+    assert.equal(getAgentCommandCatalog(OWNER).size, 0);
+    recordAvailableCommandsUpdate(OWNER, AGENT, {
+      ...event,
+      payload: { commands: [{ name: "deploy" }] },
+    });
+    initAgentCommandCatalog("test-community");
+    assert.deepEqual(getAgentCommandCatalog(OWNER).get(AGENT).commands, [
       { name: "review", description: null },
     ]);
   });
