@@ -215,7 +215,8 @@ impl RealtimeSender {
 
 impl RealtimeReceiver {
     /// Read one bounded JSON event. Unknown event types remain available to the
-    /// session driver; errors propagate, and binary audio is not this protocol.
+    /// session driver, including recoverable provider errors. Transport failures
+    /// propagate; binary audio is not this protocol.
     /// The owner sets idle/session deadlines and must not log raw events.
     pub async fn next_event(&mut self) -> Result<Value, AgentError> {
         if self.failed {
@@ -236,9 +237,6 @@ impl RealtimeReceiver {
                         serde_json::from_str(&text).map_err(|_| error("invalid JSON event"))?;
                     if event["type"].as_str().is_none() {
                         return Err(error("event type missing"));
-                    }
-                    if event["type"] == "error" {
-                        return Err(error("provider returned an error event"));
                     }
                     self.failed = false;
                     return Ok(event);

@@ -969,7 +969,7 @@ fn parse_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
         "realtime" => Ok(OpenAiApi::Realtime),
         "auto" | "" => Ok(OpenAiApi::Auto),
         other => Err(format!(
-            "config: OPENAI_COMPAT_API={other} not supported (use auto|chat|responses)"
+            "config: OPENAI_COMPAT_API={other} not supported (use auto|chat|responses|realtime)"
         )),
     }
 }

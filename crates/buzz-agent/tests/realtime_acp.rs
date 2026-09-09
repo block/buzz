@@ -23,7 +23,7 @@ async fn recv(ws: &mut Ws) -> Value {
         .unwrap();
     serde_json::from_str(msg.to_text().unwrap()).unwrap()
 }
-async fn modality(ws: &mut Ws) {
+async fn modality_ack(ws: &mut Ws) {
     let update = recv(ws).await;
     assert_eq!(update["type"], "session.update");
     send(
@@ -70,7 +70,7 @@ async fn connect(listener: TcpListener) -> Ws {
         json!({"type":"session.updated", "session":update["session"]}),
     )
     .await;
-    modality(&mut ws).await;
+    modality_ack(&mut ws).await;
     assert_eq!(recv(&mut ws).await["type"], "conversation.item.create");
     assert_eq!(recv(&mut ws).await["type"], "response.create");
     ws
@@ -132,7 +132,7 @@ async fn realtime_acp_permission_and_persistent_conversation() {
             assert_eq!(recv(&mut ws).await["type"], "response.create");
             text(&mut ws, "r2").await;
             // A second ACP prompt must use the SAME socket, not a new session.
-            modality(&mut ws).await;
+            modality_ack(&mut ws).await;
             assert_eq!(recv(&mut ws).await["type"], "conversation.item.create");
             assert_eq!(recv(&mut ws).await["type"], "response.create");
             text(&mut ws, "r3").await;
@@ -256,12 +256,18 @@ async fn realtime_acp_audio_content_roundtrip() {
         .await;
         let update = recv(&mut ws).await;
         assert_eq!(update["session"]["output_modalities"], json!(["audio"]));
+        for direction in ["input", "output"] {
+            assert_eq!(
+                update["session"]["audio"][direction]["format"],
+                json!({"type":"audio/pcm","rate":24000})
+            );
+        }
         send(
             &mut ws,
             json!({"type":"session.updated","session":update["session"]}),
         )
         .await;
-        modality(&mut ws).await;
+        modality_ack(&mut ws).await;
         let append = recv(&mut ws).await;
         assert_eq!(append["type"], "input_audio_buffer.append");
         assert_eq!(
@@ -336,6 +342,85 @@ async fn realtime_disconnect_revokes_pending_permission_without_executing() {
         .as_str()
         .unwrap()
         .contains("session ended"));
+    assert!(!dir.path().join("calls.log").exists());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn realtime_session_acknowledgment_is_not_an_echo_contract() {
+    for (modality, detection, accepted) in [
+        ("text", None, true),
+        ("text", Some(Value::Null), true),
+        ("audio", None, false),
+        ("text", Some(json!({"type":"server_vad"})), false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(socket).await.unwrap();
+            send(
+                &mut ws,
+                json!({"type":"session.created","session":{"id":"s1"}}),
+            )
+            .await;
+            assert_eq!(recv(&mut ws).await["type"], "session.update");
+            let mut session =
+                json!({"type":"realtime","output_modalities":[modality],"audio":{"input":{}}});
+            if let Some(detection) = detection {
+                session["audio"]["input"]["turn_detection"] = detection;
+            }
+            send(&mut ws, json!({"type":"session.updated","session":session})).await;
+            if accepted {
+                modality_ack(&mut ws).await;
+                assert_eq!(recv(&mut ws).await["type"], "conversation.item.create");
+                assert_eq!(recv(&mut ws).await["type"], "response.create");
+                text(&mut ws, "r1").await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let mut h = Harness::spawn_with_env(&url, &options()).await;
+        let sid = init(&mut h, dir.path()).await;
+        let p = prompt(&mut h, &sid).await;
+        let result = h.recv_until(|v| v["id"] == p).await;
+        if accepted {
+            assert_eq!(result["result"]["stopReason"], "end_turn", "{result}");
+        } else {
+            assert!(
+                result["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("acknowledge manual session"),
+                "{result}"
+            );
+        }
+        assert!(!dir.path().join("calls.log").exists());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn realtime_rejection_reports_provider_reason_without_tool_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = connect(listener).await;
+        send(&mut ws, json!({"type":"error", "error":{"code":"invalid_value","message":"Unsupported output voice"}})).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let mut h = Harness::spawn_with_env(&url, &options()).await;
+    let sid = init(&mut h, dir.path()).await;
+    let p = prompt(&mut h, &sid).await;
+    let result = h.recv_until(|v| v["id"] == p).await;
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported output voice"),
+        "{result}"
+    );
     assert!(!dir.path().join("calls.log").exists());
     server.await.unwrap();
 }

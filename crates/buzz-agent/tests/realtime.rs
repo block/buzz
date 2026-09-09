@@ -148,11 +148,6 @@ async fn invalid_frames_poison_connection_without_echoing_provider_data() {
     for message in [
         Message::Text("not-json secret".into()),
         Message::Text(json!({"not_type":"secret"}).to_string().into()),
-        Message::Text(
-            json!({"type":"error","error":{"message":"secret"}})
-                .to_string()
-                .into(),
-        ),
         Message::Binary(vec![1, 2].into()),
         Message::Text("x".repeat(1024 * 1024 + 1).into()),
     ] {
@@ -276,5 +271,36 @@ async fn pending_provider_read_does_not_block_cancellation_write() {
         .unwrap()
         .unwrap();
     assert_eq!(terminal["response"]["status"], "cancelled");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_error_preserves_event_and_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let event = json!({"type":"error","event_id":"server_error", "error":{"type":"invalid_request_error","code":"invalid_value","message":"Unknown voice","event_id":"client_update"}});
+    let expected = event.clone();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(tcp).await.unwrap();
+        for event in [
+            json!({"type":"session.created"}),
+            event,
+            json!({"type":"session.updated"}),
+        ] {
+            ws.send(Message::Text(event.to_string().into()))
+                .await
+                .unwrap();
+        }
+    });
+    let connection = RealtimeConnection::connect(&endpoint, "test")
+        .await
+        .unwrap();
+    let (_sender, mut reader) = connection.split();
+    assert_eq!(reader.next_event().await.unwrap(), expected);
+    assert_eq!(
+        reader.next_event().await.unwrap()["type"],
+        "session.updated"
+    );
     server.await.unwrap();
 }

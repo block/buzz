@@ -176,7 +176,10 @@ impl RealtimeSession {
                     "type":"realtime", "model":ctx.effective_model,
                     "instructions":ctx.system_prompt, "tools":tools,
                     "output_modalities":[if audio_output { "audio" } else { "text" }],
-                    "audio":{"input":{"turn_detection":null}},
+                    "audio":{
+                        "input":{"turn_detection":null,"format":{"type":"audio/pcm","rate":24000}},
+                        "output":{"format":{"type":"audio/pcm","rate":24000}},
+                    },
                 }))
                 .await?;
             let deadline = Instant::now() + ctx.cfg.llm_timeout;
@@ -184,9 +187,11 @@ impl RealtimeSession {
             if updated["type"] != "session.updated"
                 || updated["session"]["output_modalities"]
                     != json!([if audio_output { "audio" } else { "text" }])
-                || updated["session"]["audio"]["input"].get("turn_detection") != Some(&Value::Null)
+                || updated["session"]["audio"]["input"]
+                    .get("turn_detection")
+                    .is_some_and(|value| !value.is_null())
             {
-                return Err(error("provider did not acknowledge manual text session"));
+                return Err(error("provider did not acknowledge manual session"));
             }
         }
         let live = self.live.as_mut().ok_or_else(|| error("missing session"))?;
@@ -438,8 +443,16 @@ impl Live {
             biased;
             _ = ctx.cancel.changed() => Err(AgentError::Cancelled),
             result = tokio::time::timeout_at(deadline.min(self.expires), self.events.recv()) => {
-                result.map_err(|_| error("response deadline exceeded"))?
-                    .ok_or_else(|| error("session disconnected"))?
+                let event = result.map_err(|_| error("response deadline exceeded"))?
+                    .ok_or_else(|| error("session disconnected"))??;
+                if event["type"] == "error" {
+                    // This manual driver cannot reconcile rejected mutations yet.
+                    // Keep that policy here, not in the reusable transport.
+                    let message = event["error"]["message"].as_str().unwrap_or("unspecified provider error");
+                    let bounded: String = message.chars().filter(|c| !c.is_control()).take(512).collect();
+                    return Err(error(&format!("provider rejected request: {bounded}")));
+                }
+                Ok(event)
             }
         }
     }
