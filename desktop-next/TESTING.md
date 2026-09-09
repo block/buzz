@@ -12,7 +12,7 @@ so it needs no mock native bridge or live relay.
   Rebuild after any source change. `pnpm exec playwright test --grep <name>` narrows
   a regression without replacing the full final pass.
 
-Browser coverage binds the actual production catalog: all 54 examples, axe ARIA
+Browser coverage binds the actual production catalog: all 55 examples, axe ARIA
 checks in both modes, no external runtime requests, preserved loading labels,
 checkbox and switch keyboard activation, dialog focus trap and return, selection,
 command dispatch, form validation, multiline input, tabs, manual carousel,
@@ -38,3 +38,8 @@ inspection without adding transition properties that could mask missing motion.
 Layout coverage verifies table alignment, native/custom scrollbar treatment, actual
 scrolling, pointer and keyboard resizing, grip sizing under zoom, and shared Glass
 tab motion, keyboard selection, and reduced motion.
+
+Composer coverage exercises empty drafts, multiline and modifier handling, IME
+composition, pointer/keyboard send and stop, retained failed drafts and retry,
+attachment removal and limits, model controls, transcript preview, and 390/884/1440
+layouts. Card header spacing is checked against the production component.

@@ -4,6 +4,7 @@
 @import "@buzz/design-tokens/foundations.css";
 
 @import "./styles/actions.css";
+@import "./styles/composer.css";
 @import "./styles/controls.css";
 @import "./styles/overlays.css";
 @import "./styles/surfaces.css";

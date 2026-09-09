@@ -1,7 +1,7 @@
 # Buzz design system
 
 The next Buzz web client starts with a living design system. `/design` is the
-visual overview; `/design/components` contains 54 searchable live examples;
+visual overview; `/design/components` contains 55 searchable live examples;
 `/design/compositions` shows product patterns and generated responses.
 
 ```sh

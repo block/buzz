@@ -5,6 +5,10 @@ import { cx } from "./classes";
 export function Card({ className, ...props }: ComponentProps<"section">) {
   return <section {...props} className={cx("bui-card", className)} />;
 }
+/** Groups a card heading and description with a compact shared rhythm. */
+export function CardHeader({ className, ...props }: ComponentProps<"div">) {
+  return <div {...props} className={cx("bui-card-header", className)} />;
+}
 /** A concise status label; its text carries meaning in addition to color. */
 export function Badge({
   tone = "neutral",

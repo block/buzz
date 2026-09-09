@@ -21,7 +21,7 @@ for (const mode of ["light", "dark"] as const) {
     await page.goto("/design/components");
     if (mode === "dark")
       await page.getByRole("button", { name: "Switch to dark mode" }).click();
-    await expect(page.locator(".catalog-entry")).toHaveCount(54);
+    await expect(page.locator(".catalog-entry")).toHaveCount(55);
     await expect(
       page.getByRole("button", { name: "Saving", exact: true }),
     ).toBeDisabled();
@@ -141,7 +141,7 @@ test("filtering has an explicit empty-state recovery", async ({ page }) => {
     .fill("nothing-matches-this");
   await expect(page.locator(".catalog-entry")).toHaveCount(0);
   await page.getByRole("button", { name: "Clear filters" }).click();
-  await expect(page.locator(".catalog-entry")).toHaveCount(54);
+  await expect(page.locator(".catalog-entry")).toHaveCount(55);
 });
 test("generated actions require a click, disable during streaming, and recover after invalid data", async ({
   page,
@@ -286,8 +286,8 @@ test("styled navigation preserves link semantics and opens the component catalog
 }) => {
   await page.goto("/design");
   await page
-    .getByRole("link", { name: "Explore 54 examples", exact: true })
+    .getByRole("link", { name: "Explore 55 examples", exact: true })
     .click();
   await expect(page).toHaveURL("/design/components");
-  await expect(page.locator(".catalog-entry")).toHaveCount(54);
+  await expect(page.locator(".catalog-entry")).toHaveCount(55);
 });

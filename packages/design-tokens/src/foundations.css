@@ -3,6 +3,8 @@
   --control-sm: 2rem;
   --control-md: 2.5rem;
   --control-lg: 3.25rem;
+  --control-multiline-min: 5rem;
+  --control-multiline-max: 16rem;
   --size-scrollbar: 0.375rem;
   --size-grip-length: 1rem;
   --size-grip-thickness: 0.25rem;

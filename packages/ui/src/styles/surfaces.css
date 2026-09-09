@@ -9,6 +9,14 @@
     padding: var(--space-panel-inset);
     color: var(--text-primary);
   }
+  .bui-card-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-control-gap);
+  }
+  .bui-card-header > * {
+    margin: 0;
+  }
   .bui-badge,
   .bui-chip {
     @apply text-meta;

@@ -79,6 +79,42 @@ Native scroll surfaces use thin scrollbars; custom ScrollArea bars share the
 length while retaining a larger pointer target. Table cells align to the reading
 edge, including row and column headings.
 
+## AI composer
+
+`AIComposer` is a controlled multiline prompt surface. It requires nonblank text,
+uses Enter to submit and Shift+Enter for newlines, and leaves IME composition and
+other modifier combinations alone. It grows between the shared multiline bounds,
+then scrolls with the system's thin scrollbar. Button and keyboard submissions use
+one path; pending submissions disable duplicate sends.
+
+```tsx
+<AIComposer
+  value={draft}
+  onValueChange={setDraft}
+  onSubmit={async (text) => {
+    await acceptPrompt(text); // Host-owned request with timeout/retry policy.
+    setDraft(""); // Clear only after acceptance; rejected requests retain the draft.
+  }}
+  onAttach={openFilePicker}
+  context={({ disabled }) => <ContextChips disabled={disabled} />}
+  controls={({ disabled }) => <ModelControls disabled={disabled} />}
+  generation={isGenerating ? { onStop: stopGeneration } : undefined}
+/>
+```
+
+The host supplies model/permission controls, context, and attachment behavior.
+Slots receive `disabled` and must apply it to their controls. Rejections show an
+inline retry message; the host must not clear the controlled draft before success.
+While generation is active, the stop action stays available even if editing is
+disabled. Optional `voice` supplies a labeled host callback; the component never
+requests microphone access or uploads data. Authentication, permission enforcement,
+model execution, file validation, speech capture, and network lifecycle belong to
+the host. The catalog demonstrates these seams locally, including a sample voice
+transcript and bounded attachment metadata; it sends nothing to a model.
+
+Use `CardHeader` around a card title and description for an 8px gap at the default
+root size, while preserving the larger spacing between the card's other sections.
+
 ## Generated responses
 
 `GeneratedResponse` accepts unknown input and validates it before rendering. The

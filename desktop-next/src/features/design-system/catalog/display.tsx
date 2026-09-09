@@ -7,6 +7,7 @@ import {
   BarChart,
   Button,
   Card,
+  CardHeader,
   Carousel,
   EmptyState,
   Meter,
@@ -26,10 +27,12 @@ export function CardDemo() {
         <Layers aria-hidden="true" />
         <Badge>Project</Badge>
       </div>
-      <h3 className="text-heading">Build something together</h3>
-      <p className="text-body text-secondary">
-        A quiet container for a focused group of ideas.
-      </p>
+      <CardHeader>
+        <h3 className="text-heading">Build something together</h3>
+        <p className="text-body text-secondary">
+          A quiet container for a focused group of ideas.
+        </p>
+      </CardHeader>
       <Button
         nativeButton={false}
         role="link"

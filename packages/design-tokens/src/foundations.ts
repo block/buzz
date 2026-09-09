@@ -8,6 +8,16 @@ export const FOUNDATION_GROUPS = [
       ["control-md", "2.5rem", "Standard actions and inputs."],
       ["control-lg", "3.25rem", "Prominent actions."],
       [
+        "control-multiline-min",
+        "5rem",
+        "Minimum writing area for a multiline prompt.",
+      ],
+      [
+        "control-multiline-max",
+        "16rem",
+        "Maximum growing writing area before scrolling.",
+      ],
+      [
         "size-scrollbar",
         "0.375rem",
         "Thin custom scrollbars and native scrollbar fallback.",

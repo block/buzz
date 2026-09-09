@@ -1,4 +1,6 @@
 import type { ComponentType } from "react";
+import { ComposerDemo } from "./composer";
+import composerSource from "./composer.tsx?raw";
 import * as forms from "./forms";
 import formsSource from "./forms.tsx?raw";
 import * as overlays from "./overlays";
@@ -18,6 +20,15 @@ export interface CatalogEntry {
   source: string;
 }
 export const CATALOG: readonly CatalogEntry[] = [
+  {
+    id: "ai-composer",
+    name: "AI composer",
+    description:
+      "A multiline prompt with context, attachments, model controls, and send/stop states.",
+    category: "Inputs",
+    Preview: ComposerDemo,
+    source: composerSource,
+  },
   {
     id: "buttons",
     name: "Buttons",
