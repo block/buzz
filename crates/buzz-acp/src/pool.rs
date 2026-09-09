@@ -296,11 +296,12 @@ fn has_system_prompt_support(
     protocol_version: u32,
     agent_name: &str,
     goose_system_prompt_supported: Option<bool>,
+    pi_system_prompt_supported: bool,
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
     } else if agent_name == "pi-acp" {
-        false // Pi uses an explicit capability, not its protocol version.
+        pi_system_prompt_supported
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
@@ -332,13 +333,11 @@ fn session_new_system_prompt<'a>(
 
 impl OwnedAgent {
     pub(crate) fn has_system_prompt_support(&self) -> bool {
-        if self.agent_name == "pi-acp" {
-            return self.acp.supports_pi_system_prompt();
-        }
         has_system_prompt_support(
             self.protocol_version,
             &self.agent_name,
             self.goose_system_prompt_supported,
+            self.acp.supports_pi_system_prompt(),
         )
     }
 }

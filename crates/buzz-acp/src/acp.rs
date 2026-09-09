@@ -466,6 +466,8 @@ impl AcpClient {
             if !args.iter().any(|arg| arg == "--") {
                 cmd.arg("--");
             }
+            // Desktop launches buzz-acp in the Buzz nest; adapters inherit that
+            // workspace. Keep managed skills tied to launch CWD across sessions.
             cmd.arg("--skill")
                 .arg(std::env::current_dir()?.join(".agents/skills"));
         }

@@ -18,7 +18,10 @@ standing instructions.
 
 Buzz adds `-- --skill <harness-cwd>/.agents/skills` when launching `pi-acp`.
 An existing separator and explicit Pi options are preserved. Managed agents
-run from the Buzz workspace, so the default directory is its `.agents/skills`.
+run from the Buzz nest (normally `~/.buzz`): Desktop sets the `buzz-acp` child
+CWD through `default_agent_workdir()`, and adapters inherit it. The default
+skill directory is that launch workspace's `.agents/skills`. Standalone CLI
+launches use the caller's working directory.
 The path is fixed at adapter launch and applies to every Pi subprocess.
 
 The full composed session prompt is sent as a replacement string through

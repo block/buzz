@@ -152,33 +152,69 @@ async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
 }
 
 #[tokio::test]
-async fn pi_launch_preserves_existing_forwarded_skills_and_one_separator() {
+async fn pi_launch_preserves_existing_skills_in_explicit_workspace() {
+    const FIXTURE_ENV: &str = "BUZZ_TEST_PI_LAUNCH_WORKSPACE";
+    if let Some(dir) = std::env::var_os(FIXTURE_ENV) {
+        let path = std::path::PathBuf::from(dir).join("pi-acp");
+        let mut client = AcpClient::spawn(
+            path.to_str().unwrap(),
+            &["--".into(), "--skill".into(), "/extra skills".into()],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize())
+            .await
+            .unwrap()
+            .unwrap_err();
+        client.shutdown().await;
+        return;
+    }
+
     let dir = fixture_dir();
-    let path = script_at(
+    let workspace = dir.join("chosen workspace");
+    std::fs::create_dir_all(workspace.join(".agents/skills")).unwrap();
+    // Canonicalize macOS's /var -> /private/var before comparing with getcwd.
+    let workspace = workspace.canonicalize().unwrap();
+    script_at(
         &dir,
-        &format!("printf '%s\\n' \"$@\" > '{}/args'", dir.display()),
+        r#"printf '%s\n' "$@" > "$(dirname "$0")/args"
+pwd -P > "$(dirname "$0")/cwd""#,
     );
-    let mut client = AcpClient::spawn(
-        path.to_str().unwrap(),
-        &["--".into(), "--skill".into(), "/extra skills".into()],
-        &[],
-        false,
+    // Re-enter only this test in a separate process so parallel tests never
+    // share a mutated CWD. This models Desktop setting its harness child's CWD.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pool::pi_prompt_tests::pi_launch_preserves_existing_skills_in_explicit_workspace",
+                "--nocapture",
+            ])
+            .kill_on_drop(true)
+            .env(FIXTURE_ENV, &dir)
+            .current_dir(&workspace)
+            .output(),
     )
     .await
+    .unwrap()
     .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize())
-        .await
-        .unwrap()
-        .unwrap_err();
-    client.shutdown().await;
+    assert!(
+        output.status.success(),
+        "child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("cwd")).unwrap().trim(),
+        workspace.to_str().unwrap()
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("args")).unwrap(),
         format!(
             "--\n--skill\n/extra skills\n--skill\n{}\n",
-            std::env::current_dir()
-                .unwrap()
-                .join(".agents/skills")
-                .display()
+            workspace.join(".agents/skills").display()
         )
     );
     std::fs::remove_dir_all(dir).unwrap();
