@@ -724,11 +724,11 @@
   }
 
   .code-input-digit[data-motion="enter"] {
-    animation: code-input-digit-enter var(--duration-state) ease-out;
+    animation: code-input-digit-enter var(--duration-state) ease-out both;
   }
 
   .code-input-digit[data-motion="exit"] {
-    animation: code-input-digit-exit var(--duration-state) ease-in;
+    animation: code-input-digit-exit var(--duration-state) ease-out both;
   }
 
   .code-input:disabled .code-input-digit {
