@@ -2,6 +2,7 @@ import type * as React from "react";
 import { Hash } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { Markdown } from "@/shared/ui/markdown";
 
 export type ChannelIntroAction = {
   description?: string;
@@ -18,6 +19,7 @@ export type ChannelIntro = {
   description?: string | null;
   hideBeginning?: boolean;
   icon?: React.ReactNode;
+  originatingThread?: string;
 };
 
 /**
@@ -34,6 +36,17 @@ export function ChannelIntroBlock({
   className?: string;
   intro: ChannelIntro;
 }) {
+  if (intro.originatingThread)
+    return (
+      <div
+        className={cn("px-3 text-xs text-muted-foreground", className)}
+        data-testid="task-origin-thread"
+      >
+        <Markdown
+          content={`Continued from [this thread](${intro.originatingThread}).`}
+        />
+      </div>
+    );
   return (
     <div
       className={cn(

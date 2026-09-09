@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import {
@@ -14,6 +14,22 @@ export const TaskChannelBranches = React.createContext(
 );
 
 export function useChannelBackedTaskParents(channels: Channel[]) {
+  const queryClient = useQueryClient();
+  React.useEffect(
+    () =>
+      queryClient.getQueryCache().subscribe((event) => {
+        if (
+          event.type === "updated" &&
+          event.action.type === "success" &&
+          event.query.queryKey[0] === "channel-canvas"
+        ) {
+          void queryClient.invalidateQueries({
+            queryKey: ["channel-backed-task-canvases"],
+          });
+        }
+      }),
+    [queryClient],
+  );
   const channelIds = React.useMemo(
     () => channels.map((channel) => channel.id).sort(),
     [channels],

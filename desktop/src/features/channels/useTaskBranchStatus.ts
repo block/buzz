@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  GitBranch,
   GitMerge,
   GitPullRequest,
   GitPullRequestClosed,
+  GitPullRequestDraft,
 } from "lucide-react";
+import { TaskBranchGlyph } from "@/features/channels/ui/TaskBranchGlyph";
 import {
   githubRepositoryUrl,
   type ChannelBackedTask,
@@ -38,12 +39,14 @@ export function useTaskBranchStatus(
   const pr =
     query.data?.find((item) => item.state === "OPEN") ?? query.data?.[0];
   const Icon = !pr
-    ? GitBranch
+    ? TaskBranchGlyph
     : pr.state === "MERGED"
       ? GitMerge
       : pr.state === "CLOSED"
         ? GitPullRequestClosed
-        : GitPullRequest;
+        : pr.isDraft
+          ? GitPullRequestDraft
+          : GitPullRequest;
   const label = !pr
     ? "Branch"
     : pr.state === "MERGED"
@@ -56,11 +59,11 @@ export function useTaskBranchStatus(
   const color = !pr
     ? "text-muted-foreground"
     : pr.state === "MERGED"
-      ? "text-purple-500"
+      ? "text-purple-600 dark:text-purple-400"
       : pr.state === "CLOSED"
-        ? "text-red-500"
+        ? "text-red-600 dark:text-red-400"
         : pr.isDraft
           ? "text-muted-foreground"
-          : "text-green-500";
+          : "text-green-600 dark:text-green-400";
   return { query, pr, Icon, label, color };
 }

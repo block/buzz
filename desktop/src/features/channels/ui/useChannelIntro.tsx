@@ -1,4 +1,6 @@
 import * as React from "react";
+import { useCanvasQuery } from "@/features/channels/hooks";
+import { parseChannelBackedTask } from "@/features/channels/lib/channelBackedTask";
 import { Bot, FolderPlus, Plus, Sparkles, UserPlus } from "lucide-react";
 
 import {
@@ -46,11 +48,24 @@ export function useChannelIntro({
   onWelcomeAddAgent?: () => void;
 }) {
   const projectHome = useIsProjectHomeChannel(activeChannel?.id);
+  const canvas = useCanvasQuery(
+    activeChannel?.id ?? null,
+    activeChannel?.channelType === "stream",
+  );
+  const originatingThread = parseChannelBackedTask(
+    canvas.data?.content,
+  )?.originatingThread;
 
   return React.useMemo(() => {
     if (!activeChannel || activeChannel.channelType === "dm") {
       return null;
     }
+    if (originatingThread)
+      return {
+        channelKindLabel: "task channel",
+        channelName: activeChannel.name,
+        originatingThread,
+      };
 
     const actions: ChannelIntroAction[] = [];
     if (isWelcomeExperienceChannel(activeChannel)) {
@@ -145,5 +160,6 @@ export function useChannelIntro({
     onOpenMembers,
     onWelcomeAddAgent,
     projectHome,
+    originatingThread,
   ]);
 }

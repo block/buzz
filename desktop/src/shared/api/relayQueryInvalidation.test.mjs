@@ -6,6 +6,7 @@ import { isRelayDependentQueryKey } from "./relayQueryInvalidation.ts";
 test("relay invalidation includes relay-backed channel and profile queries", () => {
   for (const queryKey of [
     ["channels"],
+    ["channel-backed-task-canvases", ["channel-1"]],
     ["channels", "channel-1", "members"],
     ["channel-messages", "channel-1"],
     ["thread-replies", "channel-1", "root-1"],

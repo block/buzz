@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type * as React from "react";
 import { toast } from "sonner";
+import { ListTodo } from "lucide-react";
 import { useCanvasQuery } from "@/features/channels/hooks";
 import {
   githubRepositoryUrl,
@@ -10,7 +11,6 @@ import {
 import { useTaskBranchStatus } from "@/features/channels/useTaskBranchStatus";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
-import { Markdown } from "@/shared/ui/markdown";
 
 function BranchStatus({
   branch,
@@ -24,29 +24,52 @@ function BranchStatus({
     (repository
       ? `${repository}/tree/${encodeURIComponent(branch.name)}`
       : null);
-  const label = pr ? `#${pr.number} ${pr.title}` : branch.name;
+  const label = branch.name;
   return (
-    <div className="mt-1 space-y-1 text-xs">
+    <div className="min-w-0 text-xs">
       <div className="flex items-center gap-2">
         <Icon aria-label={status} className={cn("h-4 w-4 shrink-0", color)} />
         {href ? (
           <a
-            href={href}
+            href={
+              repository
+                ? `${repository}/tree/${encodeURIComponent(branch.name)}`
+                : href
+            }
             target="_blank"
             rel="noreferrer"
             className="min-w-0 truncate text-muted-foreground hover:text-foreground hover:underline"
             title={`${status}: ${label}`}
             onClick={(event) => {
               event.preventDefault();
-              void openUrl(href).catch(() =>
-                toast.error("Could not open link in browser"),
-              );
+              void openUrl(
+                repository
+                  ? `${repository}/tree/${encodeURIComponent(branch.name)}`
+                  : href,
+              ).catch(() => toast.error("Could not open link in browser"));
             }}
           >
             {label}
           </a>
         ) : (
           <span>{label}</span>
+        )}
+        {pr && (
+          <a
+            href={pr.url}
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
+            title={pr.title}
+            onClick={(event) => {
+              event.preventDefault();
+              void openUrl(pr.url).catch(() =>
+                toast.error("Could not open link in browser"),
+              );
+            }}
+          >
+            #{pr.number}
+          </a>
         )}
       </div>
       {query.isFetching && <span className="sr-only">Checking for PR…</span>}
@@ -74,29 +97,29 @@ export function TaskChannelWorkspace({
       <div
         className={cn(
           channelChrome.contentPadding,
-          "shrink-0 border-b px-5 pb-3",
+          "shrink-0 border-b px-5 pb-2",
         )}
       >
-        <details open data-testid="task-overview">
-          <summary className="cursor-pointer text-sm font-medium">
-            {task.task.title}
-          </summary>
-          <div
-            className="mt-2 max-h-48 space-y-2 overflow-y-auto text-sm"
-            data-testid="task-overview-details"
-          >
-            <p className="text-muted-foreground">{task.task.description}</p>
+        <section aria-label="Task" data-testid="task-overview">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <h2 className="flex min-w-0 items-center gap-2 text-sm font-medium">
+              {!task.branch && (
+                <ListTodo
+                  aria-hidden="true"
+                  data-testid="branchless-task-glyph"
+                  className="h-4 w-4 shrink-0 text-muted-foreground"
+                />
+              )}
+              <span className="truncate" title={task.task.title}>
+                {task.task.title}
+              </span>
+            </h2>
             {task.branch && <BranchStatus branch={task.branch} />}
-            <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs">
-              <div>
-                Origin <Markdown content={task.originatingThread} />
-              </div>
-              <div>
-                Parent <Markdown content={task.parentChannel} />
-              </div>
-            </div>
           </div>
-        </details>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {task.task.description}
+          </p>
+        </section>
       </div>
       <div
         className="flex min-h-0 flex-1 flex-col"
