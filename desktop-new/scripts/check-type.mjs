@@ -72,9 +72,10 @@ const RETIRED_ROLES = new Map([
  * wrong. Fix the system at that point rather than adding a tenth override.
  */
 const OVERRIDES = new Map([
-  // Example of the shape. Remove when a real exception replaces it.
-  // ["features/foo/ui/Bar.tsx:font-medium", "Optical match to the adjacent
-  //  native control, which renders at 500 and cannot be changed."],
+  [
+    "shared/styles/flex-workspace.css:font-size:",
+    "FlexLayout's public theme variable forwards the existing text-body role; no new text size is authored.",
+  ],
 ]);
 
 const RULES = [

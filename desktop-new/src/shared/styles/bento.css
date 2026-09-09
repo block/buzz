@@ -1,0 +1,230 @@
+@layer components {
+  /* The workspace backdrop. Panels sit on the gradient — DESIGN.md § Surface and
+     depth — so the specimen supplies the real one rather than showing panels on
+     the documentation page's flat surface, where a panel's edge and shadow
+     cannot be judged. The dot texture matches the app shell. */
+  .bento-stage {
+    position: relative;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    height: 42rem;
+    max-height: 80svh;
+    overflow: hidden;
+    border-radius: var(--radius-panel);
+    background: var(--bg-app);
+    padding: var(--space-workspace-inset);
+  }
+
+  .bento-stage::before {
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(
+      var(--texture-dots-color) 1px,
+      transparent 1.2px
+    );
+    background-size: var(--texture-dots-size) var(--texture-dots-size);
+    content: "";
+    pointer-events: none;
+  }
+
+  .bento-layout {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+  }
+
+  .bento-workspace {
+    /* `min-height: 0` so the grid cell can actually shrink it; without it the
+       dock's content floors its height and it overflows the stage. */
+    min-height: 0;
+    height: 100%;
+    /* Dockview's grid paints an opaque fill of its own — `white`, from the
+       vendor theme — behind every panel. On the backdrop that reads as a white
+       sheet covering the gradient, which is exactly what it is. The panels
+       supply their own surface, so the grid must supply none.
+
+       This is the same defect the app dock hit, and the reason it recurs is that
+       the variable is inherited: setting it once here covers the grid, the group,
+       and anything else the vendor points at it. */
+    --dv-group-view-background-color: transparent;
+    /* No separator either. A gutter of real air is the separation — a hairline
+       *and* a gap reads as a seam drawn on top of a seam. */
+    --dv-separator-border: transparent;
+  }
+
+  .bento-workspace .dv-grid-view,
+  .bento-workspace .dv-dockview,
+  .bento-workspace .dv-view-container,
+  .bento-workspace .dv-branch-node {
+    background: transparent;
+  }
+
+  /* The panel surface itself is Panel's — see `.panel` in components.css. */
+
+  /* The header row. `height: auto` because a tab strip can wrap above the
+     header, and the vendor's fixed height would clip it. */
+  .bento-workspace .dv-tabs-and-actions-container {
+    position: relative;
+    display: flex;
+    height: auto;
+    min-height: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    border: 0;
+    background: transparent;
+  }
+
+  /* PanelHeader spans the row beneath any tabs, and owns its own inset — which
+     is why the header no longer sits jammed against the panel's top edge. */
+  .bento-workspace .dv-right-actions-container {
+    position: relative;
+    z-index: 1;
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .bento-workspace .dv-right-actions-container > div {
+    width: 100%;
+  }
+
+  /* ============================================================
+     Making the header the drag handle.
+
+     This is the whole reason the composition works, and it is worth stating
+     plainly because the obvious reading of this file is wrong.
+
+     Dockview attaches its *group* drag source to one element: the "void
+     container", the empty space in its tab bar. Our header renders in the
+     right-actions slot, which has **no drag source at all** — so dragging a
+     panel by its header did nothing. What worked was dragging a *tab*, which
+     has its own source. That is the "sometimes it works, sometimes it doesn't":
+     two visually similar targets, only one of them draggable.
+
+     So the void container is stretched to cover the whole header row and sits
+     *behind* the header, which lets go of pointer events except on its actual
+     controls. A press on the header's empty space or its title reaches the void
+     container underneath and starts a real dockview group drag; a press on a
+     button hits the button.
+
+     Why not forward synthetic events into the void container instead: a
+     synthesised pointer sequence is not the gesture the browser is tracking, so
+     it desynchronises from pointer capture the moment the real pointer leaves
+     the element. This keeps one gesture, owned by the vendor. */
+  /* Stretched across the header row, behind the header, so a press anywhere on
+     the header starts a real dockview group drag.
+
+     Bounded to the header, and this is the subtle part. Dockview finds a drop
+     target by hit-testing under the cursor, so any element of ours that covers
+     the panel *content* sits between the cursor and the content drop target and
+     swallows the drop: the panel lifts, the highlight appears, and nothing
+     happens on release. An earlier version of this rule used `inset: 0` against
+     a `position: relative` header whose height the tab strip could grow, so the
+     handle spilled 90px down over the content — which is why dropping was
+     finicky in exactly the cases that involved a stack.
+
+     `bottom: auto` with an explicit height keeps it in the header row whatever
+     the strip does. Toggling `pointer-events` mid-drag would also work, but it
+     depends on a flag arriving before the first hit-test; a handle that is never
+     in the way needs no timing at all. */
+  .bento-workspace .dv-void-container {
+    position: absolute;
+    z-index: 0;
+    top: 0;
+    right: 0;
+    bottom: auto;
+    left: 0;
+    height: var(--size-panel-header);
+    cursor: grab;
+  }
+
+  /* When a strip is present the header sits below it, so the handle follows. */
+  .bento-workspace .dv-tabs-and-actions-container:has(.dv-tab:nth-child(2))
+    .dv-void-container {
+    top: auto;
+    bottom: 0;
+  }
+
+  .bento-workspace .dv-right-actions-container,
+  .bento-workspace .dv-right-actions-container .panel-header {
+    pointer-events: none;
+    cursor: grab;
+  }
+
+  /* Every interactive descendant takes its events back. `:where()` keeps this at
+     zero specificity so a component's own cursor still wins. */
+  .bento-workspace .dv-right-actions-container
+    :where(button, a, input, textarea, select, [role="button"], [tabindex]) {
+    pointer-events: auto;
+    cursor: pointer;
+  }
+
+  .bento-workspace [data-bento-anchored] .dv-void-container,
+  .bento-workspace [data-bento-anchored] .panel-header {
+    cursor: default;
+  }
+
+  .bento-workspace .dv-tab {
+    cursor: grab;
+  }
+
+  /* The tab strip exists to *choose* a panel, so a group holding one panel has
+     nothing to choose between and hides it. Without this the panel's name
+     appears twice — once as a lone tab, once in the header below it — which is
+     the duplication this whole header model exists to remove.
+
+     Dockview always renders the tabs container, and there is no option to
+     suppress it per group, so the condition is expressed here: hidden unless a
+     second tab exists. */
+  .bento-workspace .dv-tabs-container {
+    min-width: 0;
+    padding: var(--space-1) var(--space-1) 0;
+    gap: var(--space-1);
+  }
+
+  .bento-workspace .dv-tabs-container:not(:has(> .dv-tab:nth-child(2))) {
+    display: none;
+  }
+
+  .bento-workspace .dv-tab {
+    height: var(--size-row);
+    align-items: center;
+    padding-inline: var(--space-control-inset);
+    border: 0;
+    border-radius: var(--radius-control);
+  }
+
+  .bento-workspace .dv-tab:hover:not(.dv-active-tab) {
+    background: var(--bg-hover);
+  }
+
+  .bento-workspace .dv-active-tab {
+    background: var(--bg-selected);
+  }
+
+  .bento-workspace .dv-active-tab .bento-tab-label {
+    color: var(--text-primary);
+  }
+
+  .bento-workspace .dv-content-container {
+    overflow: hidden;
+    /* Isolate the body so a drop overlay moving over a panel cannot force its
+       subtree to re-layout. */
+    contain: layout paint;
+  }
+
+  /* The drop target, in the product's language rather than the vendor's. */
+  .bento-dock-theme .dv-drop-target-anchor {
+    border: 1px solid var(--purple-8);
+    border-radius: var(--radius-panel);
+    background: var(--purple-3);
+    transition: none;
+  }
+
+  /* The overlay lives under Dockview's shell, outside `.bento-workspace`.
+     Theme-scoped rules reach it there. Direct manipulation has no easing. */
+  .bento-dock-theme .dv-drop-target-container,
+  .bento-dock-theme .dv-drop-target {
+    --dv-transition-duration: 0ms;
+  }
+}

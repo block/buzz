@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { PanelHeader } from "./PanelHeader";
 
 /**
  * The orientation row for a message-bearing conversation surface.
@@ -25,30 +26,30 @@ export function ConversationHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="conversation-header">
-      <div className="conversation-header-identity">
-        {icon ? (
-          <span className="conversation-header-icon" aria-hidden="true">
-            {icon}
-          </span>
-        ) : null}
-        <div className="conversation-header-title-block">
-          <div className="conversation-header-title-row">
-            <h1 className="text-heading text-primary">{title}</h1>
-            {metadata ? (
-              <span className="conversation-header-metadata">{metadata}</span>
+    <PanelHeader
+      actions={actions}
+      title={
+        <div className="conversation-header-identity">
+          {icon ? (
+            <span className="conversation-header-icon" aria-hidden="true">
+              {icon}
+            </span>
+          ) : null}
+          <div className="conversation-header-title-block">
+            <div className="conversation-header-title-row">
+              <h1 className="text-heading text-primary">{title}</h1>
+              {metadata ? (
+                <span className="conversation-header-metadata">{metadata}</span>
+              ) : null}
+            </div>
+            {context ? (
+              <div className="conversation-header-context text-body-sm text-secondary">
+                {context}
+              </div>
             ) : null}
           </div>
-          {context ? (
-            <div className="conversation-header-context text-body-sm text-secondary">
-              {context}
-            </div>
-          ) : null}
         </div>
-      </div>
-      {actions ? (
-        <div className="conversation-header-actions">{actions}</div>
-      ) : null}
-    </header>
+      }
+    />
   );
 }

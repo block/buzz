@@ -1,80 +1,53 @@
-import { type BaseUiPart, resolveBaseUiBacking } from "@/shared/ui/registry";
+import {
+  baseUiDocsUrl,
+  COMPONENTS,
+  resolveBaseUiBacking,
+} from "@/shared/ui/registry";
 
-/**
- * The sentence under a component's title, as segments rather than as markup.
- *
- * Split out from the component so the phrasing is testable without a DOM: the
- * component renders these segments and nothing else, so a test asserting the
- * flattened text is asserting what the page actually says. Building the string
- * and the markup separately would let the two drift, which is the failure this
- * shape exists to prevent.
- */
 export type SentenceSegment =
   | { kind: "text"; value: string }
-  | { kind: "part"; part: BaseUiPart };
+  | { kind: "link"; value: string; href: string; external: boolean };
 
-function text(value: string): SentenceSegment {
-  return { kind: "text", value };
-}
-
-function part(value: BaseUiPart): SentenceSegment {
-  return { kind: "part", part: value };
-}
-
-/** "Field and Input", "Field, Input and Button" — a readable list, not commas. */
-function partList(parts: readonly BaseUiPart[]): SentenceSegment[] {
-  return parts.flatMap((value, index) => {
-    if (index === 0) return [part(value)];
-    const separator = index === parts.length - 1 ? " and " : ", ";
-    return [text(separator), part(value)];
-  });
-}
-
-/**
- * Four answers, because there are four genuinely different situations:
- *
- *   own only        Built on Base UI Button.
- *   inherited only  No Base UI part of its own. Inherits Base UI Button
- *                   through Buzz Button.
- *   both            Built on Base UI Field and Input. Also inherits Base UI
- *                   Button through Buzz Button.
- *   neither         No Base UI part. Semantic native header.
- *
- * The last says what the component *is* rather than trailing off after the
- * dash — authoring its own markup is the decision, not a gap, and a sentence
- * that only reports an absence reads like something is missing.
- */
-export function baseUiBackingSentence(
-  slug: string,
-  behavior: string,
-): SentenceSegment[] {
+/** Direct Base UI imports link upstream; inherited backing links to its Buzz owner. */
+export function baseUiBackingSentence(slug: string): SentenceSegment[] {
   const { own, inherited } = resolveBaseUiBacking(slug);
-
-  if (own.length === 0 && inherited.length === 0) {
-    return [text(`No Base UI part. ${behavior}.`)];
-  }
-
-  const segments: SentenceSegment[] =
-    own.length > 0
-      ? [text("Built on Base UI "), ...partList(own), text(".")]
-      : [text("No Base UI part of its own.")];
-
+  const links: Extract<SentenceSegment, { kind: "link" }>[] = own.map(
+    (part) => ({
+      kind: "link",
+      value: `Base UI ${part.name}`,
+      href: baseUiDocsUrl(part),
+      external: true,
+    }),
+  );
+  const seen = new Set<string>();
   for (const entry of inherited) {
-    segments.push(
-      text(own.length > 0 ? " Also inherits Base UI " : " Inherits Base UI "),
-      part(entry.part),
-      text(` through Buzz ${entry.through}.`),
+    const component = COMPONENTS.find(
+      (candidate) => candidate.name === entry.through,
     );
+    if (!component || seen.has(component.slug)) continue;
+    seen.add(component.slug);
+    links.push({
+      kind: "link",
+      value: component.name,
+      href: `/design/components/${component.slug}`,
+      external: false,
+    });
   }
-
+  if (!links.length) return [];
+  const segments: SentenceSegment[] = [{ kind: "text", value: "Inherits " }];
+  links.forEach((link, index) => {
+    if (index)
+      segments.push({
+        kind: "text",
+        value: index === links.length - 1 ? " and " : ", ",
+      });
+    segments.push(link);
+  });
+  segments.push({ kind: "text", value: "." });
   return segments;
 }
 
-/** The sentence as plain text — what a reader sees, links flattened. */
+/** Plain text of the same segments used by the rendered description. */
 export function flattenSentence(segments: readonly SentenceSegment[]): string {
-  return segments
-    .map((segment) =>
-      segment.kind === "text" ? segment.value : segment.part.name,
-    )
-    .join("");
+  return segments.map((segment) => segment.value).join("");
 }

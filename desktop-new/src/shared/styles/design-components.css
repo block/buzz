@@ -295,3 +295,20 @@
     }
   }
 }
+
+@layer components {
+  .composer-playground-stage {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    min-width: 0;
+    height: min(24rem, 65vh);
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+  }
+  .composer-playground-stage > .message-composer {
+    flex: 0 0 auto;
+  }
+}

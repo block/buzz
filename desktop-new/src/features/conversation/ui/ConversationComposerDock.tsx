@@ -2,13 +2,7 @@ import type { AgentTurn } from "@/features/agent-activity/types";
 import { AgentActivityRail } from "@/features/agent-activity/ui/AgentActivityRail";
 import { MessageComposer } from "@/features/composer/ui/MessageComposer";
 
-/**
- * The conversation's fixed-height bottom dock.
- *
- * Its grid owns the spatial relationship between authoring and activity. When
- * activity arrives, it takes its natural row below the Composer; the Composer
- * yields only from its lower edge while its top stays fixed.
- */
+/** Content-sized authoring dock. Activity fades into reserved space without resizing the conversation. */
 export function ConversationComposerDock({
   draft,
   onDraftChange,
@@ -16,10 +10,16 @@ export function ConversationComposerDock({
   turns,
   placeholder,
   responseControl,
+  autoFocus,
+  recipients,
+  onDelivered,
 }: {
+  onDelivered?: (content: string) => void;
+  recipients?: readonly { pubkey: string; name: string; isAgent: boolean }[];
+  autoFocus?: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
-  onSend: (content: string) => Promise<void>;
+  onSend: (content: string, recipients?: string[]) => Promise<void>;
   turns: AgentTurn[];
   placeholder?: string;
   responseControl?: {
@@ -37,13 +37,18 @@ export function ConversationComposerDock({
       data-activity={workingTurns.length > 0 || undefined}
     >
       <MessageComposer
+        autoFocus={autoFocus}
+        recipients={recipients}
+        onDelivered={onDelivered}
         draft={draft}
         onDraftChange={onDraftChange}
         onSend={onSend}
         placeholder={placeholder}
         responseControl={responseControl}
       />
-      <AgentActivityRail turns={workingTurns} />
+      <div className="conversation-composer-activity-slot text-body-sm">
+        <AgentActivityRail turns={workingTurns} />
+      </div>
     </div>
   );
 }

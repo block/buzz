@@ -1,0 +1,83 @@
+@layer components {
+  .session-exchange {
+    display: grid;
+    gap: var(--space-6);
+    min-width: 0;
+  }
+  .conversation-message {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+  .conversation-message-body {
+    flex: 1;
+    min-width: 0;
+  }
+  .conversation-message-heading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+  .conversation-message-content {
+    overflow-wrap: anywhere;
+  }
+  .conversation-message-content :where(p, ul) {
+    margin: 0;
+  }
+  .conversation-message-content :where(p, ul) + :where(p, ul) {
+    margin-top: var(--space-3);
+  }
+  .conversation-message-content ul {
+    list-style: disc;
+    padding-inline-start: var(--space-5);
+  }
+  .conversation-message-content li + li {
+    margin-top: var(--space-1);
+  }
+  .conversation-message-content strong {
+    font-weight: 600;
+  }
+  .conversation-message-actions,
+  .conversation-delivery {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+  .conversation-delivery {
+    color: var(--text-secondary);
+  }
+  .conversation-delivery[data-failed] {
+    color: var(--red-12);
+  }
+  .conversation-reply {
+    margin-bottom: var(--space-2);
+    overflow-wrap: anywhere;
+  }
+  .session-exchange-work {
+    display: grid;
+    gap: var(--space-5);
+    padding-inline-start: calc(var(--space-6) + var(--space-3));
+    min-width: 0;
+  }
+  .conversation-state {
+    display: grid;
+    justify-items: center;
+    text-align: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    color: var(--text-secondary);
+  }
+  .conversation-state p {
+    margin: 0;
+  }
+  @media (max-width: 40rem) {
+    .session-exchange-work {
+      padding-inline-start: var(--space-3);
+    }
+  }
+}

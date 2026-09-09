@@ -1,73 +1,55 @@
 import { describe, expect, it } from "vitest";
-
 import { COMPONENTS } from "@/shared/ui/registry";
-
 import {
   baseUiBackingSentence,
   flattenSentence,
 } from "./baseUiBackingSentence";
 
-function sentenceFor(slug: string): string {
-  const component = COMPONENTS.find((candidate) => candidate.slug === slug);
-  if (!component) throw new Error(`No component ${slug}`);
-  return flattenSentence(
-    baseUiBackingSentence(component.slug, component.behavior),
-  );
-}
+const sentenceFor = (slug: string) =>
+  flattenSentence(baseUiBackingSentence(slug));
 
-describe("the Base UI backing sentence", () => {
-  it("names the part a component imports itself", () => {
-    expect(sentenceFor("button")).toBe("Built on Base UI Button.");
-    expect(sentenceFor("avatar")).toBe("Built on Base UI Avatar.");
-    expect(sentenceFor("tabs")).toBe("Built on Base UI Tabs.");
-    expect(sentenceFor("navigation-item")).toBe("Built on Base UI Button.");
-    expect(sentenceFor("preview-card")).toBe("Built on Base UI Preview Card.");
+describe("inline inheritance description", () => {
+  it("names direct Base UI imports", () => {
+    expect(sentenceFor("button")).toBe("Inherits Base UI Button.");
+    expect(sentenceFor("avatar")).toBe("Inherits Base UI Avatar.");
+    expect(sentenceFor("tabs")).toBe("Inherits Base UI Tabs.");
   });
-
-  it("says where an indirect part enters, rather than claiming none", () => {
-    expect(sentenceFor("icon-button")).toBe(
-      "No Base UI part of its own. Inherits Base UI Button through Buzz Button.",
-    );
+  it("names Buzz owners for indirect backing without duplicating them", () => {
+    expect(sentenceFor("composer")).toBe("Inherits Button.");
+    expect(sentenceFor("icon-button")).toBe("Inherits Button.");
+    expect(sentenceFor("inline-chip")).toBe("Inherits PreviewCard.");
   });
-
-  it("reads as one sentence when a component has both", () => {
+  it("combines both libraries in one sentence", () => {
     expect(sentenceFor("search-field")).toBe(
-      "Built on Base UI Field and Input. Also inherits Base UI Button through Buzz Button.",
+      "Inherits Base UI Field, Base UI Input and Button.",
     );
   });
-
-  it("says what a component is instead when it has no part at all", () => {
-    expect(sentenceFor("panel-header")).toBe(
-      "No Base UI part. Semantic native header.",
-    );
-    expect(sentenceFor("inline-chip")).toBe(
-      "No Base UI part of its own. Inherits Base UI Preview Card through Buzz PreviewCard.",
-    );
+  it("adds no absence commentary for native components", () => {
+    expect(sentenceFor("panel-header")).toBe("");
   });
-
-  it("gives every component a sentence that ends and never doubles a full stop", () => {
+  it("links Buzz components internally and Base UI externally", () => {
+    expect(baseUiBackingSentence("composer")).toContainEqual({
+      kind: "link",
+      value: "Button",
+      href: "/design/components/button",
+      external: false,
+    });
+    expect(baseUiBackingSentence("button")).toContainEqual({
+      kind: "link",
+      value: "Base UI Button",
+      href: "https://base-ui.com/react/components/button",
+      external: true,
+    });
+  });
+  it("keeps every nonempty note concise and punctuated", () => {
     for (const component of COMPONENTS) {
       const sentence = sentenceFor(component.slug);
-      expect(sentence, component.slug).not.toBe("");
-      expect(sentence.endsWith("."), component.slug).toBe(true);
-      expect(sentence, component.slug).not.toContain("..");
-      // A stray double space is the tell that a segment joined without its
-      // separator; the sentence is assembled from parts, so check it reads.
-      expect(sentence, component.slug).not.toContain("  ");
+      if (!sentence) continue;
+      expect(sentence.startsWith("Inherits ")).toBe(true);
+      expect(sentence.endsWith(".")).toBe(true);
+      expect(sentence).not.toContain("..");
+      expect(sentence).not.toContain("  ");
+      expect(sentence).not.toContain("through");
     }
-  });
-
-  it("links every part it names", () => {
-    const segments = baseUiBackingSentence("search-field", "unused");
-    const linked = segments
-      .filter((segment) => segment.kind === "part")
-      .map((segment) => (segment.kind === "part" ? segment.part.name : ""));
-    expect(linked).toEqual(["Field", "Input", "Button"]);
-
-    expect(
-      baseUiBackingSentence("inline-chip", "unused")
-        .filter((segment) => segment.kind === "part")
-        .map((segment) => (segment.kind === "part" ? segment.part.name : "")),
-    ).toEqual(["Preview Card"]);
   });
 });

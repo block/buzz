@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 
+import {
+  type ColorScheme,
+  useColorScheme,
+} from "@/shared/theme/useColorScheme";
+
 /**
  * What a component is made of, read from the running component.
  *
@@ -46,8 +51,13 @@ export interface AnatomyPart {
 }
 
 interface Measured {
-  /** The scheme generation these values were read in, so a stale read is visible. */
-  scheme: number;
+  /**
+   * The colour scheme these values were read in, so a stale read is visible.
+   *
+   * Carried on the row rather than merely listed as an effect dependency, so the
+   * re-measure is a real data flow: a row states the mode it was read in.
+   */
+  scheme: ColorScheme;
   name: string;
   note?: string;
   present: boolean;
@@ -196,35 +206,6 @@ function isAbsent(painted: string): boolean {
   );
 }
 
-/**
- * The active colour scheme, observed from `<html>`.
- *
- * Not `useColorScheme()`, which owns local state — calling it here would create a
- * *second* independent copy that never hears the toggle in the layout, so the
- * table would keep reporting light-mode values on a dark page. Reporting a stale
- * painted colour is the specific failure this component exists to prevent, so it
- * watches the class the theme actually sets.
- */
-/**
- * A counter that increments whenever the colour scheme changes.
- *
- * It is stored on each measured row (`Measured.scheme`) rather than merely listed
- * as an effect dependency, so the re-measure is a real data flow instead of a
- * lint-suppressed side effect: rows carry the generation they were read in.
- */
-function useSchemeVersion(): number {
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    const observer = new MutationObserver(() => setVersion((n) => n + 1));
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-    return () => observer.disconnect();
-  }, []);
-  return version;
-}
-
 export function ComponentAnatomy({
   parts,
   scope,
@@ -236,7 +217,11 @@ export function ComponentAnatomy({
   caption?: string;
 }) {
   const [rows, setRows] = useState<Measured[] | null>(null);
-  const schemeVersion = useSchemeVersion();
+  // The shared colour-scheme fact. This used to be a local MutationObserver on
+  // `<html>`, because `useColorScheme` held per-caller state and reading it here
+  // would have produced a second answer that never heard the layout's toggle.
+  // The fact now has one value, so the workaround is gone.
+  const { scheme } = useColorScheme();
 
   useEffect(() => {
     // After paint, so Base UI has mounted and the indicator has its size.
@@ -247,7 +232,7 @@ export function ComponentAnatomy({
           const element = root?.querySelector(part.selector) ?? null;
           if (!element) {
             return {
-              scheme: schemeVersion,
+              scheme,
               name: part.name,
               note: part.note,
               present: false,
@@ -268,7 +253,7 @@ export function ComponentAnatomy({
             values[property.id] = tokenNames(declared);
           }
           return {
-            scheme: schemeVersion,
+            scheme,
             name: part.name,
             note: part.note,
             present: true,
@@ -278,7 +263,7 @@ export function ComponentAnatomy({
       );
     });
     return () => cancelAnimationFrame(frame);
-  }, [parts, scope, schemeVersion]);
+  }, [parts, scope, scheme]);
 
   const columns = PROPERTIES.filter((property) =>
     rows?.some((row) => row.values[property.id]),

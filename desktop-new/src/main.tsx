@@ -7,6 +7,10 @@ import "@fontsource/jetbrains-mono/400.css";
 import "./shared/styles/globals.css";
 import { routeTree } from "./app/routeTree.gen";
 import { useKeyboardFocusVisibility } from "./app/useKeyboardFocusVisibility";
+import { applyStoredColorScheme } from "./shared/theme/useColorScheme";
+
+// Before the first render, so a stored dark choice never shows a light frame.
+applyStoredColorScheme();
 
 const router = createRouter({ routeTree });
 

@@ -3,6 +3,7 @@ import { Link, Outlet } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 
 import { useColorScheme } from "@/shared/theme/useColorScheme";
+import { Accordion } from "@/shared/ui/Accordion";
 import { IconButton } from "@/shared/ui/IconButton";
 import { COMPONENTS } from "@/shared/ui/registry";
 
@@ -54,7 +55,14 @@ const SECTIONS: NavSection[] = [
   },
   {
     heading: "Product UI",
-    items: componentNavItems("product-ui"),
+    items: componentNavItems("product-ui").filter(
+      ([, to]) =>
+        ![
+          "/design/components/composer",
+          "/design/components/workspace",
+          "/design/components/flex-workspace",
+        ].includes(to),
+    ),
   },
 ];
 
@@ -125,6 +133,47 @@ export function DesignSystemLayout() {
             >
               <h2 className="text-body text-tertiary">{section.heading}</h2>
               <NavItems items={section.items} />
+              {section.heading === "Product UI" ? (
+                <Accordion
+                  variant="navigation"
+                  defaultValue={["workspace", "chat"]}
+                  items={[
+                    {
+                      value: "workspace",
+                      title: "Workspace",
+                      content: (
+                        <NavItems
+                          items={["workspace", "flex-workspace"].map((slug) => {
+                            const component = COMPONENTS.find(
+                              (item) => item.slug === slug,
+                            );
+                            return [
+                              component?.name ?? slug,
+                              `/design/components/${slug}`,
+                            ];
+                          })}
+                        />
+                      ),
+                    },
+                    {
+                      value: "chat",
+                      title: "Chat",
+                      content: (
+                        <NavItems
+                          items={COMPONENTS.filter(
+                            (component) =>
+                              component.slug === "composer" ||
+                              component.parent === "composer",
+                          ).map((component) => [
+                            component.name,
+                            `/design/components/${component.slug}`,
+                          ])}
+                        />
+                      ),
+                    },
+                  ]}
+                />
+              ) : null}
             </section>
           ))}
         </div>

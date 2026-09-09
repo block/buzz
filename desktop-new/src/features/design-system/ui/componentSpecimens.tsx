@@ -1,3 +1,12 @@
+import { FlexWorkspace } from "@/shared/ui/FlexWorkspace";
+import {
+  ConversationSpecimen,
+  AgentWorkSpecimen,
+  WorkStepSpecimen,
+  ConversationMessageSpecimen,
+  ConversationStateSpecimen,
+} from "./ConversationSpecimen";
+import { BentoSpecimen } from "./BentoSpecimen";
 import {
   IconDots,
   IconHash,
@@ -8,6 +17,9 @@ import {
 } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { Switch } from "@/shared/ui/Switch";
+import { Accordion } from "@/shared/ui/Accordion";
+import { Select } from "@/shared/ui/Select";
 import { Avatar } from "@/shared/ui/Avatar";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { Button } from "@/shared/ui/Button";
@@ -22,6 +34,7 @@ import { Tabs } from "@/shared/ui/Tabs";
 import { ComponentAnatomy } from "./ComponentAnatomy";
 import {
   ActivityRailSpecimen,
+  FormattingBarSpecimen,
   MessageComposerSpecimen,
 } from "./composerSpecimens";
 import { Panel } from "@/shared/ui/Panel";
@@ -255,6 +268,20 @@ function IconButtonSpecimen() {
               disabled
             />
           </Specimen>
+          {(["tint", "solid"] as const).map((variant) => (
+            <Specimen
+              key={variant}
+              prop={`variant="${variant}" shape="round" disabled`}
+            >
+              <IconButton
+                aria-label={`Disabled round ${variant}`}
+                icon={icons.add}
+                shape="round"
+                variant={variant}
+                disabled
+              />
+            </Specimen>
+          ))}
         </div>
       </SpecimenGroup>
     </div>
@@ -505,6 +532,23 @@ function ConversationHeaderSpecimen() {
             </>
           }
         />
+      </SpecimenGroup>
+      <SpecimenGroup label="Narrow — full context and actions remain available">
+        <div className="w-full max-w-xs">
+          <ConversationHeader
+            title="Review the conversation hierarchy"
+            metadata="On this device"
+            context="From design"
+            actions={
+              <>
+                {people}
+                <Button variant="quiet" size="compact">
+                  Start session
+                </Button>
+              </>
+            }
+          />
+        </div>
       </SpecimenGroup>
     </div>
   );
@@ -812,7 +856,50 @@ function InlineChipSpecimen() {
   );
 }
 
+function SwitchSpecimen() {
+  const [checked, setChecked] = useState(false);
+  return (
+    <div className="component-specimen-stack">
+      <Switch
+        checked={checked}
+        onCheckedChange={setChecked}
+        label="Show agent activity"
+      />
+      <Switch checked label="Show agent activity" />
+      <Switch disabled label="Show agent activity" />
+    </div>
+  );
+}
+
+function SelectSpecimen() {
+  const [value, setValue] = useState("channel");
+  return (
+    <Select
+      label="Preview context"
+      value={value}
+      onValueChange={setValue}
+      groups={[
+        {
+          label: "Destination",
+          options: [
+            { value: "channel", label: "Channel" },
+            { value: "session", label: "Session" },
+            { value: "dm", label: "Direct message" },
+          ],
+        },
+      ]}
+    />
+  );
+}
+
 export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
+  "flex-workspace": FlexWorkspace,
+  conversation: ConversationSpecimen,
+  "conversation-message": ConversationMessageSpecimen,
+  "conversation-state": ConversationStateSpecimen,
+  "agent-work-area": AgentWorkSpecimen,
+  "work-step": WorkStepSpecimen,
+  workspace: BentoSpecimen,
   button: ButtonSpecimen,
   "icon-button": IconButtonSpecimen,
   avatar: AvatarSpecimen,
@@ -820,11 +907,39 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   "inline-chip": InlineChipSpecimen,
   panel: PanelSpecimen,
   tabs: TabsSpecimen,
+  select: SelectSpecimen,
+  switch: SwitchSpecimen,
+  accordion: () => (
+    <Accordion
+      items={[
+        {
+          value: "purpose",
+          title: "When to use an accordion",
+          content: (
+            <p className="text-body">
+              Use a disclosure for supporting content that does not need to be
+              visible all the time.
+            </p>
+          ),
+        },
+        {
+          value: "behavior",
+          title: "Keyboard behavior",
+          content: (
+            <p className="text-body">
+              Focus a heading and press Enter or Space to expand it.
+            </p>
+          ),
+        },
+      ]}
+    />
+  ),
   "conversation-header": ConversationHeaderSpecimen,
   "panel-header": PanelHeaderSpecimen,
   "search-field": SearchFieldSpecimen,
   "navigation-section": NavigationSectionSpecimen,
   "navigation-item": NavigationItemSpecimen,
   composer: MessageComposerSpecimen,
+  "composer-formatting-bar": FormattingBarSpecimen,
   "activity-rail": ActivityRailSpecimen,
 };

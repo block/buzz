@@ -12,7 +12,7 @@ import {
  * paths resolve the same way the app resolves them and no Node types are needed.
  */
 const SOURCES = import.meta.glob(
-  "/src/{shared/ui,features/composer/ui,features/agent-activity/ui}/*.tsx",
+  "/src/{shared/ui,features/composer/ui,features/agent-activity/ui,features/conversation/ui}/*.tsx",
   {
     query: "?raw",
     import: "default",
@@ -76,11 +76,17 @@ describe("component registry — Base UI backing", () => {
       for (const slug of component.composes) {
         const sibling = COMPONENTS.find((candidate) => candidate.slug === slug);
         expect(sibling, `${component.slug} composes ${slug}`).toBeDefined();
-        expect(
-          source.includes(`from "./${sibling?.name}"`) ||
-            source.includes(`from "@/shared/ui/${sibling?.name}"`),
-          `${component.slug} imports ${sibling?.name}`,
-        ).toBe(true);
+        const imports = [...source.matchAll(/from "([^"]+)"/g)].map((match) => {
+          const specifier = match[1];
+          if (specifier.startsWith("@/")) return `${specifier.slice(2)}.tsx`;
+          if (specifier.startsWith("./")) {
+            return `${component.source.slice(0, component.source.lastIndexOf("/") + 1)}${specifier.slice(2)}.tsx`;
+          }
+          return specifier;
+        });
+        expect(imports, `${component.slug} imports ${sibling?.name}`).toContain(
+          sibling?.source,
+        );
       }
     }
   });

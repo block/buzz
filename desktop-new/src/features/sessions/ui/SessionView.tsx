@@ -195,7 +195,7 @@ export function SessionView({
       <ConversationComposerDock
         draft={draft}
         onDraftChange={onDraftChange}
-        onSend={send}
+        onSend={(content) => send(content)}
         placeholder="Reply in this session"
         turns={turns}
       />

@@ -1,7 +1,7 @@
+import { Switch } from "@/shared/ui/Switch";
 import { useState } from "react";
 
 import type { AgentTurn } from "@/features/agent-activity/types";
-import { AgentActivityRail } from "@/features/agent-activity/ui/AgentActivityRail";
 import { ConversationComposerDock } from "@/features/conversation/ui/ConversationComposerDock";
 import { MessageComposer } from "@/features/composer/ui/MessageComposer";
 
@@ -35,6 +35,7 @@ export function ComposerSpecimen({
   return (
     <div className="composer-page-specimen">
       <ConversationComposerDock
+        autoFocus={false}
         draft={draft}
         onDraftChange={setDraft}
         onSend={async () => undefined}
@@ -47,13 +48,39 @@ export function ComposerSpecimen({
 }
 
 export function ActivityRailSpecimen() {
-  return <AgentActivityRail turns={[WORKING_TURN]} />;
+  const [working, setWorking] = useState(true);
+  return (
+    <div className="component-specimen-stack">
+      <Switch
+        checked={working}
+        onCheckedChange={setWorking}
+        label="Show agent activity"
+      />
+      <ComposerSpecimen turns={working ? [WORKING_TURN] : []} />
+    </div>
+  );
 }
 
 export function MessageComposerSpecimen() {
   const [draft, setDraft] = useState("");
   return (
     <MessageComposer
+      autoFocus={false}
+      draft={draft}
+      onDraftChange={setDraft}
+      onSend={async () => undefined}
+      placeholder="Reply in this session"
+    />
+  );
+}
+
+/** The formatting bar is never useful alone: mount it through its real composer. */
+export function FormattingBarSpecimen() {
+  const [draft, setDraft] = useState("Select some text, then format it.");
+  return (
+    <MessageComposer
+      autoFocus={false}
+      defaultFormattingOpen
       draft={draft}
       onDraftChange={setDraft}
       onSend={async () => undefined}

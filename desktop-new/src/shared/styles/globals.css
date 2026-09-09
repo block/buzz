@@ -1,3 +1,21 @@
+/* Vendor stylesheets go in a layer, and it is declared before Tailwind's so it
+   loses to everything we author.
+
+   `DockWorkspace` imports `dockview.css` from JS, which arrives **unlayered** —
+   and unlayered CSS beats every layered rule regardless of selector
+   specificity. Our dock styling lives in `@layer components`, so it silently
+   lost: the resize seam kept dockview's 4px instead of our widened hit target,
+   and the sash cursor was the vendor's. Nothing looked broken enough to notice,
+   which is what made it survive — the seam simply stayed hard to grab.
+
+   Declaring the layer is not enough on its own — a rule only joins a layer at
+   the point it is imported. So the vendor sheet is imported *here*, with
+   `layer(vendor)`, instead of from `DockWorkspace`: this file is where layer
+   order is decided, and an unlayered `import "…dockview.css"` in a component
+   would quietly reintroduce the same defeat. */
+@layer vendor, theme, base, flex-vendor, components, utilities;
+
+@import "dockview-react/dist/styles/dockview.css" layer(vendor);
 @import "tailwindcss";
 @import "./tokens.css";
 @import "./typography.css";
@@ -6,6 +24,7 @@
 @import "./design-components.css";
 @import "./product.css";
 @import "./agents.css";
+@import "./bento.css";
 
 @layer base {
   /* Pointer focus has a caret or pressed control to make its destination clear.

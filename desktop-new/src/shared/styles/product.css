@@ -99,17 +99,11 @@
   .buzz-dockview {
     --dv-background-color: transparent;
     --dv-tabs-and-actions-container-background-color: transparent;
-    /* Dockview's own theme sets this to a literal `white`, and `DockWorkspace`
-       passes `themeLight` in both colour schemes — so in dark mode the vendor
-       painted an opaque white sheet *behind* our glass, and the 52% dark fill
-       over it composited to flat grey. The panels' redundant second
-       fill had been hiding it: two stacked fills reached 0.77 alpha, opaque
-       enough that the white underneath barely showed. Removing the redundancy
-       revealed a bug that had been there since the dock landed.
-
-       Reset here rather than swapping the JS theme, because every dockview
-       surface this variable feeds is already overridden to transparent below —
-       the variable was the one leak. */
+    /* Dockview's own theme sets this to a literal `white`. `DockWorkspace` now
+       passes a per-mode theme (`dockTheme`), so the vendor no longer paints an
+       opaque white sheet behind our glass in dark mode — but every dockview
+       surface this variable feeds is overridden to transparent below anyway, so
+       resetting it here keeps the leak closed regardless of vendor theme. */
     --dv-group-view-background-color: transparent;
     --dv-tab-active-background-color: var(--bg-chrome-selected);
     --dv-tab-active-color: var(--text-primary);
@@ -128,9 +122,10 @@
     background: transparent;
   }
 
-  .buzz-dockview .dv-groupview {
-    padding: 0.25rem;
-  }
+  /* No padding. The air between panels is the theme's `gap`, which dockview
+     applies as a splitview margin — so the gutter is real layout with the
+     resize seam inside it, rather than inset padding that only looked like a
+     gutter and left nothing to grab. */
 
   .buzz-dockview .dv-tabs-and-actions-container {
     min-height: 1.875rem;
@@ -160,31 +155,133 @@
     overflow: hidden;
   }
 
+  /* The resize seam. Dockview gives the sash 4px and positions it — in JS, as
+     an inline offset — so that its 4px is centred on the boundary. Our hit
+     target is wider than that, and wider than the gutter, so growing it must be
+     paid for on both sides: the offset is half the growth, measured from
+     dockview's own width rather than from the gutter. Measured against the
+     gutter it lands 2px off centre, which is the kind of thing that reads as
+     sloppy without being obviously wrong.
+
+     `--dv-sash-size` is not a dockview variable — the vendor writes 4px
+     literally, so this names the number we are compensating for instead of
+     burying it inside an expression.
+
+     A transparent handle costs nothing on screen, and the width is what makes
+     the seam findable: there is no visible divider to aim at, unlike a zero-gap
+     dock where the border itself is the target.
+
+     Dockview sets the axis cursor per orientation (`ew-resize` / `ns-resize`),
+     so this must not restate one — the previous hardcoded `col-resize` was
+     wrong on every horizontal seam, and never applied anyway. */
   .buzz-dockview .dv-sash {
-    width: var(--space-2);
+    --dv-sash-size: 4px;
+
     background: transparent;
-    cursor: col-resize;
   }
 
-  .buzz-dockview .dv-sash:hover {
+  .buzz-dockview .dv-horizontal > .dv-sash-container > .dv-sash {
+    width: var(--size-resize-seam);
+    margin-left: calc((var(--dv-sash-size) - var(--size-resize-seam)) / 2);
+  }
+
+  .buzz-dockview .dv-vertical > .dv-sash-container > .dv-sash {
+    height: var(--size-resize-seam);
+    margin-top: calc((var(--dv-sash-size) - var(--size-resize-seam)) / 2);
+  }
+
+  /* A hairline in the gutter on hover, centred in the seam rather than filling
+     it — the handle is deliberately wider than the line it shows. */
+  .buzz-dockview .dv-sash::after {
+    position: absolute;
     background: var(--border-primary);
+    content: "";
+    opacity: 0;
+    transition: opacity var(--duration-state);
   }
 
+  .buzz-dockview .dv-sash:hover::after,
+  .buzz-dockview .dv-sash:active::after {
+    opacity: 1;
+  }
+
+  .buzz-dockview .dv-horizontal > .dv-sash-container > .dv-sash::after {
+    top: 0;
+    bottom: 0;
+    left: calc(50% - 0.5px);
+    width: 1px;
+  }
+
+  .buzz-dockview .dv-vertical > .dv-sash-container > .dv-sash::after {
+    top: calc(50% - 0.5px);
+    right: 0;
+    left: 0;
+    height: 1px;
+  }
+
+  /* ============================================================
+     Dragging a panel.
+
+     Two costs to hold down, both from this app's own surfaces rather than from
+     dockview. Neither is a micro-optimisation: each one is a whole-screen
+     repaint per frame, and DESIGN.md § Motion already rules out the same cost
+     when it arrives as an animated blur.
+
+     1. Every panel is `backdrop-filter`. While a ghost and an overlay move
+        across the screen, each frame can force every blurred surface to
+        re-composite. During a drag the blur is dropped and the fill is made
+        opaque: `bg-panel` is what the blur was approximating anyway, so the
+        panels hold their place while the cost goes away. It returns on drop.
+     2. Panel content is isolated with `contain`, so a drop overlay resizing
+        over a panel cannot force that panel's subtree to re-layout. */
+  .buzz-dockview .dv-content-container {
+    contain: layout paint;
+  }
+
+  .buzz-dockview[data-dragging] .panel {
+    backdrop-filter: none;
+    background: var(--bg-panel);
+  }
+
+  /* A drag must not select the text it passes over — DESIGN.md § Motion. */
+  .buzz-dockview[data-dragging],
   .buzz-dockview:has(.dv-tab.dv-tab-dragging) {
     user-select: none;
+  }
+
+  /* The drop target. Dockview mounts this on the component root (the theme's
+     `dndOverlayMounting: 'absolute'`), so it can span the gutter. It states
+     where the panel will land, so it takes the panel's own silhouette rather
+     than a vendor rectangle. */
+  .buzz-dockview .dv-drop-target-anchor {
+    border: 1px solid var(--purple-8);
+    border-radius: var(--radius-panel);
+    background: var(--purple-3);
+  }
+
+  /* The overlay moves between drop zones as the cursor crosses them, and
+     dockview's own duration for that is 300ms when the overlay is mounted on
+     the component root. That is slow enough that the target visibly trails the
+     pointer — the exact reading of lag, from a transition rather than from work
+     per frame. The overlay is not direct manipulation (it snaps between
+     discrete zones, so easing carries the information that it moved), but it
+     has to keep up: `duration-fast` is the shortest step we have. */
+  .buzz-dockview .dv-drop-target-container,
+  .buzz-dockview .dv-drop-target {
+    --dv-transition-duration: var(--duration-fast);
   }
 
   /* No background. These fill `.dv-content-container` edge to edge — measured at
      610x551 inside 612x553, the two pixels being its border — and that container
      is already primary glass.
-     
+
      They each set the same `glass-2` fill with no blur of their own, so the two
      identical translucent layers composited: 0.52 over 0.52 is **0.77**, landing
      between glass-4 and glass-5. The panels read as nearly solid, which is why
      the backdrop barely showed through a surface that was supposed to be the
      most translucent one in the system. Nothing declared 0.77 and no token holds
      it — it was the arithmetic of a redundant fill.
-     
+
      A region that exactly covers a glass surface does not need its own. If one
      of these later needs to sit apart from its container, it takes a whole
      material rather than a bare fill. */
@@ -376,26 +473,23 @@
     white-space: pre-wrap;
   }
 
-  /* The bottom dock owns the reserved workspace, not Composer. Its top edge
-     stays put; agent activity consumes room from the dock's lower edge, so the
-     composer shortens from below rather than jumping upward. */
+  /* Content grows the dock. Activity occupies a permanently reserved row and
+     never changes the space taken from the conversation. */
   .conversation-composer-dock {
     display: grid;
     flex: 0 0 auto;
-    height: 7.75rem;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    min-width: 0;
     gap: var(--space-1);
     padding: 0 1.5rem 1.5rem;
     background: var(--bg-panel);
   }
 
-  .conversation-composer-dock[data-activity] {
-    height: 9.375rem;
+  .conversation-composer-activity-slot {
+    min-width: 0;
+    min-height: 1lh;
   }
 
-  /* Activity is an auto-sized grid row, not an estimated absolute rail. Its
-     arrival takes room from the Composer's bottom edge while grid keeps the
-     Composer's top edge fixed. The 4px grid gap is the only separation. */
   .agent-activity-rail {
     display: flex;
     width: min(100%, 47rem);
@@ -453,17 +547,16 @@
     display: grid;
     box-sizing: border-box;
     width: min(100%, 47rem);
-    height: 100%;
     min-height: 0;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
-    margin: auto;
+    margin: 0 auto;
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-control);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-panel);
     transition:
-      height var(--duration-settle) var(--easing-settle),
       border-color var(--duration-state) var(--easing-state),
       box-shadow var(--duration-state) var(--easing-state);
   }
@@ -481,35 +574,42 @@
     min-height: 0;
   }
 
-  .message-composer textarea {
-    display: block;
+  .message-composer-editor {
     box-sizing: border-box;
     width: 100%;
-    height: 100%;
-    max-height: 10rem;
     min-height: 1.5lh;
+    max-height: min(10rem, 30vh);
     overflow-y: auto;
-    resize: none;
-    border: 0;
-    outline: 0;
     padding: 0.375rem 0;
-    background: transparent;
+    outline: 0;
     color: var(--text-primary);
-    font: inherit;
   }
 
-  html[data-keyboard-navigation] .message-composer textarea:focus-visible {
+  .message-composer-editor p {
+    margin: 0;
+  }
+  .message-composer-editor p + p {
+    margin-top: var(--space-1);
+  }
+  .message-composer-editor ul,
+  .message-composer-editor ol,
+  .message-composer-editor blockquote {
+    margin: 0;
+    padding-inline-start: var(--space-5);
+  }
+  .message-composer-editor blockquote {
+    border-inline-start: 2px solid var(--border-primary);
+  }
+  html[data-keyboard-navigation] .message-composer-editor.ProseMirror-focused {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
-
-  .message-composer textarea::placeholder {
+  .message-composer-editor p.is-editor-empty:first-child::before {
     color: var(--text-tertiary);
-  }
-
-  .message-composer textarea:disabled {
-    color: var(--text-disabled);
-    cursor: not-allowed;
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
   }
 
   .message-composer-feedback {
@@ -532,97 +632,215 @@
     gap: var(--space-1);
   }
 
-  .composer-emoji-picker {
-    z-index: 1000;
-    width: 15rem;
-    border: 1px solid var(--border-primary);
-    border-radius: var(--radius-control);
-    padding: var(--space-2);
-    background: var(--bg-float);
-    box-shadow: var(--shadow-sm);
-    transform-origin: var(--transform-origin);
-    transition:
-      opacity var(--duration-state) var(--easing-state),
-      transform var(--duration-state) var(--easing-state);
+  .message-composer-actions-end {
+    flex-shrink: 0;
   }
 
-  .composer-emoji-picker[data-starting-style],
-  .composer-emoji-picker[data-ending-style] {
-    opacity: 0;
-    transform: scale(0.98);
-  }
-
-  .composer-emoji-grid {
+  .composer-toolbar-presence {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: var(--space-1);
-  }
-
-  .composer-emoji-grid .buzz-button {
-    padding: 0;
-  }
-
-  .icon-button,
-  .quiet-button,
-  .primary-button {
-    border: 0;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .icon-button {
-    display: grid;
-    width: 2.25rem;
-    height: 2.25rem;
-    place-items: center;
-    border-radius: 0.75rem;
-    background: var(--neutral-11);
-    color: var(--neutral-1);
-  }
-
-  .quiet-button,
-  .primary-button {
-    min-height: 2.25rem;
-    border-radius: 0.75rem;
-    padding: 0 0.875rem;
-  }
-
-  .quiet-button {
-    background: var(--neutral-2);
-    color: var(--text-primary);
-  }
-
-  .primary-button {
-    background: var(--neutral-11);
-    color: var(--neutral-1);
-  }
-
-  .new-session-center {
-    display: flex;
-    width: min(100%, 47rem);
-    flex: 1;
+    min-width: 0;
     align-items: center;
-    justify-content: center;
-    flex-direction: column;
-    gap: 0.75rem;
-    margin: auto;
-    padding: 2rem;
-    text-align: center;
   }
 
-  .activity-block {
-    margin: 0.5rem 0 0.75rem 2.625rem;
-    border-radius: 0.875rem;
-    padding: 0.75rem;
-    background: var(--neutral-2);
+  .composer-toolbar-presence > * {
+    grid-area: 1 / 1;
   }
 
+  .composer-toolbar-enter {
+    animation: composer-toolbar-enter var(--duration-settle)
+      var(--easing-settle) both;
+  }
+  .composer-toolbar-exit {
+    animation: composer-toolbar-exit var(--duration-settle) var(--easing-settle)
+      both;
+  }
+
+  @keyframes composer-toolbar-enter {
+    from {
+      opacity: 0;
+      transform: translateX(-0.5rem) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+  }
+  @keyframes composer-toolbar-exit {
+    from {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: translateX(0.5rem) scale(0.96);
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .buzz-shimmer-text::after {
-      display: none;
+    .composer-toolbar-enter,
+    .composer-toolbar-exit {
+      animation: none;
     }
   }
 
+  .composer-formatting-bar {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .composer-formatting-divider {
+    align-self: stretch;
+    border-inline-start: 1px solid var(--border-primary);
+    margin-block: var(--space-2);
+  }
+
+  .composer-expression-picker {
+    width: min(22rem, calc(100vw - var(--space-6)));
+    max-height: min(32rem, var(--available-height));
+    overflow: auto;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-sm);
+    transform-origin: var(--transform-origin);
+  }
+  .composer-expression-picker .buzz-tabs {
+    padding: var(--space-2) var(--space-3) 0;
+  }
+  .composer-emoji-content,
+  .composer-gif-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3);
+  }
+  .composer-emoji-content section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .composer-emoji-content h3 {
+    margin: 0;
+  }
+  .composer-expression-search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding-inline: var(--space-2);
+    color: var(--text-secondary);
+  }
+  .composer-expression-search input {
+    min-width: 0;
+    height: var(--size-control);
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .composer-emoji-categories {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+  .composer-emoji-categories button {
+    display: grid;
+    width: var(--size-control);
+    height: var(--size-control);
+    flex: 0 0 auto;
+    place-items: center;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+  }
+  .composer-emoji-categories button:hover,
+  .composer-emoji-categories button[aria-selected="true"] {
+    background: var(--neutral-3);
+    color: var(--text-primary);
+  }
+  .composer-emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: var(--space-1);
+  }
+  .composer-emoji-choice {
+    display: grid;
+    min-width: 0;
+    min-height: 2rem;
+    place-items: center;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+  }
+  .composer-emoji-choice:hover {
+    background: var(--neutral-3);
+  }
+  .composer-emoji-choice img {
+    width: 1.25rem;
+    height: 1.25rem;
+    object-fit: contain;
+  }
+  .composer-emoji-preview {
+    display: flex;
+    min-height: 3.5rem;
+    align-items: center;
+    gap: var(--space-3);
+    border-top: 1px solid var(--border-primary);
+    padding-top: var(--space-3);
+  }
+  .composer-emoji-preview img,
+  .composer-emoji-preview-glyph {
+    width: var(--text-body-lg);
+    height: var(--text-body-lg);
+    flex: 0 0 auto;
+    object-fit: contain;
+    @apply text-body-lg;
+    line-height: 1;
+  }
+  .composer-emoji-preview-glyph {
+    display: grid;
+    place-items: center;
+  }
+  .composer-emoji-preview div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+  .composer-gif-grid {
+    columns: 2;
+    column-gap: var(--space-1);
+  }
+  .composer-gif-grid button {
+    display: block;
+    width: 100%;
+    break-inside: avoid;
+    margin-bottom: var(--space-1);
+    overflow: hidden;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: 0;
+    background: var(--neutral-3);
+  }
+  .composer-gif-grid img {
+    display: block;
+    width: 100%;
+  }
   @media (max-width: 48rem) {
     .conversation-composer-dock {
       padding: 0 0.75rem 0.75rem;
@@ -663,5 +881,52 @@
       padding-right: 1rem;
       padding-left: 1rem;
     }
+  }
+}
+
+@layer components {
+  .composer-link-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--neutral-8);
+  }
+  .composer-link-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: min(24rem, calc(100vw - var(--space-6)));
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-5);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-float);
+  }
+  .composer-link-dialog form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .composer-link-dialog label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .composer-link-dialog input {
+    height: var(--size-control);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: 0 var(--space-control-inset);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .composer-link-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
   }
 }

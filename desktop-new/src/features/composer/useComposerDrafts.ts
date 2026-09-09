@@ -4,6 +4,7 @@ export type ComposerDrafts = {
   readDraft: (destinationId: string) => string;
   writeDraft: (destinationId: string, value: string) => void;
   clearDraft: (destinationId: string) => void;
+  settleDraft: (destinationId: string, sentContent: string) => void;
 };
 
 /**
@@ -40,5 +41,17 @@ export function useComposerDrafts(): ComposerDrafts {
     });
   }, []);
 
-  return { readDraft, writeDraft, clearDraft };
+  const settleDraft = useCallback(
+    (destinationId: string, sentContent: string) => {
+      setDrafts((current) => {
+        if (current.get(destinationId)?.trim() !== sentContent.trim())
+          return current;
+        const next = new Map(current);
+        next.delete(destinationId);
+        return next;
+      });
+    },
+    [],
+  );
+  return { readDraft, writeDraft, clearDraft, settleDraft };
 }

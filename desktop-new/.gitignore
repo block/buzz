@@ -9,3 +9,6 @@ src/app/routeTree.gen.ts
 # Local-only dev tooling. A config here wraps the committed vite.config.ts to
 # add a personal plugin; it is ignored so it cannot be committed by accident.
 vite.local.config.ts
+
+# Isolated local runtime, private keys, and build products
+.local/

@@ -1,3 +1,4 @@
+import { chipFaces } from "@/shared/chips/faceResolver";
 import { mergeAttributes, Node } from "@tiptap/core";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 
@@ -83,6 +84,38 @@ export const ChipNode = Node.create({
   renderText({ node }) {
     const address = chipAddressFromAttrs(node.attrs);
     return address ? formatChipAddress(address) : "";
+  },
+
+  addStorage() {
+    return {
+      markdown: {
+        serialize(
+          state: { write: (text: string) => void },
+          node: { attrs: Record<string, unknown> },
+        ) {
+          const address = chipAddressFromAttrs(node.attrs);
+          if (address)
+            state.write(
+              `[${chipFaces.get(address).label.replace(/[[\]\\]/g, "")} ](${formatChipAddress(address)})`,
+            );
+        },
+        parse: {
+          updateDOM(element: HTMLElement) {
+            for (const link of element.querySelectorAll('a[href^="buzz://"]')) {
+              const match = link
+                .getAttribute("href")
+                ?.match(/^buzz:\/\/(agent|person)\/([a-f0-9]{64})$/);
+              if (!match) continue;
+              const chip = document.createElement("span");
+              chip.setAttribute("data-chip", "");
+              chip.setAttribute("data-kind", match[1]);
+              chip.setAttribute("data-id", match[2]);
+              link.replaceWith(chip);
+            }
+          },
+        },
+      },
+    };
   },
 
   addNodeView() {

@@ -613,6 +613,11 @@
   --size-control: 2.25rem;
   --size-row: 1.875rem;
   --size-navigator: 13.5rem;
+  /* The grab area of a resize seam, deliberately wider than the gutter it sits
+     in. The gutter is a visual decision; this is a hit target, and a person
+     aiming at an invisible 8px seam misses. Widening a transparent handle costs
+     nothing on screen, so the two are separate decisions with separate names. */
+  --size-resize-seam: 0.875rem;
   --radius-panel: var(--corner-panel);
   --radius-control: var(--corner-control);
   --radius-row: var(--corner-row);

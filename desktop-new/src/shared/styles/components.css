@@ -130,6 +130,20 @@
     @apply glass-primary-interactive;
   }
 
+  /* Disabled owns the foreground across icon variants, independently of source
+     order. Accent fills also yield to neutral so unavailability cannot look
+     like an available send/stop action. Shape never changes state semantics. */
+  .buzz-button[data-icon-variant][data-disabled] {
+    color: var(--text-disabled);
+  }
+
+  .buzz-button:is(
+    [data-icon-variant="tint"],
+    [data-icon-variant="solid"]
+  )[data-disabled] {
+    background: var(--neutral-3);
+  }
+
   /* A preview is supplemental context, never a second interactive surface.
      It is portal-rendered by Base UI so a clipped parent cannot hide it. */
   .buzz-preview-card {
@@ -209,7 +223,19 @@
   /* A panel is the default opaque reading surface over the atmospheric
      backdrop. Its border and threshold shadow arrive together: taking only
      bg-panel would lose the boundary that lets it sit above the gradient. */
-  .panel {
+  /* One set of declarations, two selectors.
+
+     A dockview group *is* a Panel — it is the movable, independently legible
+     surface on the backdrop — but dockview creates that element itself, so no
+     React component can wrap it in `<Panel>`. Adding its selector here is what
+     keeps Panel the single owner of the panel surface: restating the fill,
+     border, radius, and shadow in the workspace stylesheet would be a second
+     definition that drifts the first time one of them changes.
+
+     `:where()` keeps the vendor selector at zero specificity, so a Panel
+     variant can still override it without an escalation. */
+  .panel,
+  :where(.bento-workspace .dv-groupview) {
     width: 100%;
     height: 100%;
     min-width: 0;
@@ -403,6 +429,10 @@
     position: relative;
     display: flex;
     min-height: var(--size-panel-header);
+    width: 100%;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    padding-block: var(--space-2);
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
@@ -432,40 +462,26 @@
     gap: var(--space-row-gap);
   }
 
+  .panel-header-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .panel-header-actions {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    margin-inline-start: auto;
+  }
+
   .panel-header-title > h2 {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  /* ConversationHeader identifies a message-bearing surface. Unlike PanelHeader,
-     it gives the title an optional status/context layer and reserves the end for
-     feature-owned conversation actions. */
-  .conversation-header {
-    position: relative;
-    display: flex;
-    width: 100%;
-    min-height: var(--size-panel-header);
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-    padding: 0 var(--space-panel-inset);
-  }
-
-  .conversation-header::after {
-    position: absolute;
-    right: var(--space-panel-inset);
-    bottom: 0;
-    left: var(--space-panel-inset);
-    height: 1px;
-    background: var(--border-primary);
-    content: "";
-    pointer-events: none;
-  }
-
+  /* Conversation identity composes PanelHeader; only its inner content lives here. */
   .conversation-header-identity,
-  .conversation-header-title-row,
-  .conversation-header-actions {
+  .conversation-header-title-row {
     display: flex;
     min-width: 0;
     align-items: center;
@@ -487,6 +503,7 @@
   }
 
   .conversation-header-title-row {
+    flex-wrap: wrap;
     gap: var(--space-1);
   }
 
@@ -504,23 +521,6 @@
 
   .conversation-header-context {
     margin-top: var(--space-1);
-  }
-
-  .conversation-header-actions {
-    flex: 0 0 auto;
-    gap: var(--space-1);
-  }
-
-  @media (max-width: 48rem) {
-    .conversation-header {
-      min-height: auto;
-      align-items: start;
-      padding-block: var(--space-2);
-    }
-
-    .conversation-header-actions {
-      padding-top: 0.125rem;
-    }
   }
 
   .search-field {
@@ -666,6 +666,185 @@
     .navigation-item,
     .buzz-tabs-indicator {
       transition-duration: 0ms;
+    }
+  }
+}
+
+@layer components {
+  .buzz-select {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+  }
+  .buzz-select-popup {
+    min-width: var(--anchor-width);
+    max-width: calc(100vw - var(--space-6));
+    max-height: var(--available-height);
+    overflow-y: auto;
+    padding: var(--space-1);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    background: var(--bg-float);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+    z-index: 1000;
+  }
+  .buzz-select-group-label {
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+  .buzz-select-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-control);
+    cursor: default;
+  }
+  .buzz-select-option[data-highlighted] {
+    background: var(--neutral-4);
+    outline: none;
+  }
+  .buzz-select-option[data-selected] {
+    color: var(--text-primary);
+  }
+}
+
+@layer components {
+  .buzz-accordion {
+    min-width: 0;
+    margin-block: var(--space-4);
+  }
+  .buzz-accordion-heading {
+    margin: 0;
+  }
+  .buzz-accordion-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: var(--space-2);
+    background: transparent;
+    color: var(--text-primary);
+    text-align: start;
+    cursor: pointer;
+  }
+  .buzz-accordion:not([data-variant="activity"]) .buzz-accordion-trigger:hover {
+    background: var(--neutral-3);
+  }
+  .buzz-accordion-trigger:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+  .buzz-accordion-trigger[aria-expanded="true"] > svg {
+    transform: rotate(180deg);
+  }
+  .buzz-accordion-panel {
+    padding: var(--space-2);
+  }
+  .buzz-accordion[data-variant="navigation"] {
+    margin: 0;
+  }
+  .buzz-accordion[data-variant="navigation"] .buzz-accordion-trigger {
+    padding: var(--space-1) var(--space-2);
+  }
+  .buzz-accordion[data-variant="navigation"] .buzz-accordion-panel {
+    padding: var(--space-1) 0 var(--space-1) var(--space-4);
+  }
+}
+
+@layer components {
+  .buzz-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .buzz-switch-control {
+    display: inline-flex;
+    width: 2.25rem;
+    height: 1.25rem;
+    align-items: center;
+    padding: 0.125rem;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-pill);
+    background: var(--neutral-4);
+    cursor: pointer;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      border-color var(--duration-state) var(--easing-state);
+  }
+  .buzz-switch-control[data-checked] {
+    border-color: var(--purple-8);
+    background: var(--purple-8);
+  }
+  .buzz-switch-thumb {
+    display: block;
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: var(--radius-pill);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-xs);
+    transform: translateX(0);
+    transition: transform var(--duration-settle) var(--easing-settle);
+  }
+  .buzz-switch-control[data-checked] .buzz-switch-thumb {
+    transform: translateX(1rem);
+  }
+  .buzz-switch-control[data-disabled] {
+    cursor: not-allowed;
+    background: var(--neutral-3);
+  }
+  .buzz-switch-control[data-disabled] .buzz-switch-thumb {
+    background: var(--neutral-5);
+    box-shadow: none;
+  }
+  .buzz-switch:has(.buzz-switch-control[data-disabled]) {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  html[data-keyboard-navigation] .buzz-switch-control:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .buzz-accordion[data-variant="activity"] {
+    margin: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger {
+    justify-content: flex-start;
+    padding: var(--space-2) 0;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+    flex-shrink: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-panel {
+    padding: 0;
+    height: var(--accordion-panel-height);
+    overflow: clip;
+    transition: height var(--duration-settle) var(--easing-settle);
+  }
+  .buzz-accordion[data-variant="activity"]
+    .buzz-accordion-panel:is([data-starting-style], [data-ending-style]) {
+    height: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+    transition: transform var(--duration-settle) var(--easing-settle);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-accordion[data-variant="activity"] .buzz-accordion-panel,
+    .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+      transition: none;
     }
   }
 }

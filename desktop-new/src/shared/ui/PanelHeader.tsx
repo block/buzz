@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+/** Shared header frame. Product identity and controls are supplied through slots.
+ * Workspace dragging and tab strips are owned by the layout, not this frame. */
 export function PanelHeader({
   title,
   icon,
