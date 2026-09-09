@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -149,6 +150,57 @@ void main() {
     },
   );
 
+  test(
+    'global discovery re-reads removal heads without viewer filter',
+    () async {
+      final old = signed(
+        relay,
+        39002,
+        '',
+        tags: [
+          ['d', 'room'],
+          ['p', owner.public],
+          ['p', agent.public, '', 'bot'],
+        ],
+      );
+      final removed = members(time: 101, includeViewer: false);
+      final session = _ReadSession([runtime], relay.public);
+      var removedNow = false;
+      session.page = (filters) {
+        final filter = filters.single;
+        expect(filter.authors, [relay.public]);
+        if (filter.tags.containsKey('#p')) {
+          expect(filter.tags['#p'], [owner.public]);
+          return [old]; // The removed head cannot match #p=viewer.
+        }
+        expect(filter.tags, {
+          '#d': ['room'],
+        });
+        expect(filter.limit, 1);
+        return [removedNow ? removed : old];
+      };
+      final before = await read(session, destination: null);
+      expect(before.single.channelIds, ['room']);
+      removedNow = true;
+      final after = await read(
+        _ReadSession([runtime], relay.public)..page = session.page,
+        destination: null,
+      );
+      expect(after, isEmpty);
+      expect(
+        buildMentionCandidates(
+          members: [],
+          relayAgents: after,
+          sharedChannelIds: {'room'},
+          userCache: {},
+          ownerByAgentPubkey: {},
+          currentPubkey: owner.public,
+        ),
+        isEmpty,
+      );
+    },
+  );
+
   test('same-second membership tie is deterministic', () async {
     final yes = members();
     final no = members(includeAgent: false);
@@ -197,6 +249,7 @@ void main() {
       final session = _ReadSession([owned, policy], relay.public);
       var calls = 0;
       session.page = (filters) {
+        if (filters.first.tags.containsKey('#d')) return [first, last];
         calls++;
         if (calls == 1) return List.filled(500, first);
         expect(filters.single.until, first.createdAt);

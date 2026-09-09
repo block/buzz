@@ -22,13 +22,37 @@ Future<List<AgentDirectoryEntry>> readAgentAuthorization(
   }
   final authority = await session.fetchRelaySelf();
   check();
-  final membership = await _membershipPages(
+  var membership = await _membershipPages(
     session,
     authority,
     viewer,
     channelId,
     check,
   );
+  if (channelId == null) {
+    // #p discovers destinations, not authority: a replacement removing the
+    // viewer cannot match that filter. Re-read each exact coordinate without
+    // #p, and never retain a discovery snapshot if its head is absent.
+    final destinations = membership
+        .where((e) => e.kind == 39002 && e.pubkey == authority)
+        .map((e) => e.getTagValue('d'))
+        .whereType<String>()
+        .toSet();
+    if (destinations.length > 1000) {
+      throw StateError('Membership destination budget exceeded');
+    }
+    membership = await _queryAgentFilters(session, [
+      for (final destination in destinations)
+        NostrFilter(
+          kinds: const [39002],
+          authors: [authority],
+          tags: {
+            '#d': [destination],
+          },
+          limit: 1,
+        ),
+    ], checkCurrent: check);
+  }
   check();
   final runtime = await _queryAgentFilters(session, [
     for (final key in requestedKeys)
