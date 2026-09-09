@@ -45,9 +45,8 @@ pub(crate) async fn run_subscriber(
     health: Arc<SubscriptionHealth>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
-    health.connecting(SubscriptionPath::Event);
-
     loop {
+        health.connecting(SubscriptionPath::Event);
         let attempt = connect_and_subscribe(
             &redis_url,
             &broadcast_tx,

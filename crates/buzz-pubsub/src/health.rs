@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Number of required cross-pod Redis subscription paths in every relay pod.
@@ -148,6 +149,14 @@ pub struct SubscriptionPathSnapshot {
     pub consumer_attached: bool,
     /// Unix timestamp of the latest completed end-to-end ready transition.
     pub last_ready_timestamp_seconds: Option<u64>,
+    /// Time spent reaching the latest completed end-to-end ready transition.
+    pub last_readiness_duration: Option<Duration>,
+    /// Time spent continuously outside `ready`; zero while ready.
+    pub not_ready_duration: Duration,
+    /// Time spent in the current state.
+    pub state_duration: Duration,
+    /// Consecutive failed connection/subscription attempts since the latest ready state.
+    pub consecutive_failures: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,24 +167,64 @@ struct PathStatus {
     ever_ready: bool,
     terminal: bool,
     last_ready_timestamp_seconds: Option<u64>,
+    last_readiness_duration: Option<Duration>,
+    not_ready_since: Instant,
+    state_since: Instant,
+    consecutive_failures: u64,
 }
 
 impl PathStatus {
-    const INITIAL: Self = Self {
-        state: SubscriptionPathState::Connecting,
-        consumer_attached: false,
-        network_ready: false,
-        ever_ready: false,
-        terminal: false,
-        last_ready_timestamp_seconds: None,
-    };
+    fn initial(now: Instant) -> Self {
+        Self {
+            state: SubscriptionPathState::Connecting,
+            consumer_attached: false,
+            network_ready: false,
+            ever_ready: false,
+            terminal: false,
+            last_ready_timestamp_seconds: None,
+            last_readiness_duration: None,
+            not_ready_since: now,
+            state_since: now,
+            consecutive_failures: 0,
+        }
+    }
 
-    const fn snapshot(self) -> SubscriptionPathSnapshot {
+    fn snapshot(self, now: Instant) -> SubscriptionPathSnapshot {
         SubscriptionPathSnapshot {
             state: self.state,
             consumer_attached: self.consumer_attached,
             last_ready_timestamp_seconds: self.last_ready_timestamp_seconds,
+            last_readiness_duration: self.last_readiness_duration,
+            not_ready_duration: if self.state == SubscriptionPathState::Ready {
+                Duration::ZERO
+            } else {
+                now.saturating_duration_since(self.not_ready_since)
+            },
+            state_duration: now.saturating_duration_since(self.state_since),
+            consecutive_failures: self.consecutive_failures,
         }
+    }
+
+    fn set_state(&mut self, state: SubscriptionPathState, now: Instant) {
+        if self.state != state {
+            self.state = state;
+            self.state_since = now;
+        }
+    }
+
+    fn mark_ready(&mut self, now: Instant) {
+        self.last_readiness_duration = Some(now.saturating_duration_since(self.not_ready_since));
+        self.set_state(SubscriptionPathState::Ready, now);
+        self.ever_ready = true;
+        self.last_ready_timestamp_seconds = Some(unix_timestamp_seconds());
+        self.consecutive_failures = 0;
+    }
+
+    fn mark_not_ready(&mut self, state: SubscriptionPathState, now: Instant) {
+        if self.state == SubscriptionPathState::Ready {
+            self.not_ready_since = now;
+        }
+        self.set_state(state, now);
     }
 }
 
@@ -197,10 +246,11 @@ impl Default for SubscriptionHealth {
 impl SubscriptionHealth {
     /// Create the per-process fixed path snapshot.
     pub fn new() -> Self {
+        let now = Instant::now();
         Self {
             group_id: Uuid::new_v4(),
             sequence: AtomicU64::new(1),
-            statuses: Mutex::new([PathStatus::INITIAL; REQUIRED_PATH_COUNT]),
+            statuses: Mutex::new([PathStatus::initial(now); REQUIRED_PATH_COUNT]),
             publish_lock: Mutex::new(()),
             changed: Notify::new(),
         }
@@ -223,11 +273,9 @@ impl SubscriptionHealth {
                 } else {
                     SubscriptionTransition::Connected
                 });
-                status.state = SubscriptionPathState::Ready;
-                status.ever_ready = true;
-                status.last_ready_timestamp_seconds = Some(unix_timestamp_seconds());
+                status.mark_ready(Instant::now());
             }
-            status.snapshot()
+            status.snapshot(Instant::now())
         };
         self.publish(
             path,
@@ -237,13 +285,19 @@ impl SubscriptionHealth {
         );
     }
 
-    /// Record that the initial Redis connection attempt has started.
+    /// Record that a Redis connection/subscription attempt has started.
     pub fn connecting(&self, path: SubscriptionPath) {
-        self.update_nonterminal(path, |status| {
+        if self.update_nonterminal(path, |status| {
             status.network_ready = false;
-            status.state = SubscriptionPathState::Connecting;
+            status.mark_not_ready(SubscriptionPathState::Connecting, Instant::now());
             (None, None)
-        });
+        }) {
+            metrics::counter!(
+                "buzz_redis_subscription_attempts_total",
+                "path" => path.as_str(),
+            )
+            .increment(1);
+        }
     }
 
     /// Record a completed Redis subscription handshake.
@@ -258,9 +312,7 @@ impl SubscriptionHealth {
             } else {
                 SubscriptionTransition::Connected
             };
-            status.state = SubscriptionPathState::Ready;
-            status.ever_ready = true;
-            status.last_ready_timestamp_seconds = Some(unix_timestamp_seconds());
+            status.mark_ready(Instant::now());
             (
                 Some(transition),
                 Some(SubscriptionTransitionReason::Subscribe),
@@ -272,7 +324,8 @@ impl SubscriptionHealth {
     pub fn reconnecting(&self, path: SubscriptionPath, reason: SubscriptionTransitionReason) {
         self.update_nonterminal(path, |status| {
             status.network_ready = false;
-            status.state = SubscriptionPathState::Reconnecting;
+            status.mark_not_ready(SubscriptionPathState::Reconnecting, Instant::now());
+            status.consecutive_failures = status.consecutive_failures.saturating_add(1);
             let transition = if status.ever_ready {
                 SubscriptionTransition::Disconnected
             } else {
@@ -286,7 +339,7 @@ impl SubscriptionHealth {
     pub fn failed(&self, path: SubscriptionPath, reason: SubscriptionTransitionReason) {
         self.update(path, |status| {
             status.network_ready = false;
-            status.state = SubscriptionPathState::Failed;
+            status.mark_not_ready(SubscriptionPathState::Failed, Instant::now());
             status.terminal = true;
             (Some(SubscriptionTransition::Terminal), Some(reason))
         });
@@ -297,7 +350,7 @@ impl SubscriptionHealth {
         self.update_nonterminal(path, |status| {
             status.network_ready = false;
             status.consumer_attached = false;
-            status.state = SubscriptionPathState::Stopped;
+            status.mark_not_ready(SubscriptionPathState::Stopped, Instant::now());
             status.terminal = true;
             (
                 Some(SubscriptionTransition::Terminal),
@@ -308,16 +361,17 @@ impl SubscriptionHealth {
 
     /// Return the current state for one path.
     pub fn snapshot(&self, path: SubscriptionPath) -> SubscriptionPathSnapshot {
-        self.lock_statuses()[path.index()].snapshot()
+        self.lock_statuses()[path.index()].snapshot(Instant::now())
     }
 
     /// Return all path snapshots in [`SubscriptionPath::ALL`] order.
     pub fn snapshots(&self) -> [SubscriptionPathSnapshot; REQUIRED_PATH_COUNT] {
         let statuses = self.lock_statuses();
+        let now = Instant::now();
         [
-            statuses[0].snapshot(),
-            statuses[1].snapshot(),
-            statuses[2].snapshot(),
+            statuses[0].snapshot(now),
+            statuses[1].snapshot(now),
+            statuses[2].snapshot(now),
         ]
     }
 
@@ -373,8 +427,8 @@ impl SubscriptionHealth {
             Option<SubscriptionTransition>,
             Option<SubscriptionTransitionReason>,
         ),
-    ) {
-        self.update(path, mutate);
+    ) -> bool {
+        self.update(path, mutate)
     }
 
     fn update(
@@ -386,18 +440,19 @@ impl SubscriptionHealth {
             Option<SubscriptionTransition>,
             Option<SubscriptionTransitionReason>,
         ),
-    ) {
+    ) -> bool {
         let _publish_guard = self.lock_publish();
         let (snapshot, transition, reason) = {
             let mut statuses = self.lock_statuses();
             let status = &mut statuses[path.index()];
             if status.terminal {
-                return;
+                return false;
             }
             let (transition, reason) = mutate(status);
-            (status.snapshot(), transition, reason)
+            (status.snapshot(Instant::now()), transition, reason)
         };
         self.publish(path, snapshot, transition, reason);
+        true
     }
 
     fn publish(
@@ -464,6 +519,28 @@ fn publish_path_gauges(path: SubscriptionPath, snapshot: SubscriptionPathSnapsho
         )
         .set(timestamp as f64);
     }
+    if let Some(duration) = snapshot.last_readiness_duration {
+        metrics::gauge!(
+            "buzz_redis_subscription_last_readiness_duration_seconds",
+            "path" => path.as_str(),
+        )
+        .set(duration.as_secs_f64());
+    }
+    metrics::gauge!(
+        "buzz_redis_subscription_not_ready_duration_seconds",
+        "path" => path.as_str(),
+    )
+    .set(snapshot.not_ready_duration.as_secs_f64());
+    metrics::gauge!(
+        "buzz_redis_subscription_state_duration_seconds",
+        "path" => path.as_str(),
+    )
+    .set(snapshot.state_duration.as_secs_f64());
+    metrics::gauge!(
+        "buzz_redis_subscription_consecutive_failures",
+        "path" => path.as_str(),
+    )
+    .set(snapshot.consecutive_failures as f64);
 }
 
 fn publish_aggregate_gauges(snapshots: &[SubscriptionPathSnapshot; REQUIRED_PATH_COUNT]) {
@@ -531,6 +608,47 @@ mod tests {
             health.snapshot(SubscriptionPath::Cache).state,
             SubscriptionPathState::Failed
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_duration_includes_retries_and_resets_after_recovery() {
+        let health = SubscriptionHealth::new();
+        health.consumer_attached(SubscriptionPath::Event);
+        health.connecting(SubscriptionPath::Event);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        health.reconnecting(SubscriptionPath::Event, SubscriptionTransitionReason::Dial);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        health.connecting(SubscriptionPath::Event);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        health.network_ready(SubscriptionPath::Event);
+
+        let initial = health.snapshot(SubscriptionPath::Event);
+        assert_eq!(
+            initial.last_readiness_duration,
+            Some(Duration::from_secs(9))
+        );
+        assert_eq!(initial.not_ready_duration, Duration::ZERO);
+        assert_eq!(initial.consecutive_failures, 0);
+
+        health.reconnecting(
+            SubscriptionPath::Event,
+            SubscriptionTransitionReason::StreamClosed,
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let recovering = health.snapshot(SubscriptionPath::Event);
+        assert_eq!(recovering.not_ready_duration, Duration::from_secs(5));
+        assert_eq!(recovering.state_duration, Duration::from_secs(5));
+        assert_eq!(recovering.consecutive_failures, 1);
+
+        health.connecting(SubscriptionPath::Event);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        health.network_ready(SubscriptionPath::Event);
+        let recovered = health.snapshot(SubscriptionPath::Event);
+        assert_eq!(
+            recovered.last_readiness_duration,
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(recovered.consecutive_failures, 0);
     }
 
     #[tokio::test]

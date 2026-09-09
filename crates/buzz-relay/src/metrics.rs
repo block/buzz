@@ -269,6 +269,29 @@ pub(crate) fn describe_redis_subscription_metrics() {
         metrics::Unit::Seconds,
         "Unix timestamp of the latest completed consumer-plus-Redis subscription handshake"
     );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_last_readiness_duration_seconds",
+        metrics::Unit::Seconds,
+        "Seconds spent continuously not ready before the latest completed end-to-end subscription handshake"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_not_ready_duration_seconds",
+        metrics::Unit::Seconds,
+        "Seconds spent continuously outside ready, or zero while the subscription path is ready"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_state_duration_seconds",
+        metrics::Unit::Seconds,
+        "Seconds spent in the current bounded subscription path state"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_consecutive_failures",
+        "Consecutive connection or subscription failures since the path was last ready"
+    );
+    metrics::describe_counter!(
+        "buzz_redis_subscription_attempts_total",
+        "Redis connection and subscription attempts by required path"
+    );
     metrics::describe_counter!(
         "buzz_redis_subscription_transitions_total",
         "Redis subscription path transitions by path, bounded transition, and bounded reason"
@@ -380,6 +403,7 @@ mod contract_tests {
             let health = SubscriptionHealth::new();
             for path in SubscriptionPath::ALL {
                 health.consumer_attached(path);
+                health.connecting(path);
                 health.network_ready(path);
             }
             health.refresh_metrics();
@@ -390,6 +414,13 @@ mod contract_tests {
         assert!(
             scrape.contains("# TYPE buzz_redis_subscription_last_ready_timestamp_seconds gauge")
         );
+        assert!(
+            scrape.contains("# TYPE buzz_redis_subscription_last_readiness_duration_seconds gauge")
+        );
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_not_ready_duration_seconds gauge"));
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_state_duration_seconds gauge"));
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_consecutive_failures gauge"));
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_attempts_total counter"));
         assert!(scrape.contains("# TYPE buzz_redis_subscription_transitions_total counter"));
         assert!(scrape.contains("# TYPE buzz_redis_subscription_paths_ready gauge"));
         assert!(scrape.contains("# TYPE buzz_redis_subscription_all_ready gauge"));
@@ -415,6 +446,22 @@ mod contract_tests {
             line.starts_with("buzz_redis_subscription_last_ready_timestamp_seconds{")
         }) {
             assert_eq!(label_keys(line), BTreeSet::from(["path"]));
+        }
+        for prefix in [
+            "buzz_redis_subscription_last_readiness_duration_seconds{",
+            "buzz_redis_subscription_not_ready_duration_seconds{",
+            "buzz_redis_subscription_state_duration_seconds{",
+            "buzz_redis_subscription_consecutive_failures{",
+            "buzz_redis_subscription_attempts_total{",
+        ] {
+            let lines = scrape
+                .lines()
+                .filter(|line| line.starts_with(prefix))
+                .collect::<Vec<_>>();
+            assert_eq!(lines.len(), 3, "unexpected series for {prefix}:\n{scrape}");
+            for line in lines {
+                assert_eq!(label_keys(line), BTreeSet::from(["path"]));
+            }
         }
         for line in scrape
             .lines()

@@ -125,9 +125,8 @@ pub async fn run_cache_invalidation_subscriber_until_cancelled(
     health: Arc<SubscriptionHealth>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
-    health.connecting(SubscriptionPath::Cache);
-
     loop {
+        health.connecting(SubscriptionPath::Cache);
         let attempt = connect_and_subscribe(&redis_url, &broadcast_tx, &health);
         let result = tokio::select! {
             () = cancel.cancelled() => return,

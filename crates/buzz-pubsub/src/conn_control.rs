@@ -115,9 +115,8 @@ pub async fn run_conn_control_subscriber_until_cancelled(
     health: Arc<SubscriptionHealth>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
-    health.connecting(SubscriptionPath::ConnectionControl);
-
     loop {
+        health.connecting(SubscriptionPath::ConnectionControl);
         let attempt = connect_and_subscribe(&redis_url, &broadcast_tx, &health);
         let result = tokio::select! {
             () = cancel.cancelled() => return,
