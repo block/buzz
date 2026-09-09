@@ -30,9 +30,13 @@ class CorpusTests(unittest.TestCase):
             'missing expected step': lambda d: d['cases'][0]['expected'].pop(),
             'ID corruption': lambda d: d['events']['policy']['event'].update(id='f' * 64),
             'shape expectation lie': lambda d: d['events']['unknown-tag'].update(shape=True),
+            'non-boolean download durability': lambda d: d['cases'][0]['external']['downloads'][0].update(immutable='false'),
+            'non-boolean Tailnet flag': lambda d: d['cases'][0]['external']['downloads'][0].update(tailnet=None),
+            'non-boolean ephemeral flag': lambda d: d['cases'][0]['external']['downloads'][0].update(ephemeral=123),
             'missing external facts': lambda d: d['cases'][0]['external'].pop('downloads'),
             'missing scenario coverage': lambda d: [c.update(coverage=[]) for c in d['cases']],
             'unmarked production identity data': lambda d: d['provenance'].update(test_only=False),
+            'conflicting permutation oracle': lambda d: next(c for c in d['cases'] if c['name'] == 'late-handoff-delivery')['expected'][-1].update(projection={'handoff': 'incorrect'}),
             'invalid outcome': lambda d: d['cases'][0]['expected'][0].update(outcome='maybe'),
         }
         for label, mutate in mutations.items():

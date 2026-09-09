@@ -238,7 +238,9 @@ Comments, invalid events, OA tags and replays do not reset stale time.
 
 ## issue-state and the existing assignment wire
 
-Enrollment content: `{state:"triage"}`. Backlog: state plus `triage` ID.
+Enrollment content: `{state:"triage"}`. Backlog: state plus `triage` ID;
+only Owner or coordinator may sign backlog (the accepting triage action alone
+does not grant the triage delegate authority to sign a state record).
 Ready: state plus `stream`, `assignment` (ID or null), `update` (latest text ID),
 and `rework` (rejected verdict ID or null). In-development: state, stream,
 assignment (non-null). Implemented adds commit, tests and remote_readback.
@@ -392,11 +394,20 @@ readback attesting immutable Tailnet availability. Other platforms use method
 and Windows must explicitly state unsigned status in human-readable text.
 Ephemeral CI artifact URLs alone fail `durability` even if hashes match.
 
-Handoffs form a previous chain per set. A later handoff requires all verdict slots
-of the old handoff still empty; after any valid verdict a new handoff in that set
-is forbidden (`handoff-locked`). Before verdicts, a new handoff may select another
-allowed human or corrected artifacts, but old handoff verdicts reject `old-handoff`.
+Handoffs form a previous chain per set. Evaluate supersession against the complete
+known history, never arrival order: an otherwise valid verdict on the old handoff
+with created_at <= the proposed successor's created_at prevents that successor
+(`handoff-locked`). Equal timestamps keep the verdict and the existing handoff;
+this is a cutoff rule, not selection between competing handoff heads. If no such
+verdict exists, the successor may select another allowed human or corrected
+artifacts. A verdict referring to the old handoff with created_at strictly after
+that valid successor rejects `old-handoff`. Recompute both records if one arrives
+late: retract the invalid derived projection and expose the reason while retaining
+both signed events. A fork of otherwise valid handoff successors remains conflict,
+not a timestamp winner. A conflicted verdict slot also prevents supersession.
 New artifacts never inherit any verdict, even when their bytes happen to match.
+As with policy cutoffs, timestamps do not prove real-world chronology; Host current
+canonical readback and role checks still gate any side effects.
 
 ## member-verdict
 

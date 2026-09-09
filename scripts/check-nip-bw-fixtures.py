@@ -27,6 +27,7 @@ COVERAGE = {
     'wrong-tester', 'foreign-verdict', 'old-verdict', 'partial-reject',
     'resolved-sibling', 'rework-new-set', 'new-artifact-no-inheritance',
     'attestation-preserved', 'attestation-negative', 'set-failed', 'set-aborted',
+    'handoff-order-convergence', 'handoff-equal-time', 'backlog-role',
 }
 OUTCOMES = {'accept', 'reject', 'pending', 'conflict', 'replay', 'ignore'}
 STAGES = {'envelope', 'id', 'signature', 'shape', 'attestation', 'references',
@@ -211,10 +212,16 @@ def validate(data):
             valid_shape = False
         require(valid_shape == item['shape'], f'{label}: shape expectation mismatch')
     names, coverage, used = set(), set(), set()
+    permutation_projections = {}
     for case in data['cases']:
         require(set(case) == {'name', 'coverage', 'mode', 'now', 'trust', 'external', 'input', 'expected'}, 'case keys')
         require(case['name'] not in names, 'duplicate case name')
         names.add(case['name'])
+        permutation_key = compact([sorted(case['input']), case['now'], case['trust'], case['external']])
+        projection = case['expected'][-1]['projection'] if case['expected'] else None
+        if permutation_key in permutation_projections:
+            require(permutation_projections[permutation_key] == projection, 'permutation end projections differ')
+        permutation_projections[permutation_key] = projection
         coverage.update(case['coverage'])
         require(case['mode'] in ('crypto', 'semantic'), 'case mode')
         check_type(case['now'], 'time', data)
@@ -251,6 +258,8 @@ def validate(data):
         for download in case['external']['downloads']:
             require(set(download) == {'url', 'bytes_hex', 'immutable', 'tailnet', 'ephemeral'}, 'download keys')
             check_type(download['url'], 'url', data)
+            for flag in ('immutable', 'tailnet', 'ephemeral'):
+                check_type(download[flag], 'bool', data)
             require(matches('(?:[0-9a-f]{2})*', download['bytes_hex']), 'download bytes')
     required = COVERAGE | {f'{r}-{polarity}' for r in RECORDS | {'artifact'} for polarity in ('positive', 'negative')}
     require(required <= coverage, f'missing coverage: {sorted(required - coverage)}')
