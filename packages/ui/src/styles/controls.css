@@ -6,7 +6,7 @@
     @apply text-body;
     width: 100%;
     min-height: var(--control-md);
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--border-interactive);
     border-radius: var(--radius-control);
     padding: var(--space-control-gap) var(--space-control-inset);
     background: var(--bg-panel);
@@ -50,7 +50,7 @@
     justify-content: center;
     width: 1.25rem;
     height: 1.25rem;
-    border: 1px solid var(--text-tertiary);
+    border: 1px solid var(--border-interactive);
     border-radius: 0.375rem;
     background: var(--bg-panel);
     flex-shrink: 0;
@@ -83,7 +83,7 @@
     height: 1.625rem;
     border-radius: var(--radius-pill);
     padding: 0.1875rem;
-    background: var(--border-primary);
+    background: var(--border-interactive);
     border: 0;
     cursor: pointer;
   }

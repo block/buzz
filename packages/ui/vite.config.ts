@@ -1,5 +1,15 @@
+import { copyFileSync } from "node:fs";
 import { defineConfig } from "vite";
 export default defineConfig({
+  plugins: [
+    {
+      name: "license-notices",
+      closeBundle() {
+        copyFileSync("THIRD_PARTY_NOTICES.md", "dist/THIRD_PARTY_NOTICES.md");
+        copyFileSync("../../LICENSE", "dist/LICENSE");
+      },
+    },
+  ],
   build: {
     lib: {
       entry: "src/index.ts",

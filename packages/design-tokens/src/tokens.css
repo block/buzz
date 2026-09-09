@@ -205,6 +205,7 @@
   --text-disabled: var(--neutral-8);
 
   --border-primary: var(--neutral-7);
+  --border-interactive: var(--neutral-9);
   --border-secondary: var(--neutral-6);
   --border-tertiary: var(--neutral-5);
 
@@ -341,6 +342,7 @@
      colour and draw every hairline at near-black. It did exactly that until
      these three lines existed. */
   --border-color-primary: var(--border-primary);
+  --border-color-interactive: var(--border-interactive);
   --border-color-secondary: var(--border-secondary);
   --border-color-tertiary: var(--border-tertiary);
 

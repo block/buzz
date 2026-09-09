@@ -1,3 +1,4 @@
+import "../catalog/catalog.css";
 import { Link, Outlet } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 
@@ -31,7 +32,11 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   },
   {
     heading: "Components",
-    items: [],
+    items: [
+      ["All components", "/design/components"],
+      ["Compositions", "/design/compositions"],
+      ["Open-source guide", "/design/open-source"],
+    ],
   },
 ];
 
@@ -128,7 +133,7 @@ export function DesignSystemLayout() {
       </nav>
 
       <main className="min-w-0 flex-1 px-6 py-10 sm:px-10 lg:px-16">
-        <div className="mx-auto max-w-3xl">
+        <div className="mx-auto max-w-6xl">
           <Outlet />
         </div>
       </main>

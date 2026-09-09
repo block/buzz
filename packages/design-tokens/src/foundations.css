@@ -28,5 +28,10 @@
   --press-scale: 0.97;
 }
 @media (prefers-reduced-motion: reduce) {
-  :root { --duration-state: 0ms; --duration-enter: 0ms; --duration-exit: 0ms; --press-scale: 1; }
+  :root {
+    --duration-state: 0ms;
+    --duration-enter: 0ms;
+    --duration-exit: 0ms;
+    --press-scale: 1;
+  }
 }

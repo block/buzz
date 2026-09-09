@@ -1,0 +1,31 @@
+# Design-system validation
+
+Use the repository Hermit environment. The catalog runs independently of Tauri,
+so it needs no mock native bridge or live relay.
+
+- `pnpm check` checks formatting, both source layers' typography, both modes'
+  APCA text pairings, essential-control boundary contrast, generated CSS freshness,
+  compiled Tailwind role mappings, and generated-response validation/rendering.
+- `pnpm test:e2e` builds fresh production output, starts a dedicated preview server
+  on 5189, and runs Chromium. It refuses to reuse an existing server.
+- `pnpm exec playwright test` reuses an already-built `dist` for a focused rerun.
+  Rebuild after any source change. `pnpm exec playwright test --grep <name>` narrows
+  a regression without replacing the full final pass.
+
+Browser coverage binds the actual production catalog: all 54 examples, axe ARIA
+checks in both modes, no external runtime requests, preserved loading labels,
+checkbox and switch keyboard activation, dialog focus trap and return, selection,
+command dispatch, form validation, multiline input, tabs, manual carousel,
+keyboard resizing, filtering recovery, generated-response actions/streaming/error
+recovery, reduced motion, and overflow at 390/768/1440px.
+
+Axe's WCAG text-color rule is disabled because DESIGN.md deliberately uses APCA;
+`check:contrast` is the required independent contrast gate. Automated accessibility
+checks supplement manual keyboard and visual inspection; they do not certify every
+screen-reader/browser combination.
+
+Screenshots are generated under `test-results/`. Every explicit capture uses the
+repository's `waitForAnimations` helper. Overview light/dark and composed examples
+are different states; compare hashes before including images in a PR. Use the root
+`scripts/post-screenshots.sh` workflow for PR image hosting. Do not commit reports,
+traces, or screenshots to the source branch.

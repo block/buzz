@@ -15,7 +15,8 @@
   },
   "scripts": {
     "build": "vite build && tsc --emitDeclarationOnly",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",

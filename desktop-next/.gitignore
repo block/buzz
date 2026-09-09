@@ -3,3 +3,6 @@ dist
 *.log
 .DS_Store
 src/app/routeTree.gen.ts
+
+test-results
+playwright-report

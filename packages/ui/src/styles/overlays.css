@@ -150,3 +150,10 @@
     max-width: 18rem;
   }
 }
+@layer components {
+  .bui-popup[data-ending-style],
+  .bui-popover[data-ending-style],
+  .bui-backdrop[data-ending-style] {
+    transition-duration: var(--duration-exit);
+  }
+}

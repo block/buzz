@@ -66,3 +66,21 @@ or proprietary BlockUI package compatibility is implied.
 
 See `../../desktop-next/OPEN_SOURCE.md` for provenance and `THIRD_PARTY_NOTICES.md`
 for upstream notices. New source is covered by the repository's Apache-2.0 license.
+
+## Generated responses
+
+`GeneratedResponse` accepts unknown input and validates it before rendering. The
+version 1 schema supports text, notices, metrics, task lists, tables, and action
+lists. It caps serialized input at 64,000 characters, 20 blocks, 30 tasks per list,
+50 table rows, 8 columns, and 6 actions per action list. IDs must be unique in their
+scope, and action IDs are unique across the snapshot. Unknown fields and types fail.
+
+The schema accepts no HTML, URLs, arbitrary styles, or component names. Text is
+rendered through React escaping. The host supplies an own-property action allowlist;
+unknown actions stay disabled. Rendering never dispatches an action. `state="streaming"`
+and `pendingAction` prevent activation while a snapshot or request is in flight.
+Invalid input renders an error and an optional host-provided retry callback.
+
+The host owns streaming assembly, action authorization, persistence, retries, and
+network errors. Pass a new immutable complete snapshot when it changes. The renderer
+is a presentation boundary, not an agent execution engine or an authorization system.

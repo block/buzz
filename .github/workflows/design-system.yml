@@ -17,3 +17,11 @@ jobs:
       - run: pnpm install --filter buzz-desktop-next... --frozen-lockfile
       - run: pnpm --filter buzz-desktop-next check
       - run: pnpm --filter buzz-desktop-next build
+      - run: pnpm exec biome check packages/ui packages/design-tokens
+      - run: pnpm --filter buzz-desktop-next exec playwright install --with-deps chromium
+      - run: pnpm --filter buzz-desktop-next exec playwright test
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: buzz-design-system
+          path: desktop-next/dist
+          retention-days: 14

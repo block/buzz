@@ -148,3 +148,9 @@
     text-align: center;
   }
 }
+
+@layer components {
+  .bui-toast[data-limited] {
+    display: none;
+  }
+}
