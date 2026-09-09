@@ -12,6 +12,7 @@ class _Session extends PolicySession {
   final String authority;
   void Function(NostrEvent)? changed;
   void Function(RelaySubscriptionStatus)? status;
+  void Function(String)? terminal;
   int closed = 0;
   int attempts = 0;
   int failures = 0;
@@ -32,6 +33,7 @@ class _Session extends PolicySession {
   }) async {
     attempts++;
     if (attempts <= failures) throw StateError('establishment unavailable');
+    terminal = onClosed;
     subscription = filter;
     changed = onEvent;
     status = onStatusChanged;
@@ -82,6 +84,7 @@ void main() {
       final c = container(session);
       addTearDown(c.dispose);
       final entries = await c.read(agentDirectoryProvider.future);
+      expect(session.subscription!.kinds, contains(39002));
       expect(entries.single.pubkey, agent.public);
       expect(entries.single.channelIds, isEmpty);
       final choices = buildMentionCandidates(
@@ -141,41 +144,62 @@ void main() {
     },
   );
 
-  test(
+  testWidgets(
     'live ownership changes and recovered subscription rebuild current directory',
-    () async {
+    (tester) async {
       final events = [owned, policy];
       final session = _Session(events, relay.public);
       final c = container(session);
       expect((await c.read(agentDirectoryProvider.future)).length, 1);
       events.remove(policy);
       session.changed!(policy);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(await c.read(agentDirectoryProvider.future), isEmpty);
       events.add(policy);
-      session.status!(RelaySubscriptionStatus.ready);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      final retiredClose = session.terminal!;
+      retiredClose('restricted: terminal');
+      await tester.pump(const Duration(milliseconds: 150));
+      await expectLater(
+        c.read(agentDirectoryProvider.future),
+        throwsStateError,
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(session.attempts, 2);
+      retiredClose('late duplicate'); // cannot retire the replacement
       expect((await c.read(agentDirectoryProvider.future)).length, 1);
+      session.terminal!('restricted: again');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(session.attempts, 3);
+      expect((await c.read(agentDirectoryProvider.future)).length, 1);
+      session.terminal!('restricted: exhausted');
+      await tester.pump(const Duration(seconds: 2));
+      expect(session.attempts, 3);
+      await expectLater(
+        c.read(agentDirectoryProvider.future),
+        throwsStateError,
+      );
       c.dispose();
-      expect(session.closed, 1);
+      expect(session.closed, 3);
       session.changed!(policy); // late events cannot invalidate a retired scope
     },
   );
 
-  test(
+  testWidgets(
     'failed establishment recovers while connected; coordinate delete refreshes',
-    () async {
+    (tester) async {
       final events = [owned, policy];
       final session = _Session(events, relay.public)..failures = 1;
       final c = container(session);
       addTearDown(c.dispose);
       await c.read(agentDirectoryProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       await expectLater(
         c.read(agentDirectoryProvider.future),
         throwsStateError,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
       expect(session.attempts, 2);
       expect((await c.read(agentDirectoryProvider.future)).length, 1);
       final deny = signed(
@@ -189,7 +213,7 @@ void main() {
       );
       events.add(deny);
       session.deliver(deny);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(
         (await c.read(agentDirectoryProvider.future)).single.respondTo,
         'nobody',
@@ -214,28 +238,30 @@ void main() {
           ],
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(
         (await c.read(agentDirectoryProvider.future)).single.respondTo,
         'nobody',
       );
       session.deliver(deletion);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(await c.read(agentDirectoryProvider.future), isEmpty);
       session.status!(RelaySubscriptionStatus.ready);
       session.deliver(deletion); // replay remains removed after reconnect
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(await c.read(agentDirectoryProvider.future), isEmpty);
     },
   );
 
-  test(
+  testWidgets(
     'establishment retries are bounded and retired scopes cannot retry',
-    () async {
+    (tester) async {
       final session = _Session([owned, policy], relay.public)..failures = 99;
       final c = container(session);
       await c.read(agentDirectoryProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 150));
       expect(session.attempts, 3);
       await expectLater(
         c.read(agentDirectoryProvider.future),
@@ -246,7 +272,7 @@ void main() {
       final c2 = container(retired);
       await c2.read(agentDirectoryProvider.future);
       c2.dispose();
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
       expect(retired.attempts, 1);
     },
   );

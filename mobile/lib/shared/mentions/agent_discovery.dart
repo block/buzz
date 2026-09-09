@@ -82,6 +82,25 @@ class _AgentDirectoryUpdates extends Notifier<int> {
       Future<void> subscribe() async {
         if (disposed) return;
         attempts++;
+        var active = true;
+        bool current() => !disposed && active;
+        void lost(Object error) {
+          if (!current()) return;
+          active = false;
+          unsubscribe?.call();
+          unsubscribe = null;
+          failure = error;
+          changed();
+          // One budget for establishment and terminal closure per generation.
+          // Exhaustion remains visible until session/account rebuild.
+          if (attempts < 3) {
+            retry = Timer(Duration(milliseconds: 250 * attempts), () {
+              retry = null;
+              unawaited(subscribe());
+            });
+          }
+        }
+
         try {
           final close = await session.subscribeWithStatus(
             NostrFilter(
@@ -90,34 +109,24 @@ class _AgentDirectoryUpdates extends Notifier<int> {
               since: DateTime.now().millisecondsSinceEpoch ~/ 1000,
             ),
             (event) {
+              if (!current()) return;
               if (event.kind == 5 && !_isAgentCoordinateDeletion(event)) return;
               changed();
             },
-            onClosed: (_) => changed(),
+            onClosed: (message) => lost(StateError(message)),
             onStatusChanged: (status) {
-              if (disposed) return;
+              if (!current()) return;
               if (status == RelaySubscriptionStatus.ready) failure = null;
               changed();
             },
           );
-          if (disposed) {
+          if (!current()) {
             close();
           } else {
             unsubscribe = close;
           }
         } catch (error) {
-          if (disposed) return;
-          failure = error;
-          changed();
-          // Establishment can fail before the session installs status callbacks.
-          // Three attempts per session generation; exhausted failure stays
-          // visible to directory readers until reconnect/rebuild permits retry.
-          if (attempts < 3) {
-            retry = Timer(Duration(milliseconds: 250 * attempts), () {
-              retry = null;
-              unawaited(subscribe());
-            });
-          }
+          lost(error);
         }
       }
 

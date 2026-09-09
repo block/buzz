@@ -47,7 +47,7 @@ class PolicySession extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    expect(filters.length, lessThanOrEqualTo(10));
+    expectSync(filters.length, lessThanOrEqualTo(10));
     queries.addAll(filters);
     if (failPolicy && filters.any((f) => f.kinds.contains(30177))) {
       throw StateError('policy read failed');

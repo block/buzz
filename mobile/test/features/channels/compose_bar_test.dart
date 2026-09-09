@@ -30,6 +30,12 @@ import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../shared/mentions/agent_policy_test.dart'
+    show PolicySession, signed;
+import '../../shared/crypto/nip_oa_test.dart' show authTag, profile;
+
+part 'discovery_lifecycle_tests.dart';
+
 final _pngBytes = Uint8List.fromList([
   0x89,
   0x50,
@@ -174,6 +180,7 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  RelaySessionNotifier? discoverySession,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
@@ -210,7 +217,12 @@ Widget _buildComposeBar({
       channelMembersProvider(
         'channel-1',
       ).overrideWith((ref) => membersFuture ?? Future.value(members)),
-      agentDirectoryProvider.overrideWith((ref) async => relayAgents),
+      if (discoverySession == null)
+        agentDirectoryProvider.overrideWith((ref) async => relayAgents),
+      if (discoverySession != null)
+        relaySessionProvider.overrideWith(() => discoverySession),
+      if (discoverySession != null)
+        myPubkeyProvider.overrideWithValue(currentPubkey),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -668,6 +680,7 @@ void main() {
     _setMockMediaUploadPlatformHandler(null);
   });
 
+  discoveryLifecycleTests();
   group('ComposeBar', () {
     testWidgets('starts compact and grows to the full-width composer', (
       tester,
