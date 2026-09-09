@@ -704,7 +704,7 @@
     border-color: var(--neutral-7);
   }
 
-  .code-input-control:focus {
+  html[data-keyboard-navigation] .code-input-control:focus-visible {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
