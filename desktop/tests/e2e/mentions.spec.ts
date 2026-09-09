@@ -2343,9 +2343,7 @@ test("navigating to mention Options during a held selection inserts nothing late
   await expect(input).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(
-    page
-      .getByTestId("message-composer")
-      .getByTestId("mention-options-trigger"),
+    page.getByTestId("message-composer").getByTestId("mention-options-trigger"),
   ).toBeFocused();
 
   // Release the held authority response and settle the downstream DOM.
@@ -2437,9 +2435,9 @@ test("navigating away from the mention row pin during its held revalidation pins
   await holdMentionGateCommand(page, "revalidate_relay_agents");
   await page.keyboard.press("Enter");
   await waitForMentionGate(page);
-  await expect(
-    page.getByTestId("composer-address-lock-status"),
-  ).toContainText("Checking access");
+  await expect(page.getByTestId("composer-address-lock-status")).toContainText(
+    "Checking access",
+  );
 
   // Native Shift+Tab from the pin — the editor's key handler sees no overlay
   // events — must really move focus off the pin control.
@@ -2510,120 +2508,136 @@ test("navigating away from the mention row pin during its held revalidation pins
       `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
     ),
   ).toBeVisible();
-  await expect(
-    page.getByTestId("composer-address-lock-status"),
-  ).toContainText("Automatically mentioning quinn");
+  await expect(page.getByTestId("composer-address-lock-status")).toContainText(
+    "Automatically mentioning quinn",
+  );
   await expect(input).toHaveText("@quinn ");
   await expect(input.locator(".agent-mention-highlight")).toHaveText("quinn");
 });
 
-test("editing and restoring the draft during a held mention selection inserts nothing late", async ({
-  page,
-}) => {
-  await installMockBridge(page, {
-    relayAgents: [
-      {
-        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
-        name: "quinn",
-        respondTo: "allowlist",
-        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
-        channelNames: ["general"],
-      },
-    ],
-  });
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-
-  const composer = page.getByTestId("message-composer");
-  const input = page.getByTestId("message-input");
-  // Read-only DOM offsets: no editor state or browser selection is changed.
-  const readCaret = () =>
-    input.evaluate((element) => {
-      const selection = window.getSelection();
-      if (
-        !selection?.anchorNode ||
-        !selection.focusNode ||
-        !element.contains(selection.anchorNode) ||
-        !element.contains(selection.focusNode)
-      ) {
-        return null;
-      }
-      const offset = (node: Node, position: number) => {
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        range.setEnd(node, position);
-        return range.toString().length;
-      };
-      return {
-        anchor: offset(selection.anchorNode, selection.anchorOffset),
-        focus: offset(selection.focusNode, selection.focusOffset),
-        collapsed: selection.isCollapsed,
-      };
+for (const change of ["draft", "selection range"] as const) {
+  test(`editing and restoring the ${change} during a held mention selection inserts nothing late`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      relayAgents: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          name: "quinn",
+          respondTo: "allowlist",
+          respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+          channelNames: ["general"],
+        },
+      ],
     });
-  await input.fill("@quinn");
-  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
-  await expect(quinnRow).toBeVisible();
-  await expect(quinnRow).toBeEnabled();
-  await expect(input).toBeFocused();
-  const originalCaret = await readCaret();
-  expect(originalCaret).toEqual({ anchor: 6, focus: 6, collapsed: true });
-  const baselineCommands = await readCommandLog(page);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  await holdMentionGateCommand(page, "revalidate_relay_agents");
-  await quinnRow.click();
-  await waitForMentionGate(page);
-  const status = page.getByTestId("composer-address-lock-status");
-  await expect(status).toContainText("Checking access");
-  await expect(input).toBeFocused();
-  await expect.poll(readCaret).toEqual(originalCaret);
+    const composer = page.getByTestId("message-composer");
+    const input = page.getByTestId("message-input");
+    // Read-only DOM offsets: no editor state or browser selection is changed.
+    const readCaret = () =>
+      input.evaluate((element) => {
+        const selection = window.getSelection();
+        if (
+          !selection?.anchorNode ||
+          !selection.focusNode ||
+          !element.contains(selection.anchorNode) ||
+          !element.contains(selection.focusNode)
+        ) {
+          return null;
+        }
+        const offset = (node: Node, position: number) => {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          range.setEnd(node, position);
+          return range.toString().length;
+        };
+        return {
+          anchor: offset(selection.anchorNode, selection.anchorOffset),
+          focus: offset(selection.focusNode, selection.focusOffset),
+          collapsed: selection.isCollapsed,
+        };
+      });
+    await input.fill("@quinn");
+    const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+    await expect(quinnRow).toBeVisible();
+    await expect(quinnRow).toBeEnabled();
+    await expect(input).toBeFocused();
+    const originalCaret = await readCaret();
+    expect(originalCaret).toEqual({ anchor: 6, focus: 6, collapsed: true });
+    const baselineCommands = await readCommandLog(page);
 
-  // Real edits invalidate the pending operation even when text AND caret
-  // return to their original values before the allowed response arrives.
-  await page.keyboard.press("Backspace");
-  await expect(input).toHaveText("@quin");
-  await expect(input).toBeFocused();
-  await page.keyboard.type("n");
-  await expect(input).toHaveText("@quinn");
-  await expect(input).toBeFocused();
-  await expect.poll(readCaret).toEqual(originalCaret);
+    await holdMentionGateCommand(page, "revalidate_relay_agents");
+    await quinnRow.click();
+    await waitForMentionGate(page);
+    const status = page.getByTestId("composer-address-lock-status");
+    await expect(status).toContainText("Checking access");
+    await expect(input).toBeFocused();
+    await expect.poll(readCaret).toEqual(originalCaret);
 
-  await releaseMentionGate(page);
-  await expect
-    .poll(async () =>
-      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
-    )
-    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
-  // Same downstream settlement window as the adjacent held-gate probes.
-  await page.waitForTimeout(300);
+    if (change === "draft") {
+      // Behavior coverage: text edits also invalidate the query revision.
+      await page.keyboard.press("Backspace");
+      await expect(input).toHaveText("@quin");
+      await expect(input).toBeFocused();
+      await page.keyboard.type("n");
+    } else {
+      // Query snapshots use the selection ANCHOR, not its moving head.
+      // Extend and retract a real native range without changing text/anchor:
+      // query revision cannot mask removal of editor cancellation listeners.
+      await page.keyboard.press("Shift+ArrowLeft");
+      await expect(input).toHaveText("@quinn");
+      await expect(input).toBeFocused();
+      await expect.poll(readCaret).toEqual({
+        anchor: 6,
+        focus: 5,
+        collapsed: false,
+      });
+      await page.keyboard.press("Shift+ArrowRight");
+    }
+    await expect(input).toHaveText("@quinn");
+    await expect(input).toBeFocused();
+    await expect.poll(readCaret).toEqual(originalCaret);
 
-  await expect(input).toBeFocused();
-  await expect(input).toHaveText("@quinn");
-  await expect.poll(readCaret).toEqual(originalCaret);
-  await expect(input.locator(".mention-chip")).toHaveCount(0);
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
-  await expect(
-    composer.getByTestId(
-      `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-  await expect(status).not.toContainText("Checking access");
-  await expect(status).not.toContainText("Automatically mentioning");
-  const settledCommands = await readCommandLog(page);
-  for (const command of [
-    "add_channel_members",
-    "start_managed_agent",
-    "attach_managed_agent",
-    "sync_agents_to_active_huddle",
-    "send_channel_message",
-    "sign_event",
-  ]) {
-    expect(commandCount(settledCommands, command)).toBe(
-      commandCount(baselineCommands, command),
-    );
-  }
-  expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
-});
+    await releaseMentionGate(page);
+    await expect
+      .poll(async () =>
+        commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+      )
+      .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+    // Same downstream settlement window as the adjacent held-gate probes.
+    await page.waitForTimeout(300);
+
+    await expect(input).toBeFocused();
+    await expect(input).toHaveText("@quinn");
+    await expect.poll(readCaret).toEqual(originalCaret);
+    await expect(input.locator(".mention-chip")).toHaveCount(0);
+    await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+    await expect(
+      composer.getByTestId(
+        `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+      ),
+    ).toHaveCount(0);
+    await expect(status).not.toContainText("Checking access");
+    await expect(status).not.toContainText("Automatically mentioning");
+    const settledCommands = await readCommandLog(page);
+    for (const command of [
+      "add_channel_members",
+      "start_managed_agent",
+      "attach_managed_agent",
+      "sync_agents_to_active_huddle",
+      "send_channel_message",
+      "sign_event",
+    ]) {
+      expect(commandCount(settledCommands, command)).toBe(
+        commandCount(baselineCommands, command),
+      );
+    }
+    expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
+  });
+}
 
 test("selected relay agents are invited as bots before sending", async ({
   page,

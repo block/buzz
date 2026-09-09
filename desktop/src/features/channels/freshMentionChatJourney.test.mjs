@@ -239,9 +239,12 @@ function Composer() {
       {
         onKeyDown: (event) => {
           // Only editor events reach this bridge, as in MessageComposer.
-          if (event.key === "Tab" && event.shiftKey &&
-              event.target === richText.editor.view.dom &&
-              focusMentionOptionsTrigger(formRef.current)) {
+          if (
+            event.key === "Tab" &&
+            event.shiftKey &&
+            event.target === richText.editor.view.dom &&
+            focusMentionOptionsTrigger(formRef.current)
+          ) {
             event.preventDefault();
             return;
           }
@@ -258,7 +261,9 @@ function Composer() {
       React.createElement(MentionAutocomplete, {
         composerOwnsFocus: true,
         keepMentionedAgentsPinned: keepPinned,
-        onKeepMentionedAgentsPinnedChange: state.withOptions ? setKeepPinned : undefined,
+        onKeepMentionedAgentsPinnedChange: state.withOptions
+          ? setKeepPinned
+          : undefined,
         isOpen: mention.isMentionOpen,
         isLoading: mention.isMentionLoading,
         suggestions: mention.suggestions,
@@ -495,19 +500,30 @@ for (const mode of ["Enter", "pin"]) {
   test(`navigation: editor ShiftTab abandons ${mode} even after return`, async () => {
     await setup({ owner: OTHER, visible: true, directoryVisible: true });
     let resolve;
-    state.fresh = new Promise((r) => { resolve = r; });
+    state.fresh = new Promise((r) => {
+      resolve = r;
+    });
     await act(async () => {
       richText.editor.view.dom.focus();
       choose(mode);
     });
     unchanged();
     await act(async () => {
-      richText.editor.view.dom.dispatchEvent(new dom.window.KeyboardEvent("keydown", {
-        key: "Tab", shiftKey: true, bubbles: true, cancelable: true,
-      }));
+      richText.editor.view.dom.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
       const trigger = document.querySelector("[data-mention-options-trigger]");
       assert.ok(trigger, "chat Options trigger exists");
-      assert.equal(document.activeElement === trigger, true, "ShiftTab focuses Options");
+      assert.equal(
+        document.activeElement === trigger,
+        true,
+        "ShiftTab focuses Options",
+      );
       richText.editor.view.dom.focus();
     });
     await act(async () => resolve([rawAgent()]));
@@ -521,65 +537,110 @@ for (const shiftKey of [false, true]) {
     test(`navigation: focused pin ${shiftKey ? "ShiftTab" : "Tab"} depart=${depart}`, async () => {
       await setup({ owner: OTHER, visible: true, directoryVisible: true });
       let resolve;
-      state.fresh = new Promise((r) => { resolve = r; });
-      const toggle = document.querySelector(`[data-testid="mention-always-address-${AGENT}"]`);
+      state.fresh = new Promise((r) => {
+        resolve = r;
+      });
+      const toggle = document.querySelector(
+        `[data-testid="mention-always-address-${AGENT}"]`,
+      );
       assert.ok(toggle, "production pin Toggle exists");
       await act(async () => {
         toggle.focus();
-        assert.equal(document.activeElement === toggle, true, "keyboard pin owns focus");
+        assert.equal(
+          document.activeElement === toggle,
+          true,
+          "keyboard pin owns focus",
+        );
         const key = shiftKey ? " " : "Enter";
         const event = new dom.window.KeyboardEvent("keydown", {
-          key, bubbles: true, cancelable: true,
+          key,
+          bubbles: true,
+          cancelable: true,
         });
         toggle.dispatchEvent(event);
-        assert.equal(event.defaultPrevented, false, "overlay activation stays native");
-        assert.equal(state.freshCalls ?? 0, 0, "pin keydown must not select in editor");
+        assert.equal(
+          event.defaultPrevented,
+          false,
+          "overlay activation stays native",
+        );
+        assert.equal(
+          state.freshCalls ?? 0,
+          0,
+          "pin keydown must not select in editor",
+        );
         const release = new dom.window.KeyboardEvent("keyup", {
-          key, bubbles: true, cancelable: true,
+          key,
+          bubbles: true,
+          cancelable: true,
         });
         // JSDOM lacks native activation: Enter clicks on keydown, Space on keyup.
         if (key === " ") toggle.dispatchEvent(release);
-        if (!event.defaultPrevented && !release.defaultPrevented) toggle.click();
+        if (!event.defaultPrevented && !release.defaultPrevented)
+          toggle.click();
       });
       unchanged();
       assert.equal(state.freshCalls, 1);
-      if (depart) await act(async () => {
-        const event = new dom.window.KeyboardEvent("keydown", {
-          key: "Tab", shiftKey, bubbles: true, cancelable: true,
+      if (depart)
+        await act(async () => {
+          const event = new dom.window.KeyboardEvent("keydown", {
+            key: "Tab",
+            shiftKey,
+            bubbles: true,
+            cancelable: true,
+          });
+          toggle.dispatchEvent(event);
+          assert.equal(
+            event.defaultPrevented,
+            false,
+            "overlay Tab stays native",
+          );
+          const outside = document.createElement("button");
+          document.body.append(outside);
+          if (!event.defaultPrevented) outside.focus();
+          assert.equal(
+            document.activeElement === outside,
+            true,
+            "Tab departs pin",
+          );
+          toggle.focus();
         });
-        toggle.dispatchEvent(event);
-        assert.equal(event.defaultPrevented, false, "overlay Tab stays native");
-        const outside = document.createElement("button");
-        document.body.append(outside);
-        if (!event.defaultPrevented) outside.focus();
-        assert.equal(document.activeElement === outside, true, "Tab departs pin");
-        toggle.focus();
-      });
       await act(async () => resolve([rawAgent()]));
       await settle();
       if (depart) {
         unchanged();
         assert.equal(picker.announcement, "");
       } else {
-        assert.deepEqual(effects.filter(([kind]) => kind === "promote"), [["promote", AGENT]]);
-        assert.deepEqual(effects.filter(([kind]) => kind === "autoPin"), []);
-        assert.deepEqual(effects.filter(([kind]) => kind === "provenance"), [
-          ["provenance", [{ pubkey: AGENT, prefix: "@Remote Scout " }]],
-        ]);
+        assert.deepEqual(
+          effects.filter(([kind]) => kind === "promote"),
+          [["promote", AGENT]],
+        );
+        assert.deepEqual(
+          effects.filter(([kind]) => kind === "autoPin"),
+          [],
+        );
+        assert.deepEqual(
+          effects.filter(([kind]) => kind === "provenance"),
+          [["provenance", [{ pubkey: AGENT, prefix: "@Remote Scout " }]]],
+        );
         assert.equal(effects.filter(([kind]) => kind === "edit").length, 2);
         assert.deepEqual(getMentionSelectionHistory(VIEWER, CHANNEL), []);
         assert.equal(richText.getPlainTextAndCursor().text, "@Remote Scout ");
-        assert.equal(mention.getDraftMentionRefs("@Remote Scout ")[0]?.pubkey, AGENT);
+        assert.equal(
+          mention.getDraftMentionRefs("@Remote Scout ")[0]?.pubkey,
+          AGENT,
+        );
         // MentionHighlightExtension decorates literal @labels from either path;
         // .mention-chip is not selection provenance. The pin witnesses above
         // distinguish admission paths; verify the prefix is plain document text
         // (useRichTextEditor.replacePlainTextRange), not an embedded mention node.
         assert.deepEqual(richText.editor.getJSON(), {
           type: "doc",
-          content: [{
-            type: "paragraph",
-            content: [{ type: "text", text: "@Remote Scout " }],
-          }],
+          content: [
+            {
+              type: "paragraph",
+              content: [{ type: "text", text: "@Remote Scout " }],
+            },
+          ],
         });
       }
     });
@@ -588,10 +649,16 @@ for (const shiftKey of [false, true]) {
 
 for (const departure of ["window", "no-Options native fallback"]) {
   test(`navigation: ${departure} abandons pending selection after return`, async () => {
-    await setup({ owner: OTHER, visible: true, directoryVisible: true,
-      withOptions: departure !== "no-Options native fallback" });
+    await setup({
+      owner: OTHER,
+      visible: true,
+      directoryVisible: true,
+      withOptions: departure !== "no-Options native fallback",
+    });
     let resolve;
-    state.fresh = new Promise((r) => { resolve = r; });
+    state.fresh = new Promise((r) => {
+      resolve = r;
+    });
     await act(async () => {
       richText.editor.view.dom.focus();
       choose("Enter");
@@ -603,20 +670,38 @@ for (const departure of ["window", "no-Options native fallback"]) {
       if (departure === "window") {
         // Window departure can retain activeElement; dispatch only that boundary.
         dom.window.dispatchEvent(new dom.window.Event("blur"));
-        assert.equal(document.activeElement === editor, true, "window blur retains editor identity");
+        assert.equal(
+          document.activeElement === editor,
+          true,
+          "window blur retains editor identity",
+        );
         dom.window.dispatchEvent(new dom.window.Event("focus"));
       } else {
-        assert.equal(document.querySelector("[data-mention-options-trigger]") === null, true);
+        assert.equal(
+          document.querySelector("[data-mention-options-trigger]") === null,
+          true,
+        );
         const event = new dom.window.KeyboardEvent("keydown", {
-          key: "Tab", shiftKey: true, bubbles: true, cancelable: true,
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
         });
         editor.dispatchEvent(event);
-        assert.equal(event.defaultPrevented, false, "no Options leaves ShiftTab native");
+        assert.equal(
+          event.defaultPrevented,
+          false,
+          "no Options leaves ShiftTab native",
+        );
         // Explicit native Tab default emulation, not a browser tab-order claim.
         const outside = document.createElement("button");
         document.body.append(outside);
         if (!event.defaultPrevented) outside.focus();
-        assert.equal(document.activeElement === outside, true, "native fallback departs editor");
+        assert.equal(
+          document.activeElement === outside,
+          true,
+          "native fallback departs editor",
+        );
         editor.focus();
       }
     });
