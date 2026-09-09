@@ -480,19 +480,11 @@ pub fn spawn_agent_child(
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
-    let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
-        None
-    } else {
-        match resolve_command(effective_mcp_command) {
-            Some(path) => Some(path),
-            None => {
-                eprintln!(
-                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
-                );
-                None
-            }
-        }
-    };
+    let resolved_mcp_command: Option<std::path::PathBuf> = resolve_spawn_mcp_command(
+        record.mcp_command_override.as_deref(),
+        effective_mcp_command,
+        resolve_command,
+    )?;
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
@@ -994,6 +986,58 @@ pub fn start_managed_agent_process(
 
 #[cfg(test)]
 mod test_fixtures;
+
+/// Decide which MCP server command a spawn launches.
+///
+/// Two regimes, and the difference between them is the whole point (HA-290):
+///
+/// * No override — the historical behaviour. The command is derived from the
+///   runtime catalog, and a catalog command that cannot be resolved merely
+///   skips the MCP server: an agent without MCP tools still works, so a missing
+///   optional binary must not block the spawn.
+/// * Explicit override — it wins over the catalog, and an override that cannot
+///   be resolved is a hard error. The override exists to interpose a
+///   capability-enforcing proxy in front of the stock MCP server; falling back
+///   to the catalog default would hand the agent exactly the tool surface the
+///   override was installed to remove. Fail closed, never silently.
+///
+/// Pure over an injected resolver so the decision is testable without a
+/// filesystem or an app handle.
+pub(crate) fn resolve_spawn_mcp_command<F>(
+    mcp_command_override: Option<&str>,
+    catalog_mcp_command: &str,
+    resolve: F,
+) -> Result<Option<std::path::PathBuf>, String>
+where
+    F: Fn(&str) -> Option<std::path::PathBuf>,
+{
+    if let Some(pin) = mcp_command_override {
+        // Present-but-blank is a broken override, not an absent one: the record
+        // says "do not launch the catalog default" and names nothing usable.
+        // Only a missing field (`None`) means "no override".
+        let pin = pin.trim();
+        if pin.is_empty() {
+            return Err("MCP command override is set but empty".to_string());
+        }
+        let path = resolve(pin).ok_or_else(|| missing_command_message(pin, "MCP command override"))?;
+        eprintln!(
+            "buzz-desktop: mcp_command_override={pin:?} (catalog default {catalog_mcp_command:?} bypassed)"
+        );
+        return Ok(Some(path));
+    }
+
+    if catalog_mcp_command.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(match resolve(catalog_mcp_command) {
+        Some(path) => Some(path),
+        None => {
+            eprintln!("buzz-desktop: mcp_command {catalog_mcp_command:?} not found, skipping");
+            None
+        }
+    })
+}
 
 #[cfg(test)]
 mod tests;

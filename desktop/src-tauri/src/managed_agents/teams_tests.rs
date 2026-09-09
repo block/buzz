@@ -174,6 +174,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         acp_command: "buzz-acp".to_string(),
         agent_command: "buzz-agent".to_string(),
         agent_command_override: None,
+        mcp_command_override: None,
         agent_args: vec![],
         mcp_command: String::new(),
         turn_timeout_seconds: 300,

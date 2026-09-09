@@ -74,6 +74,7 @@ mod tests {
             acp_command: String::new(),
             agent_command: String::new(),
             agent_command_override: None,
+            mcp_command_override: None,
             agent_args: vec![],
             mcp_command: String::new(),
             turn_timeout_seconds: 0,

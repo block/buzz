@@ -109,6 +109,7 @@ impl AgentDefinition {
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
+            mcp_command_override: None,
             agent_args: Vec::new(),
             mcp_command: String::new(),
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
@@ -254,6 +255,19 @@ pub struct ManagedAgentRecord {
     /// create-time snapshot.
     #[serde(default)]
     pub agent_command_override: Option<String>,
+    /// Explicit per-instance MCP server pin (HA-290). `None` — the default and
+    /// the state of every pre-existing record — keeps the derived behaviour:
+    /// the effective MCP command comes from the runtime catalog
+    /// (`known_acp_runtime`). When `Some`, this value wins over the catalog and
+    /// is what reaches the harness as `BUZZ_ACP_MCP_COMMAND`.
+    ///
+    /// An override that cannot be resolved FAILS THE SPAWN; it never falls back
+    /// to the catalog default. The override exists to interpose a
+    /// capability-enforcing proxy in front of the stock MCP server, so a silent
+    /// fallback would hand the agent exactly the tool surface the override was
+    /// installed to remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command_override: Option<String>,
     pub agent_args: Vec<String>,
     /// Create-time snapshot of the catalog MCP command. Never read at spawn —
     /// the effective MCP command is always re-derived from the runtime catalog

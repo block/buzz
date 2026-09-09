@@ -799,3 +799,30 @@ fn summary_with_drift_serializes_restart_diff_entries() {
         }]))
     );
 }
+
+#[test]
+fn mcp_command_override_survives_a_store_round_trip() {
+    // HA-290: the override must still be there after the Desktop rewrites
+    // managed-agents.json (it rewrites on every command), or the wrapper would
+    // silently uninstall itself at the next relaunch.
+    let mut record = sample_agent_record();
+    record.mcp_command_override = Some("/opt/hive/capability_wrapper.py".to_string());
+    let round_tripped: ManagedAgentRecord =
+        serde_json::from_str(&serde_json::to_string(&record).expect("serializes"))
+            .expect("re-reads");
+    assert_eq!(
+        round_tripped.mcp_command_override.as_deref(),
+        Some("/opt/hive/capability_wrapper.py")
+    );
+
+    // A record without the override neither fails to load nor grows a null key
+    // in the 147-record store.
+    let plain = sample_agent_record();
+    let json = serde_json::to_string(&plain).expect("serializes");
+    assert!(
+        !json.contains("mcp_command_override"),
+        "an absent override must not add a key to the store"
+    );
+    let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("legacy record loads");
+    assert_eq!(reloaded.mcp_command_override, None);
+}

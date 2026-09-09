@@ -183,3 +183,31 @@ fn reconcile_legacy_team_persona_runtime_files_rewrites_persona_md() {
     let updated = std::fs::read_to_string(persona_path).unwrap();
     assert!(updated.contains("runtime: buzz-agent\n"));
 }
+
+#[test]
+fn reconcile_provider_mcp_commands_preserves_explicit_override() {
+    // HA-290: the per-launch fix-up rewrites the legacy `mcp_command` snapshot
+    // (only when it is stale — empty or the removed `buzz-mcp-server`).
+    // It must not touch `mcp_command_override`, or the wrapper would be
+    // uninstalled on the next app launch without anyone editing anything.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Sakura",
+            "acp_command": "buzz-acp",
+            "agent_command": "buzz-agent",
+            "mcp_command": "buzz-mcp-server",
+            "mcp_command_override": "/opt/hive/capability_wrapper.py"
+        }]),
+    );
+
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
+    assert_eq!(
+        records[0]["mcp_command_override"],
+        "/opt/hive/capability_wrapper.py"
+    );
+}

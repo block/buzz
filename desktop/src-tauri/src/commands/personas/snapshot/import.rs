@@ -609,6 +609,7 @@ pub async fn confirm_agent_snapshot_import(
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
+            mcp_command_override: None,
             agent_args: vec![],
             mcp_command: String::new(),
             turn_timeout_seconds: 0,

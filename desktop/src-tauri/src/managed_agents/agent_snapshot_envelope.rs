@@ -419,6 +419,7 @@ mod tests {
             relay_mesh: None,
             effort_level: None,
             agent_command_override: None,
+            mcp_command_override: None,
             persona_source_version: None,
             provider: None,
         }

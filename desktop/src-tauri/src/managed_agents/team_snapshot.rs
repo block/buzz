@@ -263,6 +263,7 @@ mod tests {
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear
             agent_command_override: None,
+            mcp_command_override: None,
             agent_args: vec![],
             mcp_command: String::new(),
             turn_timeout_seconds: 120,

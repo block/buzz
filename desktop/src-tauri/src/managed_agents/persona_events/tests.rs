@@ -15,6 +15,7 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_command_override: None,
+        mcp_command_override: None,
         agent_args: vec![],
         mcp_command: String::new(),
         turn_timeout_seconds: 320,

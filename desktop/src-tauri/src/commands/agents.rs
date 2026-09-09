@@ -658,6 +658,7 @@ pub async fn create_managed_agent(
                 .to_string(),
             agent_command,
             agent_command_override,
+            mcp_command_override: None,
             agent_args,
             mcp_command,
             // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;

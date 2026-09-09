@@ -169,6 +169,7 @@ fn local_agent() -> ManagedAgentRecord {
         acp_command: "buzz-acp".to_string(),
         agent_command: "goose".to_string(),
         agent_command_override: Some("claude".to_string()),
+        mcp_command_override: None,
         agent_args: vec![],
         mcp_command: "buzz-dev-mcp".to_string(),
         turn_timeout_seconds: 320,

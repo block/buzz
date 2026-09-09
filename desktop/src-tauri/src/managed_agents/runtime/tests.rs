@@ -1245,3 +1245,104 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+// ── resolve_spawn_mcp_command (HA-290) ───────────────────────
+//
+// The bug these controls pin down: the Desktop derived the MCP command from
+// the runtime catalog and wrote BUZZ_ACP_MCP_COMMAND after merging the
+// record's env_vars, so neither `mcp_command` nor an env_vars entry in
+// managed-agents.json could interpose a capability-enforcing proxy — the
+// stock buzz-dev-mcp was launched every time, and a seat whose manifest
+// denies `shell` still received it.
+
+use std::path::PathBuf;
+
+/// Resolver stub: only the listed commands exist.
+fn resolver(existing: &'static [&'static str]) -> impl Fn(&str) -> Option<PathBuf> {
+    move |cmd: &str| {
+        existing
+            .iter()
+            .any(|e| *e == cmd)
+            .then(|| PathBuf::from(format!("/resolved{cmd}")))
+    }
+}
+
+#[test]
+fn no_override_keeps_catalog_default() {
+    let got = super::resolve_spawn_mcp_command(None, "buzz-dev-mcp", resolver(&["buzz-dev-mcp"]))
+        .expect("catalog default must not fail the spawn");
+    assert_eq!(got, Some(PathBuf::from("/resolvedbuzz-dev-mcp")));
+}
+
+#[test]
+fn no_override_and_empty_catalog_yields_no_mcp_server() {
+    let got = super::resolve_spawn_mcp_command(None, "", resolver(&[]))
+        .expect("an agent without an MCP server is legal");
+    assert_eq!(got, None);
+}
+
+#[test]
+fn no_override_with_unresolvable_catalog_skips_instead_of_failing() {
+    // Historical behaviour preserved: a missing optional MCP binary must not
+    // block the spawn.
+    let got = super::resolve_spawn_mcp_command(None, "buzz-dev-mcp", resolver(&[]))
+        .expect("missing catalog command only skips the MCP server");
+    assert_eq!(got, None);
+}
+
+#[test]
+fn explicit_override_wins_over_catalog_default() {
+    let got = super::resolve_spawn_mcp_command(
+        Some("/opt/hive/capability_wrapper.py"),
+        "buzz-dev-mcp",
+        resolver(&["/opt/hive/capability_wrapper.py", "buzz-dev-mcp"]),
+    )
+    .expect("resolvable override is the effective command");
+    assert_eq!(
+        got,
+        Some(PathBuf::from("/resolved/opt/hive/capability_wrapper.py")),
+        "the override, not the catalog default, must reach BUZZ_ACP_MCP_COMMAND"
+    );
+}
+
+#[test]
+fn unresolvable_override_fails_closed_and_never_falls_back_to_catalog() {
+    // The catalog command IS resolvable here: falling back would be the silent
+    // degradation this card exists to prevent.
+    let err = super::resolve_spawn_mcp_command(
+        Some("/opt/hive/missing_wrapper.py"),
+        "buzz-dev-mcp",
+        resolver(&["buzz-dev-mcp"]),
+    )
+    .expect_err("an unusable override must fail the spawn, not degrade it");
+    assert!(
+        err.contains("/opt/hive/missing_wrapper.py"),
+        "the refusal must name the override: {err}"
+    );
+    assert!(
+        err.contains("MCP command override"),
+        "the refusal must name the role: {err}"
+    );
+}
+
+#[test]
+fn blank_override_fails_closed_instead_of_falling_back() {
+    // A record that carries the field but names nothing is a broken override,
+    // not an absent one. Falling back here would launch the stock MCP server
+    // on a seat whose record says not to — the exact bypass this card closes.
+    let err = super::resolve_spawn_mcp_command(
+        Some("   "),
+        "buzz-dev-mcp",
+        resolver(&["buzz-dev-mcp"]),
+    )
+    .expect_err("present-but-blank override must fail the spawn");
+    assert!(err.contains("empty"), "the refusal must say why: {err}");
+}
+
+#[test]
+fn only_a_missing_field_means_no_override() {
+    // The `None` half of the pair above: absent field keeps today's behaviour.
+    let got = super::resolve_spawn_mcp_command(None, "buzz-dev-mcp", resolver(&["buzz-dev-mcp"]))
+        .expect("absent override is not an error");
+    assert_eq!(got, Some(PathBuf::from("/resolvedbuzz-dev-mcp")));
+}

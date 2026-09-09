@@ -190,6 +190,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
         agent_command: String::new(),
         agent_command_override: None,
+        mcp_command_override: None,
         agent_args: vec![],
         mcp_command: String::new(),
         turn_timeout_seconds: 0,

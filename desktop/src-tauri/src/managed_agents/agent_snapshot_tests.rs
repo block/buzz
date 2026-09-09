@@ -23,6 +23,7 @@ fn minimal_record() -> ManagedAgentRecord {
         acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
         agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
         agent_command_override: Some("goose-override".to_string()), // MUST NOT appear
+        mcp_command_override: None,
         agent_args: vec!["--arg".to_string()],         // MUST NOT appear in snapshot
         mcp_command: "mcp-server".to_string(),         // MUST NOT appear in snapshot
         turn_timeout_seconds: 120,                     // deprecated, MUST NOT appear
