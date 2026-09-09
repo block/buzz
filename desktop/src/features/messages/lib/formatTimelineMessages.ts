@@ -49,6 +49,16 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
+function pubkeyToAccentColor(pubkey: string): string {
+  let hash = 0;
+  for (let i = 0; i < pubkey.length; i++) {
+    hash = (hash << 5) - hash + pubkey.charCodeAt(i);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsla(${hue}, 65%, 55%, 0.10)`;
+}
+
 export function isTimelineContentEvent(event: RelayEvent) {
   return (
     event.kind === KIND_STREAM_MESSAGE ||
@@ -508,6 +518,7 @@ export function formatTimelineMessages(
       rootId: thread.rootId,
       depth: getDepth(event),
       accent: currentPubkey === authorPubkey,
+      accentColor: authorPubkey ? pubkeyToAccentColor(authorPubkey) : undefined,
       pending: event.pending,
       edited: edit !== undefined,
       kind: event.kind,

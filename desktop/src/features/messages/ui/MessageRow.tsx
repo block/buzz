@@ -893,6 +893,13 @@ export const MessageRow = React.memo(
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
         >
+          {message.accentColor ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 -z-10 rounded-2xl"
+              style={{ backgroundColor: message.accentColor }}
+            />
+          ) : null}
           {isThreadReplyLayout ? (
             <>
               {avatarGutterNode}
@@ -931,6 +938,7 @@ export const MessageRow = React.memo(
     prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
+    prev.message.accentColor === next.message.accentColor &&
     // The header timestamp and hover gutter both derive from createdAt (the
     // old `time` prop was the same value pre-formatted; this row reads neither).
     prev.message.createdAt === next.message.createdAt &&
