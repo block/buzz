@@ -299,6 +299,8 @@ fn has_system_prompt_support(
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
+    } else if agent_name == "pi-acp" {
+        false // Pi uses an explicit capability, not its protocol version.
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
@@ -311,8 +313,15 @@ fn session_new_system_prompt<'a>(
     protocol_version: u32,
     agent_name: &str,
     prompt: Option<&'a str>,
+    pi_system_prompt_supported: bool,
 ) -> Option<SystemPromptTransport<'a>> {
-    if is_goose || (protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME) {
+    if is_goose {
+        None
+    } else if agent_name == "pi-acp" {
+        prompt
+            .filter(|_| pi_system_prompt_supported)
+            .map(SystemPromptTransport::MetaReplace)
+    } else if protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME {
         None
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         prompt.map(SystemPromptTransport::ClaudeMeta)
@@ -323,6 +332,9 @@ fn session_new_system_prompt<'a>(
 
 impl OwnedAgent {
     pub(crate) fn has_system_prompt_support(&self) -> bool {
+        if self.agent_name == "pi-acp" {
+            return self.acp.supports_pi_system_prompt();
+        }
         has_system_prompt_support(
             self.protocol_version,
             &self.agent_name,
@@ -1517,6 +1529,7 @@ async fn create_session_and_apply_model(
                 agent.protocol_version,
                 &agent.agent_name,
                 combined_system_prompt.as_deref(),
+                agent.acp.supports_pi_system_prompt(),
             ),
             session_title.as_deref(),
         )
@@ -5485,56 +5498,7 @@ mod tests {
         assert_eq!(composed, "<base>\nbe helpful\n</base>\n\ntick");
     }
 
-    #[test]
-    fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
-        assert!(!has_system_prompt_support(2, "goose", None));
-        assert!(!has_system_prompt_support(2, "goose", Some(false)));
-        assert!(has_system_prompt_support(2, "goose", Some(true)));
-        assert!(has_system_prompt_support(1, "goose", Some(true)));
-        assert!(has_system_prompt_support(2, "buzz-agent", None));
-        // Goose never receives system prompt via session/new (uses post-hoc method).
-        assert_eq!(
-            session_new_system_prompt(true, 2, "goose", Some("instructions")),
-            None
-        );
-        // Protocol-v2 non-goose gets Field transport.
-        assert_eq!(
-            session_new_system_prompt(false, 2, "buzz-agent", Some("instructions")),
-            Some(SystemPromptTransport::Field("instructions"))
-        );
-        // Protocol-v1 non-goose, non-claude gets None (legacy user-message framing).
-        assert_eq!(
-            session_new_system_prompt(false, 1, "codex", Some("instructions")),
-            None
-        );
-        // claude-agent-acp gets ClaudeMeta transport regardless of protocol version.
-        assert_eq!(
-            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            Some(SystemPromptTransport::ClaudeMeta("instructions"))
-        );
-        assert_eq!(
-            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            None,
-            "goose path must never produce a transport even when agent_name matches"
-        );
-    }
-
-    #[test]
-    fn claude_agent_acp_has_system_prompt_support_regardless_of_protocol_version() {
-        // claude-agent-acp declares protocolVersion:1 but supports _meta.systemPrompt;
-        // has_system_prompt_support must return true so user-message framing is suppressed.
-        assert!(has_system_prompt_support(1, CLAUDE_AGENT_ACP_NAME, None));
-        assert!(has_system_prompt_support(2, CLAUDE_AGENT_ACP_NAME, None));
-    }
-
-    #[test]
-    fn old_zed_adapter_name_falls_through_to_protocol_version_gate() {
-        // The renamed @zed-industries package predates the _meta.systemPrompt support,
-        // so it must not be treated as capable and stays on legacy user-message framing.
-        let old_name = "@zed-industries/claude-code-acp";
-        assert!(!has_system_prompt_support(1, old_name, None));
-        assert!(has_system_prompt_support(2, old_name, None));
-    }
+    include!("pool/system_prompt_tests.rs");
 
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
@@ -11214,3 +11178,7 @@ done"#
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "pool/pi_prompt_tests.rs"]
+mod pi_prompt_tests;

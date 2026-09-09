@@ -872,13 +872,12 @@ export function processTranscriptEvent(
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
       // the harness as <base>/<agent-instructions>/<core-memory>/<channel-canvas>.
-      // claude-agent-acp uses _meta.systemPrompt.append instead; both paths
+      // Pi uses _meta.systemPrompt; Claude uses _meta.systemPrompt.append.
       // produce the same standalone card (turnId: null, acpSource "session/new");
       // the bare field takes precedence when both are present.
       const params = asRecord(payload.params);
-      const metaPrompt = asString(
-        asRecord(asRecord(params._meta).systemPrompt).append,
-      );
+      const meta = asRecord(params._meta).systemPrompt;
+      const metaPrompt = asString(meta) ?? asString(asRecord(meta).append);
       const systemPrompt = asString(params.systemPrompt) ?? metaPrompt;
       if (systemPrompt) {
         const sections = parseSystemPromptSections(systemPrompt);
