@@ -8,7 +8,7 @@ export function AppearanceControls() {
   const { density, setDensity, saveError } = useDensity();
 
   return (
-    <div className="mx-3 flex flex-col items-start gap-3">
+    <div className="mx-3 flex shrink-0 flex-col items-start gap-3">
       <Button
         size="sm"
         variant="secondary"

@@ -6,15 +6,25 @@ test("every catalog entry links to its own focused component page", async ({
   page,
 }) => {
   await page.goto("/design/components");
-  const entries = await page
-    .locator(".catalog-entry h2 a")
-    .evaluateAll((links) =>
-      links.map((link) => ({
-        name: link.textContent ?? "",
-        href: link.getAttribute("href") ?? "",
-      })),
-    );
+  const entries = await page.locator(".catalog-entry").evaluateAll((links) =>
+    links.map((link) => ({
+      name: link.querySelector("h2")?.textContent ?? "",
+      href: link.querySelector(".catalog-eyebrow")?.getAttribute("href") ?? "",
+    })),
+  );
   expect(entries).toHaveLength(55);
+  await expect(page.getByText("Explore states →", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.locator(".catalog-grid .catalog-source")).toHaveCount(0);
+  for (const eyebrow of await page.locator(".catalog-eyebrow").all()) {
+    await expect(eyebrow).toContainText("→");
+  }
+  const nav = page.getByRole("navigation", {
+    name: "Design system",
+    exact: true,
+  });
+  await expect(nav.locator('a[href^="/design/components/"]')).toHaveCount(55);
   expect(new Set(entries.map((entry) => entry.href)).size).toBe(55);
   for (const entry of entries) {
     await page.goto(entry.href);
@@ -38,7 +48,7 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
 }) => {
   await page.goto("/design/components");
   await page.getByRole("button", { name: "Compact", exact: true }).click();
-  await page.getByRole("link", { name: "Explore Input", exact: true }).click();
+  await page.getByRole("link", { name: "Inputs: Input", exact: true }).click();
   await expect(page).toHaveURL(/\/design\/components\/input$/);
   await expect(page.getByRole("heading", { level: 1 })).toBeFocused();
   const input = page.getByRole("textbox", {
@@ -49,6 +59,22 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
   await expect(input).toHaveCSS("height", "32px");
   await page.getByRole("button", { name: "Reset example" }).click();
   await expect(input).toHaveValue("");
+  const nav = page.getByRole("navigation", {
+    name: "Design system",
+    exact: true,
+  });
+  await expect(
+    nav.getByRole("link", { name: "Input", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(
+    nav.getByRole("link", { name: "All components", exact: true }),
+  ).not.toHaveAttribute("aria-current", "page");
+  await nav.getByRole("link", { name: "Resizable", exact: true }).click();
+  await expect(page).toHaveURL(/\/resizable$/);
+  await expect(
+    page.getByRole("button", { name: "Compact", exact: true }),
+  ).toBeInViewport();
+  await nav.getByRole("link", { name: "Input", exact: true }).click();
   await page
     .getByRole("link", { name: "Next: Textarea", exact: false })
     .click();

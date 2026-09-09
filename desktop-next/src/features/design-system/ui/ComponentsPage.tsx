@@ -66,14 +66,16 @@ export function ComponentsPage() {
             className="catalog-entry"
           >
             <div>
-              <p className="text-meta text-tertiary">{entry.category}</p>
+              <Link
+                to="/design/components/$componentId"
+                params={{ componentId: entry.id }}
+                className="catalog-eyebrow text-meta text-tertiary hover:text-primary"
+                aria-label={`${entry.category}: ${entry.name}`}
+              >
+                {entry.category} <span aria-hidden="true">→</span>
+              </Link>
               <h2 id={`${entry.id}-title`} className="text-heading mt-1">
-                <Link
-                  to="/design/components/$componentId"
-                  params={{ componentId: entry.id }}
-                >
-                  {entry.name}
-                </Link>
+                {entry.name}
               </h2>
               <p className="text-caption text-secondary mt-2">
                 {entry.description}
@@ -82,22 +84,6 @@ export function ComponentsPage() {
             <div className="catalog-preview">
               <entry.Preview />
             </div>
-            <Link
-              to="/design/components/$componentId"
-              params={{ componentId: entry.id }}
-              className="text-label text-accent"
-              aria-label={`Explore ${entry.name}`}
-            >
-              Explore states →
-            </Link>
-            <details className="catalog-source">
-              <summary className="text-caption text-secondary">
-                View example source
-              </summary>
-              <pre className="text-code">
-                <code>{entry.source}</code>
-              </pre>
-            </details>
           </section>
         ))}
       </div>
