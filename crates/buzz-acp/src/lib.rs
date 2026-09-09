@@ -4798,6 +4798,31 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if let PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32002,
+                message,
+            }) = &result.outcome
+            {
+                // Model-not-found (-32002) is non-retryable like auth errors:
+                // the configured model won't appear between retries, so tell
+                // the owner now which model failed and where to change it.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — configured model not found (non-retryable)"
+                );
+                // buzz-agent stamps the rejected id: `llm model not found: (<model>) 404 …`
+                let model = message
+                    .split("llm model not found: (")
+                    .nth(1)
+                    .and_then(|rest| rest.split(')').next())
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or("<unknown>");
+                let content = format!(
+                    "⚠️ I couldn't process the last request: my configured model `{model}` was not found by the LLM provider (404). \
+                     The agent owner needs to open this agent's settings and select a different model, then re-send."
+                );
+                spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -11009,6 +11034,92 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(channel_id),
             0,
             "auth error must dead-letter immediately — no events should be pending"
+        );
+    }
+
+    /// A model-not-found (`-32002`) error must dead-letter immediately: the
+    /// configured model id won't start existing between retries, and the
+    /// owner needs to be told which model to change right away.
+    #[tokio::test]
+    async fn model_not_found_error_dead_letters_immediately_without_requeueing() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let not_found = acp::AcpError::AgentError {
+            code: -32002,
+            message: "llm model not found: (gpt-6-astra) 404 Not Found".to_string(),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(not_found),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "model-not-found must dead-letter immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            0,
+            "model-not-found must dead-letter immediately — no events should be pending"
         );
     }
 
