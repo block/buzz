@@ -7,6 +7,17 @@ export const FOUNDATION_GROUPS = [
       ["control-sm", "2rem", "Small actions."],
       ["control-md", "2.5rem", "Standard actions and inputs."],
       ["control-lg", "3.25rem", "Prominent actions."],
+      [
+        "size-scrollbar",
+        "0.375rem",
+        "Thin custom scrollbars and native scrollbar fallback.",
+      ],
+      [
+        "size-grip-length",
+        "1rem",
+        "Visible resize grip length, independent of its hit area.",
+      ],
+      ["size-grip-thickness", "0.25rem", "Visible resize grip thickness."],
       ["space-action-inset", "1.25rem", "Standard button horizontal padding."],
       ["space-tooltip-block", "0.125rem", "Compact tooltip vertical padding."],
       ["layer-dialog", "80", "Modal surfaces."],

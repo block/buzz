@@ -131,6 +131,9 @@
     );
     transition: clip-path var(--duration-state) var(--ease-standard);
   }
+  .bui-tabs-list[data-variant="glass"] .bui-tab-indicator {
+    background: var(--bg-chrome-selected);
+  }
   .bui-tabs-list:has(.bui-tab:focus-visible) .bui-tab-indicator {
     transition: none;
   }
@@ -165,6 +168,19 @@
   }
   .bui-tab-panel {
     padding-block: var(--space-control-inset);
+  }
+  .bui-tabs-list[data-variant="glass"] {
+    background: var(--bg-chrome-glass);
+    backdrop-filter: blur(var(--blur-md));
+    box-shadow:
+      inset 0 1px 0 var(--rim-lit),
+      inset 0 -1px 0 var(--rim-shade);
+  }
+  .bui-tabs-list[data-variant="glass"] .bui-tab {
+    padding-inline: var(--space-action-inset);
+  }
+  .bui-tabs-list[data-variant="glass"] .bui-tab:not([data-active]):hover {
+    background: var(--bg-chrome-glass-hover);
   }
   .bui-accordion {
     display: grid;

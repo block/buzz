@@ -1,0 +1,26 @@
+/* Apply one thin native treatment to pages, code, tables, inputs, and overlays.
+ * Base UI viewports retain their own native-scrollbar suppression. */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-primary) transparent;
+  }
+  @supports not (scrollbar-width: thin) {
+    ::-webkit-scrollbar {
+      width: var(--size-scrollbar);
+      height: var(--size-scrollbar);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-primary);
+      border-radius: var(--radius-pill);
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+  }
+  @media (forced-colors: active) {
+    * {
+      scrollbar-color: auto;
+    }
+  }
+}

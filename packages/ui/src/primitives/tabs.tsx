@@ -10,11 +10,19 @@ function StyledRoot({
 }
 
 function StyledList({
+  variant = "solid",
   className,
   ...props
-}: ComponentProps<typeof Primitive.List>) {
+}: ComponentProps<typeof Primitive.List> & {
+  /** Material of the tab track; behavior and indicator motion remain shared. */
+  variant?: "solid" | "glass";
+}) {
   return (
-    <Primitive.List {...props} className={skin("bui-tabs-list", className)} />
+    <Primitive.List
+      {...props}
+      data-variant={variant}
+      className={skin("bui-tabs-list", className)}
+    />
   );
 }
 

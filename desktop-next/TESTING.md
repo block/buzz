@@ -34,3 +34,7 @@ Spacing and motion regressions exercise command empty-state recovery, dialog hea
 gaps, accordion density, toast entrance/exit, interrupted tab selection, and reduced
 motion in the production catalog. Animation checks stretch duration for frame
 inspection without adding transition properties that could mask missing motion.
+
+Layout coverage verifies table alignment, native/custom scrollbar treatment, actual
+scrolling, pointer and keyboard resizing, grip sizing under zoom, and shared Glass
+tab motion, keyboard selection, and reduced motion.

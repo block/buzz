@@ -45,15 +45,22 @@
   }
   .bui-scrollbar {
     display: flex;
-    width: 0.5rem;
+    width: var(--size-scrollbar);
     margin: 0.25rem;
     border-radius: var(--radius-pill);
-    background: var(--bg-inset);
+    background: transparent;
+  }
+  .bui-scrollbar[data-orientation="horizontal"] {
+    width: auto;
+    height: var(--size-scrollbar);
   }
   .bui-scroll-thumb {
     width: 100%;
     background: var(--border-primary);
     border-radius: inherit;
+  }
+  .bui-scrollbar[data-orientation="horizontal"] .bui-scroll-thumb {
+    height: 100%;
   }
   .bui-toast-viewport {
     position: fixed;
@@ -133,6 +140,7 @@
   }
   .bui-table th,
   .bui-table td {
+    text-align: start;
     padding: var(--space-control-inset);
     border-bottom: 1px solid var(--border-tertiary);
     white-space: nowrap;

@@ -1,3 +1,4 @@
+import { Tabs } from "@buzz/ui";
 import { BLUR, RAMPS } from "@/shared/tokens/registry";
 
 import { Note, PageHeader, Section, Swatch } from "./primitives";
@@ -5,27 +6,23 @@ import { Note, PageHeader, Section, Swatch } from "./primitives";
 const GLASS = RAMPS.find((ramp) => ramp.id === "glass");
 
 function ChromePill() {
-  const items: Array<[string, boolean]> = [
-    ["Me", false],
-    ["Messages", true],
-    ["Projects", false],
-  ];
+  const items = ["Me", "Messages", "Projects"];
   return (
-    <div className="rim-glass blur-chrome flex items-center gap-1 rounded-full bg-chrome-glass p-1.5">
-      {items.map(([label, selected]) => (
-        <button
-          key={label}
-          type="button"
-          className={
-            selected
-              ? "elevate-xs rounded-full bg-chrome-selected px-5 py-2 text-label text-primary"
-              : "rounded-full px-5 py-2 text-body text-secondary transition-colors hover:bg-chrome-glass-hover hover:text-primary"
-          }
-        >
-          {label}
-        </button>
+    <Tabs.Root defaultValue="Messages">
+      <Tabs.List variant="glass" aria-label="Glass navigation preview">
+        {items.map((label) => (
+          <Tabs.Tab key={label} value={label}>
+            {label}
+          </Tabs.Tab>
+        ))}
+        <Tabs.Indicator />
+      </Tabs.List>
+      {items.map((label) => (
+        <Tabs.Panel key={label} value={label} className="bui-sr-only">
+          {label} surface selected in this material preview.
+        </Tabs.Panel>
       ))}
-    </div>
+    </Tabs.Root>
   );
 }
 
@@ -39,7 +36,7 @@ export function GlassPage() {
 
       <Section
         title="Live"
-        description="The chrome pill, rendered from the real tokens over the real backdrop. Hover an unselected item to see the glass hover move one step up the ramp."
+        description="The chrome pill, rendered from the real tokens over the real backdrop. Select a tab to see the shared indicator slide; hover an unselected item to see the glass hover move one step up the ramp."
       >
         <div className="texture-dots flex items-center justify-center rounded-xl bg-app px-8 py-12">
           <ChromePill />

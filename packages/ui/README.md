@@ -53,7 +53,9 @@ refs, controlled state, and events. Styled parts merge both string and state-fun
 class names. The underlying libraries own focus management, keyboard navigation,
 ARIA semantics, and dismissal. Caller-supplied labels and composition still matter.
 
-Place `Tabs.Indicator` inside `Tabs.List` for a sliding selection pill. Pointer
+Place `Tabs.Indicator` inside `Tabs.List` for a sliding selection pill.
+Use `Tabs.List variant="glass"` for translucent chrome; it shares the same
+selection behavior and motion as the default solid variant. Pointer
 selection retargets the shared 120ms transition; keyboard focus and reduced motion
 keep selection immediate. Panels update immediately. Toasts use the shared
 180ms entrance and 120ms exit transitions, with no movement under reduced motion.
@@ -71,6 +73,11 @@ or proprietary BlockUI package compatibility is implied.
 
 See `../../desktop-next/OPEN_SOURCE.md` for provenance and `THIRD_PARTY_NOTICES.md`
 for upstream notices. New source is covered by the repository's Apache-2.0 license.
+
+Native scroll surfaces use thin scrollbars; custom ScrollArea bars share the
+`size-scrollbar` token. Resize grips use `size-grip-length` (1rem) for their visible
+length while retaining a larger pointer target. Table cells align to the reading
+edge, including row and column headings.
 
 ## Generated responses
 

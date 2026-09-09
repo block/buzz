@@ -3,6 +3,9 @@
   --control-sm: 2rem;
   --control-md: 2.5rem;
   --control-lg: 3.25rem;
+  --size-scrollbar: 0.375rem;
+  --size-grip-length: 1rem;
+  --size-grip-thickness: 0.25rem;
   --space-action-inset: 1.25rem;
   --space-tooltip-block: 0.125rem;
   --layer-dialog: 80;
