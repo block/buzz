@@ -32,26 +32,11 @@ fn script_at(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
-    for (capability, supported) in [
-        (
-            serde_json::json!({"replace": true, "persisted": true}),
-            true,
-        ),
-        (serde_json::json!({"replace": true}), false),
-        (
-            serde_json::json!({"append": true, "persisted": true}),
-            false,
-        ),
-        (
-            serde_json::json!({"replace": "true", "persisted": true}),
-            false,
-        ),
-        (serde_json::Value::Null, false),
-    ] {
+async fn pi_composed_prompt_uses_field_without_capability_negotiation() {
+    for version in [1, 2] {
         let dir = fixture_dir();
         let init = serde_json::json!({"jsonrpc":"2.0", "id":0, "result": {
-            "protocolVersion":2, "agentCapabilities":{"_meta":{"piAcp":{"systemPrompt":capability}}}
+            "protocolVersion":version, "agentInfo":{"name":"pi-acp", "version":"fixture"}, "agentCapabilities":{}
         }});
         let path = script_at(
             &dir,
@@ -72,8 +57,8 @@ async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
             .await
             .unwrap();
         acp.initialize().await.unwrap();
-        let mut agent = owned_pi(acp, 2);
-        assert_eq!(agent.has_system_prompt_support(), supported);
+        let mut agent = owned_pi(acp, version);
+        assert!(agent.has_system_prompt_support());
         let mut ctx = tests::make_prompt_context_no_owner();
         ctx.base_prompt = Some("BUZZ_BASE".into());
         ctx.system_prompt = Some("BUZZ_PERSONA".into());
@@ -99,7 +84,7 @@ async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
         let request: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("request")).unwrap()).unwrap();
         let params = &request["params"];
-        assert!(params.get("systemPrompt").is_none());
+        assert!(params["_meta"].get("systemPrompt").is_none());
         assert!(params["_meta"]["sessionTitle"]
             .as_str()
             .unwrap()
@@ -112,7 +97,7 @@ async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
             huddle_instructions: Some("BUZZ_HUDDLE"),
             agent_canvas: Some(canvas),
         };
-        let user = prepend_standing_for_legacy(if supported { 2 } else { 1 }, &standing, "EVENT");
+        let user = prepend_standing_for_legacy(2, &standing, "EVENT");
         for marker in [
             "BUZZ_BASE",
             "BUZZ_PERSONA",
@@ -121,21 +106,17 @@ async fn pi_capability_controls_composed_prompt_and_legacy_framing() {
             "BUZZ_HUDDLE",
             "BUZZ_CANVAS",
         ] {
-            if supported {
-                assert_eq!(
-                    params["_meta"]["systemPrompt"]
-                        .as_str()
-                        .unwrap()
-                        .matches(marker)
-                        .count(),
-                    1
-                );
-                assert!(!user.contains(marker));
-            } else {
-                assert!(params["_meta"].get("systemPrompt").is_none());
-                assert_eq!(user.matches(marker).count(), 1);
-            }
+            assert_eq!(
+                params["systemPrompt"]
+                    .as_str()
+                    .unwrap()
+                    .matches(marker)
+                    .count(),
+                1
+            );
+            assert!(!user.contains(marker));
         }
+
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(
             args,
@@ -291,7 +272,7 @@ async fn real_pi_preserves_buzz_prompt_and_launch_skills_on_restore() {
         .session_new_full(
             &ctx.cwd,
             vec![],
-            Some(SystemPromptTransport::MetaReplace("OTHER_SESSION")),
+            Some(SystemPromptTransport::Field("OTHER_SESSION")),
             None,
         )
         .await

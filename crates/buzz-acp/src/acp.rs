@@ -200,7 +200,6 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
-    pi_system_prompt_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -569,7 +568,6 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
-            pi_system_prompt_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -628,17 +626,8 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        self.pi_system_prompt_supported = ["replace", "persisted"].iter().all(|key| {
-            result["agentCapabilities"]["_meta"]["piAcp"]["systemPrompt"][key].as_bool()
-                == Some(true)
-        });
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
-    }
-
-    /// Whether Pi advertised persistent system-prompt replacement.
-    pub fn supports_pi_system_prompt(&self) -> bool {
-        self.pi_system_prompt_supported
     }
 
     /// Send the ACP `authenticate` request for an adapter-advertised method.
@@ -657,12 +646,9 @@ impl AcpClient {
     ///
     /// - `None` — no system-prompt field in the request (legacy framing).
     /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
-    ///   (ACP protocol v2, buzz-agent, goose unused).
+    ///   (ACP protocol v2, buzz-agent, pi-acp; goose unused).
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
-    ///
-    /// - `Some(SystemPromptTransport::MetaReplace(text))` — `_meta.systemPrompt`
-    ///   as a string, replacing Pi's native base prompt.
     ///
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
@@ -685,9 +671,6 @@ impl AcpClient {
         match system_prompt {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
-            }
-            Some(SystemPromptTransport::MetaReplace(sp)) => {
-                params["_meta"]["systemPrompt"] = serde_json::Value::String(sp.to_owned());
             }
             Some(SystemPromptTransport::ClaudeMeta(sp)) => {
                 // Merge into _meta so sessionTitle (set below) is not clobbered.
@@ -2157,7 +2140,7 @@ pub struct SessionNewResponse {
 
 /// How to deliver a system prompt on `session/new`.
 ///
-/// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent, pi-acp).
 /// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
 ///   `claude-agent-acp` to append to the adapter's own native system prompt
 ///   while keeping its tool-use preset intact.
@@ -2167,8 +2150,6 @@ pub enum SystemPromptTransport<'a> {
     Field(&'a str),
     /// Deliver as `_meta.systemPrompt: {"append": text}`.
     ClaudeMeta(&'a str),
-    /// Deliver as `_meta.systemPrompt: text`, replacing the native base prompt.
-    MetaReplace(&'a str),
 }
 
 /// How to switch to a particular model on a session.

@@ -24,10 +24,11 @@ skill directory is that launch workspace's `.agents/skills`. Standalone CLI
 launches use the caller's working directory.
 The path is fixed at adapter launch and applies to every Pi subprocess.
 
-The full composed session prompt is sent as a replacement string through
-`_meta.systemPrompt` only when Pi advertises both `replace` and `persisted`
-under `agentCapabilities._meta.piAcp.systemPrompt`. Older adapters retain
-first-turn user framing. Session titles share `_meta.sessionTitle`.
+The full composed session prompt is sent as a replacement string through the
+provisional top-level `session/new.params.systemPrompt` field. Buzz recognizes
+`pi-acp` by the agent name returned during initialization, regardless of protocol
+version. No custom capability negotiation or legacy Pi prompt fallback is used.
+Session titles continue to use `_meta.sessionTitle`.
 
 ## Validation
 

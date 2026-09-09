@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildTranscript } from "./agentSessionTranscript.ts";
 
-test("Pi replacement metadata produces a standalone system prompt card", () => {
+test("Pi top-level replacement prompt produces a standalone system prompt card", () => {
   const events = [
     {
       seq: 1,
@@ -15,11 +15,9 @@ test("Pi replacement metadata produces a standalone system prompt card", () => {
       payload: {
         method: "session/new",
         params: {
-          _meta: {
-            sessionTitle: "Pi fixture",
-            systemPrompt:
-              "<base>\nBuzz base\n</base>\n\n<agent-instructions>\nPersona\n</agent-instructions>",
-          },
+          _meta: { sessionTitle: "Pi fixture" },
+          systemPrompt:
+            "<base>\nBuzz base\n</base>\n\n<agent-instructions>\nPersona\n</agent-instructions>",
         },
       },
     },
@@ -32,12 +30,5 @@ test("Pi replacement metadata produces a standalone system prompt card", () => {
   assert.deepEqual(
     cards[0].sections.map((section) => section.body),
     ["Buzz base", "Persona"],
-  );
-  events[0].payload.params.systemPrompt = "<base>\nBare field wins\n</base>";
-  assert.deepEqual(
-    buildTranscript(events)
-      .find((item) => item.acpSource === "session/new")
-      .sections.map((section) => section.body),
-    ["Bare field wins"],
   );
 });

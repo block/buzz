@@ -296,13 +296,10 @@ fn has_system_prompt_support(
     protocol_version: u32,
     agent_name: &str,
     goose_system_prompt_supported: Option<bool>,
-    pi_system_prompt_supported: bool,
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
-    } else if agent_name == "pi-acp" {
-        pi_system_prompt_supported
-    } else if agent_name == CLAUDE_AGENT_ACP_NAME {
+    } else if agent_name == "pi-acp" || agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
         protocol_version >= 2
@@ -314,14 +311,11 @@ fn session_new_system_prompt<'a>(
     protocol_version: u32,
     agent_name: &str,
     prompt: Option<&'a str>,
-    pi_system_prompt_supported: bool,
 ) -> Option<SystemPromptTransport<'a>> {
     if is_goose {
         None
     } else if agent_name == "pi-acp" {
-        prompt
-            .filter(|_| pi_system_prompt_supported)
-            .map(SystemPromptTransport::MetaReplace)
+        prompt.map(SystemPromptTransport::Field)
     } else if protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME {
         None
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
@@ -337,7 +331,6 @@ impl OwnedAgent {
             self.protocol_version,
             &self.agent_name,
             self.goose_system_prompt_supported,
-            self.acp.supports_pi_system_prompt(),
         )
     }
 }
@@ -1528,7 +1521,6 @@ async fn create_session_and_apply_model(
                 agent.protocol_version,
                 &agent.agent_name,
                 combined_system_prompt.as_deref(),
-                agent.acp.supports_pi_system_prompt(),
             ),
             session_title.as_deref(),
         )
