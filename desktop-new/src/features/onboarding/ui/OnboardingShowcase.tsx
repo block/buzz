@@ -141,7 +141,7 @@ function CheckEmailStage() {
         </p>
       </div>
       <div className="onboarding-code-content">
-        <CodeInput label="Verification code" labelHidden />
+        <CodeInput label="Verification code" labelHidden defaultValue="28" />
         <p className="text-body-sm text-tertiary">
           Didn’t get the code?{" "}
           <button

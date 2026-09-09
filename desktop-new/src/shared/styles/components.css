@@ -704,7 +704,7 @@
     border-color: var(--neutral-7);
   }
 
-  html[data-keyboard-navigation] .code-input-control:focus-visible {
+  .code-input-control:focus {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
   }
@@ -721,7 +721,14 @@
     place-items: center;
     color: var(--text-primary);
     pointer-events: none;
+  }
+
+  .code-input-digit[data-motion="enter"] {
     animation: code-input-digit-enter var(--duration-state) ease-out;
+  }
+
+  .code-input-digit[data-motion="exit"] {
+    animation: code-input-digit-exit var(--duration-state) ease-in;
   }
 
   .code-input:disabled .code-input-digit {
@@ -740,9 +747,22 @@
     }
   }
 
+  @keyframes code-input-digit-exit {
+    from {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    to {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .code-input-digit {
-      animation: none;
+    .code-input-digit[data-motion="enter"],
+    .code-input-digit[data-motion="exit"] {
+      animation-duration: 1ms;
     }
   }
 

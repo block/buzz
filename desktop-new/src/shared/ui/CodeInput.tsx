@@ -16,6 +16,7 @@ export type CodeInputProps = {
 
 const CODE_INPUT_LENGTH = 6;
 const CODE_INPUT_DIGIT_KEYS = ["1", "2", "3", "4", "5", "6"] as const;
+type DigitMotion = "idle" | "enter" | "exit";
 
 function digitsFrom(value: string): string[] {
   const digits = value.replace(/\D/g, "").slice(0, CODE_INPUT_LENGTH).split("");
@@ -37,11 +38,50 @@ export function CodeInput({
   onValueChange,
 }: CodeInputProps) {
   const [digits, setDigits] = useState(() => digitsFrom(defaultValue));
+  const [renderedDigits, setRenderedDigits] = useState(() =>
+    digitsFrom(defaultValue),
+  );
+  const [digitMotions, setDigitMotions] = useState<DigitMotion[]>(() =>
+    Array.from({ length: CODE_INPUT_LENGTH }, () => "idle"),
+  );
+  const digitsRef = useRef(digits);
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
 
   const update = (next: string[]) => {
+    const previous = digitsRef.current;
+    digitsRef.current = next;
     setDigits(next);
+    setRenderedDigits((current) =>
+      current.map((renderedDigit, index) => {
+        if (next[index]) return next[index];
+        if (previous[index]) return previous[index];
+        return renderedDigit;
+      }),
+    );
+    setDigitMotions((current) =>
+      current.map((motion, index) => {
+        if (previous[index] === next[index]) return motion;
+        return next[index] ? "enter" : "exit";
+      }),
+    );
     onValueChange?.(next.join(""));
+  };
+
+  const handleDigitAnimationEnd = (index: number, motion: DigitMotion) => {
+    setDigitMotions((current) => {
+      if (current[index] !== motion) return current;
+      const next = [...current];
+      next[index] = "idle";
+      return next;
+    });
+
+    if (motion === "exit" && !digitsRef.current[index]) {
+      setRenderedDigits((current) => {
+        const next = [...current];
+        next[index] = "";
+        return next;
+      });
+    }
   };
 
   const insert = (index: number, value: string) => {
@@ -131,13 +171,17 @@ export function CodeInput({
               type="text"
               value={digit}
             />
-            {digit ? (
+            {renderedDigits[index] ? (
               <span
                 aria-hidden="true"
                 className="code-input-digit text-body font-semibold"
-                key={digit}
+                data-motion={digitMotions[index]}
+                key={renderedDigits[index]}
+                onAnimationEnd={() =>
+                  handleDigitAnimationEnd(index, digitMotions[index])
+                }
               >
-                {digit}
+                {renderedDigits[index]}
               </span>
             ) : null}
           </div>
