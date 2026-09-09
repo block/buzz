@@ -12,7 +12,6 @@ import {
 import {
   respawnManagedAgentWithRules,
   isManagedAgentActive,
-  shouldStartManagedAgent,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -188,7 +187,7 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (!shouldStartManagedAgent(agent)) {
+      if (isManagedAgentActive(agent)) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
@@ -215,6 +214,26 @@ export function useMembersSidebarActions({
     } catch (error) {
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to control agent.",
+      );
+    } finally {
+      setActiveActionKey(null);
+    }
+  }
+
+  async function handleCommunityEnrollment(agent: ManagedAgent) {
+    clearActionFeedback();
+    setActiveActionKey(`enroll:${agent.pubkey}`);
+    try {
+      await startManagedAgentWithRules({
+        agent,
+        startManagedAgent: startManagedAgentMutation.mutateAsync,
+      });
+      setActionNoticeMessage(`Enrolled ${agent.name} in this community.`);
+    } catch (error) {
+      setActionErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to enroll agent in this community.",
       );
     } finally {
       setActiveActionKey(null);
@@ -327,6 +346,7 @@ export function useMembersSidebarActions({
   return {
     actionErrorMessage,
     actionNoticeMessage,
+    handleCommunityEnrollment,
     handleLifecycleAction,
     handleRemoveAll,
     handleRemoveMember,

@@ -28,7 +28,6 @@ import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
   respawnManagedAgentWithRules,
-  shouldStartManagedAgent,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
@@ -110,7 +109,7 @@ export function useManagedAgentActions() {
 
   function assertStartNotBlockedByPresence(agent: ManagedAgent) {
     const reason = agentPresenceStartBlockReason(
-      !shouldStartManagedAgent(agent),
+      isManagedAgentActive(agent),
       getAvailability(agent.pubkey),
     );
     if (reason) throw new Error(reason);

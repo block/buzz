@@ -32,24 +32,19 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
-/** A later-community enrollment failure does not revoke global deployment. */
-export function needsProviderEnrollmentRetry(
-  agent: Pick<ManagedAgent, "backend" | "keyCustody" | "lastError">,
+/** Provider enrollment is community-local, so it stays independently retryable. */
+export function canEnrollManagedAgentInCommunity(
+  agent: Pick<ManagedAgent, "backend" | "keyCustody" | "status">,
 ) {
   return (
-    agent.backend?.type === "provider" &&
+    agent.backend.type === "provider" &&
     agent.keyCustody === "provider" &&
-    Boolean(agent.lastError)
+    agent.status === "deployed"
   );
-}
-
-export function shouldStartManagedAgent(agent: ManagedAgent) {
-  return !isManagedAgentActive(agent) || needsProviderEnrollmentRetry(agent);
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
-    if (needsProviderEnrollmentRetry(agent)) return "Retry enrollment";
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
 

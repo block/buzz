@@ -16,9 +16,9 @@ import {
 } from "lucide-react";
 
 import {
+  canEnrollManagedAgentInCommunity,
   getManagedAgentPrimaryActionLabel,
-  needsProviderEnrollmentRetry,
-  shouldStartManagedAgent,
+  isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -67,6 +67,7 @@ type MembersSidebarMemberCardProps = {
   onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
+  onEnrollManagedAgent: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
@@ -136,6 +137,7 @@ export function MembersSidebarMemberCard({
   onBan,
   onChangeRole,
   onEditRespondTo,
+  onEnrollManagedAgent,
   onManagedAgentAction,
   onOpenProfile,
   onRemoveMember,
@@ -228,18 +230,16 @@ export function MembersSidebarMemberCard({
                   ? agentCommunityAvailability(managedAgentRuntime) === "Here"
                     ? "default"
                     : "secondary"
-                  : managedAgent && !shouldStartManagedAgent(managedAgent)
+                  : managedAgent && isManagedAgentActive(managedAgent)
                     ? "default"
                     : "secondary"
               }
             >
               {managedAgentRuntime
                 ? agentCommunityAvailability(managedAgentRuntime)
-                : managedAgent && needsProviderEnrollmentRetry(managedAgent)
-                  ? "Enrollment failed"
-                  : managedAgent && !shouldStartManagedAgent(managedAgent)
-                    ? "Running"
-                    : "Stopped"}
+                : managedAgent && isManagedAgentActive(managedAgent)
+                  ? "Running"
+                  : "Stopped"}
             </Badge>
             {managedAgent ? (
               <Badge
@@ -290,6 +290,7 @@ export function MembersSidebarMemberCard({
           onBan={onBan}
           onChangeRole={onChangeRole}
           onEditRespondTo={onEditRespondTo}
+          onEnrollManagedAgent={onEnrollManagedAgent}
           onManagedAgentAction={onManagedAgentAction}
           onRemoveMember={onRemoveMember}
           onTimeout={onTimeout}
@@ -320,6 +321,7 @@ function MemberActionsMenu({
   onBan,
   onChangeRole,
   onEditRespondTo,
+  onEnrollManagedAgent,
   onManagedAgentAction,
   onRemoveMember,
   onTimeout,
@@ -341,6 +343,7 @@ function MemberActionsMenu({
   onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
+  onEnrollManagedAgent: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onTimeout: (member: ChannelMember, expiresAtSecs: number) => void;
@@ -356,9 +359,7 @@ function MemberActionsMenu({
 
   const startBlockReason = managedAgent
     ? agentPresenceStartBlockReason(
-        pairAction
-          ? pairAction === "stop"
-          : !shouldStartManagedAgent(managedAgent),
+        pairAction ? pairAction === "stop" : isManagedAgentActive(managedAgent),
         availability,
       )
     : undefined;
@@ -405,6 +406,16 @@ function MemberActionsMenu({
                 ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
                 : getManagedAgentPrimaryActionLabel(managedAgent)}
             </DropdownMenuItem>
+            {canEnrollManagedAgentInCommunity(managedAgent) ? (
+              <DropdownMenuItem
+                data-testid={`sidebar-agent-enroll-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onEnrollManagedAgent(managedAgent)}
+              >
+                <Play className="h-4 w-4" />
+                Enroll in this community
+              </DropdownMenuItem>
+            ) : null}
             {onEditRespondTo ? (
               <DropdownMenuItem
                 data-testid={`sidebar-edit-respond-to-${member.pubkey}`}
@@ -535,7 +546,7 @@ function getPairActionIcon(action: ManagedAgentPairAction) {
 }
 
 function getManagedAgentActionIcon(agent: ManagedAgent) {
-  if (!shouldStartManagedAgent(agent)) {
+  if (isManagedAgentActive(agent)) {
     return <Square className="h-4 w-4" />;
   }
 

@@ -9,7 +9,7 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
-import { shouldStartManagedAgent } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -283,7 +283,7 @@ function AgentPersonaCard({
       provider: persona.provider,
       defaultModel,
     });
-  const isActive = agent ? !shouldStartManagedAgent(agent) : false;
+  const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
@@ -398,7 +398,7 @@ function StandaloneAgentCard({
     agent.lastError,
     agent.lastErrorCode,
   )?.copy;
-  const isActive = !shouldStartManagedAgent(agent);
+  const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
 
   return (

@@ -3,7 +3,6 @@ import { toast } from "sonner";
 
 import {
   isManagedAgentActive,
-  shouldStartManagedAgent,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -36,7 +35,7 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      if (!shouldStartManagedAgent(managedAgent)) {
+      if (isManagedAgentActive(managedAgent)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],

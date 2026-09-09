@@ -157,8 +157,8 @@ where
 /// The provider operation is deliberately idempotent: creation uses it for the
 /// first community, and every later community-scoped start repeats it so the
 /// same provider-custodied identity can enroll wherever its owner is a member.
-pub(super) async fn attest(
-    app: &AppHandle,
+pub(super) async fn attest<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     provider_id: &str,
@@ -188,8 +188,8 @@ pub(super) async fn attest(
 /// provider I/O, and result persistence must stay inside this one operation;
 /// otherwise a slower failure can land after a newer success and reopen global
 /// attestation while overwriting its error state.
-async fn attest_serialized(
-    app: &AppHandle,
+async fn attest_serialized<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     provider_id: &str,
