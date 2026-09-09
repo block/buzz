@@ -67,10 +67,7 @@ const SUBSCRIPTION_NAMES: Record<string, string> = {
   devin: "Devin account",
 };
 
-function useSetupStepState(): {
-  onRefresh: () => void;
-  state: SetupStepState;
-} {
+function useSetupStepState() {
   const runtimesQuery = useAcpRuntimesQueryForced();
   const items = runtimesQuery.data ?? [];
   const isChecking = runtimesQuery.isFetching;
