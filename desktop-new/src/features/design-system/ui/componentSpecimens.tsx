@@ -357,12 +357,17 @@ function TextFieldSpecimen() {
   return (
     <div className="component-specimen-stack">
       <SpecimenGroup label="Inset — content">
-        <div className="w-full max-w-sm">
+        <div className="component-specimen-stack w-full max-w-sm">
           <TextField
             label="Email address"
             placeholder="name@example.com"
             description="We’ll use this to help you sign in."
             type="email"
+          />
+          <TextField
+            label="Password"
+            defaultValue="buzz-password"
+            type="password"
           />
         </div>
       </SpecimenGroup>
