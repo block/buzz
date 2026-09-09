@@ -14,7 +14,7 @@ branch:
   name: "jtennant/berd-voice-status-sounds"
 ---`;
 
-test("a task canvas exposes overview and conversation only", async ({
+test("a task summary sits above the conversation and can collapse", async ({
   page,
 }) => {
   await installMockBridge(page, { canvasContent: TASK_CANVAS });
@@ -30,8 +30,13 @@ test("a task canvas exposes overview and conversation only", async ({
     "jtennant/berd-voice-status-sounds",
   );
   await expect(page.getByTestId("task-work-tree")).toHaveCount(0);
-  await page.getByTestId("task-view-conversation").click();
+  await expect(page.getByTestId("task-view-tabs")).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await page.getByTestId("task-overview").locator("summary").click();
+  await expect(page.getByTestId("task-overview-details")).toBeHidden();
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await page.getByTestId("task-overview").locator("summary").press("Enter");
+  await expect(page.getByTestId("task-overview-details")).toBeVisible();
   await expect(page.getByTestId("task-work-navigator")).toHaveCount(0);
 });
 

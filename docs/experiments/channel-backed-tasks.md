@@ -16,7 +16,7 @@ Conversation → local task + new channel → implementation branch → pull req
 - A branch created outside this workflow can remain unbound temporarily and should be flagged for resolution. A person or agent can attach it to an appropriate channel or create a new one.
 - Rebinding an established branch is for correcting mistakes, not routine restructuring.
 - The branch, pull request, CI, and review use the task's channel.
-- The client recognizes the canvas schema and adds Overview and Conversation views. Overview shows the selected task and its branch or pull request. The nested left sidebar shows branch and PR status glyphs, using the local `gh` login to discover pull requests.
+- The client recognizes the canvas schema and shows a collapsible task summary above the conversation, including its branch or pull request. The nested left sidebar shows branch and PR status glyphs, using the local `gh` login to discover pull requests.
 
 ## Canvas data model
 

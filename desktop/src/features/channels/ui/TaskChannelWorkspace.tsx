@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import * as React from "react";
+import type * as React from "react";
 import { toast } from "sonner";
 import { useCanvasQuery } from "@/features/channels/hooks";
 import {
@@ -68,49 +68,26 @@ export function TaskChannelWorkspace({
 }) {
   const canvas = useCanvasQuery(channelId, channelId !== null);
   const task = parseChannelBackedTask(canvas.data?.content);
-  const [view, setView] = React.useState<"overview" | "conversation">(
-    "overview",
-  );
   if (!task) return children;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <nav
-        aria-label="Task views"
+      <div
         className={cn(
           channelChrome.contentPadding,
-          "flex gap-1 border-b px-5 pb-2",
+          "shrink-0 border-b px-5 pb-3",
         )}
-        data-testid="task-view-tabs"
       >
-        {(["overview", "conversation"] as const).map((item) => (
-          <button
-            key={item}
-            type="button"
-            aria-current={view === item ? "page" : undefined}
-            data-testid={`task-view-${item}`}
-            className={cn(
-              "rounded-full px-3 py-1.5 text-xs capitalize hover:bg-muted",
-              view === item && "bg-muted",
-            )}
-            onClick={() => setView(item)}
-          >
-            {item}
-          </button>
-        ))}
-      </nav>
-      {view === "conversation" ? (
-        children
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <details open data-testid="task-overview">
+          <summary className="cursor-pointer text-sm font-medium">
+            {task.task.title}
+          </summary>
           <div
-            className="mx-auto max-w-3xl space-y-6 px-6 py-8"
-            data-testid="task-overview"
+            className="mt-2 max-h-48 space-y-2 overflow-y-auto text-sm"
+            data-testid="task-overview-details"
           >
-            <h2 className="text-xl font-semibold">{task.task.title}</h2>
-            <p className="text-sm text-muted-foreground">
-              {task.task.description}
-            </p>
-            <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">{task.task.description}</p>
+            {task.branch && <BranchStatus branch={task.branch} />}
+            <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs">
               <div>
                 Origin <Markdown content={task.originatingThread} />
               </div>
@@ -118,10 +95,17 @@ export function TaskChannelWorkspace({
                 Parent <Markdown content={task.parentChannel} />
               </div>
             </div>
-            {task.branch && <BranchStatus branch={task.branch} />}
           </div>
-        </div>
-      )}
+        </details>
+      </div>
+      <div
+        className="flex min-h-0 flex-1 flex-col"
+        style={
+          { "--buzz-channel-content-top-padding": "0px" } as React.CSSProperties
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }
