@@ -21,11 +21,23 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use buzz_media::{BucketSnapshot, SweepError};
+
+/// Where relay storage gauges get their snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageMetricsMode {
+    /// Preserve the existing in-process S3 sweep.
+    Inline,
+    /// Read the newest completed snapshot persisted by `buzz-admin`.
+    Snapshot,
+    /// Emit no storage-family metrics.
+    Disabled,
+}
 
 /// Sweep knobs, read once at boot. See `PLANS/S3_STORAGE_METRICS_PLAN.md` F7.
 #[derive(Debug, Clone, Copy)]
@@ -40,18 +52,16 @@ pub struct StorageSweepConfig {
     /// Cumulative listed-object cap; a listing that exceeds it fails the
     /// attempt (old snapshot kept) rather than growing memory unbounded.
     pub max_objects: u64,
-    /// Kill switch. `false` ⇒ no sweep ever spawns and no storage-family
-    /// gauge (including the health gauges) is ever emitted — a relay whose
-    /// deployment lacks `s3:ListBucket` can turn the whole feature off.
-    pub enabled: bool,
+    /// Snapshot source and kill switch.
+    pub mode: StorageMetricsMode,
 }
 
 impl StorageSweepConfig {
     /// Reads `BUZZ_STORAGE_SWEEP_INTERVAL_SECS` (default 3600, floor 60),
     /// `BUZZ_STORAGE_SWEEP_TIMEOUT_SECS` (default 120),
-    /// `BUZZ_STORAGE_SWEEP_MAX_OBJECTS` (default 1_000_000), and the
-    /// `BUZZ_STORAGE_METRICS` kill switch (`off` ⇒ disabled, anything else
-    /// including unset ⇒ enabled).
+    /// `BUZZ_STORAGE_SWEEP_MAX_OBJECTS` (default 1_000_000), and
+    /// `BUZZ_STORAGE_METRICS` (`inline`, `external`, or `off`). Unset keeps
+    /// the legacy inline behavior; unknown values fail closed.
     pub fn from_env() -> Self {
         let interval_secs = std::env::var("BUZZ_STORAGE_SWEEP_INTERVAL_SECS")
             .ok()
@@ -66,16 +76,30 @@ impl StorageSweepConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1_000_000);
-        let enabled = std::env::var("BUZZ_STORAGE_METRICS")
+        let raw_mode = std::env::var("BUZZ_STORAGE_METRICS")
             .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref()
-            != Some("off");
+            .map(|v| v.trim().to_ascii_lowercase());
+        let mode = parse_storage_metrics_mode(raw_mode.as_deref());
         Self {
             interval: Duration::from_secs(interval_secs),
             timeout: Duration::from_secs(timeout_secs),
             max_objects,
-            enabled,
+            mode,
+        }
+    }
+}
+
+fn parse_storage_metrics_mode(value: Option<&str>) -> StorageMetricsMode {
+    match value {
+        Some("off") => StorageMetricsMode::Disabled,
+        Some("snapshot") | Some("external") => StorageMetricsMode::Snapshot,
+        Some("inline") | Some("on") | None => StorageMetricsMode::Inline,
+        Some(other) => {
+            tracing::error!(
+                value = other,
+                "invalid BUZZ_STORAGE_METRICS value; storage metrics disabled"
+            );
+            StorageMetricsMode::Disabled
         }
     }
 }
@@ -94,6 +118,8 @@ struct LastAttempt {
 struct CachedSnapshot {
     data: BucketSnapshot,
     completed_at: Instant,
+    completed_at_wall: DateTime<Utc>,
+    max_objects: Option<u64>,
 }
 
 /// What a spawned sweep task hands back to the tick that harvests it.
@@ -214,6 +240,8 @@ pub async fn maybe_spawn_sweep<Fut>(
                             // Stamped at harvest, not sweep completion — exported
                             // age/cadence may lag by ≤1 usage tick.
                             completed_at: Instant::now(),
+                            completed_at_wall: Utc::now(),
+                            max_objects: None,
                         });
                     }
                     Err(err) => {
@@ -256,6 +284,28 @@ pub async fn maybe_spawn_sweep<Fut>(
         }
     });
     state.in_flight = Some(handle);
+}
+
+/// Replace the cache with a complete snapshot loaded from durable storage.
+pub async fn cache_persisted_snapshot(
+    state: &Mutex<StorageSweepState>,
+    snapshot: BucketSnapshot,
+    completed_at: DateTime<Utc>,
+    duration: Duration,
+    max_objects: u64,
+) {
+    let age = Utc::now()
+        .signed_duration_since(completed_at)
+        .to_std()
+        .unwrap_or_default();
+    let mut state = state.lock().await;
+    state.cached = Some(CachedSnapshot {
+        data: snapshot,
+        completed_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+        completed_at_wall: completed_at,
+        max_objects: Some(max_objects),
+    });
+    state.last_attempt = Some(LastAttempt { ok: true, duration });
 }
 
 /// Emit the storage-family gauges from the cached snapshot. Call every usage
@@ -302,8 +352,11 @@ pub async fn emit_storage_metrics(
         }
         return;
     };
-    metrics::gauge!("buzz_storage_sweep_age_seconds")
-        .set(cached.completed_at.elapsed().as_secs_f64());
+    let age = Utc::now()
+        .signed_duration_since(cached.completed_at_wall)
+        .to_std()
+        .unwrap_or_default();
+    metrics::gauge!("buzz_storage_sweep_age_seconds").set(age.as_secs_f64());
 
     let snapshot = &cached.data;
     metrics::gauge!("buzz_total_storage_bytes", "kind" => "physical")
@@ -322,6 +375,11 @@ pub async fn emit_storage_metrics(
     metrics::gauge!("buzz_storage_multi_variant_bytes").set(snapshot.multi_variant_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_bytes").set(snapshot.unknown_key_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_objects").set(snapshot.unknown_key_objects as f64);
+    if let Some(max_objects) = cached.max_objects {
+        metrics::gauge!("buzz_storage_sweep_max_objects").set(max_objects as f64);
+        metrics::gauge!("buzz_storage_sweep_cap_utilization")
+            .set(snapshot.physical_objects as f64 / max_objects as f64);
+    }
 
     let mut current = HashSet::new();
     let mut unmapped_bytes = 0u64;
@@ -398,20 +456,36 @@ mod tests {
         assert_eq!(config.interval, Duration::from_secs(3600));
         assert_eq!(config.timeout, Duration::from_secs(120));
         assert_eq!(config.max_objects, 1_000_000);
-        assert!(config.enabled);
+        assert_eq!(config.mode, StorageMetricsMode::Inline);
     }
 
     #[test]
-    fn config_kill_switch_only_off_disables() {
-        assert!(!parse_enabled(Some("off")));
-        assert!(!parse_enabled(Some("OFF")));
-        assert!(parse_enabled(Some("on")));
-        assert!(parse_enabled(Some("anything-else")));
-        assert!(parse_enabled(None));
-    }
-
-    fn parse_enabled(value: Option<&str>) -> bool {
-        value.map(str::trim).map(str::to_ascii_lowercase).as_deref() != Some("off")
+    fn config_mode_accepts_snapshot_and_fails_closed_on_unknown_values() {
+        assert_eq!(
+            parse_storage_metrics_mode(Some("off")),
+            StorageMetricsMode::Disabled
+        );
+        assert_eq!(
+            parse_storage_metrics_mode(Some("snapshot")),
+            StorageMetricsMode::Snapshot
+        );
+        assert_eq!(
+            parse_storage_metrics_mode(Some("external")),
+            StorageMetricsMode::Snapshot
+        );
+        assert_eq!(
+            parse_storage_metrics_mode(Some("on")),
+            StorageMetricsMode::Inline
+        );
+        assert_eq!(
+            parse_storage_metrics_mode(Some("inline")),
+            StorageMetricsMode::Inline
+        );
+        assert_eq!(
+            parse_storage_metrics_mode(Some("anything-else")),
+            StorageMetricsMode::Disabled
+        );
+        assert_eq!(parse_storage_metrics_mode(None), StorageMetricsMode::Inline);
     }
 
     // --- should_spawn ---
@@ -437,6 +511,8 @@ mod tests {
         let cached = Some(CachedSnapshot {
             data: BucketSnapshot::default(),
             completed_at: Instant::now(),
+            completed_at_wall: Utc::now(),
+            max_objects: None,
         });
         assert!(should_spawn(
             &cached,
@@ -456,6 +532,8 @@ mod tests {
         let cached = Some(CachedSnapshot {
             data: BucketSnapshot::default(),
             completed_at: now,
+            completed_at_wall: Utc::now(),
+            max_objects: None,
         });
         assert!(!should_spawn(
             &cached,
@@ -864,6 +942,8 @@ mod tests {
             cached: Some(CachedSnapshot {
                 data: snapshot,
                 completed_at: Instant::now(),
+                completed_at_wall: Utc::now(),
+                max_objects: None,
             }),
             last_attempt: Some(LastAttempt {
                 ok: true,
@@ -973,6 +1053,8 @@ mod tests {
             cached: Some(CachedSnapshot {
                 data: make_snapshot(true, 20),
                 completed_at: Instant::now(),
+                completed_at_wall: Utc::now(),
+                max_objects: None,
             }),
             last_attempt: Some(LastAttempt {
                 ok: true,
@@ -1017,6 +1099,8 @@ mod tests {
             guard.cached = Some(CachedSnapshot {
                 data: make_snapshot(false, 20),
                 completed_at: Instant::now(),
+                completed_at_wall: Utc::now(),
+                max_objects: None,
             });
         }
         let mut host_map_2 = HashMap::new();
@@ -1086,5 +1170,36 @@ mod tests {
             Some(&0.0),
             "(c) scope removal: host.c objects must be zeroed"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_snapshot_emits_worker_freshness_and_cap() {
+        let community = Uuid::from_u128(77);
+        let state = Mutex::new(StorageSweepState::default());
+        cache_persisted_snapshot(
+            &state,
+            snapshot_with(community, 100, 25),
+            Utc::now() - chrono::Duration::seconds(30),
+            Duration::from_secs(12),
+            100,
+        )
+        .await;
+        let host_map = HashMap::from([(community, "example.test".to_string())]);
+        let recorder = DebuggingRecorder::new();
+        metrics::with_local_recorder(&recorder, || {
+            futures::executor::block_on(emit_storage_metrics(&state, &host_map, |_| true));
+        });
+        let values = gauge_snapshot(&recorder);
+        assert_eq!(values.get("buzz_storage_sweep_ok"), Some(&1.0));
+        assert_eq!(
+            values.get("buzz_storage_sweep_duration_seconds"),
+            Some(&12.0)
+        );
+        assert_eq!(values.get("buzz_storage_sweep_max_objects"), Some(&100.0));
+        assert_eq!(
+            values.get("buzz_storage_sweep_cap_utilization"),
+            Some(&0.25)
+        );
+        assert!(values["buzz_storage_sweep_age_seconds"] >= 30.0);
     }
 }

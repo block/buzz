@@ -363,6 +363,28 @@ s3:
   accessKey: ""
   secretKey: ""
 
+# Isolated S3 accounting worker. Disabled by default, so chart upgrades retain
+# the existing relay-local sweep until an operator enables and sizes the job.
+storageAccounting:
+  enabled: false
+  schedule: "0 3 * * *"
+  maxObjects: 10000000
+  activeDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  relayMode: inline              # inline | external | off
+  serviceAccountName: ""         # defaults to the main Buzz service account
+  podLabels: {}
+  podAnnotations:
+    sidecar.istio.io/inject: "false"
+  resources:
+    requests:
+      cpu: "1"
+      memory: 20Gi
+    limits:
+      cpu: "1"
+      memory: 20Gi
+
 # In-cluster MinIO for the quickstart profile only. Production deploys leave
 # this disabled and use s3.* (or secrets.existingSecret) against managed S3.
 minio:

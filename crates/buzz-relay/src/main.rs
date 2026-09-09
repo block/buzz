@@ -1763,25 +1763,53 @@ async fn run_storage_sweep_tick(
     // leader tick, and stable for the process lifetime (env is immutable).
     // Keeping it here avoids widening Config/AppState for a single consumer.
     let config = *SWEEP_CONFIG.get_or_init(storage_sweep::StorageSweepConfig::from_env);
-    if !config.enabled {
-        return;
+    match config.mode {
+        storage_sweep::StorageMetricsMode::Disabled => return,
+        storage_sweep::StorageMetricsMode::Inline => {
+            let media_storage = Arc::clone(&state.media_storage);
+            let max_objects = config.max_objects;
+            storage_sweep::maybe_spawn_sweep(
+                &state.storage_sweep,
+                config.interval,
+                config.timeout,
+                async move {
+                    buzz_media::fold_bucket_listing(max_objects, move |token| {
+                        let media_storage = Arc::clone(&media_storage);
+                        async move { media_storage.list_page(token, 1000).await }
+                    })
+                    .await
+                },
+            )
+            .await;
+        }
+        storage_sweep::StorageMetricsMode::Snapshot => {
+            match state.db.load_storage_accounting_snapshot().await {
+                Ok(Some(stored)) => match serde_json::from_value(stored.snapshot) {
+                    Ok(snapshot) => {
+                        let duration = std::time::Duration::from_millis(
+                            u64::try_from(stored.duration_ms).unwrap_or_default(),
+                        );
+                        let max_objects = u64::try_from(stored.max_objects).unwrap_or_default();
+                        storage_sweep::cache_persisted_snapshot(
+                            &state.storage_sweep,
+                            snapshot,
+                            stored.completed_at,
+                            duration,
+                            max_objects,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "stored storage snapshot is invalid");
+                    }
+                },
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(error = %error, "failed to load stored storage snapshot");
+                }
+            }
+        }
     }
-
-    let media_storage = Arc::clone(&state.media_storage);
-    let max_objects = config.max_objects;
-    storage_sweep::maybe_spawn_sweep(
-        &state.storage_sweep,
-        config.interval,
-        config.timeout,
-        async move {
-            buzz_media::fold_bucket_listing(max_objects, move |token| {
-                let media_storage = Arc::clone(&media_storage);
-                async move { media_storage.list_page(token, 1000).await }
-            })
-            .await
-        },
-    )
-    .await;
 
     storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
         emission_scope.allows(id)

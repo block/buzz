@@ -22,12 +22,16 @@
 
 mod deletions;
 
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
+use buzz_media::{BucketSnapshot, MediaConfig, MediaStorage, S3AddressingStyle, SweepError};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -78,6 +82,12 @@ enum Command {
     GenerateKey,
     /// Run pending database migrations.
     Migrate,
+    /// Compute one complete S3 storage snapshot and persist it for relay readers.
+    StorageSnapshot {
+        /// Abort before folding a page that would exceed this object count.
+        #[arg(long, default_value_t = 10_000_000)]
+        max_objects: u64,
+    },
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
@@ -154,6 +164,7 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Database migrations complete.");
             Ok(0)
         }
+        Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
@@ -166,6 +177,146 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
+    let max_objects_db = i64::try_from(max_objects)
+        .map_err(|_| anyhow::anyhow!("--max-objects must be at most {}", i64::MAX))?;
+    if max_objects == 0 {
+        return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
+    }
+
+    let db = connect_db().await?;
+    let _leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
+        anyhow::anyhow!("another storage-snapshot worker already holds the lease")
+    })?;
+    let storage = Arc::new(MediaStorage::new(&storage_config_from_env()?)?);
+    let code_sha =
+        std::env::var("BUZZ_STORAGE_SNAPSHOT_CODE_SHA").unwrap_or_else(|_| "unknown".to_string());
+    if code_sha.is_empty() || code_sha.len() > 128 {
+        return Err(anyhow::anyhow!(
+            "BUZZ_STORAGE_SNAPSHOT_CODE_SHA must contain 1 to 128 bytes"
+        ));
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_started",
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    let run_started = Instant::now();
+    let listed_objects = Arc::new(AtomicU64::new(0));
+    let fold = buzz_media::fold_bucket_listing(max_objects, move |token| {
+        let storage = Arc::clone(&storage);
+        let listed_objects = Arc::clone(&listed_objects);
+        async move {
+            let page = storage.list_page(token, 1000).await?;
+            let page_objects = u64::try_from(page.objects.len()).unwrap_or(u64::MAX);
+            let before = listed_objects.fetch_add(page_objects, Ordering::Relaxed);
+            let after = before.saturating_add(page_objects);
+            if before / 100_000 != after / 100_000 {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "storage_snapshot_progress",
+                        "listed_objects": after,
+                        "max_objects": max_objects,
+                    })
+                );
+            }
+            Ok(page)
+        }
+    });
+    let snapshot_db = db.clone();
+    let snapshot_code_sha = code_sha.clone();
+    let persisted = persist_completed_fold(fold, move |encoded, duration_ms| async move {
+        snapshot_db
+            .save_storage_accounting_snapshot(
+                &encoded,
+                duration_ms,
+                max_objects_db,
+                &snapshot_code_sha,
+            )
+            .await?;
+        Ok(())
+    })
+    .await;
+    let (snapshot, duration_ms) = match persisted {
+        Ok(completed) => completed,
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "storage_snapshot_failed",
+                    "duration_ms": i64::try_from(run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
+                    "max_objects": max_objects,
+                    "code_sha": code_sha,
+                    "error": error.to_string(),
+                })
+            );
+            return Err(error);
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_completed",
+            "duration_ms": duration_ms,
+            "listed_objects": snapshot.physical_objects,
+            "listed_bytes": snapshot.physical_bytes,
+            "logical_objects": snapshot.logical_objects,
+            "logical_bytes": snapshot.logical_bytes,
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    Ok(0)
+}
+
+async fn persist_completed_fold<FoldFuture, Persist, PersistFuture>(
+    fold: FoldFuture,
+    persist: Persist,
+) -> Result<(BucketSnapshot, i64)>
+where
+    FoldFuture: Future<Output = std::result::Result<BucketSnapshot, SweepError>>,
+    Persist: FnOnce(serde_json::Value, i64) -> PersistFuture,
+    PersistFuture: Future<Output = Result<()>>,
+{
+    let started = Instant::now();
+    let snapshot = fold.await?;
+    let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let encoded = serde_json::to_value(&snapshot)?;
+    persist(encoded, duration_ms).await?;
+    Ok((snapshot, duration_ms))
+}
+
+fn storage_config_from_env() -> Result<MediaConfig> {
+    let required = |name: &str| {
+        std::env::var(name).map_err(|_| anyhow::anyhow!("{name} must be set for storage-snapshot"))
+    };
+    let addressing_style = std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+        .unwrap_or_else(|_| "path".to_string())
+        .parse::<S3AddressingStyle>()
+        .map_err(anyhow::Error::msg)?;
+    Ok(MediaConfig {
+        s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT").unwrap_or_default(),
+        s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_default(),
+        s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_default(),
+        s3_bucket: required("BUZZ_S3_BUCKET")?,
+        s3_region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+        s3_addressing_style: addressing_style,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "http://storage-snapshot.invalid/media".to_string(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -630,4 +781,28 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod storage_snapshot_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_fold_never_invokes_snapshot_persistence() {
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&persist_calls);
+        let result = persist_completed_fold(
+            async { Err::<BucketSnapshot, _>(SweepError::MalformedPage) },
+            move |_, _| async move {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(persist_calls.load(Ordering::SeqCst), 0);
+    }
 }
