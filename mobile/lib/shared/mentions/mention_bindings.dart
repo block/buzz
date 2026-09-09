@@ -83,13 +83,12 @@ Map<String, Set<String>> renderedMentionBindings(
     }
     // Untagged qualified literals are recognition blockers, not bindings.
     bindings.putIfAbsent(label, () => <String>{});
-    if (!keys.contains(key)) continue;
     qualified.add((
       label: label,
       base: match.group(1)!.toLowerCase(),
       key: key,
     ));
-    add(label, key);
+    if (keys.contains(key)) add(label, key);
     bindings.putIfAbsent(match.group(1)!.toLowerCase(), () => <String>{});
   }
   final winning = mentionOccurrences(
@@ -98,17 +97,12 @@ Map<String, Set<String>> renderedMentionBindings(
   ).map((range) => range.label).toSet();
   final claimed = qualified.where((q) => winning.contains(q.label)).toList();
   final bases = claimed.map((q) => q.base).where(winning.contains).toSet();
-  final remaining = keys.difference(claimed.map((q) => q.key).toSet());
-  // Ordinary sibling mentions claim their own identities before recovering a
-  // historical namesake. Current aliases must not retarget that namesake.
-  for (final label in winning.difference(bases)) {
-    final candidates = bindings[label]!;
-    if (candidates.length == 1) remaining.removeAll(candidates);
-  }
   for (final base in bases) {
-    // Multiple historical labels or leftover tagged keys cannot be paired
-    // deterministically. Leave them as non-clickable references, not guesses.
-    bindings[base] = bases.length == 1 ? remaining.toSet() : <String>{};
+    // Recipient tags do not encode which literal selected a key. In DMs they
+    // also include non-mentioned recipients, and missing profiles can leave
+    // an unrelated singleton. Even current aliases cannot establish the
+    // historical plain target. Only the qualified literal supplies its key.
+    bindings[base] = <String>{};
   }
   return bindings;
 }

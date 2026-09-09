@@ -29,39 +29,51 @@ void main() {
       isEmpty,
     );
   });
-  test(
-    'tagged qualified identity narrows a namesake independently of tag order',
-    () {
-      for (final names in [
-        {'a': 'Scout', second: 'Scout'},
-        {second: 'Scout', 'a': 'Scout'},
-      ]) {
-        final bindings = renderedMentionBindings(
-          '@Scout @Scout ($second)',
-          names,
-        );
-        expect(bindings['scout'], {'a'});
-        expect(bindings['scout ($second)'], {second});
-      }
-      expect(
-        renderedMentionBindings('@Scout', {
-          first: 'Scout',
-          second: 'Scout',
-        })['scout'],
-        {first, second},
+  test('multiple historical bases remain unbound despite current aliases', () {
+    final bindings = renderedMentionBindings(
+      '@Scout @Scout ($second) @Zed @Zed ($first)',
+      {
+        first: 'Old Zed',
+        second: 'Old Scout',
+        'c' * 64: 'Scout',
+        'd' * 64: 'Zed',
+      },
+    );
+    expect(bindings['scout'], isEmpty);
+    expect(bindings['zed'], isEmpty);
+    expect(bindings['scout ($second)'], {second});
+    expect(bindings['zed ($first)'], {first});
+  });
+  test('qualified identity does not authorize an inferred plain namesake', () {
+    for (final names in [
+      {'a': 'Scout', second: 'Scout'},
+      {second: 'Scout', 'a': 'Scout'},
+    ]) {
+      final bindings = renderedMentionBindings(
+        '@Scout @Scout ($second)',
+        names,
       );
-      expect(
-        renderedMentionBindings('@Scout ($second)', {
-          first: 'Scout',
-        })['scout ($second)'],
-        isEmpty,
-      );
-      expect(
-        renderedMentionBindings('@Old ($second)', {
-          second: 'New',
-        })['old ($second)'],
-        {second},
-      );
-    },
-  );
+      expect(bindings['scout'], isEmpty);
+      expect(bindings['scout ($second)'], {second});
+    }
+    expect(
+      renderedMentionBindings('@Scout', {
+        first: 'Scout',
+        second: 'Scout',
+      })['scout'],
+      {first, second},
+    );
+    expect(
+      renderedMentionBindings('@Scout ($second)', {
+        first: 'Scout',
+      })['scout ($second)'],
+      isEmpty,
+    );
+    expect(
+      renderedMentionBindings('@Old ($second)', {
+        second: 'New',
+      })['old ($second)'],
+      {second},
+    );
+  });
 }
