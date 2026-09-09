@@ -15,7 +15,7 @@ import 'user_profile.dart';
 class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   final Set<String> _pending = {};
   int _generation = 0;
-  final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
+  final Map<String, NostrEvent> _profileEvents = {};
   Timer? _batchTimer;
   Completer<bool>? _batchCompleter;
 
@@ -25,7 +25,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     ref.watch(myPubkeyProvider);
     _generation++;
     _pending.clear();
-    _profileEventOrders.clear();
+    _profileEvents.clear();
     ref.onDispose(() {
       _generation++;
       _batchTimer?.cancel();
@@ -45,10 +45,18 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return null;
   }
 
-  /// Stores a profile that was fetched or updated outside the batch loader.
+  /// Seeds an absent profile for local display before signed evidence arrives.
+  /// Never replaces existing state; fetched/confirmed profiles must use
+  /// [cacheProfileEvent] so ownership and event metadata advance together.
   void put(UserProfile profile) {
-    state = {...state, profile.pubkey.toLowerCase(): profile};
+    final pubkey = profile.pubkey.toLowerCase();
+    if (state.containsKey(pubkey)) return;
+    state = {...state, pubkey: profile};
   }
+
+  /// The governing kind:0 event, including metadata needed for profile edits.
+  NostrEvent? profileEvent(String pubkey) =>
+      _profileEvents[pubkey.toLowerCase()];
 
   /// Preload profiles for a list of pubkeys (e.g. channel members).
   /// Returns whether the batch completed successfully.
@@ -85,13 +93,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       );
       if (generation != _generation) return false;
       final updated = Map<String, UserProfile>.from(state);
-      final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
-        _profileEventOrders,
-      );
+      final updatedOrders = Map<String, NostrEvent>.from(_profileEvents);
       for (final event in events) {
         _cacheProfileEvent(event, updated, updatedOrders);
       }
-      _profileEventOrders
+      _profileEvents
         ..clear()
         ..addAll(updatedOrders);
       state = updated;
@@ -138,14 +144,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
       if (generation != _generation) return;
       final updated = Map<String, UserProfile>.from(state);
-      final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
-        _profileEventOrders,
-      );
+      final updatedOrders = Map<String, NostrEvent>.from(_profileEvents);
       for (final event in events) {
         _cacheProfileEvent(event, updated, updatedOrders);
       }
 
-      _profileEventOrders
+      _profileEvents
         ..clear()
         ..addAll(updatedOrders);
       state = updated;
@@ -163,21 +167,21 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   bool _cacheProfileEvent(
     NostrEvent event,
     Map<String, UserProfile> profiles, [
-    Map<String, ({int createdAt, String eventId})>? orders,
+    Map<String, NostrEvent>? orders,
   ]) {
     if (event.kind != 0) return false;
-    final eventOrders = orders ?? _profileEventOrders;
+    final eventOrders = orders ?? _profileEvents;
     final pubkey = event.pubkey.toLowerCase();
     final current = eventOrders[pubkey];
     final isNewer =
         current == null ||
         event.createdAt > current.createdAt ||
         (event.createdAt == current.createdAt &&
-            event.id.compareTo(current.eventId) < 0);
+            event.id.compareTo(current.id) < 0);
     if (!isNewer) return false;
 
     profiles[pubkey] = _profileFromEvent(event);
-    eventOrders[pubkey] = (createdAt: event.createdAt, eventId: event.id);
+    eventOrders[pubkey] = event;
     return true;
   }
 

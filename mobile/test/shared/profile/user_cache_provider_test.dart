@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -175,6 +176,34 @@ void main() {
     expect(await cache.refresh(const ['agent']), isTrue);
     expect(cache.state['agent']?.displayName, 'Valid');
   });
+
+  test(
+    'unordered seed is first hydration only and cannot replace an event',
+    () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final cache = container.read(userCacheProvider.notifier);
+      cache.put(const UserProfile(pubkey: 'AGENT', displayName: 'Local'));
+      expect(cache.state['agent']?.displayName, 'Local');
+      expect(cache.profileEvent('agent'), isNull);
+      cache.cacheProfileEvent(
+        _profileEvent(id: 'b', createdAt: 2, name: 'New'),
+      );
+      cache.put(
+        const UserProfile(
+          pubkey: 'agent',
+          displayName: 'Late',
+          ownerPubkey: 'owner',
+        ),
+      );
+      cache.cacheProfileEvent(
+        _profileEvent(id: 'a', createdAt: 1, name: 'Old'),
+      );
+      expect(cache.state['agent']?.displayName, 'New');
+      expect(cache.state['agent']?.ownerPubkey, isNull);
+      expect(cache.profileEvent('AGENT')?.id, 'b');
+    },
+  );
 
   test('same-second profile tie keeps the lowest event id', () {
     final container = ProviderContainer();
