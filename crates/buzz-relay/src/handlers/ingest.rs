@@ -449,6 +449,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
+        // NIP-BW and NIP-94 use ordinary persistent event storage. This grants
+        // transport admission only; consumers verify repository roles and evidence.
+        // Neither kind is a command or an execution-engine trigger.
+        buzz_core::kind::KIND_BUZZ_WORKFLOW_RECORD | buzz_core::kind::KIND_FILE_METADATA => {
+            Ok(Scope::MessagesWrite)
+        }
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
@@ -579,6 +585,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            | buzz_core::kind::KIND_BUZZ_WORKFLOW_RECORD
+            | buzz_core::kind::KIND_FILE_METADATA
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -3729,6 +3737,31 @@ mod tests {
                 "kind {kind} must not require an h-tag channel scope"
             );
         }
+    }
+
+    #[test]
+    fn bw_records_reach_regular_storage() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../docs/nips/NIP-BW.fixtures.json"))
+                .expect("fixture");
+        let mut scopes = Vec::new();
+        for label in ["policy", "artifact"] {
+            let event = serde_json::from_value::<Event>(fixture["events"][label]["event"].clone())
+                .expect("event");
+            let kind = event.kind.as_u16() as u32;
+            scopes.push((kind, required_scope_for_kind(kind, &event)));
+            assert!(!buzz_core::kind::is_command_kind(kind));
+            assert!(!buzz_core::kind::is_replaceable(kind));
+            assert!(!buzz_core::kind::is_parameterized_replaceable(kind));
+            assert!(!requires_h_channel_scope(kind));
+        }
+        assert_eq!(
+            scopes,
+            vec![
+                (46100, Ok(Scope::MessagesWrite)),
+                (1063, Ok(Scope::MessagesWrite))
+            ]
+        );
     }
 
     #[test]

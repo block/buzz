@@ -1,0 +1,274 @@
+{
+  "schemas": {
+    "role-policy": {
+      "required": {
+        "version": "positive",
+        "effective_at": "time",
+        "cutover": "time",
+        "operators": "[pubkey]",
+        "coordinators": "[pubkey]",
+        "workers": "workers",
+        "human_testers": "[pubkey]",
+        "triage_delegations": "[delegation]"
+      },
+      "optional": {},
+      "tags": [],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "issue-update": {
+      "required": {
+        "patch": "patch"
+      },
+      "optional": {},
+      "tags": [
+        "issue"
+      ],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "triage-action": {
+      "required": {
+        "action": "accept|need-info|snooze|duplicate|decline"
+      },
+      "optional": {
+        "question": "text",
+        "recipient": "pubkey",
+        "until": "time",
+        "target": "id",
+        "reason": "text"
+      },
+      "tags": [
+        "issue"
+      ],
+      "optional_tags": [
+        "previous",
+        "delegation"
+      ]
+    },
+    "issue-state": {
+      "required": {
+        "state": "triage|backlog|ready|in-development|implemented"
+      },
+      "optional": {
+        "triage": "id",
+        "stream": "stream",
+        "assignment": "?id",
+        "update": "id",
+        "rework": "?id",
+        "commit": "git",
+        "tests": "text",
+        "remote_readback": "readback",
+        "terminal_set": "id"
+      },
+      "tags": [
+        "issue"
+      ],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "issue-relation": {
+      "required": {
+        "relation": "blocks|related|duplicate-of|parent-of",
+        "target": "id",
+        "operation": "add|remove"
+      },
+      "optional": {},
+      "tags": [
+        "issue"
+      ],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "release-pipeline": {
+      "required": {
+        "platform": "windows|android|ios|macos",
+        "stream": "stream",
+        "workflow": "path",
+        "workflow_sha256": "id",
+        "manifest_schema": "title",
+        "manifest_sha256": "id",
+        "mirror": "url",
+        "runner": "title",
+        "publisher": "pubkey",
+        "provider": "title"
+      },
+      "optional": {},
+      "tags": [],
+      "optional_tags": []
+    },
+    "release-set": {
+      "required": {
+        "action": "freeze|close"
+      },
+      "optional": {
+        "release": "release",
+        "pipeline": "id",
+        "platform": "windows|android|ios|macos",
+        "stream": "stream",
+        "relay_sha": "git",
+        "members": "[member]",
+        "readback": "readback",
+        "set": "id",
+        "outcome": "failed|aborted",
+        "reason": "text"
+      },
+      "tags": [],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "build-request": {
+      "required": {
+        "set": "id",
+        "worker": "pubkey",
+        "attempt": "positive",
+        "retry_of": "?id"
+      },
+      "optional": {},
+      "tags": [],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "build-run": {
+      "required": {
+        "request": "id",
+        "provider": "title",
+        "run_id": "runid",
+        "attempt": "positive",
+        "url": "url",
+        "head": "git",
+        "result": "queued|running|success|failure|cancelled",
+        "observed_at": "time"
+      },
+      "optional": {},
+      "tags": [],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "test-ready": {
+      "required": {
+        "set": "id",
+        "run": "id",
+        "artifacts": "[id]",
+        "installation": "installation",
+        "limitations": "text",
+        "tester": "pubkey"
+      },
+      "optional": {},
+      "tags": [],
+      "optional_tags": [
+        "previous"
+      ]
+    },
+    "member-verdict": {
+      "required": {
+        "set": "id",
+        "test_ready": "id",
+        "artifact": "id",
+        "verdict": "accepted|rejected",
+        "reason": "text"
+      },
+      "optional": {},
+      "tags": [
+        "issue"
+      ],
+      "optional_tags": []
+    }
+  },
+  "types": {
+    "workers": {
+      "required": {
+        "windows": "[pubkey]",
+        "android": "[pubkey]",
+        "ios": "[pubkey]",
+        "macos": "[pubkey]",
+        "acp": "[pubkey]"
+      },
+      "optional": {}
+    },
+    "delegation": {
+      "required": {
+        "issue": "id",
+        "action": "accept|duplicate|decline",
+        "delegate": "pubkey",
+        "expires_at": "time"
+      },
+      "optional": {}
+    },
+    "patch": {
+      "required": {},
+      "optional": {
+        "title": "title",
+        "description": "longtext",
+        "acceptance_criteria": "[text]",
+        "non_goals": "[text]",
+        "type": "bug|feature|task",
+        "priority": "P0|P1|P2|P3",
+        "platform": "windows|android|ios|macos|acp"
+      }
+    },
+    "readback": {
+      "required": {
+        "repo": "repo",
+        "stream": "stream",
+        "head": "git",
+        "observed_at": "time"
+      },
+      "optional": {}
+    },
+    "member": {
+      "required": {
+        "issue": "id",
+        "implemented": "id"
+      },
+      "optional": {}
+    },
+    "installation": {
+      "required": {
+        "method": "tailnet-download|download",
+        "url": "url",
+        "instructions": "text",
+        "unsigned": "bool",
+        "immutable": "bool"
+      },
+      "optional": {}
+    }
+  },
+  "arrays": {
+    "default": [
+      0,
+      32
+    ],
+    "human_testers": [
+      1,
+      32
+    ],
+    "triage_delegations": [
+      0,
+      32
+    ],
+    "acceptance_criteria": [
+      0,
+      25
+    ],
+    "non_goals": [
+      0,
+      25
+    ],
+    "members": [
+      1,
+      25
+    ],
+    "artifacts": [
+      1,
+      8
+    ]
+  }
+}

@@ -554,6 +554,9 @@ pub const KIND_FORUM_VOTE: u32 = 45002;
 pub const KIND_FORUM_COMMENT: u32 = 45003;
 
 // Workflow engine (46000–46999)
+/// NIP-BW append-only issue workflow records (no execution trigger).
+pub const KIND_BUZZ_WORKFLOW_RECORD: u32 = 46100;
+
 /// Trigger workflow execution.
 pub const KIND_WORKFLOW_TRIGGER: u32 = 46020;
 /// Grant pending approval.
@@ -733,6 +736,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
+    KIND_BUZZ_WORKFLOW_RECORD,
     KIND_APPROVAL_GRANT,
     KIND_APPROVAL_DENY,
     KIND_WORKFLOW_TRIGGERED,
