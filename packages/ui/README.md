@@ -132,3 +132,12 @@ Invalid input renders an error and an optional host-provided retry callback.
 The host owns streaming assembly, action authorization, persistence, retries, and
 network errors. Pass a new immutable complete snapshot when it changes. The renderer
 is a presentation boundary, not an agent execution engine or an authorization system.
+
+## Normal and Compact
+
+All components inherit density from the root `<html data-density="compact">`.
+Use `data-density="normal"` (or omit it) for original sizing. Density changes
+shared geometry without remounting controls or replacing their behavior. Both
+profiles work in light and dark mode and follow root zoom. Text sizing is
+independent. Keep the density attribute on the document root so portals inherit
+it too. See the design-token package for the full profile and layout rhythm.

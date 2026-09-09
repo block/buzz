@@ -25,7 +25,7 @@
     cursor: not-allowed;
   }
   .bui-textarea {
-    min-height: 7rem;
+    min-height: var(--control-textarea-min);
     resize: vertical;
   }
   .bui-input-group {

@@ -7,6 +7,12 @@ export const FOUNDATION_GROUPS = [
       ["control-sm", "2rem", "Small actions."],
       ["control-md", "2.5rem", "Standard actions and inputs."],
       ["control-lg", "3.25rem", "Prominent actions."],
+      ["control-calendar", "2.25rem", "Calendar day and navigation targets."],
+      [
+        "control-textarea-min",
+        "7rem",
+        "Minimum height for longer text fields.",
+      ],
       [
         "control-multiline-min",
         "5rem",
@@ -28,6 +34,11 @@ export const FOUNDATION_GROUPS = [
         "Visible resize grip length, independent of its hit area.",
       ],
       ["size-grip-thickness", "0.25rem", "Visible resize grip thickness."],
+      [
+        "size-resize-target",
+        "1.5rem",
+        "Resize hit area preserved at either density.",
+      ],
       ["space-action-inset", "1.25rem", "Standard button horizontal padding."],
       ["space-tooltip-block", "0.125rem", "Compact tooltip vertical padding."],
       ["layer-dialog", "80", "Modal surfaces."],
@@ -39,9 +50,18 @@ export const FOUNDATION_GROUPS = [
   {
     name: "Spacing",
     description:
-      "A four-pixel rhythm, expressed in rem so the entire interface follows zoom.",
+      "A four-pixel layout rhythm in Normal and a three-pixel rhythm in Compact, with named component insets. Rem units keep both responsive to zoom.",
     roles: [
+      [
+        "spacing",
+        "0.25rem",
+        "Base layout rhythm for Tailwind spacing utilities.",
+      ],
       ["space-control-gap", "0.5rem", "Space between a label and its icon."],
+      ["space-chip-block", "0.375rem", "Chip and badge vertical inset."],
+      ["space-chip-inline", "0.625rem", "Chip and badge horizontal inset."],
+      ["space-catalog-gap", "3rem", "Space between catalog rows."],
+      ["size-catalog-preview", "10rem", "Minimum catalog preview height."],
       ["space-control-inset", "0.75rem", "Compact control padding."],
       [
         "space-heading-gap",
@@ -84,3 +104,34 @@ export const FOUNDATION_GROUPS = [
     ],
   },
 ] as const;
+
+/** Proposed compact density. Unlisted roles retain Normal values. Text, icons,
+ * motion, and fine interaction geometry are deliberately independent of density. */
+export const COMPACT_FOUNDATIONS: Partial<
+  Record<(typeof FOUNDATION_GROUPS)[number]["roles"][number][0], string>
+> = {
+  "control-sm": "1.75rem",
+  "control-md": "2rem",
+  "control-lg": "2.5rem",
+  "control-calendar": "1.75rem",
+  "control-textarea-min": "5rem",
+  "control-multiline-min": "4rem",
+  "space-action-inset": "0.75rem",
+  spacing: "0.1875rem",
+  "space-control-gap": "0.25rem",
+  "space-control-inset": "0.5rem",
+  "space-heading-gap": "0.5rem",
+  "space-section-gap": "1rem",
+  "space-panel-inset": "1rem",
+  "space-page-inset": "1.5rem",
+  "space-chip-block": "0.25rem",
+  "space-chip-inline": "0.5rem",
+  "space-catalog-gap": "2rem",
+  "size-catalog-preview": "7rem",
+  "radius-control": "0.375rem",
+  "radius-notice": "0.5rem",
+  "radius-menu": "0.75rem",
+  "radius-container": "1rem",
+  "radius-overlay": "1.5rem",
+  "radius-sheet": "2rem",
+};

@@ -1,11 +1,16 @@
 import type { CSSProperties } from "react";
-import { FOUNDATION_GROUPS } from "@buzz/design-tokens/foundations";
+import {
+  COMPACT_FOUNDATIONS,
+  FOUNDATION_GROUPS,
+} from "@buzz/design-tokens/foundations";
+import { useDensity } from "@/shared/theme/DensityProvider";
 /** Render geometry from the actual public custom properties, alongside registry values. */
 export function FoundationRoles({
   name,
 }: {
   name: (typeof FOUNDATION_GROUPS)[number]["name"];
 }) {
+  const { density } = useDensity();
   const group = FOUNDATION_GROUPS.find((group) => group.name === name);
   if (!group) throw new Error("Missing foundation group");
   return (
@@ -33,7 +38,11 @@ export function FoundationRoles({
                   style={style}
                 />
               )}
-              <span className="text-body text-secondary">{value}</span>
+              <span className="text-body text-secondary">
+                {density === "compact"
+                  ? (COMPACT_FOUNDATIONS[token] ?? value)
+                  : value}
+              </span>
             </dd>
             <dd className="text-caption text-secondary">{description}</dd>
           </div>

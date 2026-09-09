@@ -79,8 +79,8 @@
   .bui-calendar button {
     cursor: pointer;
     border-radius: var(--radius-pill);
-    min-width: 2.25rem;
-    min-height: 2.25rem;
+    min-width: var(--control-calendar);
+    min-height: var(--control-calendar);
     display: inline-flex;
     justify-content: center;
     align-items: center;
@@ -125,7 +125,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: var(--space-section-gap);
+    width: var(--size-resize-target);
     background: transparent;
   }
   .bui-resize-handle::after {
@@ -137,7 +137,7 @@
   }
   .bui-resize-handle[aria-orientation="horizontal"] {
     width: auto;
-    height: var(--space-section-gap);
+    height: var(--size-resize-target);
   }
   .bui-resize-handle[aria-orientation="horizontal"]::after {
     width: var(--size-grip-length);
@@ -160,7 +160,7 @@
   }
   .bui-chart {
     width: 100%;
-    border-spacing: 0 0.5rem;
+    border-spacing: 0 var(--space-control-gap);
     border-collapse: separate;
   }
   .bui-chart th {

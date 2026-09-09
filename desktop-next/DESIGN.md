@@ -62,7 +62,7 @@ Buzz is a place where people build together and bring their agents into the room
 - **Never judge a value against a surface it will not be used on.** A swatch on a grey fill, or a type specimen in a tinted box, is being evaluated in a context the product will never reproduce. Samples sit on the page. The one exception is a value that needs a backdrop to exist at all — translucency needs something behind it, and a white surface swatch needs a hairline or it renders as nothing.
 - **Cards are for widgets, galleries, and settings groups.** A card is a bordered, padded region on the page, not a different depth.
 - **Pick the frame before the content.** Decide what the surface is — a list, a reading column, a workspace — before filling it.
-- **Whitespace is generous by default.** Crowding reads as a different product.
+- **Whitespace is generous in Normal density.** Compact is an explicit user preference for a denser workspace: reduce shared geometry and layout rhythm, keeping readable type and essential interaction targets independent. Components inherit density from the root; never branch their markup by density.
 
 ## Motion
 

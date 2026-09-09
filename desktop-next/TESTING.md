@@ -43,3 +43,8 @@ Composer coverage exercises empty drafts, multiline and modifier handling, IME
 composition, pointer/keyboard send and stop, retained failed drafts and retry,
 attachment removal and limits, model controls, transcript preview, and 390/884/1440
 layouts. Card header spacing is checked against the production component.
+
+Density coverage checks pointer/keyboard switching, root and portal geometry,
+unchanged text size, retained drafts, reload and cross-tab persistence, invalid
+stored values, save failure and retry, live foundation values, compositions,
+Glass tab selection, and all 55 examples at 390/884/1440 in both themes.

@@ -30,7 +30,7 @@
     height: 1rem;
   }
   .bui-otp-input {
-    width: 2.5rem;
+    width: var(--control-md);
     text-align: center;
     padding: var(--space-control-gap);
   }

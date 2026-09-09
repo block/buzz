@@ -3,18 +3,26 @@
   --control-sm: 2rem;
   --control-md: 2.5rem;
   --control-lg: 3.25rem;
+  --control-calendar: 2.25rem;
+  --control-textarea-min: 7rem;
   --control-multiline-min: 5rem;
   --control-multiline-max: 16rem;
   --size-scrollbar: 0.375rem;
   --size-grip-length: 1rem;
   --size-grip-thickness: 0.25rem;
+  --size-resize-target: 1.5rem;
   --space-action-inset: 1.25rem;
   --space-tooltip-block: 0.125rem;
   --layer-dialog: 80;
   --layer-floating: 100;
   --layer-toast: 120;
   --overlay-scrim: rgb(0 0 0 / 0.5);
+  --spacing: 0.25rem;
   --space-control-gap: 0.5rem;
+  --space-chip-block: 0.375rem;
+  --space-chip-inline: 0.625rem;
+  --space-catalog-gap: 3rem;
+  --size-catalog-preview: 10rem;
   --space-control-inset: 0.75rem;
   --space-heading-gap: 1rem;
   --space-section-gap: 1.5rem;
@@ -32,6 +40,32 @@
   --duration-exit: 120ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --press-scale: 0.97;
+}
+:root[data-density="compact"] {
+  --control-sm: 1.75rem;
+  --control-md: 2rem;
+  --control-lg: 2.5rem;
+  --control-calendar: 1.75rem;
+  --control-textarea-min: 5rem;
+  --control-multiline-min: 4rem;
+  --space-action-inset: 0.75rem;
+  --spacing: 0.1875rem;
+  --space-control-gap: 0.25rem;
+  --space-control-inset: 0.5rem;
+  --space-heading-gap: 0.5rem;
+  --space-section-gap: 1rem;
+  --space-panel-inset: 1rem;
+  --space-page-inset: 1.5rem;
+  --space-chip-block: 0.25rem;
+  --space-chip-inline: 0.5rem;
+  --space-catalog-gap: 2rem;
+  --size-catalog-preview: 7rem;
+  --radius-control: 0.375rem;
+  --radius-notice: 0.5rem;
+  --radius-menu: 0.75rem;
+  --radius-container: 1rem;
+  --radius-overlay: 1.5rem;
+  --radius-sheet: 2rem;
 }
 @media (prefers-reduced-motion: reduce) {
   :root {

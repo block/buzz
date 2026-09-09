@@ -7,6 +7,12 @@ import { RouterProvider, createRouter } from "@tanstack/react-router";
 import "./shared/styles/globals.css";
 import { routeTree } from "./app/routeTree.gen";
 
+import {
+  DensityProvider,
+  initializeDensity,
+} from "./shared/theme/DensityProvider";
+
+const initialDensity = initializeDensity();
 const router = createRouter({ routeTree });
 
 declare module "@tanstack/react-router" {
@@ -20,6 +26,8 @@ if (!root) throw new Error("Missing #root element");
 
 createRoot(root).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <DensityProvider initialDensity={initialDensity}>
+      <RouterProvider router={router} />
+    </DensityProvider>
   </StrictMode>,
 );
