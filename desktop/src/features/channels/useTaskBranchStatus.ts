@@ -18,6 +18,8 @@ type PullRequest = {
   url: string;
   state: string;
   isDraft: boolean;
+  headRefOid?: string;
+  body?: string;
 };
 
 export function useTaskBranchStatus(

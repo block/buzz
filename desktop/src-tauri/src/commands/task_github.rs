@@ -74,7 +74,7 @@ pub async fn get_task_github(
         "--limit",
         "20",
         "--json",
-        "number,title,url,state,isDraft,baseRefName,reviewDecision,statusCheckRollup",
+        "number,title,body,url,state,isDraft,headRefOid,baseRefName,reviewDecision,statusCheckRollup",
     ])
     .await?;
     if view == "review" {

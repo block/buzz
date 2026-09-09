@@ -10,6 +10,7 @@ use crate::managed_agents::{
 };
 mod auth_status_cache;
 mod bounded_command;
+pub(crate) use bounded_command::output_with_timeout;
 mod login_shell;
 mod presets;
 mod runtime_metadata;

@@ -11,6 +11,8 @@ import {
 import { useTaskBranchStatus } from "@/features/channels/useTaskBranchStatus";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { AssignTask } from "./AssignTask";
+import { TaskReviewModal } from "./TaskReviewModal";
 
 function BranchStatus({
   branch,
@@ -115,6 +117,14 @@ export function TaskChannelWorkspace({
               </span>
             </h2>
             {task.branch && <BranchStatus branch={task.branch} />}
+            {task.branch && <TaskReviewModal branch={task.branch} />}
+            {channelId && canvas.data?.content && (
+              <AssignTask
+                key={channelId}
+                channelId={channelId}
+                content={canvas.data.content}
+              />
+            )}
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
             {task.task.description}

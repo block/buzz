@@ -2,6 +2,107 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
+test("review modal shows latest intent results and conservative freshness", async ({
+  page,
+}) => {
+  await installMockBridge(page, { canvasContent: TASK_CANVAS });
+  await page.goto("/");
+  await expect(page.getByTestId("channel-engineering")).toBeVisible();
+  await page.evaluate(async () => {
+    const w = window as typeof window & {
+      __BUZZ_E2E_QUERY_CLIENT__: import("@tanstack/react-query").QueryClient;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    w.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      if (command === "get_task_github")
+        return [
+          {
+            number: 308,
+            title: "Sounds",
+            body: "Updated description",
+            url: "https://github.com/block/berd/pull/308",
+            state: "OPEN",
+            isDraft: true,
+            headRefOid: "new-head",
+          },
+        ];
+      if (command === "get_task_reviews")
+        return {
+          unattributed: 1,
+          skipped: 0,
+          runs: [
+            {
+              head: "new-head",
+              started_at: "20260909T133658-0400",
+              pr_metadata: { title: "Sounds", body: "Old description" },
+              reviews: [
+                {
+                  name: "builderbot",
+                  invocation_ok: true,
+                  finding_count: 1,
+                  verdict: {
+                    findings: [
+                      { title: "Guard cleanup", body: "Handle the failure." },
+                    ],
+                  },
+                },
+                {
+                  name: "pr-template",
+                  invocation_ok: true,
+                  finding_count: 0,
+                  verdict: { findings: [] },
+                },
+                { name: "dead-code", invocation_ok: false },
+              ],
+            },
+            {
+              head: "old-head",
+              reviews: [
+                { name: "builderbot", finding_count: 5 },
+                {
+                  name: "minimality",
+                  finding_count: 0,
+                  verdict: { findings: [] },
+                },
+              ],
+            },
+          ],
+        };
+      return original(command, args, options);
+    };
+    await w.__BUZZ_E2E_QUERY_CLIENT__.invalidateQueries({
+      queryKey: ["task-github"],
+    });
+  });
+  await page.getByTestId("channel-engineering").click();
+  await page.getByRole("button", { name: "Reviews", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Local reviews" });
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.locator("summary").filter({ hasText: "builderbot" }),
+  ).toHaveText("builderbot1 findings · Same commit");
+  await expect(
+    dialog.locator("summary").filter({ hasText: "pr-template" }),
+  ).toContainText("PR metadata changed");
+  await expect(
+    dialog.locator("summary").filter({ hasText: "minimality" }),
+  ).toContainText("Different commit");
+  await expect(
+    dialog.locator("summary").filter({ hasText: "dead-code" }),
+  ).toContainText("Run failed");
+  await dialog.locator("summary").filter({ hasText: "builderbot" }).click();
+  await expect(dialog.getByText("Handle the failure.")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
 const TASK_CANVAS = `---
 buzz_schema: channel-backed-task/v1
 task:
@@ -13,6 +114,78 @@ branch:
   repository: "https://github.com/block/berd"
   name: "jtennant/berd-voice-status-sounds"
 ---`;
+
+test("assign saves the task and retains notification retry after navigating away", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    canvasContent: TASK_CANVAS,
+    managedAgents: [{ pubkey: "a".repeat(64), name: "Sol", status: "stopped" }],
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("channel-engineering")).toBeVisible();
+  await page.evaluate(() => {
+    const w = window as typeof window & {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          payload: Record<string, string>,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+      __ASSIGN_CALLS__: number;
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    let content: string | undefined;
+    let channel: string | undefined;
+    w.__ASSIGN_CALLS__ = 0;
+    w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
+      if (command === "get_canvas" && content && payload.channelId === channel)
+        return { content };
+      if (command === "assign_task_channel") {
+        w.__ASSIGN_CALLS__++;
+        channel = payload.channelId;
+        content =
+          w.__ASSIGN_CALLS__ === 1
+            ? payload.canvasContent
+            : payload.completedCanvas;
+        return {
+          assigned: true,
+          notified: w.__ASSIGN_CALLS__ > 1,
+          error: "Monitor unavailable",
+        };
+      }
+      return original(command, payload, options);
+    };
+  });
+  await page.getByTestId("channel-engineering").click();
+  await page.getByRole("button", { name: "Assign", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Assign task to agent" })
+    .selectOption("a".repeat(64));
+  await expect(
+    page.getByRole("button", { name: "Retry notification" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("task-overview")).toContainText(
+    "Assigned to Sol",
+  );
+  await page.getByTestId("channel-agents").click();
+  await page.getByTestId("channel-engineering").click();
+  await page.getByRole("button", { name: "Retry notification" }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry notification" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Assign", exact: true }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __ASSIGN_CALLS__: number })
+          .__ASSIGN_CALLS__,
+    ),
+  ).toBe(2);
+});
 
 test("loading a corrected canvas refreshes the sidebar task metadata", async ({
   page,
