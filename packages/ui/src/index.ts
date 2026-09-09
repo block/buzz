@@ -55,3 +55,9 @@ export {
   type GeneratedView,
   type GeneratedViewResult,
 } from "./generated/schema";
+
+export {
+  AIComposer,
+  type AIComposerProps,
+  type ComposerSlotState,
+} from "./composer";

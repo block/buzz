@@ -1,0 +1,75 @@
+@layer components {
+  .bui-composer {
+    width: 100%;
+    min-width: 0;
+    padding: var(--space-control-inset);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-control-gap);
+    border: 1px solid var(--border-interactive);
+    border-radius: var(--radius-overlay);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-xs);
+  }
+  .bui-composer:focus-within {
+    outline: 2px solid var(--ring-focus);
+    outline-offset: 2px;
+  }
+  .bui-composer-input {
+    @apply text-body-lg;
+    width: 100%;
+    min-height: var(--control-multiline-min);
+    max-height: var(--control-multiline-max);
+    field-sizing: content;
+    resize: none;
+    padding: var(--space-control-gap);
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+  }
+  .bui-composer-input:focus-visible {
+    outline: none;
+  }
+  .bui-composer-input::placeholder {
+    color: var(--text-tertiary);
+  }
+  .bui-composer-input:disabled {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  .bui-composer-context,
+  .bui-composer-footer,
+  .bui-composer-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-control-gap);
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .bui-composer-context:empty {
+    display: none;
+  }
+  .bui-composer-footer {
+    flex-wrap: nowrap;
+  }
+  .bui-composer-footer > .bui-icon-button {
+    flex-shrink: 0;
+  }
+  .bui-composer-controls {
+    flex: 1 1 0;
+    gap: calc(var(--space-control-gap) / 2);
+  }
+  .bui-composer-controls .bui-select-trigger {
+    @apply text-caption;
+    width: fit-content;
+    min-width: 0;
+    border: 0;
+    padding-inline: calc(var(--space-control-gap) / 2);
+    gap: calc(var(--space-control-gap) / 2);
+  }
+  .bui-composer-context .bui-chip {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
