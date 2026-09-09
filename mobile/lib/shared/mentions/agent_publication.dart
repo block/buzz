@@ -9,6 +9,11 @@ typedef AgentAuthorizationReader =
       bool Function() isCurrent,
     );
 
+/// Session-bound fresh authorization reader for exact recipient keys and one
+/// destination. Re-reads verified ownership, policy and relay-signed membership;
+/// cached directory suggestions are never publication authority. Query and
+/// scope-change failures propagate to the caller, which must check currentness
+/// before applying membership or publishing. This is not an atomic relay write.
 final agentAuthorizationReaderProvider = Provider<AgentAuthorizationReader>((
   ref,
 ) {
