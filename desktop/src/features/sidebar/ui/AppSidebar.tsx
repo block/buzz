@@ -76,6 +76,7 @@ import {
   useSidebar,
 } from "@/shared/ui/sidebar";
 import { useProtectedVisibleDirectMessages } from "@protected-feature-components";
+import { useChannelBackedTaskParents } from "@/features/channels/useChannelBackedTaskParents";
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -308,6 +309,7 @@ export function AppSidebar({
     () => channels.filter((channel) => channel.channelType === "stream"),
     [channels],
   );
+  const taskParentByChannelId = useChannelBackedTaskParents(streamChannels);
 
   const sectionBuckets = React.useMemo(() => {
     const bySection: Record<string, Channel[]> = {};
@@ -591,6 +593,7 @@ export function AppSidebar({
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
                       items={starredChannels}
+                      parentChannelById={taskParentByChannelId}
                       sortMode={sortModeFor("starred")}
                       onSortModeChange={(mode) =>
                         setSortModeFor("starred", mode)
@@ -632,6 +635,7 @@ export function AppSidebar({
                         key={section.id}
                         section={section}
                         channels={sectionBuckets.bySection[section.id] ?? []}
+                        parentChannelById={taskParentByChannelId}
                         hasUnread={
                           sectionBuckets.bySection[section.id]?.some((c) =>
                             unreadChannelIds.has(c.id),
@@ -695,6 +699,7 @@ export function AppSidebar({
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
                       items={sectionBuckets.unassigned}
+                      parentChannelById={taskParentByChannelId}
                       sortMode={sortModeFor("channels")}
                       onSortModeChange={(mode) =>
                         setSortModeFor("channels", mode)

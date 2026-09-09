@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use tauri::State;
 
 use crate::{
@@ -40,6 +42,52 @@ pub async fn get_canvas(
         "updated_at": event.created_at.as_secs(),
         "author": event.pubkey.to_hex(),
     }))
+}
+
+/// Read the most recent canvas event for each requested channel.
+#[tauri::command]
+pub async fn get_canvases(
+    channel_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let channel_ids: HashSet<_> = channel_ids.into_iter().collect();
+    let filters: Vec<_> = channel_ids
+        .iter()
+        .map(|channel_id| {
+            serde_json::json!({
+                "kinds": [40100],
+                "#h": [channel_id],
+                "limit": 1
+            })
+        })
+        .collect();
+    let mut canvases = HashMap::new();
+
+    for batch in filters.chunks(64) {
+        for event in query_relay(&state, batch).await? {
+            let Some(channel_id) = event.tags.iter().find_map(|tag| {
+                let values = tag.as_slice();
+                (values.first().map(String::as_str) == Some("h"))
+                    .then(|| values.get(1).cloned())
+                    .flatten()
+            }) else {
+                continue;
+            };
+            if !channel_ids.contains(&channel_id) {
+                continue;
+            }
+            canvases.insert(
+                channel_id,
+                serde_json::json!({
+                    "content": event.content,
+                    "updated_at": event.created_at.as_secs(),
+                    "author": event.pubkey.to_hex(),
+                }),
+            );
+        }
+    }
+
+    serde_json::to_value(canvases).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

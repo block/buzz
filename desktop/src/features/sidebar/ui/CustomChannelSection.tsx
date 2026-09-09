@@ -61,6 +61,7 @@ import { cn } from "@/shared/lib/cn";
 import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 import { HashSearch } from "@/shared/ui/icons";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
+import { nestChannels } from "@/features/channels/lib/channelBackedTask";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -73,6 +74,7 @@ const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
   { value: "recent", label: "Recent" },
   { value: "alpha", label: "A–Z" },
 ];
+const EMPTY_CHANNEL_PARENTS = new Map<string, string>();
 
 /**
  * A single always-visible "+" quick action shown at the right edge of a
@@ -342,6 +344,7 @@ export function ChannelGroupSection({
   isActiveChannel,
   activeWorkingByChannelId,
   items,
+  parentChannelById,
   listTestId,
   onBrowseClick,
   onCreateClick,
@@ -381,6 +384,7 @@ export function ChannelGroupSection({
   isActiveChannel: boolean;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   items: Channel[];
+  parentChannelById?: ReadonlyMap<string, string>;
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
@@ -424,14 +428,24 @@ export function ChannelGroupSection({
 }) {
   const contentId = `sidebar-${listTestId}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const nestedItems = nestChannels(
+    items,
+    parentChannelById ?? EMPTY_CHANNEL_PARENTS,
+  );
 
   const channelList =
     items.length > 0 ? (
       <SidebarMenu data-testid={listTestId}>
-        {items.map((channel) => (
+        {nestedItems.map(({ channel, depth }) => (
           <ContextMenu key={channel.id}>
             <ContextMenuTrigger asChild>
-              <SidebarMenuItem className="content-visibility-auto-row">
+              <SidebarMenuItem
+                className="content-visibility-auto-row"
+                data-channel-depth={depth}
+                style={
+                  depth ? { paddingInlineStart: `${depth}rem` } : undefined
+                }
+              >
                 {draggable ? (
                   <DraggableChannelRow channelId={channel.id}>
                     <ChannelMenuButton
@@ -539,6 +553,7 @@ export function ChannelGroupSection({
 export function CustomChannelSection({
   section,
   channels,
+  parentChannelById,
   hasUnread,
   isCollapsed,
   isActiveChannel,
@@ -575,6 +590,7 @@ export function CustomChannelSection({
 }: {
   section: ChannelSection;
   channels: Channel[];
+  parentChannelById?: ReadonlyMap<string, string>;
   hasUnread: boolean;
   isCollapsed: boolean;
   isActiveChannel: boolean;
@@ -614,6 +630,10 @@ export function CustomChannelSection({
 }) {
   const contentId = `sidebar-section-${section.id}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const nestedChannels = nestChannels(
+    channels,
+    parentChannelById ?? EMPTY_CHANNEL_PARENTS,
+  );
 
   return (
     <SortableSectionShell sectionId={section.id}>
@@ -727,10 +747,17 @@ export function CustomChannelSection({
               <SidebarGroupContent id={contentId}>
                 {channels.length > 0 ? (
                   <SidebarMenu>
-                    {channels.map((channel) => (
+                    {nestedChannels.map(({ channel, depth }) => (
                       <ContextMenu key={channel.id}>
                         <ContextMenuTrigger asChild>
-                          <SidebarMenuItem>
+                          <SidebarMenuItem
+                            data-channel-depth={depth}
+                            style={
+                              depth
+                                ? { paddingInlineStart: `${depth}rem` }
+                                : undefined
+                            }
+                          >
                             <DraggableChannelRow channelId={channel.id}>
                               <ChannelMenuButton
                                 channel={channel}

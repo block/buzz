@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  channelIdFromLink,
   githubRepositoryUrl,
+  nestChannels,
   parseChannelBackedTask,
 } from "./channelBackedTask.ts";
 
@@ -62,5 +64,46 @@ describe("githubRepositoryUrl", () => {
       "https://github.com/block/berd",
     );
     assert.equal(githubRepositoryUrl("https://example.com/block/berd"), null);
+  });
+});
+
+describe("channel-backed task hierarchy", () => {
+  const channel = (id) => ({ id, name: id });
+
+  it("reads channel links and recursively nests children", () => {
+    assert.equal(channelIdFromLink("buzz://channel/parent"), "parent");
+    assert.equal(channelIdFromLink("https://example.com/parent"), null);
+    assert.deepEqual(
+      nestChannels(
+        [channel("grandchild"), channel("parent"), channel("child")],
+        new Map([
+          ["child", "parent"],
+          ["grandchild", "child"],
+        ]),
+      ).map(({ channel: item, depth }) => [item.id, depth]),
+      [
+        ["parent", 0],
+        ["child", 1],
+        ["grandchild", 2],
+      ],
+    );
+  });
+
+  it("keeps missing parents and cycles visible at the top level", () => {
+    assert.deepEqual(
+      nestChannels(
+        [channel("a"), channel("b"), channel("orphan")],
+        new Map([
+          ["a", "b"],
+          ["b", "a"],
+          ["orphan", "missing"],
+        ]),
+      ).map(({ channel: item, depth }) => [item.id, depth]),
+      [
+        ["orphan", 0],
+        ["a", 0],
+        ["b", 1],
+      ],
+    );
   });
 });

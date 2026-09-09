@@ -75,6 +75,8 @@ export type CanvasResponse = {
   author: string | null;
 };
 
+export type CanvasLookup = Record<string, CanvasResponse>;
+
 export type SetCanvasInput = {
   channelId: string;
   content: string;

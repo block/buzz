@@ -991,6 +991,9 @@ export function useSetCanvasMutation(channelId: string | null) {
         void queryClient.invalidateQueries({
           queryKey: ["channel-canvas", channelId],
         });
+        void queryClient.invalidateQueries({
+          queryKey: ["channel-backed-task-canvases"],
+        });
       }
     },
   });

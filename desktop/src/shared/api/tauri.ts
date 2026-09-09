@@ -13,6 +13,7 @@ import type {
   BackendProviderCandidate,
   BackendProviderProbeResult,
   CanvasResponse,
+  CanvasLookup,
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
@@ -412,6 +413,23 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
     updatedAt: response.updated_at ?? null,
     author: response.author ?? null,
   };
+}
+
+export async function getCanvases(channelIds: string[]): Promise<CanvasLookup> {
+  const responses = await invokeTauri<Record<string, RawCanvasResponse>>(
+    "get_canvases",
+    { channelIds },
+  );
+  return Object.fromEntries(
+    Object.entries(responses).map(([channelId, response]) => [
+      channelId,
+      {
+        content: response.content,
+        updatedAt: response.updated_at ?? null,
+        author: response.author ?? null,
+      },
+    ]),
+  );
 }
 
 export async function setCanvas(

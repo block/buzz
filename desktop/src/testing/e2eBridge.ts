@@ -372,6 +372,7 @@ type E2eConfig = {
     feedReadError?: string;
     canvasReadError?: string;
     canvasContent?: string;
+    canvasContentByChannelId?: Record<string, string>;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -14753,10 +14754,32 @@ export function maybeInstallE2eTauriMocks() {
         }
         // Return the no-canvas success shape — content null means no canvas set.
         return {
-          content: activeConfig?.mock?.canvasContent ?? null,
+          content:
+            activeConfig?.mock?.canvasContentByChannelId?.[
+              (payload as { channelId: string }).channelId
+            ] ??
+            activeConfig?.mock?.canvasContent ??
+            null,
           updated_at: null,
           author: null,
         };
+      }
+      case "get_canvases": {
+        const canvasReadError = activeConfig?.mock?.canvasReadError;
+        if (canvasReadError) throw new Error(canvasReadError);
+        const fallback = activeConfig?.mock?.canvasContent;
+        return Object.fromEntries(
+          (payload as { channelIds: string[] }).channelIds.flatMap(
+            (channelId) => {
+              const content =
+                activeConfig?.mock?.canvasContentByChannelId?.[channelId] ??
+                fallback;
+              return content
+                ? [[channelId, { content, updated_at: null, author: null }]]
+                : [];
+            },
+          ),
+        );
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests

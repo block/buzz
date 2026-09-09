@@ -1,5 +1,7 @@
 import { parse } from "yaml";
 
+import type { Channel } from "@/shared/api/types";
+
 export type ChannelBackedTask = {
   task: { title: string; description: string };
   parentChannel: string;
@@ -73,4 +75,48 @@ export function githubRepositoryUrl(repository: string): string | null {
   } catch {
     return null;
   }
+}
+
+export function channelIdFromLink(link: string): string | null {
+  try {
+    const url = new URL(link);
+    return url.protocol === "buzz:" && url.hostname === "channel"
+      ? url.pathname.slice(1) || null
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export type NestedChannel = { channel: Channel; depth: number };
+
+/** Preserve sibling order while placing canvas-linked channels below their parent. */
+export function nestChannels(
+  channels: Channel[],
+  parentByChannelId: ReadonlyMap<string, string>,
+): NestedChannel[] {
+  const ids = new Set(channels.map((channel) => channel.id));
+  const children = new Map<string, Channel[]>();
+  for (const channel of channels) {
+    const parentId = parentByChannelId.get(channel.id);
+    if (!parentId || !ids.has(parentId) || parentId === channel.id) continue;
+    children.set(parentId, [...(children.get(parentId) ?? []), channel]);
+  }
+
+  const nested: NestedChannel[] = [];
+  const visited = new Set<string>();
+  const visit = (channel: Channel, depth: number) => {
+    if (visited.has(channel.id)) return;
+    visited.add(channel.id);
+    nested.push({ channel, depth });
+    for (const child of children.get(channel.id) ?? []) visit(child, depth + 1);
+  };
+  for (const channel of channels) {
+    const parentId = parentByChannelId.get(channel.id);
+    if (!parentId || !ids.has(parentId) || parentId === channel.id) {
+      visit(channel, 0);
+    }
+  }
+  for (const channel of channels) visit(channel, 0);
+  return nested;
 }
