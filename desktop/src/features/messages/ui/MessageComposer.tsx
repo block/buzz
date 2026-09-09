@@ -513,7 +513,6 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-  // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
     (emoji: string) => {
       if (!richText.editor) return;
