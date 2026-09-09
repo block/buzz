@@ -4795,8 +4795,9 @@ fn handle_prompt_result(
                     "dead-lettering batch immediately — model not found"
                 );
                 let content = "⚠️ I couldn't process the last request: the configured model \
-                    wasn't found at the provider's endpoint. Open agent settings and select a \
-                    different one from the dropdown, then re-send your request."
+                    wasn't found at the provider's endpoint. Open agent settings, select a \
+                    different model from the dropdown, and save your changes. Restart the agent \
+                    to apply the new configuration, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
@@ -11180,7 +11181,7 @@ mod error_outcome_emission_tests {
         assert_eq!(notice.kind, Kind::Custom(9));
         assert_eq!(
             notice.content,
-            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings and select a different one from the dropdown, then re-send your request."
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request."
         );
         let tags = serde_json::to_value(&notice.tags).unwrap();
         assert!(tags
