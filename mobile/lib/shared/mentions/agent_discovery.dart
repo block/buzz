@@ -110,6 +110,10 @@ class _AgentDirectoryUpdates extends Notifier<int> {
             ),
             (event) {
               if (!current()) return;
+              if (disposed) return;
+              if (event.kind == 0) {
+                ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
+              }
               if (event.kind == 5 && !_isAgentCoordinateDeletion(event)) return;
               changed();
             },

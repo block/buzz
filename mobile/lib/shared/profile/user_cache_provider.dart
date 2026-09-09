@@ -14,6 +14,7 @@ import 'user_profile.dart';
 /// kind:0 batch query (NIP-01 `authors` filter) every 50ms.
 class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   final Set<String> _pending = {};
+  int _generation = 0;
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
   Timer? _batchTimer;
   Completer<bool>? _batchCompleter;
@@ -21,8 +22,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   @override
   Map<String, UserProfile> build() {
     ref.watch(relayConfigProvider);
+    ref.watch(myPubkeyProvider);
+    _generation++;
+    _pending.clear();
     _profileEventOrders.clear();
     ref.onDispose(() {
+      _generation++;
       _batchTimer?.cancel();
       _batchTimer = null;
       _batchCompleter?.complete(false);
@@ -72,11 +77,13 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         .toSet()
         .toList();
     if (normalized.isEmpty) return true;
+    final generation = _generation;
     try {
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.profilesBatch(normalized),
       );
+      if (generation != _generation) return false;
       final updated = Map<String, UserProfile>.from(state);
       final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
         _profileEventOrders,
@@ -121,6 +128,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _batchCompleter = null;
 
     var succeeded = false;
+    final generation = _generation;
     try {
       final communityID = ref.read(activeCommunityProvider).value?.id;
       final session = ref.read(relaySessionProvider.notifier);
@@ -128,6 +136,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         NostrFilters.profilesBatch(pubkeys),
       );
 
+      if (generation != _generation) return;
       final updated = Map<String, UserProfile>.from(state);
       final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
         _profileEventOrders,

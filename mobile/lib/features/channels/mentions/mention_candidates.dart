@@ -57,6 +57,7 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
+  bool directoryReady = true,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
@@ -68,8 +69,10 @@ List<MentionCandidate> buildMentionCandidates({
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
     final isAgent = member.isBot || ownerPubkey != null;
     final policy = relayAgents.where((agent) => agent.pubkey == pk).firstOrNull;
-    if (policy?.ownerPubkey != null &&
-        !agentIsSharedWithUser(policy!, sharedChannelIds, currentPubkey)) {
+    if (ownerPubkey != null &&
+        (!directoryReady ||
+            policy?.ownerPubkey == null ||
+            !agentIsSharedWithUser(policy!, sharedChannelIds, currentPubkey))) {
       continue;
     }
     candidates.add(
@@ -98,6 +101,7 @@ List<MentionCandidate> buildMentionCandidates({
   }
 
   for (final agent in relayAgents) {
+    if (!directoryReady && agent.ownerPubkey != null) continue;
     final pk = agent.pubkey;
     if (seen.contains(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
@@ -135,7 +139,10 @@ List<MentionCandidate> buildMentionCandidates({
       final policy = relayAgents
           .where((agent) => agent.pubkey == pk)
           .firstOrNull;
-      if (policy?.ownerPubkey != null && !sharedAgentPubkeys.contains(pk)) {
+      if (ownerPubkey != null &&
+          (!directoryReady ||
+              policy?.ownerPubkey == null ||
+              !sharedAgentPubkeys.contains(pk))) {
         continue;
       }
       if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) {

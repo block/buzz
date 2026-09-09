@@ -114,6 +114,40 @@ void main() {
     expect(cache.state[agent.public]?.ownerPubkey, isNull);
   });
 
+  test(
+    'retired account refresh and preload cannot write into the next cache',
+    () async {
+      for (final preload in [false, true]) {
+        final result = Completer<List<NostrEvent>>();
+        final session = _RecordingProfileSession(result: result.future);
+        final c = ProviderContainer(
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue('first'),
+          ],
+        );
+        final cache = c.read(userCacheProvider.notifier);
+        final pending = preload
+            ? cache.preload(['agent'])
+            : cache.refresh(['agent']);
+        if (preload) {
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+        }
+        c.updateOverrides([
+          relaySessionProvider.overrideWith(() => session),
+          myPubkeyProvider.overrideWithValue('second'),
+        ]);
+        expect(c.read(userCacheProvider), isEmpty);
+        result.complete([
+          _profileEvent(id: 'old', createdAt: 2, name: 'Old scope'),
+        ]);
+        expect(await pending, isFalse);
+        expect(c.read(userCacheProvider), isEmpty);
+        c.dispose();
+      }
+    },
+  );
+
   test('non-profile history cannot poison profile order', () async {
     final session = _RecordingProfileSession(
       results: [

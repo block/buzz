@@ -2,12 +2,16 @@ part of 'agent_identity_provider.dart';
 
 /// Fresh exact-key policy and relay-signed membership. Directory entries are
 /// hints; only this read may authorize agent mentions at a destination.
+/// [resolveProfileOwners] optionally folds fetched profiles into an ordered,
+/// session-bound cache after the scope check and returns its current verified
+/// owners. Omit it for side-effect-free send-time reads.
 Future<List<AgentDirectoryEntry>> readAgentAuthorization(
   RelaySessionNotifier session,
   Set<String> requestedKeys, {
   required String? viewer,
   String? channelId,
   required bool Function() isCurrent,
+  Map<String, String> Function(Iterable<NostrEvent>)? resolveProfileOwners,
 }) async {
   void check() {
     if (!isCurrent()) throw StateError('Agent authorization scope changed');
@@ -66,6 +70,7 @@ Future<List<AgentDirectoryEntry>> readAgentAuthorization(
     runtime.where((e) => requestedKeys.contains(e.pubkey)).toList(),
     requestedKeys: requestedKeys,
     checkCurrent: check,
+    resolveProfileOwners: resolveProfileOwners,
   );
   check();
   final latest = <String, NostrEvent>{};
