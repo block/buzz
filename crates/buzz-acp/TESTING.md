@@ -1,23 +1,20 @@
 # Pi adapter integration
 
 Buzz's Pi preset uses [salman1993/pi-acp](https://github.com/salman1993/pi-acp).
-Install Pi separately, then build and install the adapter from source:
+Requires Node.js 22 or newer. Install Pi and configure its model provider,
+then install the adapter directly from the fork:
 
 ```sh
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-git clone https://github.com/salman1993/pi-acp.git
-cd pi-acp
-git checkout b893ff9241c35fd04f27b0e9dbfa2f7bc463fc42
-npm ci
-npm run build
-npm install -g .
+npm install -g @earendil-works/pi-coding-agent
+pi
+npm install -g --install-links=true git+https://github.com/salman1993/pi-acp.git#main
 ```
 
-Keep that checkout if npm links the global executable to it. Direct GitHub npm
-installation at this revision does not build `dist/index.js`. The unscoped
-`npm install -g pi-acp` command installs the upstream package, without these
-extensions. Restart managed Pi agents after installing the fork; use fresh
-sessions to replace old user-framed standing instructions.
+Restart Buzz, then select **Pi** as the agent harness. Buzz starts `pi-acp`
+automatically. Run the same adapter install command again to update it.
+The unscoped `npm install -g pi-acp` command installs the upstream package,
+without these extensions. Use fresh sessions to replace old user-framed
+standing instructions.
 
 Buzz adds `-- --skill <harness-cwd>/.agents/skills` when launching `pi-acp`.
 An existing separator and explicit Pi options are preserved. Managed agents
