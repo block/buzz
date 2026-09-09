@@ -13,6 +13,7 @@ buzz-auth = { workspace = true }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -21,6 +22,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 nostr = { workspace = true }
 futures-util = { workspace = true }
+metrics = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -206,6 +206,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
         .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
     describe_db_pool_metrics();
+    describe_redis_subscription_metrics();
     tokio::spawn(exporter);
     Ok(())
 }
@@ -254,6 +255,31 @@ pub(crate) fn describe_db_pool_metrics() {
     metrics::describe_gauge!(
         "buzz_db_pool_waiters",
         "Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"
+    );
+}
+
+/// Register the fixed-cardinality Redis subscription-path metric contract.
+pub(crate) fn describe_redis_subscription_metrics() {
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_path_state",
+        "One-hot end-to-end state by required Redis subscription path and bounded state"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_last_ready_timestamp_seconds",
+        metrics::Unit::Seconds,
+        "Unix timestamp of the latest completed consumer-plus-Redis subscription handshake"
+    );
+    metrics::describe_counter!(
+        "buzz_redis_subscription_transitions_total",
+        "Redis subscription path transitions by path, bounded transition, and bounded reason"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_paths_ready",
+        "Number of required Redis subscription paths currently ready in this relay process"
+    );
+    metrics::describe_gauge!(
+        "buzz_redis_subscription_all_ready",
+        "Whether all required Redis subscription paths are currently ready in this relay process"
     );
 }
 
@@ -330,6 +356,8 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
 mod contract_tests {
     use std::collections::BTreeSet;
 
+    use buzz_pubsub::health::{SubscriptionHealth, SubscriptionPath};
+
     const OUTCOMES: [&str; 4] = ["success", "timeout", "error", "cancelled"];
 
     fn label_keys(line: &str) -> BTreeSet<&str> {
@@ -342,6 +370,74 @@ mod contract_tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn redis_subscription_scrape_has_fixed_labels_and_one_hot_state() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_redis_subscription_metrics();
+            let health = SubscriptionHealth::new();
+            for path in SubscriptionPath::ALL {
+                health.consumer_attached(path);
+                health.network_ready(path);
+            }
+            health.refresh_metrics();
+        });
+
+        let scrape = handle.render();
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_path_state gauge"));
+        assert!(
+            scrape.contains("# TYPE buzz_redis_subscription_last_ready_timestamp_seconds gauge")
+        );
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_transitions_total counter"));
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_paths_ready gauge"));
+        assert!(scrape.contains("# TYPE buzz_redis_subscription_all_ready gauge"));
+
+        let state_lines = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_redis_subscription_path_state{"))
+            .collect::<Vec<_>>();
+        assert_eq!(state_lines.len(), 15, "unexpected state series:\n{scrape}");
+        assert_eq!(
+            state_lines
+                .iter()
+                .filter(|line| line.ends_with(" 1"))
+                .count(),
+            3,
+            "exactly one state per path must be active:\n{scrape}"
+        );
+        for line in state_lines {
+            assert_eq!(label_keys(line), BTreeSet::from(["path", "state"]));
+        }
+
+        for line in scrape.lines().filter(|line| {
+            line.starts_with("buzz_redis_subscription_last_ready_timestamp_seconds{")
+        }) {
+            assert_eq!(label_keys(line), BTreeSet::from(["path"]));
+        }
+        for line in scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_redis_subscription_transitions_total{"))
+        {
+            assert_eq!(
+                label_keys(line),
+                BTreeSet::from(["path", "reason", "transition"])
+            );
+        }
+        assert!(scrape.contains("buzz_redis_subscription_paths_ready 3"));
+        assert!(scrape.contains("buzz_redis_subscription_all_ready 1"));
+        for forbidden in [
+            "redis_url",
+            "channel",
+            "community",
+            "tenant",
+            "credential",
+            "payload",
+            "error",
+        ] {
+            assert!(!scrape.contains(&format!("{forbidden}=\"")));
+        }
     }
 
     #[test]

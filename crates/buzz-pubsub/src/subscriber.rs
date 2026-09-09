@@ -7,7 +7,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use nostr::JsonUtil;
 use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
+use crate::health::{SubscriptionHealth, SubscriptionPath, SubscriptionTransitionReason};
 use crate::topic::EventTopicKey;
 use crate::ChannelEvent;
 
@@ -39,31 +41,46 @@ pub(crate) async fn run_subscriber(
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     mut subscription_rx: mpsc::Receiver<SubscriptionCommand>,
+    cancel: CancellationToken,
+    health: Arc<SubscriptionHealth>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    health.connecting(SubscriptionPath::Event);
 
     loop {
-        match connect_and_subscribe(
+        let attempt = connect_and_subscribe(
             &redis_url,
             &broadcast_tx,
             desired_topics.clone(),
             &mut subscription_rx,
-        )
-        .await
-        {
+            &health,
+        );
+        let result = tokio::select! {
+            () = cancel.cancelled() => return,
+            result = attempt => result,
+        };
+        match result {
             Ok(()) => {
                 // Stream ended cleanly (Redis returned None). The connection was
                 // established and ran successfully, so reset backoff to the initial
                 // value — a brief Redis restart should reconnect quickly.
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                health.reconnecting(
+                    SubscriptionPath::Event,
+                    SubscriptionTransitionReason::StreamClosed,
+                );
                 tracing::warn!("Redis pub/sub stream ended (clean disconnect) — reconnecting in {backoff_secs}s");
             }
-            Err(e) => {
+            Err((reason, e)) => {
+                health.reconnecting(SubscriptionPath::Event, reason);
                 tracing::error!("Redis pub/sub error: {e} — reconnecting in {backoff_secs}s");
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+        }
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
 
         tracing::info!("Attempting to reconnect to Redis pub/sub...");
@@ -77,9 +94,14 @@ async fn connect_and_subscribe(
     broadcast_tx: &broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
-) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let conn = client.get_async_pubsub().await?;
+    health: &SubscriptionHealth,
+) -> Result<(), (SubscriptionTransitionReason, redis::RedisError)> {
+    let client = redis::Client::open(redis_url)
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
+    let conn = client
+        .get_async_pubsub()
+        .await
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
     let (mut sink, mut stream) = conn.split();
     let mut active_topics = HashSet::new();
 
@@ -93,9 +115,13 @@ async fn connect_and_subscribe(
 
     for topic in initial_topics {
         let channel = topic.redis_channel();
-        sink.subscribe(&channel).await?;
+        sink.subscribe(&channel)
+            .await
+            .map_err(|error| (SubscriptionTransitionReason::Subscribe, error))?;
         active_topics.insert(channel);
     }
+
+    health.network_ready(SubscriptionPath::Event);
 
     tracing::info!(
         topic_count = active_topics.len(),
@@ -109,14 +135,18 @@ async fn connect_and_subscribe(
                     SubscriptionCommand::Subscribe(topic) => {
                         let channel = topic.redis_channel();
                         if active_topics.insert(channel.clone()) {
-                            sink.subscribe(&channel).await?;
+                            sink.subscribe(&channel)
+                                .await
+                                .map_err(|error| (SubscriptionTransitionReason::Subscribe, error))?;
                         }
                     }
                     SubscriptionCommand::UnsubscribeIfIdle(topic) => {
                         if desired_refcount(&desired_topics, topic).await == 0 {
                             let channel = topic.redis_channel();
                             if active_topics.remove(&channel) {
-                                sink.unsubscribe(&channel).await?;
+                                sink.unsubscribe(&channel)
+                                    .await
+                                    .map_err(|error| (SubscriptionTransitionReason::Subscribe, error))?;
                             }
                         }
                     }

@@ -27,6 +27,8 @@ pub mod cache_invalidation;
 pub mod conn_control;
 /// Error types for pub/sub operations.
 pub mod error;
+/// Fixed-cardinality health for cross-pod Redis subscription paths.
+pub mod health;
 /// Redis-backed NIP-98 replay seen-set.
 pub mod nip98_replay;
 pub use nip98_replay::RedisNip98ReplayGuard;
@@ -50,6 +52,7 @@ use std::time::Duration;
 use buzz_core::TenantContext;
 use nostr::PublicKey;
 use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
@@ -110,6 +113,7 @@ pub struct PubSubManager {
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
+    subscription_health: Arc<health::SubscriptionHealth>,
 }
 
 impl PubSubManager {
@@ -138,6 +142,7 @@ impl PubSubManager {
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
+            subscription_health: Arc::new(health::SubscriptionHealth::new()),
         })
     }
 
@@ -146,6 +151,12 @@ impl PubSubManager {
     /// Runs forever — spawn this in a background task. The loop reconnects
     /// with exponential backoff on Redis disconnect (1s → 2s → 4s → … → 30s).
     pub async fn run_subscriber(self: Arc<Self>) {
+        self.run_subscriber_until_cancelled(CancellationToken::new())
+            .await;
+    }
+
+    /// Run the event subscriber until explicit process cancellation.
+    pub async fn run_subscriber_until_cancelled(self: Arc<Self>, cancel: CancellationToken) {
         let Some(subscription_rx) = self.subscription_rx.lock().await.take() else {
             tracing::error!("Redis pub/sub subscriber already started");
             return;
@@ -156,6 +167,8 @@ impl PubSubManager {
             self.broadcast_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
+            cancel,
+            Arc::clone(&self.subscription_health),
         )
         .await;
     }
@@ -163,9 +176,20 @@ impl PubSubManager {
     /// Starts the cache-invalidation subscriber loop with automatic
     /// reconnection. Runs forever — spawn this in a background task.
     pub async fn run_cache_invalidation_subscriber(self: Arc<Self>) {
-        cache_invalidation::run_cache_invalidation_subscriber(
+        self.run_cache_invalidation_subscriber_until_cancelled(CancellationToken::new())
+            .await;
+    }
+
+    /// Run the cache-invalidation subscriber until explicit process cancellation.
+    pub async fn run_cache_invalidation_subscriber_until_cancelled(
+        self: Arc<Self>,
+        cancel: CancellationToken,
+    ) {
+        cache_invalidation::run_cache_invalidation_subscriber_until_cancelled(
             self.redis_url.clone(),
             self.cache_invalidation_tx.clone(),
+            cancel,
+            Arc::clone(&self.subscription_health),
         )
         .await;
     }
@@ -173,11 +197,27 @@ impl PubSubManager {
     /// Starts the connection-control subscriber loop with automatic
     /// reconnection. Runs forever — spawn this in a background task.
     pub async fn run_conn_control_subscriber(self: Arc<Self>) {
-        conn_control::run_conn_control_subscriber(
+        self.run_conn_control_subscriber_until_cancelled(CancellationToken::new())
+            .await;
+    }
+
+    /// Run the connection-control subscriber until explicit process cancellation.
+    pub async fn run_conn_control_subscriber_until_cancelled(
+        self: Arc<Self>,
+        cancel: CancellationToken,
+    ) {
+        conn_control::run_conn_control_subscriber_until_cancelled(
             self.redis_url.clone(),
             self.conn_control_tx.clone(),
+            cancel,
+            Arc::clone(&self.subscription_health),
         )
         .await;
+    }
+
+    /// Return the shared end-to-end Redis subscription health snapshot.
+    pub fn subscription_health(&self) -> Arc<health::SubscriptionHealth> {
+        Arc::clone(&self.subscription_health)
     }
 
     /// Returns a new broadcast receiver for locally-published channel events.
@@ -378,6 +418,7 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::health::{SubscriptionPath, SubscriptionPathState};
     use crate::test_util::make_test_pool;
     use buzz_core::{CommunityId, TenantContext};
     use nostr::{EventBuilder, Keys, Kind};
@@ -401,23 +442,39 @@ mod tests {
     async fn test_publish_and_subscribe_roundtrip() {
         let manager = make_manager().await;
         let mut rx = manager.subscribe_local();
-
-        let manager_clone = manager.clone();
-        tokio::spawn(async move { manager_clone.run_subscriber().await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
+        manager
+            .subscription_health()
+            .consumer_attached(SubscriptionPath::Event);
         let ctx = ctx(0xaaaa, "a.example");
         let channel_id = Uuid::new_v4();
+        manager
+            .retain_topic(&ctx, EventTopic::Channel(channel_id))
+            .await;
+
+        let cancel = CancellationToken::new();
+        let manager_clone = manager.clone();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            manager_clone
+                .run_subscriber_until_cancelled(task_cancel)
+                .await
+        });
+        manager
+            .subscription_health()
+            .wait_for_state(
+                SubscriptionPath::Event,
+                SubscriptionPathState::Ready,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("event Redis subscription handshake");
+
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::TextNote, "hello pubsub")
             .tags([])
             .sign_with_keys(&keys)
             .expect("signing failed");
         let event_id = event.id;
-
-        manager
-            .retain_topic(&ctx, EventTopic::Channel(channel_id))
-            .await;
 
         manager
             .publish_event(&ctx, EventTopic::Channel(channel_id), &event)
@@ -432,6 +489,8 @@ mod tests {
         assert_eq!(received.community_id, ctx.community());
         assert_eq!(received.topic, EventTopic::Channel(channel_id));
         assert_eq!(received.event.id, event_id);
+        cancel.cancel();
+        task.await.expect("event subscriber shutdown");
     }
 
     #[tokio::test]
@@ -439,10 +498,27 @@ mod tests {
     async fn test_cache_invalidation_roundtrip() {
         let manager = make_manager().await;
         let mut rx = manager.subscribe_cache_invalidations();
+        manager
+            .subscription_health()
+            .consumer_attached(SubscriptionPath::Cache);
 
+        let cancel = CancellationToken::new();
         let manager_clone = manager.clone();
-        tokio::spawn(async move { manager_clone.run_cache_invalidation_subscriber().await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            manager_clone
+                .run_cache_invalidation_subscriber_until_cancelled(task_cancel)
+                .await
+        });
+        manager
+            .subscription_health()
+            .wait_for_state(
+                SubscriptionPath::Cache,
+                SubscriptionPathState::Ready,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("cache Redis subscription handshake");
 
         let channel_id = Uuid::new_v4();
         let pubkey = Keys::generate().public_key().to_bytes().to_vec();
@@ -470,6 +546,58 @@ mod tests {
                 invalidation: sent,
             }
         );
+        cancel.cancel();
+        task.await.expect("cache subscriber shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn test_connection_control_roundtrip() {
+        let manager = make_manager().await;
+        let mut rx = manager.subscribe_conn_control();
+        manager
+            .subscription_health()
+            .consumer_attached(SubscriptionPath::ConnectionControl);
+
+        let cancel = CancellationToken::new();
+        let manager_clone = manager.clone();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            manager_clone
+                .run_conn_control_subscriber_until_cancelled(task_cancel)
+                .await
+        });
+        manager
+            .subscription_health()
+            .wait_for_state(
+                SubscriptionPath::ConnectionControl,
+                SubscriptionPathState::Ready,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("connection-control Redis subscription handshake");
+
+        let ctx = ctx(0xaaaa, "a.example");
+        let sent = ConnControl::DisconnectCommunity;
+        manager
+            .publish_conn_control(&ctx, &sent)
+            .await
+            .expect("publish failed");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(
+            received,
+            ScopedConnControl {
+                community_id: ctx.community(),
+                command: sent,
+            }
+        );
+
+        cancel.cancel();
+        task.await.expect("connection-control subscriber shutdown");
     }
 
     #[tokio::test]

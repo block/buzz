@@ -460,25 +460,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
     );
-    info!("Redis pub/sub connected");
-
-    // Spawn Redis pub/sub subscriber for multi-node fan-out.
-    // Events published by other relay instances are received here and
-    // fanned out to local WebSocket subscribers.
-    let pubsub_for_sub = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+    info!("Redis pub/sub manager initialized");
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -525,6 +507,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         media_storage,
     );
     let state = Arc::new(app_state);
+    let redis_subscriptions =
+        buzz_relay::redis_subscription_runtime::RedisSubscriptionRuntime::start(Arc::clone(&state));
+    info!("Redis subscription runtime started");
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
@@ -964,65 +949,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
-    // Multi-node fan-out consumer: receive events from Redis pub/sub
-    // (published by other relay instances) and fan out to local WS subscribers.
-    {
-        let state_for_sub = Arc::clone(&state);
-        let mut rx = state_for_sub.pubsub.subscribe_local();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(channel_event) => {
-                        buzz_relay::handlers::event::fan_out_pubsub_event(
-                            &state_for_sub,
-                            channel_event,
-                        )
-                        .await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
-                        tracing::warn!("Multi-node fan-out lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Multi-node fan-out broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // Cross-pod cache-invalidation consumer: receive cache-key drops from Redis
-    // pub/sub (published by other relay instances when membership/visibility
-    // changes) and apply the matching local moka drop. Uses the `*_local` drop
-    // variants so a received drop is never re-published.
-    {
-        let state_for_cache = Arc::clone(&state);
-        let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(scoped) => {
-                        // The Redis topic carries the originating community,
-                        // and the local moka keys carry that same label. Apply
-                        // only the matching tenant-local drop; a mutation in A
-                        // must not flush B's derived state.
-                        state_for_cache
-                            .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);
-                        tracing::warn!("Cache-invalidation consumer lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Cache-invalidation broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
     // Durable lifecycle backstop: Redis pub/sub cannot deliver to a pod that was
     // offline. Periodically revalidate only communities with local live sockets
     // so missed archive commands still converge without a global DB scan.
@@ -1039,50 +965,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             std::time::Duration::from_secs(interval_secs),
             cancel,
         ));
-    }
-
-    // Cross-pod connection-control consumer: receive disconnect commands from
-    // Redis pub/sub (published by the pod that recorded a ban) and close any
-    // matching local sockets. A member's live connections may land on any pod,
-    // so this is how a ban reaches sockets the banning pod does not hold. The DB
-    // ban row is the durable backstop; even a dropped command still refuses the
-    // banned member's next auth attempt at the auth seam.
-    {
-        let state_for_conn_ctrl = Arc::clone(&state);
-        let mut rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(scoped) => match scoped.command {
-                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
-                            state_for_conn_ctrl
-                                .community_connections
-                                .disconnect_community(scoped.community_id);
-                        }
-                        buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
-                            pubkey,
-                            event_id,
-                            reason,
-                        } => {
-                            state_for_conn_ctrl.conn_manager.disconnect_pubkey(
-                                scoped.community_id,
-                                &pubkey,
-                                &event_id,
-                                &reason,
-                            );
-                        }
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_conn_control_lag_total").increment(n);
-                        tracing::warn!("Connection-control consumer lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Connection-control broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
     }
 
     let router = build_router(Arc::clone(&state));
@@ -1141,6 +1023,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
                 metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
                 metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                pool_state.pubsub.subscription_health().refresh_metrics();
 
                 let deletion_store = pool_state.db.deletion_store();
                 match deletion_store.reap_expired_serving_write_leases(1000).await {
@@ -1214,7 +1097,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
-    serve(router, health_router, Arc::clone(&state)).await?;
+    let serve_result = serve(router, health_router, Arc::clone(&state)).await;
+    redis_subscriptions
+        .shutdown(std::time::Duration::from_secs(5))
+        .await;
+    serve_result?;
     state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and

@@ -14,12 +14,16 @@
 //! The DB ban row remains the durable backstop: even if a disconnect message is
 //! dropped, the next auth attempt is refused at the auth seam.
 
+use std::sync::Arc;
+
 use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::health::{SubscriptionHealth, SubscriptionPath, SubscriptionTransitionReason};
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for connection-control messages.
@@ -91,22 +95,55 @@ pub async fn run_conn_control_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<ScopedConnControl>,
 ) {
+    let health = Arc::new(SubscriptionHealth::new());
+    health.consumer_attached(SubscriptionPath::ConnectionControl);
+    run_conn_control_subscriber_until_cancelled(
+        redis_url,
+        broadcast_tx,
+        CancellationToken::new(),
+        health,
+    )
+    .await;
+}
+
+/// Run connection control until explicit process cancellation while reporting
+/// the shared end-to-end subscription-path health contract.
+pub async fn run_conn_control_subscriber_until_cancelled(
+    redis_url: String,
+    broadcast_tx: broadcast::Sender<ScopedConnControl>,
+    cancel: CancellationToken,
+    health: Arc<SubscriptionHealth>,
+) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    health.connecting(SubscriptionPath::ConnectionControl);
 
     loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
+        let attempt = connect_and_subscribe(&redis_url, &broadcast_tx, &health);
+        let result = tokio::select! {
+            () = cancel.cancelled() => return,
+            result = attempt => result,
+        };
+        match result {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                health.reconnecting(
+                    SubscriptionPath::ConnectionControl,
+                    SubscriptionTransitionReason::StreamClosed,
+                );
                 tracing::warn!(
                     "Redis conn-control stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
                 );
             }
-            Err(e) => {
+            Err((reason, e)) => {
+                health.reconnecting(SubscriptionPath::ConnectionControl, reason);
                 tracing::error!("Redis conn-control error: {e} — reconnecting in {backoff_secs}s");
             }
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)) => {}
+        }
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
 
         tracing::info!("Attempting to reconnect to Redis conn-control...");
@@ -116,11 +153,19 @@ pub async fn run_conn_control_subscriber(
 async fn connect_and_subscribe(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<ScopedConnControl>,
-) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
+    health: &SubscriptionHealth,
+) -> Result<(), (SubscriptionTransitionReason, redis::RedisError)> {
+    let client = redis::Client::open(redis_url)
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
+    let mut conn = client
+        .get_async_pubsub()
+        .await
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
 
-    conn.psubscribe(CONN_CONTROL_PATTERN).await?;
+    conn.psubscribe(CONN_CONTROL_PATTERN)
+        .await
+        .map_err(|error| (SubscriptionTransitionReason::Subscribe, error))?;
+    health.network_ready(SubscriptionPath::ConnectionControl);
 
     tracing::info!("Redis conn-control subscriber connected — listening on {CONN_CONTROL_PATTERN}");
 
