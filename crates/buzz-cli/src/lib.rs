@@ -464,7 +464,7 @@ pub enum MessagesCmd {
     },
     /// Retrieve messages from a channel
     #[command(
-        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
+        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984\n  buzz messages get --channel <UUID> --include-aux"
     )]
     Get {
         /// Channel UUID
@@ -482,6 +482,9 @@ pub enum MessagesCmd {
         /// Comma-separated event kinds to filter (e.g. 1,1984)
         #[arg(long)]
         kinds: Option<String>,
+        /// Include reactions, deletions, and edits attached to returned messages
+        #[arg(long)]
+        include_aux: bool,
     },
     /// Get the containing thread for a message or Buzz message link
     #[command(
@@ -503,6 +506,9 @@ pub enum MessagesCmd {
         /// Maximum reply nesting depth to include
         #[arg(long)]
         depth_limit: Option<u32>,
+        /// Include reactions, deletions, and edits attached to returned messages
+        #[arg(long)]
+        include_aux: bool,
     },
     /// Full-text search across messages
     #[command(
