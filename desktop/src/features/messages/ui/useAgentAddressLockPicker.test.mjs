@@ -44,6 +44,10 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     isMentionOpen: true,
     openMentionPicker: (...args) => openPickerCalls.push(args),
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -119,6 +123,10 @@ test("always addressing a new agent delegates the first add for immediate confir
         isInlineMentionSelection: () => false,
         isMentionOpen: false,
         canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: () => {},
       },
       onAddressAgentMention: (value) => addressedSuggestions.push(value),
@@ -159,6 +167,10 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
     ],
     getMentionDisplayName: () => "Agent Ada",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -220,8 +232,16 @@ test("selecting an already addressed agent from the explicit picker pulses its b
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 5,
@@ -280,8 +300,16 @@ test("selecting an agent from a typed query immediately auto-addresses it", asyn
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => true,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 6,
@@ -348,6 +376,10 @@ test("selecting a human mention never changes automatic addressing", async () =>
       mentions: {
         getMentionDisplayName: () => "Alice",
         isInlineMentionSelection: () => true,
+        selectMention(_row, _cursor, valid, commit) {
+          const edit = this.insertMention();
+          if (valid() && edit.insertText) commit(edit);
+        },
         insertMention: () => ({
           replaceFromOffset: 0,
           replaceToOffset: 3,
@@ -401,6 +433,10 @@ test("restoring a multi-word automatic mention into an empty composer focuses af
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "claude code",
         canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: (...args) => {
           registeredMentions.push(args);
           return args[0];
@@ -451,6 +487,10 @@ test("restoring before authored text preserves its selection", async () => {
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "Morgarita",
         canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: () => {},
       },
       onPulseAddressLock: () => {},
@@ -506,6 +546,10 @@ test("restoring an existing automatic mention re-registers its agent chip", asyn
             : [],
         getMentionDisplayName: () => "claude code",
         canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: (...args) => {
           registeredMentions.push(args);
           return args[0];
@@ -648,8 +692,16 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 5,
@@ -715,8 +767,16 @@ test("repeatedly selecting an explicitly unpinned agent keeps its mentions manua
     ],
     getMentionDisplayName: () => "Agent Ada",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => true,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 0,
       replaceToOffset: 0,
@@ -830,6 +890,10 @@ test("restoring after an agent rename keeps the existing automatic mention", asy
           ],
           getMentionDisplayName: () => displayName,
           canSelectMention: () => true,
+          cancelMentionAdmission: () => {},
+          admitMention(_row, _cursor, valid, commit) {
+            if (valid()) commit();
+          },
           registerMentionPubkey: (...args) => {
             registeredMentions.push(args);
             return args[0];
@@ -912,6 +976,10 @@ test("automatic mention insertion and restoration use the registered collision-s
     getMentionDisplayName: (pubkey) =>
       [...bindings].find(([, key]) => key === pubkey)?.[0] ?? "carl",
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: (name, pubkey) => {
       const label = selectedMentionLabel(name, pubkey, bindings);
       bindings.set(label, pubkey);
@@ -1012,6 +1080,10 @@ test("inverse deletion and toggle preserve B and exclude A from the composed sen
     getMentionDisplayName: (key) =>
       [...bindings].find(([, k]) => k === key)?.[0],
     canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: (name, key) => {
       const label = selectedMentionLabel(name, key, bindings);
       bindings.set(label, key);
@@ -1091,6 +1163,7 @@ test("implicit prefix removal uses the present exact label rather than a stale a
       audience: { pubkeys: [key], excludePubkey: () => {} },
       audienceScope: "channel",
       mentions: {
+        cancelMentionAdmission: () => {},
         getDraftMentionRefs: () => [
           { displayName: "Historical Scout", pubkey: key, isAgent: true },
         ],
@@ -1126,6 +1199,10 @@ test("rejected stale selection never pins, tracks, announces or edits", async ()
       mentions: {
         getMentionDisplayName: () => "Scout",
         isInlineMentionSelection: () => true,
+        selectMention(_row, _cursor, valid, commit) {
+          const edit = this.insertMention();
+          if (valid() && edit.insertText) commit(edit);
+        },
         insertMention: () => ({
           replaceFromOffset: 1,
           replaceToOffset: 1,

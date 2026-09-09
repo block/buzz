@@ -248,7 +248,9 @@ test("membership revoked at final publish keeps draft and emits no message", asy
   });
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(
-    page.getByText(/Could not authorize a mentioned agent/),
+    page.getByText(
+      /Could not check access for a mentioned agent\. Retry or remove the mention\./,
+    ),
   ).toBeVisible();
   await expect(page.getByTestId("message-input")).toHaveText(
     "@RemoteScout hello",

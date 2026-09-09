@@ -265,7 +265,7 @@ for (const change of [
   test(`a retained callback cannot bind after ${change}`, async () => {
     await setup({ owner: OTHER, visible: true, directoryVisible: true });
     const staleRow = rows()[0];
-    const staleInsert = mention.insertMention;
+    const staleInsert = captureInsert(mention.selectMention);
     assert.equal(staleRow.isAgent, true);
     assert.equal(mention.canSelectMention(staleRow), true);
     if (change === "policy-denied") state.policy = "owner-only";
@@ -311,7 +311,7 @@ test("only an exact current target can be selected", async () => {
     assert.equal(mention.canSelectMention(target), false);
     let edit;
     await act(async () => {
-      edit = mention.insertMention(target, 1);
+      edit = captureInsert(mention.selectMention)(target, 1);
     });
     assert.equal(edit.insertText, "");
   }
@@ -340,7 +340,7 @@ for (const returnToOrigin of [false, true]) {
     await setup({ visible: true, directoryVisible: true });
     const row = rows()[0],
       oldPin = picker.toggleAlwaysAddressAgent;
-    const oldInsert = mention.insertMention;
+    const oldInsert = captureInsert(mention.selectMention);
     const oldSelect = picker.selectMentionSuggestion;
     state.channelId = "22222222-2222-4222-8222-222222222222";
     await render();
@@ -418,7 +418,7 @@ test("retained team cannot bind a removed exact member", async () => {
   const row = mention.suggestions.find((s) => s.kind === "team");
   assert.ok(row, JSON.stringify(mention.suggestions));
   assert.equal(row.teamMembers[0].pubkey, AGENT);
-  const old = mention.insertMention;
+  const old = captureInsert(mention.selectMention);
   state.missingDirectory = true;
   await act(async () => client.setQueryData(["managed-agents"], []));
   await act(async () =>
@@ -477,7 +477,7 @@ test("duplicate team members cannot mask a recipient set change", async () => {
     new Set(row.teamMembers.map((m) => m.pubkey ?? m.personaId)).size,
     1,
   );
-  const insert = mention.insertMention;
+  const insert = captureInsert(mention.selectMention);
   await act(async () =>
     client.setQueryData(["teams"], [{ ...team, personaIds: ["one", "two"] }]),
   );
@@ -529,7 +529,7 @@ for (const channelType of ["stream", "dm"]) {
     assert.equal(choice.pubkey, OTHER);
     let edit;
     await act(async () => {
-      edit = mention.insertMention(choice, 6);
+      edit = captureInsert(mention.selectMention)(choice, 6);
     });
     assert.equal(mention.getDraftMentionRefs(edit.insertText)[0].pubkey, OTHER);
   });
@@ -593,7 +593,7 @@ test("background membership/search updates leave visible same-name rows and Tab 
   });
   assert.deepEqual(outcome.suggestion, selected);
   await act(async () => {
-    edit = mention.insertMention(outcome.suggestion, 6);
+    edit = captureInsert(mention.selectMention)(outcome.suggestion, 6);
   });
   assert.equal(
     mention.getDraftMentionRefs(edit.insertText)[0].pubkey,
@@ -657,7 +657,9 @@ test("leaving a completion and navigation discard choices; explicit reopen start
   const old = rows()[0];
   await act(async () => mention.updateMentionQuery("plain", 5));
   assert.equal(mention.isMentionOpen, false);
-  assert.equal(mention.insertMention(old, 5).insertText, "");
+  await act(async () => {
+    assert.equal(captureInsert(mention.selectMention)(old, 5).insertText, "");
+  });
   await act(async () => mention.openMentionPicker(5));
   assert.equal(mention.mentionSelectedIndex, 0);
   assert.notEqual(rows()[0], old);
@@ -978,4 +980,21 @@ for (const failure of ["denied", "lookup-failed"]) {
       "fresh discovery must still exclude denied nonmembers",
     );
   });
+}
+// Observe the real admitted action after act flushes its promise; no authority stub.
+function captureInsert(select) {
+  return (row, cursor) => {
+    const edit = {
+      insertText: "",
+      replaceFromOffset: cursor,
+      replaceToOffset: cursor,
+    };
+    select(
+      row,
+      cursor,
+      () => true,
+      (committed) => Object.assign(edit, committed),
+    );
+    return edit;
+  };
 }

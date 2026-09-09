@@ -95,3 +95,47 @@ have not yet installed, they still wait for the required discovery to settle.
 Change the completion text or explicitly reopen to discover a new set of choices.
 Live access is checked again at selection, including for rows whose display
 snapshot originally permitted mentioning.
+
+## Fresh selection and pin admission
+
+Chat pointer, Enter, Tab and exact-Space choices, explicit automatic-address
+adds (including the closed-picker default-agent shortcut), and standalone forum
+choices share one cancellable prepare/commit operation. Discovery and cached
+availability are preflight only: the exact selected agent keys and destination
+are freshly revalidated in prepare mode. A team is admitted as its captured
+recipient set, never partially or by resolving its name again. Human-only and
+unresolved-persona choices retain their existing recipient semantics.
+
+No label reservation, selected-agent intent, successful-selection history,
+editor replacement, automatic audience or generated-prefix provenance is added
+while checking. A single fenced synchronous commit owns those effects. The raw
+insertion implementation is private; restoration/registration of existing draft
+intent is not a new user selection. The displayed-row WeakMap associates live
+availability overlays with installed row identities; it is not a retained-list
+or moving-ranking authority. The closed-picker shortcut holds at most one exact
+issued choice, bound to the editor/query revision.
+
+“Checking access…” is visible and announced in chat and forum. Access denial
+leaves the draft unchanged and says access changed; failed lookup or the
+15-second timeout says access could not be checked. Selecting again retries
+with fresh evidence. A duplicate action for the same pending choice is consumed,
+not queued for publication. A different choice supersedes it. Typing, native
+input, selection transactions, dismissal, navigation, submission and unmount
+abandon pending work; returning to the same text, caret or scope does not revive
+it. Native editing is never disabled by selection admission. Unexpected commit
+errors are reported as a failure to finish selection (inspect the draft before
+retry), not mislabeled as an authority denial.
+
+Unpin/removal remains available without permission and cancels pending adds.
+Existing automatic-address restoration remains separate from new pin admission.
+Native Enter outside the chooser and non-exact/ambiguous Space retain their
+normal handling. Only successful insertion settles the mention caret.
+
+Selection is not a send permit: publication independently revalidates authority
+for the actual destination, including revocation after successful selection.
+Offline fresh admission therefore fails closed without clearing the draft.
+Focused coverage in `freshMentionChatJourney.test.mjs` mounts the production
+chat picker with Tiptap and the actual standalone `ForumComposer`; its DOM is
+JSDOM with fixture IPC, **not** browser or live-relay evidence. Browser,
+relay-backed revocation, full-package gates and independent review remain
+separate release gates.

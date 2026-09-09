@@ -17,11 +17,13 @@ export function useMentionQuery(
 ) {
   const [request, setRequest] = React.useState<MentionRequest | null>(null);
   const current = React.useRef(request);
+  const revision = React.useRef(0);
   const input = React.useRef<EditorSnapshot>({ text: "", cursor: 0 });
   const snapshot = React.useRef(getSnapshot);
   snapshot.current = getSnapshot;
   const searchableNamesLowerRef = React.useRef<string[]>([]);
   const publish = React.useCallback((next: MentionRequest | null) => {
+    revision.current += 1;
     current.current = next;
     setRequest(next);
   }, []);
@@ -46,6 +48,7 @@ export function useMentionQuery(
       const previous = input.current;
       input.current = { text, cursor };
       if (previous.text === text && previous.cursor === cursor) return;
+      revision.current += 1;
       const prefix = prefixFor(input.current);
       const old = current.current;
       // Moving out of the completion (or moving in a no-trigger menu) closes it.
@@ -99,6 +102,7 @@ export function useMentionQuery(
     );
   }, [prefixFor, read, request, scope]);
   return {
+    getRevision: () => revision.current,
     request: request?.scope === scope ? request : null,
     cancel,
     refresh: React.useCallback(() => {

@@ -563,6 +563,7 @@ function MessageComposerImpl({
     onToggle: toggleAlwaysAddressAgent,
   });
   const submitMessage = React.useCallback(async () => {
+    mentions.cancelMentionAdmission();
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
@@ -682,6 +683,7 @@ function MessageComposerImpl({
     media.setUploadState,
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
+    mentions.cancelMentionAdmission,
     mentions.clearMentions,
     richText.clearContent,
     richText.setContent,
@@ -906,7 +908,11 @@ function MessageComposerImpl({
             {composerLinkPreviews}
             <output
               aria-live="polite"
-              className="sr-only"
+              className={
+                mentions.mentionAdmissionStatus
+                  ? "text-xs text-muted-foreground"
+                  : "sr-only"
+              }
               data-testid="composer-address-lock-status"
             >
               {addressLockAnnouncement}

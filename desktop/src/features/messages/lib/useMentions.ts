@@ -1,3 +1,4 @@
+import { useMentionAdmission } from "./useMentionAdmission";
 import {
   isMentionActionable,
   markMentionCollisions,
@@ -92,6 +93,7 @@ export function useMentions(
     [currentPubkey, channelId],
   );
   const query = useMentionQuery(options?.getEditorSnapshot, admissionScope);
+  const admission = useMentionAdmission(query.request ?? admissionScope);
   const mentionQuery = query.request?.query ?? null;
   const mentionStartIndex = query.request?.startIndex ?? 0;
   const { searchableNamesLowerRef, currentPrefix: currentMentionPrefix } =
@@ -461,7 +463,17 @@ export function useMentions(
     profiles,
     recentMentionPubkeys: options?.recentMentionPubkeys,
   });
-  const getDefaultAgentSuggestion = defaultAgentSuggestion;
+  // The closed-picker shortcut installs one exact choice, not a retained list.
+  const defaultChoice = React.useRef<{
+    row: MentionSuggestion | null;
+    revision: number;
+  } | null>(null);
+  const getDefaultAgentSuggestion = () => {
+    if (admissionRef.current.scope !== admissionScope) return null;
+    const row = defaultAgentSuggestion();
+    defaultChoice.current = { row, revision: query.getRevision() };
+    return row;
+  };
   // Search hooks are keyed by the requested text. Wait for that request's
   // first page and initial directories, then keep exactly one displayed set.
   // A required search may still be disabled behind cold directories. Expiry
@@ -498,6 +510,7 @@ export function useMentions(
   // not part of that snapshot's authority; a checking row can finish or retry
   // without moving anyone's highlighted recipient. Identity evidence is read
   // before discovery filtering, solely to update these already-installed rows.
+  const rowOwners = React.useRef(new WeakMap<MentionSuggestion, object>());
   const suggestions = React.useMemo<MentionSuggestion[]>(
     () =>
       snapshotSuggestions.map((row) => {
@@ -510,7 +523,7 @@ export function useMentions(
               ? candidate.teamId === row.teamId
               : candidate.personaId === row.personaId,
         );
-        return {
+        const overlay: MentionSuggestion = {
           ...row,
           action: live ? live.action : "unavailable",
           presence: live?.presence ?? "unknown",
@@ -520,6 +533,8 @@ export function useMentions(
           onRetry:
             live?.action === "unavailable" || !live ? retryMention : undefined,
         };
+        rowOwners.current.set(overlay, row);
+        return overlay;
       }),
     [
       snapshotSuggestions,
@@ -582,12 +597,15 @@ export function useMentions(
     },
     [admissionScope],
   );
+  // Private synchronous commit; public user choices must pass admitMention.
   const insertMention = React.useCallback(
     (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
       const prefix = currentMentionPrefix();
       if (
         !query.isCurrent() ||
-        !suggestions.includes(suggestion) ||
+        !snapshotSuggestions.some(
+          (row) => row === rowOwners.current.get(suggestion),
+        ) ||
         !canSelectMention(suggestion) ||
         selectionEnd !== query.read().cursor ||
         (prefix && prefix.startIndex > selectionEnd) ||
@@ -673,7 +691,7 @@ export function useMentions(
       currentMentionPrefix,
       knownAgentPubkeys,
       query,
-      suggestions,
+      snapshotSuggestions,
       currentPubkey,
       channelId,
     ],
@@ -705,29 +723,6 @@ export function useMentions(
       return trimmedName;
     },
     [],
-  );
-  const insertResolvedMention = React.useCallback(
-    ({
-      displayName,
-      pubkey,
-      replaceFromOffset,
-      replaceToOffset,
-      isAgent = false,
-    }: {
-      displayName: string;
-      pubkey: string;
-      replaceFromOffset: number;
-      replaceToOffset: number;
-      isAgent?: boolean;
-    }): AutocompleteEdit => {
-      const label = registerMentionPubkey(displayName, pubkey, { isAgent });
-      return {
-        replaceFromOffset,
-        replaceToOffset,
-        insertText: `@${label ?? displayName.trim()} `,
-      };
-    },
-    [registerMentionPubkey],
   );
   const getMentionDisplayName = React.useCallback(
     (pubkey: string): string | null => {
@@ -795,6 +790,58 @@ export function useMentions(
     sharedChannelIds,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
+  // Capture installed row identity and revision, never an availability-overlay identity.
+  const admitMention = (
+    suggestion: MentionSuggestion,
+    cursor: number,
+    consumerValid: () => boolean,
+    commit: () => void,
+  ) => {
+    const revision = query.getRevision();
+    const valid = () =>
+      consumerValid() &&
+      query.getRevision() === revision &&
+      query.read().cursor === cursor &&
+      ((query.isCurrent() &&
+        snapshotSuggestions.some(
+          (row) => row === rowOwners.current.get(suggestion),
+        )) ||
+        (!query.request &&
+          defaultChoice.current?.row === suggestion &&
+          defaultChoice.current.revision === revision)) &&
+      canSelectMention(suggestion);
+    const recipients = suggestion.teamMembers ?? [suggestion];
+    const pubkeys = recipients.flatMap((row) =>
+      row.pubkey ? [normalizePubkey(row.pubkey)] : [],
+    );
+    const intendedAgentPubkeys = recipients.flatMap((row) =>
+      row.pubkey &&
+      (("isAgent" in row && row.isAgent) ||
+        knownAgentPubkeys.has(normalizePubkey(row.pubkey)))
+        ? [normalizePubkey(row.pubkey)]
+        : [],
+    );
+    admission.begin({
+      key: rowOwners.current.get(suggestion) ?? suggestion,
+      valid,
+      prepare: () =>
+        revalidateMentionPubkeys(pubkeys, channelId, {
+          phase: "prepare",
+          intendedAgentPubkeys,
+        }),
+      commit,
+    });
+  };
+  const selectMention = (
+    suggestion: MentionSuggestion,
+    cursor: number,
+    consumerValid: () => boolean,
+    commit: (edit: AutocompleteEdit) => void,
+  ) =>
+    admitMention(suggestion, cursor, consumerValid, () => {
+      const edit = insertMention(suggestion, cursor);
+      if (edit.insertText) commit(edit);
+    });
   const extractMentionPersonas = React.useCallback(
     (text: string): PersonaMentionTarget[] =>
       extractMentionPersonasFromMaps(
@@ -840,12 +887,14 @@ export function useMentions(
       return { handled: false };
     }
     if (event.key === "Escape") {
+      admission.cancel();
       event.preventDefault();
       query.cancel();
       return { handled: true };
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      admission.cancel();
       mentionSelection.move(event.key === "ArrowDown" ? 1 : -1);
       return { handled: true };
     }
@@ -892,6 +941,10 @@ export function useMentions(
       : { handled: true };
   };
   return {
+    admitMention,
+    selectMention,
+    cancelMentionAdmission: admission.cancel,
+    mentionAdmissionStatus: admission.status,
     canSelectMention,
     cancelMentionAutocomplete,
     clearMentions,
@@ -903,8 +956,6 @@ export function useMentions(
     getMentionDisplayName,
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
-    insertMention,
-    insertResolvedMention,
     agentKnownNames: agentHighlightNames,
     isAgentPubkey,
     isManagedAgentPubkey,
