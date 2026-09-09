@@ -1,14 +1,14 @@
 /**
- * Downscale an image file to a small square data-URL for use as a community
- * icon. The result is inlined into the kind:9033 command (and the NIP-11
- * document the relay serves) so it renders
- * across communities without cross-relay media fetches; the relay caps icon
- * data-URLs at 96 KB, and 128px WebP/PNG output stays far under that.
+ * Center-crop an image file to a small square data URL for avatars and icons.
+ * The 128px WebP/PNG output is compact enough for inline profile data while
+ * retaining enough detail for every current avatar surface.
  */
 
 const ICON_SIZE = 128;
 
-export async function downscaleIconToDataUrl(file: File): Promise<string> {
+export async function downscaleSquareImageToDataUrl(
+  file: File,
+): Promise<string> {
   const bitmap = await createImageBitmap(file);
   try {
     const side = Math.min(bitmap.width, bitmap.height);
