@@ -318,7 +318,16 @@ export function AppSidebar({
 
     for (const channel of streamChannels) {
       if (starredChannelIds?.has(channel.id)) continue;
-      const sectionId = channelAssignments[channel.id];
+      let sectionId = channelAssignments[channel.id];
+      let ancestor = channel.id;
+      const visited = new Set<string>();
+      while (!sectionIds.has(sectionId) && !visited.has(ancestor)) {
+        visited.add(ancestor);
+        const parent = taskParentByChannelId.get(ancestor);
+        if (!parent) break;
+        ancestor = parent;
+        sectionId = channelAssignments[ancestor];
+      }
       if (sectionId && sectionIds.has(sectionId)) {
         if (!bySection[sectionId]) {
           bySection[sectionId] = [];
@@ -342,6 +351,7 @@ export function AppSidebar({
     };
   }, [
     streamChannels,
+    taskParentByChannelId,
     channelSections,
     channelAssignments,
     starredChannelIds,
