@@ -48,3 +48,10 @@ Density coverage checks pointer/keyboard switching, root and portal geometry,
 unchanged text size, retained drafts, reload and cross-tab persistence, invalid
 stored values, save failure and retry, live foundation values, compositions,
 Glass tab selection, and all 55 examples at 390/884/1440 in both themes.
+
+Focused-page coverage visits all 55 catalog deep links and checks that only the
+selected component renders in its shared container. It exercises eyebrow and
+nested navigation links, unknown-ID recovery, input and keyboard interactions,
+portal density, refresh, and appearance preferences. Representative pages are
+checked at 390/884/1440 in both densities and audited in both themes, with distinct
+per-component screenshots.

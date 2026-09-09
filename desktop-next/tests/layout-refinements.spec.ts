@@ -7,12 +7,7 @@ test("table cells align to the reading edge and scroll surfaces use thin bars", 
   const cells = page.locator("#table th, #table td");
   for (const cell of await cells.all())
     await expect(cell).toHaveCSS("text-align", "start");
-  for (const selector of [
-    "html",
-    "textarea",
-    "#table .bui-table-scroll",
-    ".catalog-source pre",
-  ]) {
+  for (const selector of ["html", "textarea", "#table .bui-table-scroll"]) {
     await expect(page.locator(selector).first()).toHaveCSS(
       "scrollbar-width",
       "thin",
@@ -29,6 +24,12 @@ test("table cells align to the reading edge and scroll surfaces use thin bars", 
   await expect
     .poll(() => viewport.evaluate((node) => node.scrollTop))
     .toBeGreaterThan(0);
+  await page.goto("/design/compositions");
+  await page.getByText("View the response data", { exact: true }).click();
+  await expect(page.locator(".catalog-source pre")).toHaveCSS(
+    "scrollbar-width",
+    "thin",
+  );
 });
 
 test("resize grip is one rem with a usable pointer and keyboard target", async ({

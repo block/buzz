@@ -12,10 +12,7 @@ export function OverviewPage() {
         <Badge>Buzz</Badge>
         <Badge>Open-source design system</Badge>
       </div>
-      <PageHeader
-        title="A shared language for building together."
-        intro="Quiet foundations. Expressive possibilities. A complete web component foundation for Buzz, with Inter, Lucide, and the same semantic roles from the smallest control to an agent’s response."
-      />
+      <PageHeader title="A shared language for building together." />
       <div className="bui-inline mb-12">
         <Button
           nativeButton={false}
@@ -55,10 +52,6 @@ export function OverviewPage() {
         <Card>
           <p className="text-caption text-secondary">Type with a purpose</p>
           <p className="text-title">Make room for the next idea.</p>
-          <p className="text-body text-secondary">
-            Inter brings clarity to the interface. Every size, weight, and line
-            height belongs to a named role.
-          </p>
           <code className="text-code text-tertiary">
             text-title · text-body · text-caption
           </code>
@@ -67,48 +60,23 @@ export function OverviewPage() {
           </Link>
         </Card>
       </div>
-      <Section
-        title="One system, three layers"
-        description="A change to the foundation flows through every component and every composition."
-      >
+      <Section title="One system, three layers">
         <div className="grid gap-8 md:grid-cols-3">
           {[
-            [
-              "01",
-              "Foundations",
-              "A closed vocabulary for color, type, space, corners, depth, and motion.",
-              "/design/color",
-            ],
-            [
-              "02",
-              "Components",
-              "Public behavior, Buzz styling, explicit variants, and accessible states.",
-              "/design/components",
-            ],
-            [
-              "03",
-              "Compositions",
-              "Product patterns and validated generated responses made from the same parts.",
-              "/design/compositions",
-            ],
-          ].map(([number, title, description, to]) => (
+            ["01", "Foundations", "/design/color"],
+            ["02", "Components", "/design/components"],
+            ["03", "Compositions", "/design/compositions"],
+          ].map(([number, title, to]) => (
             <div className="bui-stack" key={number}>
               <p className="text-meta text-tertiary">{number}</p>
               <h2 className="text-heading">
                 <Link to={to}>{title}</Link>
               </h2>
-              <p className="text-body text-secondary">{description}</p>
             </div>
           ))}
         </div>
       </Section>
       <Section title="A visual starting point, room to evolve">
-        <p className="text-body text-secondary">
-          Inspired by BlockUI’s visual direction and implemented for Buzz’s
-          open-source architecture. Fonts and icons are public, assets are
-          self-hosted, and the documentation is part of the app. Switch modes to
-          inspect every example in light and dark.
-        </p>
         <Link className="text-label text-accent" to="/design/open-source">
           Read the adaptation guide →
         </Link>

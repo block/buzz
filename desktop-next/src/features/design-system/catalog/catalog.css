@@ -43,6 +43,13 @@
   outline: 2px solid var(--ring-focus);
   outline-offset: 4px;
 }
+.component-preview > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.component-page > header h1:focus {
+  outline: none;
+}
 @media (max-width: 760px) {
   .catalog-grid {
     grid-template-columns: minmax(0, 1fr);

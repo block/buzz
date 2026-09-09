@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Button, Field, Input } from "@buzz/ui";
 import { CATALOG } from "../catalog/registry";
 import { PageHeader } from "./primitives";
@@ -25,10 +26,7 @@ export function ComponentsPage() {
   );
   return (
     <>
-      <PageHeader
-        title="Components"
-        intro="A shared visual language, built in the open. Quiet surfaces, confident actions, and accessible behavior — all using the same Buzz roles."
-      />
+      <PageHeader title="Components" />
       <div className="bui-stack mb-10">
         <Field.Root>
           <Field.Label>Find a component</Field.Label>
@@ -65,25 +63,21 @@ export function ComponentsPage() {
             className="catalog-entry"
           >
             <div>
-              <p className="text-meta text-tertiary">{entry.category}</p>
+              <Link
+                to="/design/components/$componentId"
+                params={{ componentId: entry.id }}
+                className="catalog-eyebrow text-meta text-tertiary hover:text-primary"
+                aria-label={`${entry.category}: ${entry.name}`}
+              >
+                {entry.category} <span aria-hidden="true">→</span>
+              </Link>
               <h2 id={`${entry.id}-title`} className="text-heading mt-1">
-                <a href={`#${entry.id}`}>{entry.name}</a>
+                {entry.name}
               </h2>
-              <p className="text-caption text-secondary mt-2">
-                {entry.description}
-              </p>
             </div>
             <div className="catalog-preview">
               <entry.Preview />
             </div>
-            <details className="catalog-source">
-              <summary className="text-caption text-secondary">
-                View example source
-              </summary>
-              <pre className="text-code">
-                <code>{entry.source}</code>
-              </pre>
-            </details>
           </section>
         ))}
       </div>

@@ -3,6 +3,7 @@ import { Link, Outlet } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 
 import { AppearanceControls } from "./AppearanceControls";
+import { CATALOG } from "../catalog/registry";
 
 /** A nav entry, optionally with children shown indented beneath it. */
 type NavItem = [label: string, to: string, children?: Array<[string, string]>];
@@ -33,7 +34,11 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   {
     heading: "Components",
     items: [
-      ["All components", "/design/components"],
+      [
+        "All components",
+        "/design/components",
+        CATALOG.map((entry) => [entry.name, `/design/components/${entry.id}`]),
+      ],
       ["Compositions", "/design/compositions"],
       ["Open-source guide", "/design/open-source"],
     ],
@@ -73,18 +78,15 @@ export function DesignSystemLayout() {
     <div className="flex min-h-screen flex-col bg-panel lg:flex-row">
       <nav
         aria-label="Design system"
-        className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-[16rem] lg:overflow-y-auto"
+        className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-[16rem]"
       >
-        <div className="px-3">
+        <div className="shrink-0 px-3">
           <Link to="/design" className="text-label text-primary">
             Buzz Design System
           </Link>
-          <p className="mt-1 text-caption text-tertiary">
-            Rendered from the tokens themselves
-          </p>
         </div>
 
-        <div className="flex flex-1 flex-col gap-6 lg:gap-7">
+        <div className="design-nav-sections flex min-h-0 max-h-80 flex-1 flex-col gap-6 overflow-y-auto lg:max-h-none lg:gap-7">
           {SECTIONS.map((section) => (
             <div key={section.heading} className="flex flex-col gap-1">
               <h2 className="px-3 pb-1.5 text-meta text-tertiary">

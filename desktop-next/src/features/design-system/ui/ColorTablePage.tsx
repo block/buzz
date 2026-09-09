@@ -1,4 +1,3 @@
-import { Link } from "@tanstack/react-router";
 import { Fragment } from "react";
 
 import {
@@ -9,7 +8,7 @@ import {
 } from "@/features/design-system/useResolvedToken";
 import { RAMPS, ROLE_GROUPS } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Section } from "./primitives";
+import { PageHeader, Section } from "./primitives";
 
 /**
  * Every token in one table: the name you type, the base token it resolves
@@ -77,33 +76,13 @@ export function ColorTablePage() {
 
   return (
     <>
-      <PageHeader
-        title="Token table"
-        intro="Every colour token in one list: the name you type, the base token it resolves through, and the value it actually paints. Values are read from the live cascade rather than written down, so this table cannot drift from the system — and it re-resolves when you switch modes."
-      />
+      <PageHeader title="Token table" />
 
-      <Note>
-        Roles are the only layer a screen may use. Ramp steps are listed
-        underneath so you can see what a role resolves through, but a component
-        referencing one directly is a bug. The reasoning behind each name lives
-        on the{" "}
-        <Link to="/design/color" className="text-accent underline">
-          colour page
-        </Link>
-        .
-      </Note>
-
-      <Section
-        title="Roles"
-        description="Grouped as they are in the system. The base column is what the role points at; the value column is where that chain ends."
-      >
+      <Section title="Roles">
         <TokenTable rows={roleRows} resolved={resolved} showGroups />
       </Section>
 
-      <Section
-        title="Ramp steps"
-        description="Layer 1. These hold the literal values every role resolves to, which is why the base column is empty for them."
-      >
+      <Section title="Ramp steps">
         <TokenTable rows={rampRows} resolved={resolved} showGroups />
       </Section>
     </>

@@ -1,23 +1,17 @@
 import type { ComponentType } from "react";
 import { ComposerDemo } from "./composer";
-import composerSource from "./composer.tsx?raw";
 import * as forms from "./forms";
-import formsSource from "./forms.tsx?raw";
 import * as overlays from "./overlays";
-import overlaysSource from "./overlays.tsx?raw";
 import * as navigation from "./navigation";
-import navigationSource from "./navigation.tsx?raw";
 import * as display from "./display";
-import displaySource from "./display.tsx?raw";
 
-/** A live example and its source, grouped by the job it does. */
+/** A live example, grouped by the job it does. */
 export interface CatalogEntry {
   id: string;
   name: string;
   description: string;
   category: string;
   Preview: ComponentType;
-  source: string;
 }
 export const CATALOG: readonly CatalogEntry[] = [
   {
@@ -27,7 +21,6 @@ export const CATALOG: readonly CatalogEntry[] = [
       "A multiline prompt with context, attachments, model controls, and send/stop states.",
     category: "Inputs",
     Preview: ComposerDemo,
-    source: composerSource,
   },
   {
     id: "buttons",
@@ -35,7 +28,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Six emphasis variants, three sizes, and named icon actions.",
     category: "Inputs",
     Preview: forms.ButtonsDemo,
-    source: formsSource,
   },
   {
     id: "input",
@@ -43,7 +35,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A single-line field with an associated label.",
     category: "Inputs",
     Preview: forms.InputDemo,
-    source: formsSource,
   },
   {
     id: "textarea",
@@ -51,7 +42,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A growing space for longer thoughts.",
     category: "Inputs",
     Preview: forms.TextareaDemo,
-    source: formsSource,
   },
   {
     id: "input-group",
@@ -59,7 +49,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Accessories around one clearly labeled input.",
     category: "Inputs",
     Preview: forms.InputGroupDemo,
-    source: formsSource,
   },
   {
     id: "form-field",
@@ -68,7 +57,6 @@ export const CATALOG: readonly CatalogEntry[] = [
       "Native submission with inline validation and a recovery path.",
     category: "Inputs",
     Preview: forms.FormDemo,
-    source: formsSource,
   },
   {
     id: "checkbox",
@@ -76,7 +64,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "An independent choice with checked and unchecked states.",
     category: "Inputs",
     Preview: forms.CheckboxDemo,
-    source: formsSource,
   },
   {
     id: "checkbox-group-fieldset",
@@ -84,7 +71,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Related choices share a visible group label.",
     category: "Inputs",
     Preview: forms.CheckboxGroupDemo,
-    source: formsSource,
   },
   {
     id: "radio-group",
@@ -92,7 +78,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "One choice from a named set.",
     category: "Inputs",
     Preview: forms.RadioDemo,
-    source: formsSource,
   },
   {
     id: "switch",
@@ -100,7 +85,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "An immediate on or off setting.",
     category: "Inputs",
     Preview: forms.SwitchDemo,
-    source: formsSource,
   },
   {
     id: "slider",
@@ -108,7 +92,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A continuous value with keyboard adjustment.",
     category: "Inputs",
     Preview: forms.SliderDemo,
-    source: formsSource,
   },
   {
     id: "number-field",
@@ -116,7 +99,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A bounded value with increment and decrement actions.",
     category: "Inputs",
     Preview: forms.NumberDemo,
-    source: formsSource,
   },
   {
     id: "input-otp",
@@ -124,7 +106,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A six-digit code with ordered input labels.",
     category: "Inputs",
     Preview: forms.OTPDemo,
-    source: formsSource,
   },
   {
     id: "combobox",
@@ -132,7 +113,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Search and select from known values.",
     category: "Inputs",
     Preview: forms.ComboboxDemo,
-    source: formsSource,
   },
   {
     id: "autocomplete",
@@ -140,7 +120,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Suggestions that still allow a new value.",
     category: "Inputs",
     Preview: forms.AutocompleteDemo,
-    source: formsSource,
   },
   {
     id: "command",
@@ -148,7 +127,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Search actions; execute only after explicit selection.",
     category: "Inputs",
     Preview: forms.CommandDemo,
-    source: formsSource,
   },
   {
     id: "calendar",
@@ -157,7 +135,6 @@ export const CATALOG: readonly CatalogEntry[] = [
       "Single, multiple, and range selection through the calendar API.",
     category: "Inputs",
     Preview: forms.CalendarDemo,
-    source: formsSource,
   },
   {
     id: "dialog",
@@ -165,7 +142,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A focused modal with a title, description, and close action.",
     category: "Overlays",
     Preview: overlays.DialogDemo,
-    source: overlaysSource,
   },
   {
     id: "alert-dialog",
@@ -173,7 +149,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A deliberate decision before a destructive action.",
     category: "Overlays",
     Preview: overlays.AlertDialogDemo,
-    source: overlaysSource,
   },
   {
     id: "sheet",
@@ -181,7 +156,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Related detail in a side surface.",
     category: "Overlays",
     Preview: overlays.SheetDemo,
-    source: overlaysSource,
   },
   {
     id: "drawer",
@@ -189,7 +163,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Focused actions in a bottom surface.",
     category: "Overlays",
     Preview: overlays.DrawerDemo,
-    source: overlaysSource,
   },
   {
     id: "popover",
@@ -197,7 +170,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Contextual controls anchored to a trigger.",
     category: "Overlays",
     Preview: overlays.PopoverDemo,
-    source: overlaysSource,
   },
   {
     id: "tooltip",
@@ -205,7 +177,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Brief help available on pointer hover and keyboard focus.",
     category: "Overlays",
     Preview: overlays.TooltipDemo,
-    source: overlaysSource,
   },
   {
     id: "hover-card",
@@ -214,7 +185,6 @@ export const CATALOG: readonly CatalogEntry[] = [
       "A preview of a link; essential information remains on the page.",
     category: "Overlays",
     Preview: overlays.PreviewCardDemo,
-    source: overlaysSource,
   },
   {
     id: "dropdown-menu",
@@ -222,7 +192,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A keyboard-navigable set of actions.",
     category: "Overlays",
     Preview: overlays.MenuDemo,
-    source: overlaysSource,
   },
   {
     id: "context-menu",
@@ -230,7 +199,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Contextual actions, including a keyboard entry point.",
     category: "Overlays",
     Preview: overlays.ContextMenuDemo,
-    source: overlaysSource,
   },
   {
     id: "select",
@@ -238,7 +206,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A finite selection with readable value labels.",
     category: "Overlays",
     Preview: overlays.SelectDemo,
-    source: overlaysSource,
   },
   {
     id: "toast",
@@ -246,7 +213,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A transient announcement with an explicit dismiss action.",
     category: "Overlays",
     Preview: overlays.ToastDemo,
-    source: overlaysSource,
   },
   {
     id: "accordion",
@@ -254,7 +220,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Related disclosures with independently focusable headings.",
     category: "Navigation",
     Preview: navigation.AccordionDemo,
-    source: navigationSource,
   },
   {
     id: "collapsible",
@@ -262,7 +227,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Optional detail without leaving the current view.",
     category: "Navigation",
     Preview: navigation.CollapsibleDemo,
-    source: navigationSource,
   },
   {
     id: "tabs",
@@ -270,7 +234,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Switch between sibling panels using pointer or arrow keys.",
     category: "Navigation",
     Preview: navigation.TabsDemo,
-    source: navigationSource,
   },
   {
     id: "toggle",
@@ -278,7 +241,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "An action that stays pressed until toggled again.",
     category: "Navigation",
     Preview: navigation.ToggleDemo,
-    source: navigationSource,
   },
   {
     id: "toggle-group",
@@ -286,7 +248,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A coordinated set of pressed choices.",
     category: "Navigation",
     Preview: navigation.ToggleGroupDemo,
-    source: navigationSource,
   },
   {
     id: "toolbar",
@@ -294,7 +255,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Related controls with shared keyboard navigation.",
     category: "Navigation",
     Preview: navigation.ToolbarDemo,
-    source: navigationSource,
   },
   {
     id: "menubar",
@@ -302,7 +262,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Persistent menus for an application workspace.",
     category: "Navigation",
     Preview: navigation.MenubarDemo,
-    source: navigationSource,
   },
   {
     id: "navigation-menu",
@@ -310,7 +269,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Links and nested destinations.",
     category: "Navigation",
     Preview: navigation.NavigationDemo,
-    source: navigationSource,
   },
   {
     id: "breadcrumb",
@@ -318,7 +276,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A location path with one current destination.",
     category: "Navigation",
     Preview: navigation.BreadcrumbDemo,
-    source: navigationSource,
   },
   {
     id: "sidebar",
@@ -326,7 +283,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A named set of primary destinations.",
     category: "Navigation",
     Preview: navigation.SidebarDemo,
-    source: navigationSource,
   },
   {
     id: "pagination",
@@ -334,7 +290,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Bounded page navigation with explicit current state.",
     category: "Navigation",
     Preview: navigation.PaginationDemo,
-    source: navigationSource,
   },
   {
     id: "card",
@@ -342,7 +297,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A contained widget or settings group.",
     category: "Display & layout",
     Preview: display.CardDemo,
-    source: displaySource,
   },
   {
     id: "badge",
@@ -350,7 +304,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Status expressed with text as well as color.",
     category: "Display & layout",
     Preview: display.BadgeDemo,
-    source: displaySource,
   },
   {
     id: "alert",
@@ -358,7 +311,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Inline information, success, warning, or failure.",
     category: "Display & layout",
     Preview: display.AlertDemo,
-    source: displaySource,
   },
   {
     id: "avatar",
@@ -366,7 +318,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Identity with a deterministic fallback.",
     category: "Display & layout",
     Preview: display.AvatarDemo,
-    source: displaySource,
   },
   {
     id: "progress",
@@ -374,7 +325,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Completion of ongoing work.",
     category: "Display & layout",
     Preview: display.ProgressDemo,
-    source: displaySource,
   },
   {
     id: "meter",
@@ -382,7 +332,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A measurement in a known range.",
     category: "Display & layout",
     Preview: display.MeterDemo,
-    source: displaySource,
   },
   {
     id: "skeleton",
@@ -390,7 +339,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A decorative loading placeholder owned by its region.",
     category: "Display & layout",
     Preview: display.SkeletonDemo,
-    source: displaySource,
   },
   {
     id: "spinner",
@@ -398,7 +346,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "One named loading announcement.",
     category: "Display & layout",
     Preview: display.SpinnerDemo,
-    source: displaySource,
   },
   {
     id: "empty-state",
@@ -406,7 +353,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Purpose and a useful next step.",
     category: "Display & layout",
     Preview: display.EmptyDemo,
-    source: displaySource,
   },
   {
     id: "separator",
@@ -414,7 +360,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A quiet boundary between related regions.",
     category: "Display & layout",
     Preview: display.SeparatorDemo,
-    source: displaySource,
   },
   {
     id: "table",
@@ -422,7 +367,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Semantic rows with horizontal overflow on narrow screens.",
     category: "Display & layout",
     Preview: display.TableDemo,
-    source: displaySource,
   },
   {
     id: "chart",
@@ -430,7 +374,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Nonnegative categorical bars with readable table values.",
     category: "Display & layout",
     Preview: display.ChartDemo,
-    source: displaySource,
   },
   {
     id: "aspect-ratio",
@@ -438,7 +381,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A stable media frame without a layout shift.",
     category: "Display & layout",
     Preview: display.AspectRatioDemo,
-    source: displaySource,
   },
   {
     id: "carousel",
@@ -446,7 +388,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Manual slide navigation with announced positions.",
     category: "Display & layout",
     Preview: display.CarouselDemo,
-    source: displaySource,
   },
   {
     id: "scroll-area",
@@ -454,7 +395,6 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "A bounded region with accessible scrolling.",
     category: "Display & layout",
     Preview: display.ScrollAreaDemo,
-    source: displaySource,
   },
   {
     id: "resizable",
@@ -462,6 +402,5 @@ export const CATALOG: readonly CatalogEntry[] = [
     description: "Adjustable regions with pointer and keyboard controls.",
     category: "Display & layout",
     Preview: display.ResizableDemo,
-    source: displaySource,
   },
 ];
