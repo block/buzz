@@ -17,7 +17,7 @@ const NCRYPTSEC =
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
-async function expectSharedCardGeometry(page: Page, expectedWidth = 610) {
+async function expectSharedCardGeometry(page: Page, expectedWidth = 800) {
   const geometry = await page
     .getByTestId("onboarding-content-card")
     .evaluate((element) => {
@@ -181,6 +181,7 @@ async function expectHorizontalCardTransition(
 test("machine onboarding: landing, backup, setup docked CTAs", async ({
   page,
 }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
@@ -329,16 +330,21 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02a-backup-option-hover.png` });
 
-  // The clean key well is the default; hovering obscures it and reveals Copy.
-  const keyWell = page.getByTestId("backup-key-well");
+  // Private-key text is masked by default; explicit reveal fetches it, and the
+  // existing hover/copy treatment remains operable afterward.
   const keyValue = page.getByTestId("backup-key-value");
   const copyButton = page.getByTestId("backup-copy-key");
+  const revealButton = page.getByTestId("backup-reveal-key");
   await expect(keyValue).toBeVisible();
+  await expect(keyValue).not.toContainText("nsec1mock");
+  await revealButton.click();
   await expect(keyValue).toContainText("nsec1mock");
-  await expect(copyButton).toHaveCSS("opacity", "0");
-  await keyWell.hover();
-  await expect(keyValue).toHaveCSS("filter", /blur\(4px\)/);
-  await expect(copyButton).toHaveCSS("opacity", "1");
+  await expect(revealButton).toHaveAttribute("aria-label", "Hide private key");
+  await expect(copyButton).toBeVisible();
+  await expect(copyButton).toBeEnabled();
+  await copyButton.click();
+  await expect(copyButton).toContainText("Copied to clipboard");
+  await expect(keyValue).toHaveCSS("filter", "none");
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-hover.png` });
 

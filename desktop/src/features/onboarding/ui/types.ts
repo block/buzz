@@ -66,7 +66,6 @@ export type SetupStepActions = {
     readyRuntimeIds: readonly string[],
     configBackTarget?: "method" | "list",
   ) => void;
-  navigateToAgentSettings?: () => void;
 };
 
 export type DefaultConfigDraft = {
@@ -86,6 +85,7 @@ export type DefaultConfigStepActions = {
 
 export type SetupStepRuntimeState = {
   errorMessage: string | null;
+  hasForcedCheckStarted: boolean;
   isChecking: boolean;
   items: AcpRuntimeCatalogEntry[];
 };

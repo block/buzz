@@ -79,6 +79,7 @@ function useSetupStepState() {
     state: {
       runtimeProviders: {
         errorMessage,
+        hasForcedCheckStarted: runtimesQuery.hasForcedCheckStarted,
         isChecking,
         items,
       },
@@ -978,13 +979,8 @@ function SetupStepContent({
 }: SetupStepContentProps) {
   const cardLayout = useOnboardingCardLayout();
   const { runtimeProviders } = state;
-  const [hasForcedCheckStarted, setHasForcedCheckStarted] =
-    React.useState(false);
-  React.useEffect(() => {
-    if (runtimeProviders.isChecking) setHasForcedCheckStarted(true);
-  }, [runtimeProviders.isChecking]);
   const readinessConfirmed =
-    hasForcedCheckStarted &&
+    runtimeProviders.hasForcedCheckStarted &&
     !runtimeProviders.isChecking &&
     runtimeProviders.errorMessage === null;
   const [stage, setStage] = React.useState<"method" | "list" | "detail">(
@@ -996,6 +992,9 @@ function SetupStepContent({
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
     string | null
   >(null);
+  const [detailConfigBackTarget, setDetailConfigBackTarget] = React.useState<
+    "method" | "list"
+  >("list");
   const [localDirection, setLocalDirection] =
     React.useState<OnboardingTransitionDirection>(direction);
   const [installResults, setInstallResults] =
@@ -1010,12 +1009,11 @@ function SetupStepContent({
     [readinessConfirmed, runtimeProviders.items],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
-  // The key prevents catalog object refreshes from creating an effect loop
-  // when the detected ready IDs have not changed.
+  // Use an ID key so catalog object refreshes cannot loop the effect.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by ID content
   React.useEffect(() => {
     if (
-      !hasForcedCheckStarted ||
+      !runtimeProviders.hasForcedCheckStarted ||
       runtimeProviders.isChecking ||
       runtimeProviders.errorMessage !== null
     ) {
@@ -1023,10 +1021,10 @@ function SetupStepContent({
     }
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [
-    hasForcedCheckStarted,
     onReadyRuntimeIdsChange,
     readyRuntimeIdsKey,
     runtimeProviders.errorMessage,
+    runtimeProviders.hasForcedCheckStarted,
     runtimeProviders.isChecking,
     runtimeProviders.items.length,
   ]);
@@ -1069,8 +1067,8 @@ function SetupStepContent({
       return;
     }
     setLocalDirection("forward");
-    actionsRef.current.next([selectedRuntime.id]);
-  }, [selectedRuntime, selectedRuntimeIsReady, stage]);
+    actionsRef.current.next([selectedRuntime.id], detailConfigBackTarget);
+  }, [detailConfigBackTarget, selectedRuntime, selectedRuntimeIsReady, stage]);
 
   function chooseMethod(nextMethod: HarnessConnectionMethod) {
     setMethod(nextMethod);
@@ -1086,6 +1084,7 @@ function SetupStepContent({
           actions.next([buzzRuntime.id], "method");
           return;
         }
+        setDetailConfigBackTarget("method");
         setSelectedRuntimeId(buzzRuntime.id);
         setStage("detail");
         return;
@@ -1104,6 +1103,7 @@ function SetupStepContent({
       actions.next([runtime.id]);
       return;
     }
+    setDetailConfigBackTarget("list");
     setSelectedRuntimeId(runtimeId);
     setStage("detail");
   }

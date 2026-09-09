@@ -37,7 +37,6 @@ import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboa
 import {
   MachineOnboardingFlow,
   type MachineOnboardingPage,
-  type PostOnboardingNavigation,
 } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
@@ -692,8 +691,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   });
   const [machineInitialPage, setMachineInitialPage] =
     useState<MachineOnboardingPage>();
-  const [postOnboardingNav, setPostOnboardingNav] =
-    useState<PostOnboardingNavigation | null>(null);
 
   const reopenMachineConfig = useCallback(() => {
     setMachineInitialPage("config");
@@ -707,27 +704,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     },
     [machine.complete],
   );
-
-  const navigateAfterOnboarding = useCallback(
-    (nav: PostOnboardingNavigation) => {
-      setPostOnboardingNav(nav);
-    },
-    [],
-  );
-
-  // Execute the pending navigation once the RouterProvider is mounted (i.e.
-  // machine.stage transitions to "ready").  We wait for the ready stage rather
-  // than using setTimeout(0) so the router is guaranteed to exist before we call
-  // router.navigate().
-  useEffect(() => {
-    if (machine.stage === "ready" && postOnboardingNav) {
-      void router.navigate({
-        to: postOnboardingNav.to,
-        search: postOnboardingNav.search ?? {},
-      });
-      setPostOnboardingNav(null);
-    }
-  }, [machine.stage, postOnboardingNav]);
 
   const openAddCommunity = useCallback(
     (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
@@ -789,7 +765,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
-        navigateAfterComplete={navigateAfterOnboarding}
         queryClient={machine.queryClient}
       />
       {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}

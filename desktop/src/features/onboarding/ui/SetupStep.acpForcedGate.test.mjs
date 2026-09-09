@@ -160,7 +160,7 @@ function deferred() {
 }
 
 const NOOP = () => {};
-const ACTIONS = { back: NOOP, next: NOOP, navigateToAgentSettings: NOOP };
+const ACTIONS = { back: NOOP, next: NOOP };
 
 /** Mount SetupStep under the query client + tooltip provider it requires. */
 function renderSetupStep() {
@@ -174,6 +174,7 @@ function setupStepTree(
   queryClient,
   actions = ACTIONS,
   onReadyRuntimeIdsChange = NOOP,
+  initialMethod = "subscription",
 ) {
   return React.createElement(
     QueryClientProvider,
@@ -184,7 +185,7 @@ function setupStepTree(
       React.createElement(SetupStep, {
         actions,
         direction: "forward",
-        initialMethod: "subscription",
+        initialMethod,
         onReadyRuntimeIdsChange,
       }),
     ),
@@ -278,6 +279,73 @@ describe("SetupStep cached-ready revalidation", () => {
       ),
       null,
       "no Checking indicator appears on success",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("hands off only the API harness selected while forced discovery is pending", async () => {
+    const queryClient = makeQueryClient();
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      catalogEntry("buzz-agent", "not_applicable"),
+      catalogEntry("goose", "not_applicable"),
+    ]);
+
+    const pending = deferred();
+    discoverHandler = (args) =>
+      args?.force === true ? pending.promise : Promise.resolve([]);
+
+    const nextCalls = [];
+    const readyRuntimeIdSnapshots = [];
+    const actions = {
+      ...ACTIONS,
+      next: (...args) => nextCalls.push(args),
+    };
+    const { container, root } = renderSetupStep();
+    await act(async () => {
+      root.render(
+        setupStepTree(
+          queryClient,
+          actions,
+          (runtimeIds) => readyRuntimeIdSnapshots.push([...runtimeIds]),
+          null,
+        ),
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      container
+        .querySelector('[data-testid="onboarding-harness-method-api"]')
+        ?.click();
+    });
+    assert.deepEqual(
+      nextCalls,
+      [],
+      "cached Buzz readiness cannot advance before forced discovery settles",
+    );
+
+    await act(async () => {
+      pending.resolve([rawReadyEntry("buzz-agent"), rawReadyEntry("goose")]);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    assert.deepEqual(
+      nextCalls,
+      [[["buzz-agent"], "method"]],
+      "successful discovery advances with only the explicitly chosen API harness",
+    );
+    assert.ok(
+      readyRuntimeIdSnapshots.some(
+        (snapshot) =>
+          snapshot.length === 2 &&
+          snapshot.includes("buzz-agent") &&
+          snapshot.includes("goose"),
+      ),
+      "catalog readiness may still be published independently of the selected handoff",
     );
 
     await act(async () => {
