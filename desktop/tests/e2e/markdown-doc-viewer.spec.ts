@@ -215,6 +215,21 @@ test("close restores focus to the invoking card when the document appears twice"
   await expect(docCards.nth(0)).not.toBeFocused();
 });
 
+test("channel rehydration keeps the viewer action", async ({ page }) => {
+  await sendMarkdownAttachment(page);
+
+  // Remount the channel while relay-origin discovery catches up. The known
+  // markdown attachment must not temporarily downgrade to Download.
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("file-card").last()).toHaveAttribute(
+    "aria-label",
+    "Open release-notes.md",
+  );
+});
+
 test("open document survives reload and back/forward navigation", async ({
   page,
 }) => {
@@ -237,12 +252,6 @@ test("open document survives reload and back/forward navigation", async ({
   // restores it — the advertised back/forward contract.
   await page.goBack();
   await expect(page.getByTestId("markdown-doc-panel")).toHaveCount(0);
-  // Rehydrating the channel must not downgrade a known markdown attachment to
-  // Download while relay-origin discovery catches up.
-  await expect(page.getByTestId("file-card").last()).toHaveAttribute(
-    "aria-label",
-    "Open release-notes.md",
-  );
   await page.goForward();
   await expect(
     panel().getByRole("heading", { name: "Release Notes" }),
