@@ -577,6 +577,12 @@ impl AcpClient {
         self.observer_context = context;
     }
 
+    /// Attach a newly resolved ACP session ID without discarding the current
+    /// turn's channel, turn ID, or start timestamp.
+    pub fn set_observer_session_id(&mut self, session_id: String) {
+        self.observer_context.session_id = Some(session_id);
+    }
+
     /// Return a clone of the observer handle, if attached.
     pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
         self.observer.clone()

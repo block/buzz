@@ -1051,12 +1051,12 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             requires_external_cli: runtime.underlying_cli.is_some(),
             underlying_cli_path,
             node_required,
-            // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
             login_hint: None,
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
             max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
+            capabilities: runtime.into(),
         },
     }
 }
@@ -1192,12 +1192,12 @@ pub fn discover_acp_runtimes_from(
                 requires_external_cli: false,
                 underlying_cli_path: None,
                 node_required: false,
-                // No auth probe for custom harnesses.
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                definition_env: def.env.clone(), // preserve for edit round-trip
+                definition_env: def.env.clone(),
                 max_parallelism: super::parallelism::harness_max_parallelism(&def.command),
+                capabilities: Default::default(),
             });
         }
     }
@@ -1252,5 +1252,7 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
+#[cfg(test)]
+mod capability_manifest_tests;
 #[cfg(test)]
 mod tests;

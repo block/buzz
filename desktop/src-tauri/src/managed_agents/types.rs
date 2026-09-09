@@ -586,6 +586,10 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// Owner-local credential storage evidence. Derived from a read-only
+    /// keyring probe at summary build time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_persistence: Option<CredentialPersistence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -634,6 +638,30 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// Credential storage status for a managed agent, derived from a read-only
+/// keyring probe and the record's inline key state. This is owner-local
+/// evidence — it does not prove the keyring entry's value derives the agent's
+/// pubkey (that would require loading the secret). See wolfyy970's feedback on
+/// #5311 and #2957.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPersistence {
+    /// Key is stored in the OS keyring and was verified present via a
+    /// read-only probe.
+    KeyringVerified,
+    /// Key is stored inline in the `0o600` JSON fallback because the keyring
+    /// was unreachable at the last save. The keyring may or may not be
+    /// reachable this boot.
+    InlineFallback,
+    /// No key found in either the keyring or the JSON file. The agent cannot
+    /// be spawned.
+    Missing,
+    /// Keyring backend is unavailable this boot — cannot determine whether
+    /// the key is in the keyring. If the key is inline, it is still usable
+    /// for spawning but the persistence state is unknown.
+    Unavailable,
+}
+
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -644,65 +672,6 @@ pub enum HarnessSource {
     Preset,
     /// Loaded at runtime from the user's `custom_harnesses/` directory.
     Custom,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AcpRuntimeCatalogEntry {
-    pub id: String,
-    pub label: String,
-    pub avatar_url: String,
-    pub availability: AcpAvailabilityStatus,
-    pub command: Option<String>,
-    pub binary_path: Option<String>,
-    pub default_args: Vec<String>,
-    pub mcp_command: Option<String>,
-    /// Environment variable used to apply the initial model, when supported.
-    pub model_env_var: Option<String>,
-    /// Environment variable used to apply the selected LLM provider, when supported.
-    pub provider_env_var: Option<String>,
-    /// Environment variable used to apply thinking effort, when supported.
-    pub thinking_env_var: Option<String>,
-    /// Canonical accepted effort values for this runtime, in display order.
-    /// Serialized from `KnownAcpRuntime::effort_normalization.canonical` for
-    /// runtimes with a static finite vocabulary (e.g. Goose). `None` for
-    /// runtimes with no canonicalization contract (buzz-agent uses a
-    /// provider/model catalog; Claude/Codex/unknown runtimes accept any string).
-    ///
-    /// The renderer uses this to drive choices and validation, replacing the
-    /// TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate. When non-null, the
-    /// `harnessNative` effort field uses this list exclusively — `off` and all
-    /// other valid Goose values are always present when this is Goose, so
-    /// `useEffortAutoClear` never incorrectly deletes a valid saved value.
-    pub effort_canonical_values: Option<Vec<String>>,
-    pub max_tokens_env_var: Option<String>,
-    pub context_limit_env_var: Option<String>,
-    pub max_rounds_env_var: Option<String>,
-    pub install_hint: String,
-    pub install_instructions_url: String,
-    /// true when at least one automated install step is available
-    pub can_auto_install: bool,
-    /// true when this runtime depends on a separately installed vendor CLI.
-    pub requires_external_cli: bool,
-    pub underlying_cli_path: Option<String>,
-    /// true when an npm adapter step is pending but Node.js / npm is absent.
-    /// The UI hides the Install button and shows a Node.js install callout.
-    pub node_required: bool,
-    /// Login/authentication status for CLI-based runtimes.
-    pub auth_status: AuthStatus,
-    /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login_hint: Option<String>,
-    /// Whether this entry came from the compiled-in catalog or a user-supplied
-    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
-    pub source: HarnessSource,
-    /// Definition-level env vars for `source: custom` entries; populated from
-    /// `HarnessDefinition.env` so saves don't silently erase existing vars.
-    /// Absent for builtin/preset entries. Skipped when empty in serialization.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub definition_env: BTreeMap<String, String>,
-    /// Spawn-time parallelism cap; absent for uncapped harnesses.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_parallelism: Option<u32>,
 }
 
 /// Result of a single install step (CLI or adapter).
@@ -982,6 +951,8 @@ mod team_catalog_source;
 pub use team_catalog_source::{TeamCatalogSource, TeamMemberCatalogSource};
 mod teams;
 pub use teams::{CreateTeamRequest, TeamRecord, UpdateTeamRequest};
+mod runtime_catalog;
+pub use runtime_catalog::*;
 
 #[cfg(test)]
 mod tests;

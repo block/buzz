@@ -1,3 +1,5 @@
+import type { AcpRuntimeCapabilityFacts } from "@/shared/api/acpRuntimeCapabilities";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -374,7 +376,20 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /**
+   * Owner-local credential storage evidence. `null` when the backend does not
+   * report it (older builds). Does not prove the keyring entry's value derives
+   * the agent's pubkey.
+   */
+  credentialPersistence: CredentialPersistence | null;
 };
+
+/** Credential storage status for a managed agent. */
+export type CredentialPersistence =
+  | "keyring_verified"
+  | "inline_fallback"
+  | "missing"
+  | "unavailable";
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
@@ -519,12 +534,10 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
-  /** True when the runtime depends on a separately installed vendor CLI. */
   requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;
-  /** Login/auth status for CLI-based runtimes. */
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
@@ -538,7 +551,7 @@ export type AcpRuntimeCatalogEntry = {
   definitionEnv?: Record<string, string>;
   /** Spawn-time parallelism cap; absent for uncapped harnesses. */
   maxParallelism?: number;
-};
+} & AcpRuntimeCapabilityFacts;
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
 export type AcpRuntime = AcpRuntimeCatalogEntry & {
