@@ -42,8 +42,10 @@ import { useThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
+import { useRecentAgentTurnFailures } from "@/features/agents/recentAgentTurnFailuresStore";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { AgentTurnFailureStatus } from "@/features/channels/ui/AgentTurnFailureStatus";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
@@ -337,9 +339,16 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
+  const recentTurnFailures = useRecentAgentTurnFailures(
+    activeChannel?.id ?? null,
+  );
+  const latestTurnFailure = recentTurnFailures[0] ?? null;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
-    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
+    hasComposerBotActivity ||
+    Boolean(latestTurnFailure) ||
+    hasTypingActivity ||
+    hasCardMintActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(
     () =>
       selectThreadComposerBotTypingPubkeys(botTypingEntries, openThreadHeadId),
@@ -347,6 +356,13 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
+  const threadTurnFailures = useRecentAgentTurnFailures(
+    activeChannel?.id ?? null,
+    openThreadHeadId ?? null,
+  );
+  const latestThreadTurnFailure = threadTurnFailures[0] ?? null;
+  const hasThreadComposerActivity =
+    hasThreadComposerBotActivity || Boolean(latestThreadTurnFailure);
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -800,6 +816,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     agents={activityAgents}
                     channel={activeChannel}
                     currentPubkey={currentPubkey}
+                    failure={latestTurnFailure}
                     onOpenAgentSession={onOpenAgentSession}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
@@ -893,7 +910,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
                 threadTypingPubkeys={threadTypingPubkeys}
-                activityAccessoryVisible={hasThreadComposerBotActivity}
+                activityAccessoryVisible={hasThreadComposerActivity}
                 activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
                     <BotActivityComposerAction
@@ -904,6 +921,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                       profiles={profiles}
                       workingBotPubkeys={threadComposerBotTypingPubkeys}
                       variant="inline"
+                    />
+                  ) : latestThreadTurnFailure ? (
+                    <AgentTurnFailureStatus
+                      agents={activityAgents}
+                      failure={latestThreadTurnFailure}
+                      onOpenAgentSession={onOpenAgentSession}
+                      profiles={profiles}
                     />
                   ) : null
                 }

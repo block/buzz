@@ -525,6 +525,17 @@ impl EventQueue {
         }
     }
 
+    /// Return the number of failed attempts already recorded for a scope.
+    ///
+    /// Used to annotate owner-only observer failures before `requeue` either
+    /// preserves the counter or clears it on dead-letter.
+    pub fn retry_count<K: IntoScope>(&self, scope: K) -> u32 {
+        self.retry_counts
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Re-queue a batch of events that failed to process.
     ///
     /// Events are pushed back to the **front** of the channel's queue so they
@@ -1100,6 +1111,43 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         root_event_id,
         parent_event_id,
         mentioned_pubkeys: mentions,
+    }
+}
+
+/// The observer-facing conversation context for a flushed prompt batch.
+///
+/// Top-level events have no NIP-10 root marker, so their own event id becomes
+/// the conversation root. Thread replies preserve the root and parent resolved
+/// from their tags. Cancelled events come first in merged prompts; the newest
+/// regular event remains the reply anchor. Keeping this at the queue boundary
+/// gives `turn_started` and `turn_error` one identical correlation contract.
+#[derive(Debug, Clone, Default)]
+pub struct TriggeringEventContext {
+    pub event_ids: Vec<String>,
+    pub root_event_id: Option<String>,
+    pub parent_event_id: Option<String>,
+}
+
+pub fn triggering_event_context(batch: &FlushBatch) -> TriggeringEventContext {
+    let mut event_ids = Vec::with_capacity(batch.cancelled_events.len() + batch.events.len());
+    event_ids.extend(batch.cancelled_events.iter().map(|be| be.event.id.to_hex()));
+    event_ids.extend(batch.events.iter().map(|be| be.event.id.to_hex()));
+    let Some(last) = batch
+        .events
+        .last()
+        .or_else(|| batch.cancelled_events.last())
+    else {
+        return TriggeringEventContext {
+            event_ids,
+            ..TriggeringEventContext::default()
+        };
+    };
+    let trigger_id = last.event.id.to_hex();
+    let thread = parse_thread_tags(&last.event);
+    TriggeringEventContext {
+        event_ids,
+        root_event_id: Some(thread.root_event_id.unwrap_or_else(|| trigger_id.clone())),
+        parent_event_id: thread.parent_event_id.or(Some(trigger_id)),
     }
 }
 
@@ -3913,6 +3961,44 @@ mod tests {
         let tags = parse_thread_tags(&event);
         assert!(tags.root_event_id.is_none());
         assert!(tags.parent_event_id.is_none());
+    }
+
+    #[test]
+    fn triggering_context_includes_cancelled_events_but_anchors_to_new_work() {
+        let ch = Uuid::new_v4();
+        let cancelled = make_event("cancelled");
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let latest = make_event_with_tags(
+            "latest",
+            vec![
+                vec!["e".into(), root.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent.clone(), "".into(), "reply".into()],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: thread(ch, &root),
+            events: vec![BatchEvent {
+                event: latest.clone(),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: cancelled.clone(),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let context = triggering_event_context(&batch);
+        assert_eq!(
+            context.event_ids,
+            vec![cancelled.id.to_hex(), latest.id.to_hex()]
+        );
+        assert_eq!(context.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(context.parent_event_id.as_deref(), Some(parent.as_str()));
     }
 
     #[test]

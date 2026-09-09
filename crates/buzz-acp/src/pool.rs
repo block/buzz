@@ -2256,9 +2256,9 @@ pub async fn run_prompt_task(
         turn_id.clone(),
         turn_started_at.clone(),
     ));
-    let triggering_event_ids: Vec<String> = batch
+    let triggering = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(crate::queue::triggering_event_context)
         .unwrap_or_default();
     agent.acp.observe(
         "turn_started",
@@ -2267,7 +2267,9 @@ pub async fn run_prompt_task(
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
-            "triggeringEventIds": triggering_event_ids,
+            "triggeringEventIds": triggering.event_ids,
+            "triggeringRootEventId": triggering.root_event_id,
+            "triggeringParentEventId": triggering.parent_event_id,
         }),
     );
 

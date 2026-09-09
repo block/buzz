@@ -4706,6 +4706,21 @@ fn handle_prompt_result(
         }
     }
 
+    // Capture conversation correlation before the batch is moved into retry /
+    // dead-letter handling. Terminal observer events repeat this context so a
+    // client can render a failure at its originating message without replaying
+    // or joining an earlier turn_started frame.
+    let triggering = result
+        .batch
+        .as_ref()
+        .map(queue::triggering_event_context)
+        .unwrap_or_default();
+    let mut attempt = result
+        .batch
+        .as_ref()
+        .map(|batch| queue.retry_count(batch.scope.clone()) + 1);
+    let mut disposition = "stopped";
+
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
     // recently-active batch that exhausts the retry budget in queue.requeue()
@@ -4762,6 +4777,7 @@ fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                disposition = "dead_lettered";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4780,8 +4796,10 @@ fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    disposition = "dead_lettered";
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                    disposition = "retrying";
                 }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -4798,6 +4816,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                disposition = "action_required";
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4813,6 +4832,9 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                disposition = "dead_lettered";
+            } else {
+                disposition = "retrying";
             }
         } else {
             tracing::debug!(
@@ -4821,6 +4843,8 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            disposition = "stopped";
+            attempt = None;
         }
     }
 
@@ -4868,7 +4892,14 @@ fn handle_prompt_result(
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
                 "error": error_msg,
+                "disposition": disposition,
+                "triggeringEventIds": triggering.event_ids,
+                "triggeringRootEventId": triggering.root_event_id,
+                "triggeringParentEventId": triggering.parent_event_id,
             });
+            if let Some(attempt) = attempt {
+                payload["attempt"] = serde_json::json!(attempt);
+            }
             if let Some(code) = error_code {
                 payload["code"] = serde_json::json!(code);
             }
@@ -10379,6 +10410,16 @@ mod error_outcome_emission_tests {
                 config.max_turn_duration_secs
             ),
         );
+        assert_eq!(turn_error.payload["disposition"], "retrying");
+        assert_eq!(turn_error.payload["attempt"], 1);
+        assert_eq!(
+            turn_error.payload["triggeringRootEventId"],
+            turn_error.payload["triggeringEventIds"][0]
+        );
+        assert_eq!(
+            turn_error.payload["triggeringParentEventId"],
+            turn_error.payload["triggeringEventIds"][0]
+        );
         assert_eq!(
             queue.pending_channels(),
             1,
@@ -10475,6 +10516,8 @@ mod error_outcome_emission_tests {
                 config.max_turn_duration_secs
             ),
         );
+        assert_eq!(turn_error.payload["disposition"], "dead_lettered");
+        assert_eq!(turn_error.payload["attempt"], crate::queue::MAX_RETRIES + 1);
         assert_eq!(
             queue.queued_event_count(channel_id),
             0,

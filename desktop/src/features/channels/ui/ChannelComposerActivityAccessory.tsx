@@ -1,5 +1,8 @@
 import type { ComponentProps } from "react";
 
+import type { RecentAgentTurnFailure } from "@/features/agents/recentAgentTurnFailuresStore";
+import { AgentTurnFailureStatus } from "@/features/channels/ui/AgentTurnFailureStatus";
+
 import { CardMintComposerChip } from "@/features/agents/ui/CardMintComposerChip";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
@@ -10,6 +13,7 @@ type ChannelComposerActivityAccessoryProps = {
   agents: ComponentProps<typeof BotActivityComposerAction>["agents"];
   channel: ComponentProps<typeof TypingIndicatorRow>["channel"];
   currentPubkey: ComponentProps<typeof TypingIndicatorRow>["currentPubkey"];
+  failure: RecentAgentTurnFailure | null;
   onOpenAgentSession: ComponentProps<
     typeof BotActivityComposerAction
   >["onOpenAgentSession"];
@@ -26,6 +30,7 @@ export function ChannelComposerActivityAccessory({
   agents,
   channel,
   currentPubkey,
+  failure,
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
@@ -42,6 +47,14 @@ export function ChannelComposerActivityAccessory({
     >
       <div className="flex w-full items-center gap-2 overflow-visible pl-2">
         {cardMintJobs.length > 0 ? <CardMintComposerChip /> : null}
+        {failure && workingBotPubkeys.length === 0 ? (
+          <AgentTurnFailureStatus
+            agents={agents}
+            failure={failure}
+            onOpenAgentSession={onOpenAgentSession}
+            profiles={profiles}
+          />
+        ) : null}
         {workingBotPubkeys.length > 0 ? (
           <div className="flex min-w-0 flex-1 overflow-visible">
             <BotActivityComposerAction
