@@ -131,6 +131,123 @@ test("identity: consistent hosted identity renders its canonical npub", async ({
   await expect(connectedNpub).toHaveText(npubEncode(DEFAULT_MOCK_PUBKEY));
 });
 
+test("identity: unlinked account offers linking, never a connected claim", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    builderlabAuth: {
+      email: "owner@example.com",
+      expiresAt: "2099-01-01T00:00:00Z",
+    },
+    // No identity object at all: the account has not linked a Buzz key.
+    builderlabIdentity: null,
+    builderlabCommunities: [
+      {
+        id: "active-community",
+        name: "E2E Test",
+        normalized_host: "localhost:3000",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openSettings(page, "hosted-communities");
+
+  await expect(
+    page.getByText("Link this account to your Buzz identity"),
+  ).toBeVisible();
+  await expect(page.getByText("Buzz identity connected")).toHaveCount(0);
+  // The seeded owned community still lists — every affordance that does
+  // not act on the binding stays available — but Connect is an action on
+  // the binding and cannot occur without a usable bound key: no row
+  // affordance, and no onboarding it could start.
+  await expect(page.getByTestId("hosted-community-row")).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }),
+  ).toHaveCount(0);
+  // Creation stays unavailable: there is no authoritative key to bind the
+  // new community to.
+  await expect(page.getByLabel("Community address")).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Create and connect", exact: true }),
+  ).toBeDisabled();
+});
+
+test("identity: padded or mixed-case bound hex is the same key, not a mismatch", async ({
+  page,
+}) => {
+  await openHostedCommunitiesSettings(page, {
+    // The same key this device signs with, padded and uppercased. It
+    // normalizes to the local key on both sides of the comparison — never
+    // a mismatch demanding delete/rebind of an identity the device already
+    // holds.
+    pubkey_hex: `  ${DEFAULT_MOCK_PUBKEY.toUpperCase()}  `,
+  });
+
+  await expect(
+    page.getByText("This account is connected to a different Buzz identity"),
+  ).toHaveCount(0);
+  const connectedNpub = page
+    .getByText("Buzz identity connected")
+    .locator("span.font-mono");
+  await expect(connectedNpub).toHaveText(npubEncode(DEFAULT_MOCK_PUBKEY));
+  // A binding that is the same key after normalization keeps its Connect
+  // affordance — recovery is reserved for a binding that actually differs.
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }).first(),
+  ).toBeVisible();
+});
+
+/**
+ * Identity payloads whose authoritative `pubkey_hex` cannot act as a key.
+ * Each is an identity *object* — so presence alone must never read as a
+ * connected, ready account — yet none carries a key the app can use.
+ */
+const UNUSABLE_BOUND_KEY_PAYLOADS: Array<
+  [label: string, payload: { npub?: string; pubkey_hex?: string }]
+> = [
+  ["missing key", {}],
+  ["non-hex key", { pubkey_hex: "zz".repeat(32) }],
+  ["npub-only key", { npub: npubEncode(OTHER_HEX) }],
+  // A checksum-valid npub stored in the hex field itself is not a hex
+  // key: it must fail closed like any other unusable spelling, never
+  // display as the account's authoritative key, and never read as a
+  // usable binding when the local comparison is skipped.
+  ["npub stored in the hex field", { pubkey_hex: npubEncode(OTHER_HEX) }],
+];
+
+for (const [label, payload] of UNUSABLE_BOUND_KEY_PAYLOADS) {
+  test(`identity: ${label} is recovery, never a connected account or actions`, async ({
+    page,
+  }) => {
+    await openHostedCommunitiesSettings(page, payload);
+
+    const settingsView = page.getByTestId("settings-view");
+    // No connected claim anywhere on the surface, despite the identity
+    // object being present.
+    await expect(page.getByText("Buzz identity connected")).toHaveCount(0);
+    // The mismatch recovery block owns the identity panel instead.
+    await expect(
+      page.getByText("This account is connected to a different Buzz identity"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByText("Account uses", { exact: true })
+        .locator("xpath=following-sibling::dd[1]"),
+    ).toHaveText("Unavailable");
+    // The unverified server-sent npub spelling never renders.
+    await expect(settingsView.getByText(npubEncode(OTHER_HEX))).toHaveCount(0);
+    // Connect stays unavailable for every owned community.
+    await expect(
+      page.getByRole("button", { name: "Connect", exact: true }),
+    ).toHaveCount(0);
+    // Creation stays unavailable: no key the new community would bind to.
+    await expect(page.getByLabel("Community address")).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Create and connect", exact: true }),
+    ).toBeDisabled();
+  });
+}
+
 test("capture: community icon picker sits beside its hosted community", async ({
   page,
 }) => {
