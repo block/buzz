@@ -1924,7 +1924,14 @@ for (const explicitPicker of [false, true]) {
     const input = page.getByTestId("message-input");
     await input.fill("@quinn");
     if (explicitPicker) {
-      await input.fill("");
+      // Clear the draft with native select-all + Backspace instead of
+      // fill(""): the programmatic selectAll inside fill can lose the
+      // selection to ProseMirror's own selection sync and leave "@quinn"
+      // behind in CI. Real key events let the editor apply both steps
+      // itself.
+      await input.press("ControlOrMeta+A");
+      await input.press("Backspace");
+      await expect(input).toBeEmpty();
       await page
         .getByRole("button", { name: "Mention someone", exact: true })
         .click();
