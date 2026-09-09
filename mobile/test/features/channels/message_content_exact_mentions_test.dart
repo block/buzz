@@ -67,4 +67,46 @@ void main() {
     expect(tester.takeException(), isNull);
     semantics.dispose();
   });
+  testWidgets('historical namesakes preserve targets with ordinary siblings', (
+    tester,
+  ) async {
+    final first = 'a' * 64, second = 'b' * 64, sibling = 'c' * 64;
+    for (final firstName in ['Scout', 'Renamed Scout', first]) {
+      for (final secondName in ['Scout', 'Renamed Scout', second]) {
+        for (final reverse in [false, true]) {
+          for (final ambiguous in [false, true]) {
+            final entries = {
+              first: firstName,
+              second: secondName,
+              sibling: 'Alice',
+              if (ambiguous) 'd' * 64: 'Unknown',
+            }.entries.toList();
+            String? tapped;
+            await tester.pumpWidget(
+              WidgetHelpers.testable(
+                child: MessageContent(
+                  content: '@Scout @Scout ($second) @Alice',
+                  mentionNames: Map.fromEntries(
+                    reverse ? entries.reversed : entries,
+                  ),
+                  onMentionTap: (key) => tapped = key,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            if (ambiguous) {
+              expect(find.text(firstName), findsNothing);
+            } else {
+              await tester.tap(find.text(firstName));
+              expect(tapped, first);
+            }
+            await tester.tap(find.text('Scout (bbbbbbbb…bbbb)'));
+            expect(tapped, second);
+            await tester.tap(find.text('Alice'));
+            expect(tapped, sibling);
+          }
+        }
+      }
+    }
+  });
 }

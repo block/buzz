@@ -90,23 +90,25 @@ Map<String, Set<String>> renderedMentionBindings(
       key: key,
     ));
     add(label, key);
+    bindings.putIfAbsent(match.group(1)!.toLowerCase(), () => <String>{});
   }
   final winning = mentionOccurrences(
     content,
     bindings.keys,
   ).map((range) => range.label).toSet();
-  for (final entry in bindings.entries) {
-    if (entry.value.length < 2) continue;
-    entry.value.removeAll(
-      qualified
-          .where(
-            (q) =>
-                q.base == entry.key &&
-                winning.contains(q.label) &&
-                bindings[q.label]?.length == 1,
-          )
-          .map((q) => q.key),
-    );
+  final claimed = qualified.where((q) => winning.contains(q.label)).toList();
+  final bases = claimed.map((q) => q.base).where(winning.contains).toSet();
+  final remaining = keys.difference(claimed.map((q) => q.key).toSet());
+  // Ordinary sibling mentions claim their own identities before recovering a
+  // historical namesake. Current aliases must not retarget that namesake.
+  for (final label in winning.difference(bases)) {
+    final candidates = bindings[label]!;
+    if (candidates.length == 1) remaining.removeAll(candidates);
+  }
+  for (final base in bases) {
+    // Multiple historical labels or leftover tagged keys cannot be paired
+    // deterministically. Leave them as non-clickable references, not guesses.
+    bindings[base] = bases.length == 1 ? remaining.toSet() : <String>{};
   }
   return bindings;
 }
