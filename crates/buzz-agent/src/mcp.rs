@@ -122,6 +122,7 @@ struct ServerSpec {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: String,
+    trusted: bool,
 }
 
 enum ClientState {
@@ -246,6 +247,7 @@ impl McpRegistry {
                     .map(|e| (e.name.clone(), e.value.clone()))
                     .collect(),
                 cwd: cwd.to_owned(),
+                trusted: s.trusted,
             };
             let (client, pgid, tool_names, raw_tools) = spawn_one(&spec, reg.init_timeout).await?;
             let server_idx = reg.servers.len();
@@ -738,6 +740,13 @@ async fn spawn_one(
     cmd.args(&spec.args);
     cmd.env_clear();
     for k in PASSTHROUGH_ENV {
+        // Withhold Buzz identity credentials from untrusted MCP servers so
+        // third-party tooling cannot exfiltrate the agent's signing key,
+        // relay URL, or owner attestation. Only the built-in buzz-dev-mcp
+        // server (marked `trusted`) receives these.
+        if !spec.trusted && is_buzz_identity_env(k) {
+            continue;
+        }
         if let Ok(v) = std::env::var(k) {
             cmd.env(k, v);
         }
@@ -909,6 +918,15 @@ fn valid_name(s: &str) -> bool {
         && s.len() <= MAX_NAME_LEN
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Returns `true` for env vars that carry Buzz identity credentials.
+/// These are withheld from untrusted (third-party) MCP server children.
+fn is_buzz_identity_env(key: &str) -> bool {
+    matches!(
+        key,
+        "BUZZ_PRIVATE_KEY" | "NOSTR_PRIVATE_KEY" | "BUZZ_RELAY_URL" | "BUZZ_AUTH_TAG"
+    )
 }
 
 pub(crate) fn truncate_at_boundary(s: &str, max: usize) -> &str {

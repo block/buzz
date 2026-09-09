@@ -541,6 +541,13 @@ pub struct McpServerStdio {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Vec<EnvVar>,
+    /// When `false`, the spawn boundary withholds Buzz identity credentials
+    /// (`BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG`) from the child
+    /// process so third-party MCP servers cannot exfiltrate the agent's
+    /// signing key or owner attestation. Only the built-in `buzz-dev-mcp`
+    /// server sets this to `true`.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
