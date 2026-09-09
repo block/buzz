@@ -111,6 +111,30 @@ impl std::fmt::Display for RespondTo {
     }
 }
 
+/// Policy controlling who may add this agent identity to channels.
+///
+/// The value is published in the agent's kind:10100 directory profile. It is
+/// optional because an existing profile may already carry the authoritative
+/// policy; first-time headless profiles must configure it explicitly so the
+/// harness never widens a relay policy by guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChannelAddPolicy {
+    Anyone,
+    #[value(name = "owner_only", alias = "owner-only")]
+    OwnerOnly,
+    Nobody,
+}
+
+impl std::fmt::Display for ChannelAddPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anyone => f.write_str("anyone"),
+            Self::OwnerOnly => f.write_str("owner_only"),
+            Self::Nobody => f.write_str("nobody"),
+        }
+    }
+}
+
 /// Permission mode for agents that support `session/set_config_option` with
 /// `configId: "mode"` (e.g. `claude-agent-acp`).
 ///
@@ -485,6 +509,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
 
+    /// Channel-add policy to publish in a first-time kind:10100 directory
+    /// profile. Existing profiles retain their published value when omitted.
+    #[arg(long, env = "BUZZ_ACP_CHANNEL_ADD_POLICY", value_enum)]
+    pub channel_add_policy: Option<ChannelAddPolicy>,
+
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
     /// Modes: owner-only, allowlist, anyone, nobody.
@@ -593,6 +622,9 @@ pub struct Config {
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    /// Explicit channel-add policy for kind:10100 directory reconciliation.
+    /// `None` preserves an existing profile and skips first-time publication.
+    pub channel_add_policy: Option<ChannelAddPolicy>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
@@ -1193,6 +1225,7 @@ impl Config {
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            channel_add_policy: args.channel_add_policy,
             allowed_respond_to,
             persona_env_vars,
             has_generated_codex_config,
@@ -1569,6 +1602,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            channel_add_policy: None,
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -2585,6 +2619,27 @@ channels = "ALL"
         assert_eq!(
             RespondTo::from_str("nobody", true).unwrap(),
             RespondTo::Nobody
+        );
+    }
+
+    #[test]
+    fn test_channel_add_policy_value_enum_parsing() {
+        use clap::ValueEnum;
+        assert_eq!(
+            ChannelAddPolicy::from_str("anyone", true).unwrap(),
+            ChannelAddPolicy::Anyone
+        );
+        assert_eq!(
+            ChannelAddPolicy::from_str("owner_only", true).unwrap(),
+            ChannelAddPolicy::OwnerOnly
+        );
+        assert_eq!(
+            ChannelAddPolicy::from_str("owner-only", true).unwrap(),
+            ChannelAddPolicy::OwnerOnly
+        );
+        assert_eq!(
+            ChannelAddPolicy::from_str("nobody", true).unwrap(),
+            ChannelAddPolicy::Nobody
         );
     }
 
