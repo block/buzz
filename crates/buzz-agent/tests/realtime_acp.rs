@@ -87,6 +87,10 @@ async fn init(h: &mut Harness, dir: &std::path::Path) -> String {
         init["result"]["agentCapabilities"]["promptCapabilities"]["audio"],
         true
     );
+    assert_eq!(
+        init["result"]["agentCapabilities"]["promptCapabilities"]["image"],
+        true
+    );
     let i = h.send("session/new", json!({"cwd":dir, "mcpServers":[{"name":"fake", "command":env!("CARGO_BIN_EXE_fake-mcp"), "args":[], "env":[{"name":"FAKE_MCP_SHELL_TOOL","value":"1"},{"name":"FAKE_MCP_CALL_LOG","value":dir.join("calls.log")}]}]})).await;
     let result = h.recv_until(|v| v["id"] == i).await;
     result["result"]["sessionId"]
@@ -423,4 +427,117 @@ async fn realtime_rejection_reports_provider_reason_without_tool_effects() {
     );
     assert!(!dir.path().join("calls.log").exists());
     server.await.unwrap();
+}
+
+// Protocol fixtures only: the provider does not perform image/audio inference.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_acp_image_forwarding_and_explicit_output() {
+    for modality in ["text", "audio"] {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+        let provider = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(socket).await.unwrap();
+            send(
+                &mut ws,
+                json!({"type":"session.created","session":{"id":"s"}}),
+            )
+            .await;
+            let update = recv(&mut ws).await;
+            assert_eq!(update["session"]["output_modalities"], json!([modality]));
+            send(
+                &mut ws,
+                json!({"type":"session.updated","session":update["session"]}),
+            )
+            .await;
+            modality_ack(&mut ws).await;
+            let item = recv(&mut ws).await;
+            assert_eq!(item["type"], "conversation.item.create");
+            assert_eq!(
+                item["item"]["content"],
+                json!([
+                    {"type":"input_image","image_url":"data:image/png;base64,AQID"},
+                    {"type":"input_text","text":"what is pictured?"}
+                ])
+            );
+            assert_eq!(recv(&mut ws).await["type"], "response.create");
+            if modality == "audio" {
+                created(&mut ws, "r").await;
+                send(&mut ws, json!({"type":"response.output_audio.delta","response_id":"r","item_id":"answer","content_index":0,"delta":STANDARD.encode(vec![0u8;4800])})).await;
+                done(&mut ws, "r", vec![json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_audio","transcript":"fixture"}]})]).await;
+            } else {
+                text(&mut ws, "r").await;
+            }
+        });
+        let mut vars = options();
+        vars.push(("OPENAI_COMPAT_BASE_URL", &url));
+        vars.push(("BUZZ_AGENT_REALTIME_OUTPUT", modality));
+        let mut h = Harness::spawn_with_env(&url, &vars).await;
+        let sid = init(&mut h, dir.path()).await;
+        let p = h
+            .send(
+                "session/prompt",
+                json!({"sessionId":sid,"prompt":[
+                    {"type":"image","mimeType":"image/png","data":"AQID"},
+                    {"type":"text","text":"what is pictured?"}
+                ]}),
+            )
+            .await;
+        let mut heard = false;
+        loop {
+            let event = h.recv().await;
+            heard |= event["params"]["update"]["content"]["type"] == "audio";
+            if event["id"] == p {
+                assert_eq!(event["result"]["stopReason"], "end_turn", "{event}");
+                break;
+            }
+        }
+        assert_eq!(heard, modality == "audio");
+        provider.await.unwrap();
+        h.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_invalid_image_fails_before_connect_and_keeps_session_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+    let mut vars = options();
+    vars.push(("OPENAI_COMPAT_BASE_URL", &url));
+    let mut h = Harness::spawn_with_env(&url, &vars).await;
+    let sid = init(&mut h, dir.path()).await;
+    for (mime, data) in [
+        ("image/png", "!".to_string()),
+        ("image/svg+xml", "AQID".into()),
+        ("image/png", STANDARD.encode(vec![1u8; 512 * 1024 + 1])),
+    ] {
+        let p = h
+            .send(
+                "session/prompt",
+                json!({"sessionId":sid,"prompt":[{"type":"image","mimeType":mime,"data":data}]}),
+            )
+            .await;
+        assert_eq!(
+            h.recv_until(|v| v["id"] == p).await["error"]["code"],
+            -32602
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+    let provider = tokio::spawn(async move {
+        let mut ws = connect(listener).await;
+        text(&mut ws, "r").await;
+    });
+    let p = prompt(&mut h, &sid).await;
+    assert_eq!(
+        h.recv_until(|v| v["id"] == p).await["result"]["stopReason"],
+        "end_turn"
+    );
+    provider.await.unwrap();
+    h.shutdown().await;
 }

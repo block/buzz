@@ -2616,6 +2616,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            realtime_audio_output: None,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,

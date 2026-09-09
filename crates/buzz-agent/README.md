@@ -143,7 +143,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
-| `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses` \| `realtime`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
@@ -383,3 +383,25 @@ Test strategy is **real subprocess, no mocks**:
 - **Fake LLM** — `tests/fake_llm.rs` and the helpers in `tests/regressions.rs` spin up a real `tokio::net::TcpListener` on port 0, parse `Content-Length`, and return scripted JSON. No HTTP mocking library.
 - **Fake MCP server** — `tests/bin/fake_mcp.rs` is a separate binary controlled by env vars: `FAKE_MCP_HANG_INIT`, `FAKE_MCP_TOOL_DELAY`, `FAKE_MCP_SPAWN_GRANDCHILD`, etc. Each fault path is a real process being abused.
 - **Regression tests are the changelog.** Each `#[test]` in `regressions.rs` is named for the bug it locks down: `assistant_text_preserved_across_prompts`, `cancel_leaves_history_valid_for_next_prompt`, `mcp_init_timeout_kills_child`, `oversize_line_kills_connection`. Read them in order to learn the protocol's failure modes.
+
+### Manual Realtime sessions
+
+`OPENAI_COMPAT_API=realtime` selects the GA OpenAI Realtime WebSocket protocol.
+The same configured model, API key and base URL apply. HTTP API roots receive
+`/realtime`; explicit `ws(s)` URLs retain their path. Non-loopback endpoints
+require TLS. This is endpoint-agnostic, not a Frankie-specific wire format.
+
+ACP prompts accept text, inline PNG/JPEG images (512 KiB each; bounded item
+frames), and complete mono PCM16 24 kHz WAV audio (100 ms to 30 s).
+`BUZZ_AGENT_REALTIME_OUTPUT=auto|text|audio` selects output: the default `auto`
+uses audio when the prompt contains audio, otherwise text. `audio` enables
+text-to-speech and image-to-speech without dummy audio input. Audio responses
+include a transcript and a complete WAV content block, not incremental playback.
+
+The server owns transient conversation state. Buzz retains ACP, MCP execution
+and permissions. Rejected mutations, cancellation, transport loss or expiry
+end the ACP Realtime session; create a new session rather than replaying possible
+tool effects. Manual turns only: no VAD/barge-in/truncation, steer, model changes,
+hooks or require-reply policies in this mode. Hosted OpenAI interoperability is
+not yet live-verified; local protocol fixtures and native inference are separate
+gates.

@@ -22,6 +22,8 @@ use crate::{
 const SESSION_LIMIT: Duration = Duration::from_secs(60 * 60);
 const MAX_CALLS: usize = 64;
 const MAX_SESSION_IDS: usize = 4096;
+// Aggregate content budget: UTF-8 text, base64 images, and decoded PCM bytes.
+const MAX_PROMPT_BYTES: usize = 1_440_000;
 
 fn error(message: &str) -> AgentError {
     AgentError::Llm(format!("realtime: {message}"))
@@ -34,7 +36,7 @@ pub(crate) struct RealtimeSession {
 }
 
 enum Input {
-    Text(String),
+    Content(Vec<Value>),
     Audio(Vec<u8>),
 }
 
@@ -65,27 +67,69 @@ impl RealtimeSession {
             ));
         }
         let mut inputs = Vec::new();
+        let mut parts = Vec::new();
         let mut total = 0usize;
         let mut audio_output = false;
         for block in prompt {
-            let input = match block {
+            match block {
                 ContentBlock::Audio { data, mime_type } => {
                     audio_output = true;
-                    Input::Audio(decode_wav(&data, &mime_type)?)
+                    let pcm = decode_wav(&data, &mime_type)?;
+                    total += pcm.len();
+                    if !parts.is_empty() {
+                        inputs.push(Input::Content(std::mem::take(&mut parts)));
+                    }
+                    inputs.push(Input::Audio(pcm));
                 }
-                other => Input::Text(prompt_to_text(vec![other])?),
-            };
-            total += match &input {
-                Input::Text(text) => text.len(),
-                Input::Audio(pcm) => pcm.len(),
-            };
-            inputs.push(input);
+                ContentBlock::Image { data, mime_type } => {
+                    if !matches!(mime_type.as_str(), "image/png" | "image/jpeg")
+                        || data.len() > 700_000
+                    {
+                        return Err(AgentError::InvalidParams(
+                            "realtime: inline PNG/JPEG up to 512 KiB decoded required".into(),
+                        ));
+                    }
+                    let bytes = STANDARD.decode(&data).map_err(|_| {
+                        AgentError::InvalidParams("realtime: invalid image base64".into())
+                    })?;
+                    if bytes.is_empty() || bytes.len() > 512 * 1024 {
+                        return Err(AgentError::InvalidParams(
+                            "realtime: image size limit".into(),
+                        ));
+                    }
+                    total += data.len();
+                    parts.push(json!({"type":"input_image", "image_url":format!("data:{mime_type};base64,{data}")}));
+                }
+                other => {
+                    let text = prompt_to_text(vec![other])?;
+                    total += text.len();
+                    parts.push(json!({"type":"input_text", "text":text}));
+                }
+            }
         }
-        if total == 0 || total > MAX_PCM {
+        if !parts.is_empty() {
+            inputs.push(Input::Content(parts));
+        }
+        if total == 0 || total > MAX_PROMPT_BYTES {
             return Err(AgentError::InvalidParams(
                 "realtime: empty or oversized prompt".into(),
             ));
         }
+        // Bound each JSON item before opening or mutating a provider session.
+        for input in &inputs {
+            if let Input::Content(parts) = input {
+                if serde_json::to_vec(parts)
+                    .map_err(|_| error("invalid content"))?
+                    .len()
+                    > 900_000
+                {
+                    return Err(AgentError::InvalidParams(
+                        "realtime: content frame limit".into(),
+                    ));
+                }
+            }
+        }
+        let audio_output = ctx.cfg.realtime_audio_output.unwrap_or(audio_output);
         if self.terminal {
             return Err(error(
                 "session ended; create a new ACP session (no automatic replay)",
@@ -217,10 +261,16 @@ impl RealtimeSession {
                 return Err(AgentError::Cancelled);
             }
             match input {
-                Input::Text(text) => live.sender.create_item(json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]})).await?,
+                Input::Content(parts) => {
+                    live.sender
+                        .create_item(json!({"type":"message", "role":"user", "content":parts}))
+                        .await?
+                }
                 Input::Audio(pcm) => {
                     for chunk in pcm.chunks(24_000) {
-                        if *ctx.cancel.borrow() { return Err(AgentError::Cancelled); }
+                        if *ctx.cancel.borrow() {
+                            return Err(AgentError::Cancelled);
+                        }
                         live.sender.append_audio(chunk).await?;
                     }
                     live.sender.commit_audio().await?;

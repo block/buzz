@@ -1193,7 +1193,7 @@ pub(crate) fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentE
         match block {
             ContentBlock::Text { text } => parts.push(text),
             ContentBlock::ResourceLink { uri } => parts.push(format!("[resource: {uri}]")),
-            ContentBlock::Unsupported | ContentBlock::Audio { .. } => {
+            ContentBlock::Unsupported | ContentBlock::Audio { .. } | ContentBlock::Image { .. } => {
                 return Err(AgentError::InvalidParams(
                     "prompt: unsupported content block (only text and resource_link are advertised)".into(),
                 ));

@@ -610,6 +610,8 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
+    /// Manual Realtime output override: None follows input (audio in -> audio out).
+    pub realtime_audio_output: Option<bool>,
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
@@ -707,6 +709,11 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
+            realtime_audio_output: if openai_api == OpenAiApi::Realtime {
+                parse_realtime_output(env("BUZZ_AGENT_REALTIME_OUTPUT").as_deref())?
+            } else {
+                None
+            },
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
@@ -772,6 +779,7 @@ impl Config {
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            realtime_audio_output: None,
             max_rounds: 0,
             max_output_tokens: 1,
             max_token_recoveries: 0,
@@ -957,6 +965,15 @@ fn resolve_provider(
         None => Err(
             "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
         ),
+    }
+}
+
+fn parse_realtime_output(raw: Option<&str>) -> Result<Option<bool>, String> {
+    match raw.unwrap_or("auto") {
+        "auto" => Ok(None),
+        "audio" => Ok(Some(true)),
+        "text" => Ok(Some(false)),
+        _ => Err("config: BUZZ_AGENT_REALTIME_OUTPUT must be auto|text|audio".into()),
     }
 }
 
@@ -1275,6 +1292,19 @@ mod tests {
         // Allowed strictly only as a literal match — defense-in-depth
         // expectation for callers.
         assert!(hs.allows("*"));
+    }
+
+    #[test]
+    fn realtime_output_values() {
+        for (raw, want) in [
+            (None, None),
+            (Some("auto"), None),
+            (Some("text"), Some(false)),
+            (Some("audio"), Some(true)),
+        ] {
+            assert_eq!(parse_realtime_output(raw).unwrap(), want);
+        }
+        assert!(parse_realtime_output(Some("both")).is_err());
     }
 
     #[test]

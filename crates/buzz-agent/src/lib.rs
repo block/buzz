@@ -376,7 +376,7 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
                 "protocolVersion": negotiated_version,
                 "agentCapabilities": {
                     "loadSession": false,
-                    "promptCapabilities": { "image": false, "audio": app.cfg.openai_api == config::OpenAiApi::Realtime, "embeddedContext": false },
+                    "promptCapabilities": { "image": app.cfg.openai_api == config::OpenAiApi::Realtime, "audio": app.cfg.openai_api == config::OpenAiApi::Realtime, "embeddedContext": false },
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
                 "agentInfo": { "name": "buzz-agent", "version": env!("CARGO_PKG_VERSION") },
