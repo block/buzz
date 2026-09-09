@@ -30,10 +30,18 @@ task:
   description: "<task description>"
 parent_channel: "buzz://channel/<channel UUID>"
 originating_thread: "buzz://message?channel=<channel UUID>&id=<message event ID>"
+assignee: null
 branch: null
 ---
 
 Experimental task: You must read and follow the [channel-backed task experiment](https://github.com/block/buzz/blob/jtennant/task-channel-experiment/docs/experiments/channel-backed-tasks.md) before working in this channel.
+```
+
+When the task is assigned, replace `assignee: null` with the assignee's stable Buzz pubkey:
+
+```yaml
+assignee:
+  pubkey: "<64-character pubkey>"
 ```
 
 When implementation starts, replace `branch: null` with the branch's repository and name:
