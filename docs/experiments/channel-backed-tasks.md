@@ -10,6 +10,7 @@ Conversation → local task + new channel → implementation branch → pull req
 
 - The task's mutable data lives in the channel canvas.
 - No native Buzz task is created.
+- Task channels are standalone Buzz channels. Do not use native Projects or `buzz projects add-channel` during this experiment. Create the channel directly and represent its relationship to another channel through `parent_channel` in the canvas.
 - The task has zero or one implementation branch.
 - Each implementation branch should ultimately have one home channel. Creating a branch through this workflow reuses an appropriate task channel instead of creating another one.
 - A branch created outside this workflow can remain unbound temporarily and should be flagged for resolution. A person or agent can attach it to an appropriate channel or create a new one.
