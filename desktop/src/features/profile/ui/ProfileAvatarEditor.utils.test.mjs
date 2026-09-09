@@ -51,12 +51,17 @@ test("squircle consumers normalize known legacy emoji artwork", () => {
 });
 
 test("squareEmojiAvatarDataUrl preserves custom inline SVG artwork", () => {
-  const customSvg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><style>text { font-weight: 700; }</style><rect width="512" height="512" fill="#FFCC00"/><path d="M0 0L32 32"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">Buzz</text></svg>';
-  const avatarUrl = `data:image/svg+xml,${encodeURIComponent(customSvg)}`;
+  const customSvgs = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><style>text { font-weight: 700; }</style><rect width="512" height="512" fill="#FFCC00"/><path d="M0 0L32 32"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">Buzz</text></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#FFCC00"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258"><tspan fill="red">ACME</tspan></text></svg>',
+  ];
 
-  assert.equal(parseEmojiAvatarDataUrl(avatarUrl), null);
-  assert.equal(squareEmojiAvatarDataUrl(avatarUrl), avatarUrl);
+  for (const customSvg of customSvgs) {
+    const avatarUrl = `data:image/svg+xml,${encodeURIComponent(customSvg)}`;
+
+    assert.equal(parseEmojiAvatarDataUrl(avatarUrl), null);
+    assert.equal(squareEmojiAvatarDataUrl(avatarUrl), avatarUrl);
+  }
 });
 
 test("squareEmojiAvatarDataUrl leaves non-emoji images unchanged", () => {

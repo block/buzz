@@ -290,7 +290,7 @@ export function parseEmojiAvatarDataUrl(
       avatarUrl.slice(EMOJI_AVATAR_DATA_URL_PREFIX.length),
     );
     const match = svg.match(
-      /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512"(?: rx="(?:112|256)")? fill="([^"]+)"\/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">(.*?)<\/text><\/svg>$/u,
+      /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512"(?: rx="(?:112|256)")? fill="([^"]+)"\/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">([^<>]*)<\/text><\/svg>$/u,
     );
 
     if (!match) {
