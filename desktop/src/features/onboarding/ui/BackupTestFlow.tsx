@@ -18,6 +18,7 @@ import {
   ONBOARDING_SECURITY_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
 } from "./OnboardingChrome";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 
 type BackupTestStage = "drop" | "password" | "success";
 
@@ -205,7 +206,18 @@ export function BackupTestFlow({
   onProgressChange,
   onVerified,
 }: BackupTestFlowProps) {
+  const cardLayout = useOnboardingCardLayout();
   const reduceMotion = useReducedMotion() ?? false;
+  const stageEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 10 };
+  const successCopyEntrance = reduceMotion
+    ? false
+    : cardLayout
+      ? { opacity: 0 }
+      : { opacity: 0, y: 8 };
   const { stage, fileName, ncryptsec, result } = progress;
   // True while a file drag is anywhere over the window — the drop overlay
   // takes over the host surface only for the duration of the drag.
@@ -389,8 +401,8 @@ export function BackupTestFlow({
           <Check aria-hidden="true" className="h-8 w-8" strokeWidth={3} />
         </motion.div>
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
-          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          initial={successCopyEntrance}
           transition={
             reduceMotion ? { duration: 0 } : { delay: 0.15, duration: 0.35 }
           }
@@ -499,9 +511,9 @@ export function BackupTestFlow({
     >
       {stage === "drop" ? (
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
           className="relative space-y-4"
-          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          initial={stageEntrance}
           key="drop"
           transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut" }}
         >
@@ -596,16 +608,19 @@ export function BackupTestFlow({
         </motion.div>
       ) : (
         <motion.div
-          animate={{ opacity: 1, y: 0 }}
+          animate={cardLayout ? { opacity: 1 } : { opacity: 1, y: 0 }}
           className="space-y-4"
-          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          initial={stageEntrance}
           key="password"
           transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut" }}
         >
           {(() => {
             const fileRow = (
               <div
-                className="flex max-w-full items-center gap-3 rounded-2xl border border-foreground/15 bg-foreground/10 px-4 py-3 text-foreground shadow-sm animate-in fade-in slide-in-from-bottom-1 duration-300 motion-reduce:animate-none"
+                className={cn(
+                  "flex max-w-full items-center gap-3 rounded-2xl border border-foreground/15 bg-foreground/10 px-4 py-3 text-foreground shadow-sm animate-in fade-in duration-300 motion-reduce:animate-none",
+                  !cardLayout && "slide-in-from-bottom-1",
+                )}
                 data-testid="backup-test-file-accepted"
               >
                 <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground/10">

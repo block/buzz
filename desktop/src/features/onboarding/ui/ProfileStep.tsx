@@ -9,7 +9,9 @@ import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingInput } from "./OnboardingInput";
 import {
   type OnboardingTransitionDirection,
   type OnboardingTransitionEffect,
@@ -205,6 +207,7 @@ export function ProfileStep({
   const displayNameDraft = name.draftValue;
   const hasDisplayNameDraft = displayNameDraft.length > 0;
   const canSubmit = displayNameDraft.trim().length > 0 && !isSaving;
+  const cardLayout = useOnboardingCardLayout();
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useLayoutEffect(() => {
@@ -213,7 +216,10 @@ export function ProfileStep({
 
   return (
     <OnboardingSlideTransition
-      className="flex w-full flex-col items-center text-center"
+      className={cn(
+        "flex w-full flex-col",
+        cardLayout ? "items-stretch text-left" : "items-center text-center",
+      )}
       data-testid="onboarding-page-1"
       direction={direction}
       effect={transitionEffect}
@@ -229,35 +235,17 @@ export function ProfileStep({
         </p>
       </div>
 
-      <label
-        className="mt-12 flex w-full cursor-text flex-col items-center"
-        htmlFor="onboarding-display-name"
-      >
-        <span className="sr-only">Name</span>
-        <div className="relative h-20 w-full max-w-[576px]">
-          {!hasDisplayNameDraft ? (
-            <div
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-0 flex select-none items-center justify-center"
-            >
-              <span className="relative inline-flex select-none items-center gap-0 text-4xl font-semibold text-muted-foreground/35 sm:text-5xl">
-                <span
-                  aria-hidden="true"
-                  className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
-                />
-                Enter your name
-              </span>
-            </div>
-          ) : null}
-          <input
+      {cardLayout ? (
+        <label
+          className="mt-8 block w-full text-sm font-medium text-foreground"
+          htmlFor="onboarding-display-name"
+        >
+          <span className="mb-2 block">Name</span>
+          <OnboardingInput
             aria-label="Name"
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
-            className={cn(
-              "h-full w-full border-0 bg-transparent px-0 py-0 text-center text-4xl font-semibold text-foreground shadow-none outline-none caret-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:text-5xl",
-              !hasDisplayNameDraft && "text-transparent caret-transparent",
-            )}
             data-testid="onboarding-display-name"
             disabled={isSaving}
             id="onboarding-display-name"
@@ -268,12 +256,59 @@ export function ProfileStep({
                 submit();
               }
             }}
+            placeholder="Enter your name"
             ref={inputRef}
             spellCheck={false}
             value={displayNameDraft}
           />
-        </div>
-      </label>
+        </label>
+      ) : (
+        <label
+          className="mt-12 flex w-full cursor-text flex-col items-center"
+          htmlFor="onboarding-display-name"
+        >
+          <span className="sr-only">Name</span>
+          <div className="relative h-20 w-full max-w-[576px]">
+            {!hasDisplayNameDraft ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 flex select-none items-center justify-center"
+              >
+                <span className="relative inline-flex select-none items-center gap-0 text-4xl font-semibold text-muted-foreground/35 sm:text-5xl">
+                  <span
+                    aria-hidden="true"
+                    className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
+                  />
+                  Enter your name
+                </span>
+              </div>
+            ) : null}
+            <input
+              aria-label="Name"
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              className={cn(
+                "h-full w-full border-0 bg-transparent px-0 py-0 text-center text-4xl font-semibold text-foreground shadow-none outline-none caret-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:text-5xl",
+                !hasDisplayNameDraft && "text-transparent caret-transparent",
+              )}
+              data-testid="onboarding-display-name"
+              disabled={isSaving}
+              id="onboarding-display-name"
+              onChange={(event) => updateDisplayName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && canSubmit) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              ref={inputRef}
+              spellCheck={false}
+              value={displayNameDraft}
+            />
+          </div>
+        </label>
+      )}
 
       {saveRecovery.errorMessage ? (
         <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />

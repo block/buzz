@@ -731,7 +731,7 @@ test("fresh existing-identity path leads with private-key recovery", async ({
   await expect(
     page.getByText("Paste your private key to sign in to Buzz."),
   ).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("onboarding-content-card")).toBeVisible();
   await expect(page.getByTestId("nostr-import-file-button")).toHaveText(
     "backup file",
   );
@@ -795,17 +795,17 @@ test("fresh existing-identity path leads with private-key recovery", async ({
     );
   });
   await expect(backupDrop).toHaveCount(0);
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
-  await backupDialog.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByTestId("onboarding-content-card")).toBeVisible();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
 
   await page.getByTestId("nostr-import-phone-link").click();
   const phoneDialog = page.getByTestId("phone-recovery-dialog");
   await expect(phoneDialog).toBeVisible();
   await expect(
-    phoneDialog.getByRole("heading", { name: "Use your Buzz identity" }),
+    phoneDialog.getByRole("heading", { name: "Scan to sign in" }),
   ).toBeVisible();
   await expect(phoneDialog.getByTestId("identity-recovery-qr")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("onboarding-content-card")).toBeVisible();
 });
 
 test("first-launch key import continues to machine setup", async ({ page }) => {
@@ -969,7 +969,7 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
-  // File contents advance to the password stage inside the same dialog.
+  // File contents advance to the password stage inside the same sheet.
   const backupDialog = page.getByTestId("backup-recovery-dialog");
   const backupFileSection = backupDialog.getByTestId(
     "nostr-import-backup-file-section",
@@ -1023,8 +1023,8 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     backupDialog.getByTestId("nostr-import-passphrase"),
   ).toBeFocused();
 
-  // Back first returns to backup-file selection instead of closing the dialog.
-  await backupDialog.getByRole("button", { name: "Back", exact: true }).click();
+  // Back first returns to backup-file selection instead of leaving the sheet.
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
     backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
   ).toBeVisible();
@@ -1927,7 +1927,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile keeps Back bottom-left and balances the avatar editor", async ({
+test("connected first-community profile keeps navigation inside the card and balances the avatar editor", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -2011,7 +2011,13 @@ test("connected first-community profile keeps Back bottom-left and balances the 
   if (!profileHeadingBox) {
     throw new Error("Could not measure community profile heading position");
   }
-  expect(Math.abs(profileHeadingBox.y - 106)).toBeLessThan(8);
+  const onboardingCard = page.getByTestId("onboarding-content-card");
+  const onboardingCardBox = await onboardingCard.boundingBox();
+  if (!onboardingCardBox) {
+    throw new Error("Could not measure onboarding card position");
+  }
+  expect(profileHeadingBox.y).toBeGreaterThan(onboardingCardBox.y);
+  expect(profileHeadingBox.y).toBeLessThan(onboardingCardBox.y + 96);
   const nameKey = page.getByTestId("community-profile-name-key");
   const avatarButton = page.getByTestId("community-avatar-open");
   await expect(nameKey).toBeVisible();
@@ -2026,19 +2032,13 @@ test("connected first-community profile keeps Back bottom-left and balances the 
       backgroundColor: styles.backgroundColor,
       borderColor: styles.borderColor,
       borderRadius: styles.borderRadius,
-      boxShadow: styles.boxShadow,
       fontSize: styles.fontSize,
     };
   });
-  expect(nameKeyStyles.backgroundColor).toMatch(
-    /^(rgba\(255, 255, 255, 0\.95\)|oklab\(.+ \/ 0\.95\))$/,
-  );
-  expect(nameKeyStyles.borderColor).toBe("rgba(113, 113, 6, 0.28)");
-  expect(nameKeyStyles.boxShadow).toContain(
-    "rgba(113, 113, 6, 0.5) 0px 0px 0px 1px inset",
-  );
+  expect(nameKeyStyles.backgroundColor).toBe("rgb(249, 249, 249)");
+  expect(nameKeyStyles.borderColor).toBe("rgb(226, 226, 226)");
   expect(nameKeyStyles).toMatchObject({
-    borderRadius: "16px",
+    borderRadius: "12px",
     fontSize: "14px",
   });
   await expect(page.getByText("Your username", { exact: true })).toBeVisible();
@@ -2338,7 +2338,7 @@ test("connected first-community profile keeps Back bottom-left and balances the 
   const backButton = page.getByTestId("community-profile-back");
   await expect(nextButton).toHaveText("Next");
   await expect(nextButton).toBeDisabled();
-  await expect(backButton).toHaveText("Back");
+  await expect(backButton).toHaveAttribute("aria-label", "Back");
   await expect(backButton).toBeEnabled();
   const [nextBox, backBox] = await Promise.all([
     nextButton.boundingBox(),
@@ -2347,12 +2347,11 @@ test("connected first-community profile keeps Back bottom-left and balances the 
   if (!nextBox || !backBox) {
     throw new Error("Could not measure community profile navigation controls");
   }
-  const viewport = page.viewportSize();
-  if (!viewport) throw new Error("Could not measure onboarding viewport");
-  expect(backBox.x).toBeLessThanOrEqual(32);
-  expect(
-    Math.abs(nextBox.x + nextBox.width / 2 - viewport.width / 2),
-  ).toBeLessThanOrEqual(1);
+  expect(backBox.x).toBeGreaterThanOrEqual(onboardingCardBox.x + 40);
+  expect(backBox.width).toBe(40);
+  expect(nextBox.x + nextBox.width).toBeLessThanOrEqual(
+    onboardingCardBox.x + onboardingCardBox.width - 40,
+  );
 
   await backButton.click();
   await expect(

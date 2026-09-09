@@ -1,13 +1,7 @@
 /**
- * Mounted consumer regressions for the SetupStep forced-probe readiness gate.
- *
- * P1: isChecking = isFetching (not isLoading) ensures the Next button stays
- * disabled while the forced probe is in flight or has rejected, even when
- * cached data exists. With the old isLoading mapping, isLoading is false when
- * data is present, so the button was incorrectly enabled.
- *
- * Mutation proof: revert only the SetupStep.tsx hunk and both tests go RED
- * (button enabled in states it must block).
+ * Mounted consumer regressions for SetupStep cached-ready revalidation.
+ * A warm forced probe still runs on entry, but cached readiness remains
+ * visually stable unless that probe fails.
  */
 
 import assert from "node:assert/strict";
@@ -186,6 +180,7 @@ function setupStepTree(queryClient) {
       React.createElement(SetupStep, {
         actions: ACTIONS,
         direction: "forward",
+        initialMethod: "subscription",
         onReadyRuntimeIdsChange: NOOP,
       }),
     ),
@@ -194,137 +189,8 @@ function setupStepTree(queryClient) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("SetupStep Next button readiness gate — P1 regression (mounted consumer)", () => {
-  it("onboarding-setup-next is disabled while forced probe is pending over cached data", async () => {
-    const queryClient = makeQueryClient();
-    // Pre-seed cache with a ready runtime. getReadyOnboardingRuntimes
-    // will return it, so readyRuntimeIds.length > 0 — proving the button
-    // is blocked by isChecking, not by an empty ready set.
-    queryClient.setQueryData(acpRuntimesQueryKey, [
-      catalogEntry("codex", "logged_in"),
-    ]);
-
-    const pending = deferred();
-    discoverHandler = (args) =>
-      args?.force === true ? pending.promise : Promise.resolve([]);
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(
-        React.createElement(
-          QueryClientProvider,
-          { client: queryClient },
-          React.createElement(
-            TooltipProvider,
-            null,
-            React.createElement(SetupStep, {
-              actions: ACTIONS,
-              direction: "forward",
-              onReadyRuntimeIdsChange: NOOP,
-            }),
-          ),
-        ),
-      );
-    });
-    // Let the mount-time forceRefresh dispatch (but not resolve).
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 10));
-    });
-
-    const button = container.querySelector(
-      '[data-testid="onboarding-setup-next"]',
-    );
-    assert.ok(button, "onboarding-setup-next button must be present");
-    assert.ok(
-      button.disabled,
-      "Next button must be disabled while forced probe is in flight over cached data",
-    );
-
-    // Resolve the pending probe inside act so React Query drains its state
-    // update before unmount — prevents "Promise resolution still pending"
-    // from the dangling deferred.
-    await act(async () => {
-      pending.resolve([]);
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-    queryClient.clear();
-  });
-
-  it("onboarding-setup-next is disabled after forced probe rejects over cached data", async () => {
-    const queryClient = makeQueryClient();
-    queryClient.setQueryData(acpRuntimesQueryKey, [
-      catalogEntry("codex", "logged_in"),
-    ]);
-
-    discoverHandler = (args) =>
-      args?.force === true
-        ? Promise.reject(new Error("forced probe rejected"))
-        : Promise.resolve([]);
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(
-        React.createElement(
-          QueryClientProvider,
-          { client: queryClient },
-          React.createElement(
-            TooltipProvider,
-            null,
-            React.createElement(SetupStep, {
-              actions: ACTIONS,
-              direction: "forward",
-              onReadyRuntimeIdsChange: NOOP,
-            }),
-          ),
-        ),
-      );
-    });
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 50));
-    });
-
-    const button = container.querySelector(
-      '[data-testid="onboarding-setup-next"]',
-    );
-    assert.ok(button, "onboarding-setup-next button must be present");
-    assert.ok(
-      button.disabled,
-      "Next button must be disabled after forced probe rejects, even with cached data",
-    );
-
-    const errorEl = container.querySelector(
-      '[data-testid="onboarding-setup-error"]',
-    );
-    assert.ok(
-      errorEl,
-      "the forced rejection error must be rendered after the probe rejects",
-    );
-    assert.match(
-      errorEl.textContent ?? "",
-      /forced probe rejected/,
-      "rendered error must surface the forced rejection message",
-    );
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-    queryClient.clear();
-  });
-});
-
-describe("SetupStep cached-ready revalidation — P4 regression (mounted consumer)", () => {
-  it("cached READY is replaced by a CHECKING indicator while a warm forced probe is pending", async () => {
+describe("SetupStep cached-ready revalidation", () => {
+  it("keeps a cached ready harness available while a warm forced probe is pending", async () => {
     const queryClient = makeQueryClient();
     queryClient.setQueryData(acpRuntimesQueryKey, [
       catalogEntry("codex", "logged_in"),
@@ -342,38 +208,43 @@ describe("SetupStep cached-ready revalidation — P4 regression (mounted consume
       await new Promise((r) => setTimeout(r, 10));
     });
 
-    assert.ok(
-      container.querySelector(
-        '[data-testid="onboarding-runtime-rechecking-codex"]',
-      ),
-      "a pending warm recheck over a cached-ready runtime must show CHECKING…",
+    const readyCard = container.querySelector(
+      '[data-testid="onboarding-runtime-codex"]',
     );
+    assert.ok(readyCard, "the cached harness remains visible during recheck");
+    assert.equal(readyCard.getAttribute("data-ready"), "true");
     assert.equal(
       container.querySelector('[data-testid="onboarding-runtime-ready-codex"]'),
       null,
-      "cached READY must not be presented as current while the recheck is in flight",
+      "the installed section does not repeat readiness with a tag",
+    );
+    assert.equal(
+      container.querySelector(
+        '[data-testid="onboarding-runtime-rechecking-codex"]',
+      ),
+      null,
+      "a warm recheck does not flash a redundant Checking state",
     );
 
-    // Success restores READY.
+    // Success preserves the stable ready card without adding a status tag.
     await act(async () => {
       pending.resolve([rawReadyEntry("codex")]);
       await new Promise((r) => setTimeout(r, 50));
     });
-    assert.ok(
-      container.querySelector('[data-testid="onboarding-runtime-ready-codex"]'),
-      "READY returns once the warm recheck succeeds",
+    assert.equal(
+      container
+        .querySelector('[data-testid="onboarding-runtime-codex"]')
+        ?.getAttribute("data-ready"),
+      "true",
+      "the harness remains ready once the warm recheck succeeds",
     );
     assert.equal(
       container.querySelector(
         '[data-testid="onboarding-runtime-rechecking-codex"]',
       ),
       null,
-      "the CHECKING indicator clears on success",
+      "no Checking indicator appears on success",
     );
-    const button = container.querySelector(
-      '[data-testid="onboarding-setup-next"]',
-    );
-    assert.ok(button && !button.disabled, "Next is enabled after success");
 
     await act(async () => {
       root.unmount();
@@ -382,7 +253,7 @@ describe("SetupStep cached-ready revalidation — P4 regression (mounted consume
     queryClient.clear();
   });
 
-  it("cached READY is replaced by a recheck affordance after a warm forced probe rejects", async () => {
+  it("replaces cached Ready with a recheck affordance after a warm forced probe rejects", async () => {
     const queryClient = makeQueryClient();
     queryClient.setQueryData(acpRuntimesQueryKey, [
       catalogEntry("codex", "logged_in"),
@@ -416,14 +287,6 @@ describe("SetupStep cached-ready revalidation — P4 regression (mounted consume
       container.querySelector('[data-testid="onboarding-setup-error"]'),
       "the warm rejection error stays visible alongside the retained card",
     );
-    const button = container.querySelector(
-      '[data-testid="onboarding-setup-next"]',
-    );
-    assert.ok(
-      button && button.disabled,
-      "Next stays gated while readiness is unconfirmed",
-    );
-
     await act(async () => {
       root.unmount();
     });

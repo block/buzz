@@ -62,7 +62,10 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
-  next: (readyRuntimeIds: readonly string[]) => void;
+  next: (
+    readyRuntimeIds: readonly string[],
+    configBackTarget?: "method" | "list",
+  ) => void;
   navigateToAgentSettings?: () => void;
 };
 
@@ -78,6 +81,7 @@ export type DefaultConfigStepActions = {
   complete: () => void;
   discardDraft: () => void;
   updateDraft: (draft: DefaultConfigDraft) => void;
+  useDifferentHarness?: () => void;
 };
 
 export type SetupStepRuntimeState = {

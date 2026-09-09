@@ -9,6 +9,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 import { OnboardingFooter } from "./OnboardingFooter";
 import { AnimatePresence, motion } from "motion/react";
 import * as React from "react";
@@ -284,6 +285,7 @@ export function AvatarStep({
     isCustomColorPickerOpen || shouldHideActionsForAnimatedAvatar;
   const previewName =
     name.draftValue.trim() || name.savedValue.trim() || "Your avatar";
+  const cardLayout = useOnboardingCardLayout();
   const animateEmojiAvatarChange = React.useCallback(() => {
     setAvatarSquishKey((key) => key + 1);
   }, []);
@@ -322,13 +324,21 @@ export function AvatarStep({
       // onboarding content and overflows on short windows, so the shell's own
       // bottom reserve isn't enough to scroll the last rows out from under the
       // fixed CTA group + scrim.
-      className="flex w-full flex-col items-center pb-20"
+      className={cn(
+        "flex w-full flex-col",
+        cardLayout ? "min-h-0 items-stretch pb-0" : "items-center pb-20",
+      )}
       data-testid="onboarding-page-avatar"
       direction={direction}
       transitionKey={`avatar-${direction}`}
     >
       <motion.div
-        className="grid w-full max-w-[1080px] items-start gap-12 lg:grid-cols-[minmax(300px,420px)_minmax(0,500px)] lg:gap-16"
+        className={cn(
+          "grid w-full max-w-[1080px] items-start",
+          cardLayout
+            ? "grid-cols-[200px_minmax(0,1fr)] gap-8"
+            : "gap-12 lg:grid-cols-[minmax(300px,420px)_minmax(0,500px)] lg:gap-16",
+        )}
         layout="position"
         layoutDependency={`${avatarEditorMode}-${isCustomColorPickerOpen}`}
         transition={AVATAR_POSITION_MOTION_TRANSITION}

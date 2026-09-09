@@ -670,14 +670,17 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
   await page.goto("/");
 
   // Reach setup by creating a new identity key and continuing past the
-  // created-key page without opening the optional backup options.
+  // created-key sheet.
   await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create my private key" }).click();
   await passThroughBackupStep(page);
 
   // Now on the setup page.
   await expect(
-    page.getByRole("heading", { name: "Set up your agent harnesses" }),
+    page.getByRole("heading", { name: "Connect your AI provider" }),
   ).toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId("onboarding-harness-method-subscription").click();
 
   // Click the "More harnesses" link — fires navigateToAgentSettings.
   await page.getByTestId("onboarding-setup-more-harnesses").click();

@@ -38,6 +38,7 @@ import {
   initialBackupTestProgress,
 } from "./BackupTestFlow";
 import { BackupPasswordTimeline } from "./BackupPasswordTimeline";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 import {
   ONBOARDING_SECURITY_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
@@ -454,6 +455,7 @@ export function EncryptedBackupCreator({
   guidedTest = true,
   onVerified,
 }: EncryptedBackupCreatorProps) {
+  const cardLayout = useOnboardingCardLayout();
   // Hosts without a longer-lived session get a private one (settings card).
   const fallbackSession = useEncryptedBackupSession();
   const session = sessionProp ?? fallbackSession;
@@ -617,7 +619,10 @@ export function EncryptedBackupCreator({
 
   return (
     <div
-      className={cn("mx-auto w-full max-w-[500px] space-y-3 text-left")}
+      className={cn(
+        "mx-auto w-full space-y-3 text-left",
+        !cardLayout && "max-w-[500px]",
+      )}
       data-testid="encrypted-backup-creator"
     >
       <div

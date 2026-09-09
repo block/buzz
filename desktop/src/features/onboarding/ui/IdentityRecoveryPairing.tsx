@@ -157,11 +157,11 @@ export function IdentityRecoveryPairing({
 
   return (
     <div
-      className="mb-4 flex w-fit max-w-full flex-col items-stretch gap-3 rounded-xl border border-foreground/15 bg-background/55 p-4"
+      className="flex w-[266px] max-w-full flex-col items-stretch gap-3"
       data-testid="identity-recovery-pairing"
     >
       <div
-        className="flex min-h-[266px] w-[266px] shrink-0 items-center justify-center rounded-lg border border-border/70 bg-white p-3"
+        className="flex min-h-[240px] w-full shrink-0 items-center justify-center"
         data-testid="identity-recovery-qr-container"
       >
         {step === "qr" && qrUri ? (
@@ -265,12 +265,6 @@ export function IdentityRecoveryPairing({
       {step === "qr" && error ? (
         <p className="max-w-[266px] text-center text-xs text-destructive">
           {error}
-        </p>
-      ) : null}
-      {step === "qr" || step === "loading" ? (
-        <p className="max-w-[266px] text-sm leading-5 text-foreground/75">
-          On your phone, open Settings → Send identity to desktop. This code
-          expires shortly and works once.
         </p>
       ) : null}
     </div>

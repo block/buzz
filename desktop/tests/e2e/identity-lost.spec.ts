@@ -2,6 +2,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 test("normal first launch uses the already-persisted identity", async ({
@@ -24,10 +25,11 @@ test("normal first launch uses the already-persisted identity", async ({
     page.getByRole("button", { name: "Create a new identity key" }),
   ).toHaveCSS("background-color", "rgb(23, 23, 23)");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create my private key" }).click();
 
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Your private identity key",
     }),
   ).toBeVisible();
   // Non-landing pages layer the dot grid over the chartreuse→light-blue gradient.
@@ -111,12 +113,14 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   await expect(page.getByTestId("identity-recovery-pairing")).toBeVisible();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
   await expect(
-    page.getByText("Scan this code with a signed-in Buzz phone."),
-  ).toBeVisible();
+    page.getByText(
+      "Scan this code with a device where you’re currently signed in to Buzz.",
+    ),
+  ).toHaveCount(0);
   await expect(
     page.getByText("On your phone, open Settings → Send identity to desktop."),
   ).toBeVisible();
-  await page.waitForTimeout(1_000); // Let the onboarding entrance motion settle.
+  await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("desktop-phone-recovery-qr.png"),
     fullPage: true,
@@ -169,20 +173,39 @@ test("phone recovery uses the desktop pairing card semantics", async ({
 
   await page.getByTestId("nostr-import-phone-link").click();
   const card = page.getByTestId("identity-recovery-pairing");
+  const stage = page.getByTestId("identity-recovery-stage");
   const qrContainer = card.getByTestId("identity-recovery-qr-container");
   const qrCode = card.getByTestId("identity-recovery-qr");
   const copyButton = card.getByTestId("copy-identity-recovery-code");
   await expect(qrCode).toBeVisible();
+  await expect(card).toHaveCSS("border-top-width", "0px");
+  await expect(qrContainer).toHaveCSS("border-top-width", "0px");
+  await expect(card).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(qrContainer).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(qrCode).toHaveAttribute("data-qr-matrix-size", "57");
   await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(3);
   await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
     "animation-name",
     "buzz-qr-cell-reveal",
   );
-  const qrBox = await qrContainer.boundingBox();
-  const copyBox = await copyButton.boundingBox();
+  await waitForAnimations(page);
+  const [stageBox, cardBox, qrBox, copyBox] = await Promise.all([
+    stage.boundingBox(),
+    card.boundingBox(),
+    qrContainer.boundingBox(),
+    copyButton.boundingBox(),
+  ]);
+  expect(stageBox).not.toBeNull();
+  expect(cardBox).not.toBeNull();
   expect(qrBox).not.toBeNull();
   expect(copyBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (cardBox?.y ?? 0) +
+        (cardBox?.height ?? 0) / 2 -
+        ((stageBox?.y ?? 0) + (stageBox?.height ?? 0) / 2),
+    ),
+  ).toBeLessThan(1);
   expect(Math.abs((copyBox?.x ?? 0) - (qrBox?.x ?? 0))).toBeLessThan(1);
   expect(Math.abs((copyBox?.width ?? 0) - (qrBox?.width ?? 0))).toBeLessThan(1);
 
@@ -204,9 +227,7 @@ test("phone recovery uses the desktop pairing card semantics", async ({
       "This gives this desktop permanent access to your Buzz identity. Only continue if you trust it.",
     ),
   ).toBeVisible();
-  await expect(
-    card.getByText(/On your phone, open Settings/),
-  ).not.toBeVisible();
+  await expect(card.getByText(/On your phone, open Settings/)).toHaveCount(0);
   await expect(card.getByTestId("identity-recovery-sas")).toHaveText("123 456");
   await expect(card.getByTestId("confirm-identity-recovery-sas")).toHaveText(
     "Codes match",
@@ -282,12 +303,12 @@ test("phone recovery continues to harness setup without creating or restarting",
   });
 
   await expect(
-    page.getByRole("heading", { name: "Set up your agent harnesses" }),
+    page.getByRole("heading", { name: "Connect your AI provider" }),
   ).toBeVisible();
   await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Your private identity key",
     }),
   ).toHaveCount(0);
 });
