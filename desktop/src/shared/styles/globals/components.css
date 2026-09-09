@@ -199,6 +199,14 @@
     z-index: 1;
   }
 
+  .buzz-huddle-speaking-avatar-squircle::after {
+    background: hsl(142 71% 45%);
+    border: 0;
+    clip-path: url("#rounded-squircle-clip");
+    inset: -2px;
+    z-index: -1;
+  }
+
   @keyframes buzz-huddle-participant-tile-enter {
     from {
       opacity: 0;

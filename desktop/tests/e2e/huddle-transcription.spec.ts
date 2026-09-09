@@ -667,6 +667,18 @@ test("animates the responding agent with the shared speaker ring", async ({
       ),
     )
     .toBe("0.890");
+  await expect(agentAvatar).toHaveCSS("clip-path", "none");
+  await expect(agentAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(agentAvatar).toHaveClass(/buzz-huddle-speaking-avatar-squircle/);
+  await expect(agentAvatar.locator(".rounded-squircle")).toHaveCSS(
+    "clip-path",
+    /rounded-squircle-clip/,
+  );
+
+  const voiceMenuTrigger = page.getByTestId("huddle-agent-voice-menu-trigger");
+  await voiceMenuTrigger.focus();
+  await expect(voiceMenuTrigger).toBeFocused();
+  await expect(voiceMenuTrigger).toHaveCSS("clip-path", "none");
 
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?.({

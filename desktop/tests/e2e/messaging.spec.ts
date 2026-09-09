@@ -402,6 +402,13 @@ test("agent avatars use the one normalized SVG clip path", async ({ page }) => {
   await expect(avatar).toHaveCSS("clip-path", /rounded-squircle-clip/);
   await expect(page.locator("#rounded-squircle-clip")).toHaveCount(1);
 
+  const avatarButton = avatar.locator("xpath=ancestor::button[1]");
+  await page.keyboard.press("Tab");
+  await avatarButton.focus();
+  await expect(avatarButton).toBeFocused();
+  await expect(avatarButton).toHaveCSS("clip-path", "none");
+  await expect(avatarButton).not.toHaveCSS("box-shadow", "none");
+
   const avatarBox = await avatar.boundingBox();
   expect(avatarBox).toMatchObject({
     width: expect.any(Number),
