@@ -307,7 +307,7 @@ export function MembersSidebarMemberCard({
 
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
-function MemberActionsMenu({
+export function MemberActionsMenu({
   availability,
   canChangeRole,
   canModerateMember,

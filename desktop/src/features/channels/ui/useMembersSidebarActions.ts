@@ -224,9 +224,16 @@ export function useMembersSidebarActions({
     clearActionFeedback();
     setActiveActionKey(`enroll:${agent.pubkey}`);
     try {
-      await startManagedAgentWithRules({
-        agent,
-        startManagedAgent: startManagedAgentMutation.mutateAsync,
+      const expectedRelayUrl = relayUrl?.trim();
+      const expectedSignerPubkey = currentPubkey?.trim().toLowerCase();
+      if (!expectedRelayUrl || !expectedSignerPubkey) {
+        throw new Error("The active community changed. Reopen it and retry.");
+      }
+
+      await startManagedAgentMutation.mutateAsync({
+        pubkey: agent.pubkey,
+        expectedRelayUrl,
+        expectedSignerPubkey,
       });
       setActionNoticeMessage(`Enrolled ${agent.name} in this community.`);
     } catch (error) {
