@@ -198,3 +198,16 @@ console.log("✓ Contrast: every text role clears its APCA target in both modes"
 for (const [role, why] of EXCEPTIONS) {
   console.log(`  (exception) ${role} — ${why.split(";")[0]}`);
 }
+
+// Essential control boundaries use non-text contrast, independently of the APCA text contract.
+for (const [mode, map] of Object.entries(modes)) {
+  for (const surface of SURFACES) {
+    const border = resolve(map, "--border-interactive");
+    const fill = resolve(map, surface);
+    if (!border || !fill || wcagRatio(border, fill) < 3) {
+      console.error(`Control boundary fails 3:1 in ${mode} on ${surface}`);
+      process.exit(1);
+    }
+  }
+}
+console.log("✓ Essential control boundaries clear 3:1 in both modes");

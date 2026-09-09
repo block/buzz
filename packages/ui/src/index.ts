@@ -45,3 +45,13 @@ export { BarChart, type ChartDatum } from "./chart";
 export { Command, type CommandItem } from "./command";
 export { InputGroup } from "./input-group";
 export { Sheet } from "./sheet";
+export {
+  GeneratedResponse,
+  type GeneratedResponseProps,
+} from "./generated/GeneratedResponse";
+export {
+  parseGeneratedView,
+  type GeneratedBlock,
+  type GeneratedView,
+  type GeneratedViewResult,
+} from "./generated/schema";

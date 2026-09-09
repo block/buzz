@@ -8,6 +8,7 @@
 @import "./styles/overlays.css";
 @import "./styles/surfaces.css";
 @import "./styles/layout.css";
+@import "./styles/scrollbars.css";
 @keyframes bui-spin {
   to {
     transform: rotate(360deg);
@@ -23,6 +24,13 @@
   .bui-loading,
   .bui-skeleton {
     animation: none;
+  }
+  .bui-toast[data-starting-style],
+  .bui-toast[data-ending-style] {
+    transform: none;
+  }
+  .bui-tab-indicator {
+    transition: none;
   }
   .bui-popup,
   .bui-popover,
@@ -113,14 +121,30 @@
     background: var(--bg-inset);
   }
   .bui-resize-handle {
-    background: var(--border-tertiary);
-    border-radius: var(--radius-pill);
-    width: 0.375rem;
-    margin-inline: var(--space-control-gap);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--space-section-gap);
+    background: transparent;
   }
-  .bui-resize-handle:hover,
-  .bui-resize-handle:focus-visible {
+  .bui-resize-handle::after {
+    content: "";
+    width: var(--size-grip-thickness);
+    height: var(--size-grip-length);
+    border-radius: var(--radius-pill);
     background: var(--border-primary);
+  }
+  .bui-resize-handle[aria-orientation="horizontal"] {
+    width: auto;
+    height: var(--space-section-gap);
+  }
+  .bui-resize-handle[aria-orientation="horizontal"]::after {
+    width: var(--size-grip-length);
+    height: var(--size-grip-thickness);
+  }
+  .bui-resize-handle:hover::after,
+  .bui-resize-handle:focus-visible::after {
+    background: var(--border-interactive);
   }
   .bui-sr-only {
     position: absolute;

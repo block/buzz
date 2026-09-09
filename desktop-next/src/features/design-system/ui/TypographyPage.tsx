@@ -127,10 +127,9 @@ export function TypographyPage() {
       </Section>
 
       <Note>
-        The Cash Sans and BlockUI type variables that appear in the design
-        exploration are contamination from another Figma library linked into
-        that file. They exist nowhere in any Buzz codebase and need no cleanup —
-        only a decision not to inherit them.
+        Inter Variable is bundled with the catalog, and JetBrains Mono covers
+        code. Fonts load from local assets. Every component uses these named
+        roles so type stays consistent as the system evolves.
       </Note>
     </>
   );

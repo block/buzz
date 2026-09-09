@@ -11,7 +11,7 @@ From the repository root:
 . ./bin/activate-hermit
 pnpm install --frozen-lockfile
 pnpm --filter buzz-desktop-next dev
-# Open http://localhost:5173/design
+# Open http://localhost:1430/design
 pnpm --filter @buzz/ui build
 ```
 
@@ -53,6 +53,13 @@ refs, controlled state, and events. Styled parts merge both string and state-fun
 class names. The underlying libraries own focus management, keyboard navigation,
 ARIA semantics, and dismissal. Caller-supplied labels and composition still matter.
 
+Place `Tabs.Indicator` inside `Tabs.List` for a sliding selection pill.
+Use `Tabs.List variant="glass"` for translucent chrome; it shares the same
+selection behavior and motion as the default solid variant. Pointer
+selection retargets the shared 120ms transition; keyboard focus and reduced motion
+keep selection immediate. Panels update immediately. Toasts use the shared
+180ms entrance and 120ms exit transitions, with no movement under reduced motion.
+
 Button variants: primary, secondary, outline, ghost, danger, link. Sizes: sm, md,
 lg. Loading disables duplicate activation while preserving the accessible name.
 Color, type, geometry, and motion are roles; components never consume color ramps.
@@ -66,3 +73,26 @@ or proprietary BlockUI package compatibility is implied.
 
 See `../../desktop-next/OPEN_SOURCE.md` for provenance and `THIRD_PARTY_NOTICES.md`
 for upstream notices. New source is covered by the repository's Apache-2.0 license.
+
+Native scroll surfaces use thin scrollbars; custom ScrollArea bars share the
+`size-scrollbar` token. Resize grips use `size-grip-length` (1rem) for their visible
+length while retaining a larger pointer target. Table cells align to the reading
+edge, including row and column headings.
+
+## Generated responses
+
+`GeneratedResponse` accepts unknown input and validates it before rendering. The
+version 1 schema supports text, notices, metrics, task lists, tables, and action
+lists. It caps serialized input at 64,000 characters, 20 blocks, 30 tasks per list,
+50 table rows, 8 columns, and 6 actions per action list. IDs must be unique in their
+scope, and action IDs are unique across the snapshot. Unknown fields and types fail.
+
+The schema accepts no HTML, URLs, arbitrary styles, or component names. Text is
+rendered through React escaping. The host supplies an own-property action allowlist;
+unknown actions stay disabled. Rendering never dispatches an action. `state="streaming"`
+and `pendingAction` prevent activation while a snapshot or request is in flight.
+Invalid input renders an error and an optional host-provided retry callback.
+
+The host owns streaming assembly, action authorization, persistence, retries, and
+network errors. Pass a new immutable complete snapshot when it changes. The renderer
+is a presentation boundary, not an agent execution engine or an authorization system.

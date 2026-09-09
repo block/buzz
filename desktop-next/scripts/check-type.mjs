@@ -83,7 +83,10 @@ function walk(dir) {
 
 const failures = [];
 
-for (const file of walk(SRC)) {
+for (const file of [
+  ...walk(SRC),
+  ...walk(new URL("../../packages/ui/src", import.meta.url).pathname),
+]) {
   const source = readFileSync(file, "utf8");
   // The typography ramp itself is the one place literals are legal — it is
   // layer 1, where values live by design.

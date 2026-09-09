@@ -7,6 +7,17 @@ export const FOUNDATION_GROUPS = [
       ["control-sm", "2rem", "Small actions."],
       ["control-md", "2.5rem", "Standard actions and inputs."],
       ["control-lg", "3.25rem", "Prominent actions."],
+      [
+        "size-scrollbar",
+        "0.375rem",
+        "Thin custom scrollbars and native scrollbar fallback.",
+      ],
+      [
+        "size-grip-length",
+        "1rem",
+        "Visible resize grip length, independent of its hit area.",
+      ],
+      ["size-grip-thickness", "0.25rem", "Visible resize grip thickness."],
       ["space-action-inset", "1.25rem", "Standard button horizontal padding."],
       ["space-tooltip-block", "0.125rem", "Compact tooltip vertical padding."],
       ["layer-dialog", "80", "Modal surfaces."],
@@ -22,6 +33,11 @@ export const FOUNDATION_GROUPS = [
     roles: [
       ["space-control-gap", "0.5rem", "Space between a label and its icon."],
       ["space-control-inset", "0.75rem", "Compact control padding."],
+      [
+        "space-heading-gap",
+        "1rem",
+        "Space between a heading and its description.",
+      ],
       ["space-section-gap", "1.5rem", "Space between related groups."],
       ["space-panel-inset", "1.5rem", "Padding inside a panel."],
       ["space-page-inset", "2rem", "Outer reading gutter."],

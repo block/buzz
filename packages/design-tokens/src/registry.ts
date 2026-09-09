@@ -282,6 +282,14 @@ export const ROLE_GROUPS: RoleGroup[] = [
         status: "core",
       },
       {
+        token: "border-interactive",
+        variable: "--border-interactive",
+        pointsAt: "neutral 9",
+        use: "An essential boundary identifying an editable or checkable control; clears 3:1 against neutral surfaces.",
+        status: "proposed",
+        owner: "Buzz design system",
+      },
+      {
         token: "border-primary",
         variable: "--border-primary",
         pointsAt: "neutral 7",
@@ -429,7 +437,10 @@ export const VOCABULARY: Array<{ group: string; words: string[] }> = [
   { group: "property", words: ["bg", "text", "border", "ring"] },
   { group: "region", words: ["app", "panel", "float", "chrome", "inset"] },
   { group: "emphasis", words: ["primary", "secondary", "tertiary"] },
-  { group: "state", words: ["hover", "pressed", "selected", "disabled"] },
+  {
+    group: "state",
+    words: ["hover", "pressed", "selected", "disabled", "interactive"],
+  },
   { group: "material", words: ["glass"] },
   { group: "modifier", words: ["tint"] },
   { group: "identity", words: ["accent", "inverse"] },

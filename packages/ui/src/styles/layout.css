@@ -45,15 +45,22 @@
   }
   .bui-scrollbar {
     display: flex;
-    width: 0.5rem;
+    width: var(--size-scrollbar);
     margin: 0.25rem;
     border-radius: var(--radius-pill);
-    background: var(--bg-inset);
+    background: transparent;
+  }
+  .bui-scrollbar[data-orientation="horizontal"] {
+    width: auto;
+    height: var(--size-scrollbar);
   }
   .bui-scroll-thumb {
     width: 100%;
     background: var(--border-primary);
     border-radius: inherit;
+  }
+  .bui-scrollbar[data-orientation="horizontal"] .bui-scroll-thumb {
+    height: 100%;
   }
   .bui-toast-viewport {
     position: fixed;
@@ -66,6 +73,14 @@
     gap: var(--space-control-gap);
   }
   .bui-toast {
+    opacity: 1;
+    transform: translate(
+      var(--toast-swipe-movement-x, 0px),
+      var(--toast-swipe-movement-y, 0px)
+    );
+    transition:
+      opacity var(--duration-enter) var(--ease-standard),
+      transform var(--duration-enter) var(--ease-standard);
     background: var(--bg-float);
     border: 1px solid var(--border-secondary);
     border-radius: var(--radius-menu);
@@ -74,6 +89,26 @@
     display: flex;
     align-items: start;
     justify-content: space-between;
+  }
+  .bui-toast[data-starting-style],
+  .bui-toast[data-ending-style] {
+    opacity: 0;
+    transform: translateY(var(--space-panel-inset));
+  }
+  .bui-toast[data-ending-style] {
+    transition-duration: var(--duration-exit);
+  }
+  .bui-toast[data-ending-style][data-swipe-direction="right"] {
+    transform: translateX(100%);
+  }
+  .bui-toast[data-ending-style][data-swipe-direction="left"] {
+    transform: translateX(-100%);
+  }
+  .bui-toast[data-ending-style][data-swipe-direction="up"] {
+    transform: translateY(-100%);
+  }
+  .bui-toast[data-ending-style][data-swipe-direction="down"] {
+    transform: translateY(100%);
   }
   .bui-skeleton {
     min-height: var(--control-md);
@@ -105,6 +140,7 @@
   }
   .bui-table th,
   .bui-table td {
+    text-align: start;
     padding: var(--space-control-inset);
     border-bottom: 1px solid var(--border-tertiary);
     white-space: nowrap;
@@ -146,5 +182,11 @@
     border-radius: var(--radius-menu);
     padding: var(--space-page-inset);
     text-align: center;
+  }
+}
+
+@layer components {
+  .bui-toast[data-limited] {
+    display: none;
   }
 }

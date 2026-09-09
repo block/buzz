@@ -1,3 +1,4 @@
+import { copyFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -15,6 +16,17 @@ export default defineConfig({
       ],
     }),
     react(),
+    {
+      name: "license-notices",
+      apply: "build",
+      closeBundle() {
+        copyFileSync(
+          "../packages/ui/THIRD_PARTY_NOTICES.md",
+          "dist/THIRD_PARTY_NOTICES.md",
+        );
+        copyFileSync("../LICENSE", "dist/LICENSE");
+      },
+    },
   ],
   resolve: { alias: { "@": "/src" } },
   server: { port: 1430, strictPort: true },

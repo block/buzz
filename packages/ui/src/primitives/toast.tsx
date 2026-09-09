@@ -57,6 +57,7 @@ function StyledClose({
 }: ComponentProps<typeof Primitive.Close>) {
   return (
     <Primitive.Close
+      aria-hidden={false}
       {...props}
       className={skin("bui-icon-control", className)}
     />

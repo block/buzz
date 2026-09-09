@@ -183,3 +183,5 @@ Every addition lands in `src/shared/tokens/registry.ts` in the same change that 
 ## Open-source component foundation
 
 The shared component library is built proactively for the new client. Public Base UI provides behavior; Buzz owns styling, tokens, and named variants. Use Inter, JetBrains Mono, and Lucide. See OPEN_SOURCE.md for the adaptation contract.
+
+Editable and checkable control boundaries use the proposed `border-interactive` role, measured at 3:1 against neutral surfaces. This is an intentional exception to the quiet separator ramp; it identifies an affordance rather than separating content.

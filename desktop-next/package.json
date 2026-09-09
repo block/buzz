@@ -15,19 +15,22 @@
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:tokens": "node ../packages/design-tokens/build.mjs --check",
     "tokens:build": "node ../packages/design-tokens/build.mjs",
-    "test": "pnpm --filter @buzz/design-tokens test"
+    "test": "pnpm --filter @buzz/design-tokens test && pnpm --filter @buzz/ui test",
+    "test:e2e": "pnpm build && playwright test"
   },
   "dependencies": {
+    "@buzz/design-tokens": "workspace:*",
+    "@buzz/ui": "workspace:*",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@tanstack/react-router": "^1.168.10",
+    "lucide-react": "^1.0.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "@buzz/design-tokens": "workspace:*",
-    "@buzz/ui": "workspace:*",
-    "lucide-react": "^1.0.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
     "@types/react": "^19.1.8",
@@ -35,7 +38,6 @@
     "@vitejs/plugin-react": "^6.0.0",
     "tailwindcss": "^4.3.0",
     "typescript": "~6.0.0",
-    "vite": "^8.0.0",
-    "@playwright/test": "^1.58.2"
+    "vite": "^8.0.0"
   }
 }
