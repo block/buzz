@@ -547,16 +547,21 @@ void main() {
     // shared nonblank-name label contract: the row shows the compact npub
     // of the a11ce key instead of a blank author label. Binds the production
     // seam — the sender resolves through the user cache exactly as the live
-    // page does.
+    // page does. Keyed remounts keep each ProviderScope (and its user-cache
+    // override) fresh between scenarios, so each iteration actually
+    // consumes its own blank-name fixture.
     const sender =
         'a11ce00000000000000000000000000000000000000000000000000000000000';
     for (final blankName in const ['', '   ']) {
       await tester.pumpWidget(
-        await buildTestable(
-          users: {
-            ...testUsers,
-            sender: UserProfile(pubkey: sender, displayName: blankName),
-          },
+        KeyedSubtree(
+          key: ValueKey('blank-sender-${blankName.length}'),
+          child: await buildTestable(
+            users: {
+              ...testUsers,
+              sender: UserProfile(pubkey: sender, displayName: blankName),
+            },
+          ),
         ),
       );
       await tester.pumpAndSettle();
