@@ -27,7 +27,7 @@ dependencies:
   nostr: ^2.0.0
   pointycastle: ^4.0.0
   url_launcher: ^6.3.2
-  gpt_markdown: ^1.1.6
+  gpt_markdown: ^1.2.1
   highlight: ^0.7.0
   intl: ^0.20.2
   uuid: ^4.5.1

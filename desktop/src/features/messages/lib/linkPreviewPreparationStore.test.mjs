@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { after, before, test } from "node:test";
+
+import { JSDOM } from "jsdom";
 
 import {
   __linkPreviewPreparationTest,
@@ -12,6 +14,29 @@ import {
 const first = { href: "https://example.com/first" };
 const second = { href: "https://example.com/second" };
 const firstTag = ["link-preview", "snapshot", first.href];
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "http://localhost",
+});
+const ipcHandlers = new Map();
+
+before(() => {
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    window: dom.window,
+  });
+  dom.window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      const handler = ipcHandlers.get(cmd);
+      return handler
+        ? handler(args)
+        : Promise.reject(new Error(`unmocked Tauri command: ${cmd}`));
+    },
+    transformCallback: () => Math.random(),
+  };
+});
+
+after(() => dom.window.close());
 
 function deferred() {
   let resolve;
@@ -41,6 +66,7 @@ function seed(
 
 test.afterEach(() => {
   __linkPreviewPreparationTest.reset();
+  ipcHandlers.clear();
 });
 
 test("adopts one in-flight job for the same canonical URL", () => {
@@ -223,6 +249,60 @@ test("Skip after completion cannot replace finalized tags", async () => {
   });
 });
 
+test("expired settled work replaced by a pending retry keeps deadline and Skip", async () => {
+  const expiredTag = ["link-preview", "snapshot", first.href, "expired"];
+  const pendingRetry = deferred();
+  let fetchCalls = 0;
+  ipcHandlers.set("fetch_link_preview_metadata", () => {
+    fetchCalls += 1;
+    return pendingRetry.promise;
+  });
+  ipcHandlers.set("cancel_link_preview_metadata", () => Promise.resolve());
+  ipcHandlers.set("release_link_preview_metadata", () => Promise.resolve());
+
+  const seedExpiredFallback = () =>
+    seed(
+      first,
+      Promise.resolve(expiredTag),
+      true,
+      Date.now() - 5 * 60_000,
+      expiredTag,
+      expiredTag,
+    );
+
+  seedExpiredFallback();
+  const timeoutPreparation = prepareBackgroundLinkPreviews([first], 0);
+  assert.ok(timeoutPreparation);
+  assert.equal(
+    __linkPreviewPreparationTest.jobs.get(first.href)?.settled,
+    false,
+  );
+  assert.equal(
+    fetchCalls,
+    1,
+    "the expired job was replaced through production I/O",
+  );
+  assert.deepEqual(await timeoutPreparation.promise, {
+    status: "ready",
+    tags: [],
+  });
+
+  seedExpiredFallback();
+  const skipPreparation = prepareBackgroundLinkPreviews([first], 1_000);
+  assert.ok(skipPreparation);
+  assert.equal(
+    __linkPreviewPreparationTest.jobs.get(first.href)?.settled,
+    false,
+  );
+  skipPreparation.skip();
+  assert.deepEqual(await skipPreparation.promise, {
+    status: "ready",
+    tags: [],
+  });
+
+  pendingRetry.resolve(null);
+});
+
 test("already-settled partial results contain only successful tags", async () => {
   seed(first, Promise.resolve(firstTag), true);
   seed(second, Promise.resolve(null), true);
@@ -271,4 +351,19 @@ test("reset cancels pending preparations instead of authorizing send", async () 
   pending.resolve(firstTag);
 
   assert.deepEqual(await preparation.promise, { status: "cancelled" });
+});
+
+test("Skip aborts an abandoned in-flight preview job", async () => {
+  const pending = deferred();
+  seed(first, pending.promise);
+  const job = __linkPreviewPreparationTest.jobs.get(first.href);
+
+  const preparation = prepareBackgroundLinkPreviews([first], 1_000);
+  assert.ok(preparation);
+  preparation.skip();
+
+  assert.deepEqual(await preparation.promise, { status: "ready", tags: [] });
+  assert.equal(job.controller.signal.aborted, true);
+  assert.equal(__linkPreviewPreparationTest.jobs.has(first.href), false);
+  pending.resolve(null);
 });

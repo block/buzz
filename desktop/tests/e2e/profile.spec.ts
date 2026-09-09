@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   createMockAgentMemoryListing,
@@ -420,7 +421,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     .getByRole("button", { name: `Open profile for ${agentName}` })
     .click();
   await expect(page.getByTestId("user-profile-public-key")).toContainText(
-    agentPubkey.slice(0, 8),
+    npubEncode(agentPubkey).slice(0, 8),
   );
   const dmSurface = await readOwnedAgentProfileContract(page);
 

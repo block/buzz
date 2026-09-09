@@ -36,11 +36,28 @@ export function runTauriCommand(args) {
   // Tauri runs beforeBuildCommand and then consumes frontendDist. Give the
   // entire invocation a private directory so concurrent OSS/internal packages
   // cannot replace one another's assets between those two operations.
-  const invocationRoot = mkdtempSync(
+  let invocationRoot = mkdtempSync(
     path.join(tmpdir(), "buzz-tauri-package-assets-"),
   );
+  // `frontendDist` deserializes into an untagged enum whose first variant is a
+  // URL, and a Windows absolute path parses as one -- `C:` becomes the scheme.
+  // Tauri then embeds zero assets, exits 0, and the app boots to
+  // ERR_FILE_NOT_FOUND. Hand it a path relative to the config's own directory,
+  // which can never parse as a URL. If the temp dir is on another drive there
+  // is no relative form, so put the scratch root beside the config instead.
+  const configDir = path.join(desktopRoot, "src-tauri");
+  const relativeTo = (root) =>
+    path.relative(configDir, path.join(root, "dist"));
+  if (path.isAbsolute(relativeTo(invocationRoot))) {
+    rmSync(invocationRoot, { recursive: true, force: true });
+    invocationRoot = mkdtempSync(
+      path.join(desktopRoot, ".buzz-tauri-package-assets-"),
+    );
+  }
   const frontendDist = path.join(invocationRoot, "dist");
-  const outputOverride = JSON.stringify({ build: { frontendDist } });
+  const outputOverride = JSON.stringify({
+    build: { frontendDist: relativeTo(invocationRoot) },
+  });
 
   try {
     const delimiterIndex = args.indexOf("--");
