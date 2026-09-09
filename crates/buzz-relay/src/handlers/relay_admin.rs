@@ -410,12 +410,37 @@ async fn execute_relay_admin_command(
                 "relay member removed"
             );
 
-            if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
-                warn!(error = %e, "failed to publish NIP-43 member removed event");
+            // Production revocation ordering: the durable row is already gone;
+            // clear every local authorization cache before terminating this
+            // pod's sockets and awaiting cluster publication. Publication is
+            // not best-effort here: a failure must reach the caller so durable
+            // sync can classify it retryable rather than falsely succeeding.
+            state.invalidate_all_accessible_channels(tenant);
+            let target_bytes = hex::decode(&target_hex)
+                .map_err(|_| "invalid target pubkey after validation".to_string())?;
+            state
+                .disconnect_revoked_pubkey_clusterwide(tenant, &target_bytes, &event.id.to_hex())
+                .await
+                .map_err(|e| format!("retryable: cluster disconnect publication failed: {e}"))?;
+            if state
+                .db
+                .is_relay_member(tenant.community(), &target_hex)
+                .await
+                .map_err(|e| format!("database error confirming removal: {e}"))?
+            {
+                return Err("retryable: relay member removal was not durable".to_string());
             }
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+
+            publish_nip43_member_removed(tenant, state, &target_hex)
+                .await
+                .map_err(|e| {
+                    format!("retryable: failed to publish NIP-43 member removed event: {e}")
+                })?;
+            publish_nip43_membership_list(tenant, state)
+                .await
+                .map_err(|e| {
+                    format!("retryable: failed to publish NIP-43 membership list: {e}")
+                })?;
         }
 
         // kind:9032 — Change relay member role

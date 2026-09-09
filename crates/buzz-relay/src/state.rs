@@ -1224,6 +1224,37 @@ impl AppState {
         closed
     }
 
+    /// Disconnect a pubkey locally, then await cluster publication.
+    ///
+    /// Revocation callers use this after durable removal and cache invalidation.
+    /// A publication failure is returned and must remain retryable; the absent
+    /// database row is nevertheless the reconnect fence.
+    pub async fn disconnect_revoked_pubkey_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        operation_id: &str,
+    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        let reason = "restricted: relay membership revoked";
+        let closed = self.conn_manager.disconnect_pubkey(
+            tenant.community(),
+            pubkey,
+            operation_id,
+            reason,
+        );
+        self.pubsub
+            .publish_conn_control(
+                tenant,
+                &ConnControl::DisconnectPubkey {
+                    pubkey: pubkey.to_vec(),
+                    event_id: operation_id.to_string(),
+                    reason: reason.to_string(),
+                },
+            )
+            .await?;
+        Ok(closed)
+    }
+
     /// Disconnect a community locally and publish the command to every relay pod.
     ///
     /// Publication is awaited so the archive API can distinguish durable state

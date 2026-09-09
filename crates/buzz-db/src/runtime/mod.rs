@@ -545,6 +545,13 @@ impl DbConfig {
 }
 
 impl Db {
+    /// Writer pool for tightly scoped integration services that require
+    /// multi-statement atomicity. Callers must not route authorization reads to
+    /// a replica.
+    pub fn writer_pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
     /// When `config.read_database_url` is set, a second pool with the same

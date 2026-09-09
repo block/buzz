@@ -117,6 +117,31 @@ test("completed final leave persists discovery until a community is saved", () =
   assert.equal(loadCommunityDiscoveryAfterLeave(storage), false);
 });
 
+test("private key material is removed from persisted community state", () => {
+  const secret = "nsec1thismustneverremaininbrowserstorage";
+  const storage = createMemoryStorage({
+    "buzz-communities": JSON.stringify([
+      {
+        id: "founderportal-community",
+        name: "Buzz",
+        relayUrl: "wss://relay.example",
+        pubkey: "ab".repeat(32),
+        nsec: secret,
+        addedAt: "2026-09-09T00:00:00Z",
+      },
+    ]),
+  });
+  globalThis.localStorage = storage;
+  globalThis.window = { localStorage: storage };
+
+  const loaded = loadCommunities();
+  assert.equal(loaded.length, 1);
+  assert.equal("nsec" in loaded[0], false);
+  assert.equal(storage.getItem("buzz-communities").includes(secret), false);
+  assert.equal(storage.getItem("buzz-communities").includes("\"nsec\""), false);
+  assert.equal(loaded[0].pubkey, "ab".repeat(32), "public identity may remain display-only");
+});
+
 test("clearCommunityStorage preserves completed final-leave discovery", () => {
   const storage = createMemoryStorage({
     "buzz-communities": "new",

@@ -23,6 +23,8 @@ pub mod connection;
 pub mod error;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
+/// Internal FounderPortal bridge operation executor.
+pub mod founderportal_bridge;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).
 pub mod invite_token;
 /// Fixed-schema evidence for the relay's earliest startup steps.
