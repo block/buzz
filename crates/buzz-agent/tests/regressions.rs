@@ -1444,8 +1444,9 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
         )
         .await;
 
-    // Wait for the tool call to be in-progress.
-    h.recv_until(|v| {
+    // Wait for the tool call to be in-progress, authorizing it first. Without
+    // approval this waits forever when the optional real MCP binary is built.
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
