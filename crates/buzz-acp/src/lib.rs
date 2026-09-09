@@ -4785,7 +4785,8 @@ fn handle_prompt_result(
                 }
             } else if matches!(
                 &result.outcome,
-                PromptOutcome::Error(acp::AcpError::AgentError { code: -32002, .. })
+                PromptOutcome::Error(acp::AcpError::AgentError { code: -32002, message })
+                    if message.contains("model not found")
             ) {
                 // Retrying the same missing model cannot repair its configuration.
                 tracing::warn!(
@@ -4794,8 +4795,8 @@ fn handle_prompt_result(
                     "dead-lettering batch immediately — model not found"
                 );
                 let content = "⚠️ I couldn't process the last request: the configured model \
-                    wasn't found at the provider's endpoint. Open this agent's Runtime settings \
-                    and choose a different model or provider, then re-send your request."
+                    wasn't found at the provider's endpoint. Open agent settings and select a \
+                    different one from the dropdown, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
@@ -11179,7 +11180,7 @@ mod error_outcome_emission_tests {
         assert_eq!(notice.kind, Kind::Custom(9));
         assert_eq!(
             notice.content,
-            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open this agent's Runtime settings and choose a different model or provider, then re-send your request."
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings and select a different one from the dropdown, then re-send your request."
         );
         let tags = serde_json::to_value(&notice.tags).unwrap();
         assert!(tags
@@ -11196,6 +11197,23 @@ mod error_outcome_emission_tests {
     /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
     async fn non_auth_application_error_is_requeued() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32000,
+            message: "Usage credits required for 1M context".to_string(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn non_model_resource_not_found_is_requeued() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32002,
+            message: "Resource not found: session no longer exists".to_string(),
+        })
+        .await;
+    }
+
+    async fn assert_application_error_is_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -11211,12 +11229,6 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
-        };
-
-        // Usage-credits error — AgentError but NOT an auth error.
-        let usage_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "Usage credits required for 1M context".to_string(),
         };
 
         let agent = dummy_agent(0).await;
@@ -11250,7 +11262,7 @@ mod error_outcome_emission_tests {
             agent,
             source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
             turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(usage_error),
+            outcome: PromptOutcome::Error(error),
             batch: Some(batch),
         };
         handle_prompt_result(
