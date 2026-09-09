@@ -370,7 +370,7 @@ function TextFieldSpecimen() {
             defaultValue="buzz-password"
             type="password"
           />
-          <CodeInput label="Verification code" defaultValue="284619" />
+          <CodeInput label="Verification code" defaultValue="28" autoFocus />
         </div>
       </SpecimenGroup>
       <SpecimenGroup label="Inset — states">
