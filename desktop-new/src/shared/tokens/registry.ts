@@ -320,14 +320,6 @@ export const ROLE_GROUPS: RoleGroup[] = [
         use: "Anything hovering above the page: menus, dialogs, tooltips, toasts. Shares a light value with bg-panel and diverges in dark, because a shadow cannot carry elevation on a near-black background.",
         status: "core",
       },
-      {
-        token: "bg-field-soft",
-        variable: "--bg-field-soft",
-        pointsAt: "neutral 2 light / neutral 4 dark",
-        use: "The quiet neutral fill for soft form controls on a panel.",
-        status: "proposed",
-        owner: "desktop-new TextField",
-      },
     ],
   },
   {

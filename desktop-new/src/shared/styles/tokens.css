@@ -488,7 +488,6 @@
   --bg-app: var(--gradient-1);
   --bg-panel: var(--neutral-1); /* dark: neutral-3 */
   --bg-float: var(--neutral-1); /* dark: neutral-5 */
-  --bg-field-soft: var(--neutral-2); /* dark: neutral-4 */
 
   /* `bg-hover` was here and is gone. It was neutral-4 in both modes, so
      `bg-neutral-4` says it exactly. Its five call sites now do.
@@ -675,7 +674,6 @@
 .dark {
   --bg-panel: var(--neutral-3);
   --bg-float: var(--neutral-5);
-  --bg-field-soft: var(--neutral-4);
   --bg-chrome-selected: var(--neutral-5);
 
   /* Two steps lighter than light mode's neutral-4, because a hairline needs more
@@ -841,7 +839,6 @@
   --color-app: var(--bg-app);
   --color-panel: var(--bg-panel);
   --color-float: var(--bg-float);
-  --color-field-soft: var(--bg-field-soft);
 
   /* TEXT COLOUR REGISTERS IN ITS OWN NAMESPACE, like borders below.
      Not `--color-*`.
