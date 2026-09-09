@@ -1,0 +1,27 @@
+{
+  "packageFormatVersion": "0.1.0-alpha",
+  "contractVersion": "0.1.0-alpha",
+  "id": "dev.example.webbrowser",
+  "name": "Example Web Browser",
+  "version": "0.1.0",
+  "publisher": "Example Devs",
+  "license": "Apache-2.0",
+  "runtime": {
+    "type": "stdio",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "path": "bin/aarch64-apple-darwin",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "bytes": 0
+      }
+    }
+  },
+  "grants": ["browser.browse"],
+  "contributions": [
+    {
+      "kind": "browser",
+      "id": "web",
+      "title": "Web"
+    }
+  ]
+}

@@ -49,6 +49,20 @@ export default defineConfig(async ({ mode }) => {
           __dirname,
           "../scripts/model-capabilities.json",
         ),
+        // e2e-only: routes the bare `@tauri-apps/api/core` import through a
+        // shim that intercepts `invoke` for the native-smoke passthrough
+        // split — see `src/testing/tauriCoreNativeSmokeShim.ts` for why this
+        // has to happen at the module level rather than by patching
+        // `window.__TAURI_INTERNALS__` at runtime. Never present outside
+        // `mode === "e2e"`, so a production build never resolves through it.
+        ...(mode === "e2e"
+          ? {
+              "@tauri-apps/api/core": path.resolve(
+                __dirname,
+                "./src/testing/tauriCoreNativeSmokeShim.ts",
+              ),
+            }
+          : {}),
       },
     },
 

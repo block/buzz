@@ -1,11 +1,12 @@
 # Buzz Plugin System
 
-Status: proposed; no plugin runtime ships yet.
+Status: browser contribution alpha available on macOS. Version 1 remains proposed.
 
-This document describes a proposed Desktop plugin system. It is a public
-architecture proposal, not a description of current Buzz behavior. The relay,
-Desktop routes, Tauri commands, settings panels, and event-kind registry remain
-compiled and closed until this proposal is implemented.
+This document describes the proposed version-1 Desktop plugin system. The
+separate [browser plugin prototype](plugin-browser-prototype.md) implements an
+incompatible `0.1.0-alpha` contract on macOS. The relay and event-kind registry
+remain unchanged. Version-1 routes, commands, settings, and contribution types
+remain unimplemented.
 
 ## Goals
 

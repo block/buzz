@@ -344,6 +344,13 @@ desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
+# Runs the harness-free native adapter smoke test, then builds the external
+# example plugin and launches the real Buzz debug binary with the e2e
+# frontend to drive Settings install through uninstall. macOS only; not part
+# of `just ci` (needs a windowed session). See docs/plugin-browser-prototype.md.
+plugin-browser-smoke:
+    python3 desktop/scripts/plugin-browser-smoke.py
+
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 

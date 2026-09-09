@@ -8,6 +8,9 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    let target = std::env::var("TARGET").expect("Cargo sets TARGET for build scripts");
+    println!("cargo:rustc-env=BUZZ_PLUGIN_TARGET_TRIPLE={target}");
+
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

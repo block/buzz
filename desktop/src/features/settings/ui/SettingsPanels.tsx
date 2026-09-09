@@ -13,6 +13,7 @@ import {
   MessagesSquare,
   MonitorCog,
   Moon,
+  Puzzle,
   ShieldAlert,
   Smartphone,
   Smile,
@@ -70,6 +71,7 @@ import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
+import { PluginsSettingsPanel } from "@/features/plugins/PluginsSettingsPanel";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -97,6 +99,7 @@ export type SettingsSection =
   | "custom-emoji"
   | "local-archive"
   | "mobile"
+  | "plugins"
   | "updates";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
@@ -117,6 +120,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "custom-emoji",
   "local-archive",
   "mobile",
+  "plugins",
   "updates",
 ];
 
@@ -228,6 +232,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "mobile",
     label: "Mobile",
     icon: Smartphone,
+  },
+  {
+    value: "plugins",
+    label: "Plugins",
+    icon: Puzzle,
   },
   {
     value: "updates",
@@ -856,6 +865,8 @@ export function renderSettingsSection(
       return <LocalArchiveSettingsCard />;
     case "mobile":
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
+    case "plugins":
+      return <PluginsSettingsPanel />;
     case "updates":
       return <UpdateChecker />;
     default: {

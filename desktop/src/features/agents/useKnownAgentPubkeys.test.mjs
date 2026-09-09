@@ -20,7 +20,9 @@ Object.assign(globalThis, {
 after(() => dom.window.close());
 
 test("provenance context follows exact local inventory and rejects failed cached reads", async () => {
-  const { act, renderHook, cleanup } = await import("@testing-library/react");
+  const { act, renderHook, cleanup, waitFor } = await import(
+    "@testing-library/react"
+  );
   const owner = "a".repeat(64),
     remote = "b".repeat(64),
     local = "c".repeat(64);
@@ -53,21 +55,20 @@ test("provenance context follows exact local inventory and rejects failed cached
     { wrapper },
   );
   assert.deepEqual(result.current, [true, false, true]);
-  await act(async () =>
+  await act(async () => {
     client.setQueryData(
       ["managed-agents"],
       [{ pubkey: remote, status: "deployed" }],
-    ),
-  );
-  assert.deepEqual(result.current, [false, true, true]);
+    );
+  });
+  await waitFor(() => assert.deepEqual(result.current, [false, true, true]));
   await act(async () => {
     client
       .getQueryCache()
       .find({ queryKey: ["managed-agents"] })
       .setState({ error: new Error("inventory unavailable"), status: "error" });
-    await new Promise((resolve) => setTimeout(resolve, 5));
   });
-  assert.deepEqual(result.current, [false, false, false]);
+  await waitFor(() => assert.deepEqual(result.current, [false, false, false]));
   cleanup();
   client.clear();
 });

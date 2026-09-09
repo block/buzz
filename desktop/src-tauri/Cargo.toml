@@ -37,6 +37,12 @@ tauri-build = { version = "2", features = [] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
+# Bounded TERM-then-KILL process-group teardown for plugin child processes
+# (desktop/src-tauri/src/plugin_host/browser_webview.rs, shutdown.rs), plus
+# descriptor-relative, no-follow package copy/enumeration in package.rs
+# (`dir` feature includes `fs`). Already resolves transitively at 0.31.3, so
+# this direct pin moves nothing.
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "dir"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
@@ -61,6 +67,11 @@ security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
 user-idle = { version = "0.6", default-features = false }
 plist = "1"
+# Direct raw-wry adapter for the plugin browser surface
+# (plugin_host/browser_webview.rs): no Tauri IPC, no injected script, no
+# custom protocol. Pinned exactly; Tauri keeps its own separate wry 0.55.1
+# transitively, so this resolves as a second wry version in the tree by design.
+wry = "=0.56.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
@@ -147,6 +158,8 @@ audioadapter-buffers = "3.0"
 tempfile = "3"
 strip-ansi-escapes = "0.2"
 tracing = "0.1"
+# SPDX license-id validation for plugin manifests (plugin_host/manifest.rs).
+spdx = "0.10"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
@@ -157,3 +170,17 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so desktop-produced snapshots and voice notes
 # can prove their full client-sanitize → relay-accept contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+# Offline JSON Schema validation of every MCP frame the plugin host sends and
+# accepts against the committed fixture (mcp_stdio_tests.rs); no network
+# access at test time.
+jsonschema = { version = "0.28", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Main-thread event loop and window for the harness-free browser_native_smoke
+# binary; matches the tao version Tauri already resolves transitively so this
+# pin moves nothing.
+tao = "=0.35.3"
+
+[[test]]
+name = "browser_native_smoke"
+harness = false
