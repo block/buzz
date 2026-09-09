@@ -78,6 +78,21 @@ async function pickDropdownOption(
   await page.getByRole("menuitemradio", { name: optionName }).click();
 }
 
+/**
+ * Pick an option from a PersonaModelCombobox (popover-based combobox with
+ * <button> items, not a PersonaDropdownField with menuitemradio items).
+ */
+async function pickModelComboboxOption(
+  page: import("@playwright/test").Page,
+  triggerId: string,
+  optionName: string | RegExp,
+) {
+  await page.locator(`#${triggerId}`).click();
+  // Items in PersonaModelCombobox are plain <button> elements inside the popover.
+  // Query at page level because the popover is portaled outside the dialog.
+  await page.getByRole("button", { name: optionName }).click();
+}
+
 test.describe("agent definition dialog", () => {
   test("owner-only-access build shows disabled agent access with an explanation", async ({
     page,
@@ -153,6 +168,53 @@ test.describe("edit agent dialog", () => {
     await expect(page.getByTestId("agent-respond-to")).toBeVisible();
   });
 
+  test("definition-only context renders access control and parallelism (rows 9–10 D-owned)", async ({
+    page,
+  }) => {
+    // Rows 9–10: in definition-only context (zero-instance definition), access/parallelism
+    // are D-owned and must be rendered. This test proves Artifact 4 access-field
+    // completeness for the definition-only route (R5 — definition-only edit from library).
+    const DEFONLY_PERSONA_ID = "persona-defonly-access-e2e";
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      personas: [
+        {
+          id: DEFONLY_PERSONA_ID,
+          displayName: "Definition Only Agent",
+          systemPrompt: "No instances here.",
+          respondTo: "owner-only",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+
+    // Navigate to the definition-edit route via the definitions library button.
+    const defButton = page.getByRole("button", {
+      name: "Definition Only Agent agent profile",
+    });
+    await expect(defButton).toBeVisible({ timeout: 10_000 });
+    await defButton.click();
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Rows 9–10 Artifact 4: access control IS visible in definition-only context.
+    await expect(page.getByTestId("agent-respond-to")).toBeVisible({
+      timeout: 10_000,
+    });
+    // D-owned parallelism field rendered.
+    await expect(page.locator("#edit-agent-parallelism")).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
   test("edits the agent name and persists it across a dialog reopen", async ({
     page,
   }) => {
@@ -205,7 +267,7 @@ test.describe("edit agent dialog", () => {
 
     // Pick a provider so model discovery has a scope, then set a custom model.
     await pickDropdownOption(page, "edit-agent-llm-provider", "Anthropic");
-    await pickDropdownOption(page, "edit-agent-model", "Custom model...");
+    await pickModelComboboxOption(page, "edit-agent-model", "Custom model...");
     await page.locator("#edit-agent-custom-model").fill("claude-opus-4-5");
     // Anthropic requires a credential before save unlocks.
     await page.getByLabel("Anthropic API Key").fill("sk-test-edit-agent-e2e");
@@ -396,14 +458,150 @@ test.describe("edit agent dialog", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // Definition editor opens; the instance editor does not.
-    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+    // Merged dialog opens with D+I sections together — the old routing that
+    // preferred the definition dialog over the instance dialog is fixed.
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
-    // And it is the persona's record that's being edited.
-    await expect(page.locator("#persona-display-name")).toHaveValue(
+    await expect(page.getByTestId("persona-dialog")).not.toBeVisible();
+    // Both D-fields (agent name from definition) and I-fields are accessible.
+    await expect(page.locator("#edit-agent-display-name")).toHaveValue(
       "Edit E2E Persona",
+    );
+  });
+});
+
+test.describe("merged dialog — team-linked and D+I wiring", () => {
+  const TEAM_PERSONA_ID = "persona-team-e2e";
+  const TEAM_AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
+  const TEAM_AGENT_NAME = "Tyler Agent";
+
+  test("team-linked instance: D-fields render disabled in the merged dialog", async ({
+    page,
+  }) => {
+    // Seed a team-managed persona so the merged dialog shows D-fields as read-only.
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: TEAM_AGENT_PUBKEY,
+          name: TEAM_AGENT_NAME,
+          personaId: TEAM_PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: TEAM_PERSONA_ID,
+          displayName: "Team Bot",
+          systemPrompt: "Team-managed agent.",
+          sourceTeam: "team-acme",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+
+    const agentButton = page.getByRole("button", {
+      name: "Team Bot agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // D-fields must be disabled for team-managed definitions.
+    await expect(page.locator("#edit-agent-display-name")).toBeDisabled();
+    await expect(page.locator("#edit-agent-system-prompt")).toBeDisabled();
+
+    // The "Managed by team X" notice must identify the team.
+    await expect(page.getByTestId("team-managed-notice")).toBeVisible();
+    await expect(page.getByTestId("team-managed-notice")).toContainText(
+      "team-acme",
+    );
+
+    // I-fields (instance name, respond-to) remain editable.
+    await expect(page.locator("#edit-agent-name")).not.toBeDisabled();
+    // The access control is the regression pin for the defReadOnly fix: it is an
+    // I-owned field, so it must stay enabled even though the definition is
+    // team-managed and its D-fields are read-only.
+    await expect(page.locator("#agent-respond-to")).not.toBeDisabled();
+  });
+
+  test("linked agent: edit D-field and I-field, one Save persists both layers", async ({
+    page,
+  }) => {
+    // Seed a persona-linked agent. The merged dialog must write both the
+    // D-layer (persona displayName) and I-layer (instance name) in a single Save.
+    const LINKED_PERSONA_ID = "persona-linked-e2e";
+    const LINKED_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
+
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: LINKED_PUBKEY,
+          name: "Original Instance Name",
+          personaId: LINKED_PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: LINKED_PERSONA_ID,
+          displayName: "Original Definition Name",
+          systemPrompt: "Original prompt.",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+
+    const agentButton = page.getByRole("button", {
+      name: "Original Definition Name agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Edit a D-field (definition display name) and an I-field (instance name)
+    // in the same dialog open.
+    await page.locator("#edit-agent-display-name").fill("Renamed Definition");
+    await page.locator("#edit-agent-name").fill("Renamed Instance");
+
+    // One Save click — both layers must be persisted.
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    // Reopen and verify both changes persisted (mock bridge echoes saves to store).
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.locator("#edit-agent-display-name")).toHaveValue(
+      "Renamed Definition",
+      { timeout: 10_000 },
+    );
+    await expect(page.locator("#edit-agent-name")).toHaveValue(
+      "Renamed Instance",
+      { timeout: 10_000 },
     );
   });
 });

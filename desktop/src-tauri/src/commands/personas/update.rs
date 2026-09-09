@@ -17,7 +17,60 @@ use crate::{
 use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
 
 #[cfg(test)]
+mod concurrent_edit_tests;
+#[cfg(test)]
 mod name_propagation_tests;
+
+/// Test-only hook: a process-global observer called right before
+/// `find_persona_for_update` while `managed_agents_store_lock` is held.
+/// Tests can install a closure that asserts the lock is not re-acquirable
+/// at that point, proving the guard and the comparison share the same
+/// lock scope. Production builds compile this away entirely.
+#[cfg(test)]
+type GuardObserver = Box<dyn Fn(&crate::app_state::AppState) + Send>;
+#[cfg(test)]
+pub(crate) static PRE_GUARD_OBSERVER: std::sync::Mutex<Option<GuardObserver>> =
+    std::sync::Mutex::new(None);
+
+/// Marker prefixed to the compare-and-swap rejection so the frontend can map it
+/// to the "changed while you were editing" affordance rather than a generic
+/// save failure. The persisted definition advanced past the revision the editor
+/// was seeded with, so applying this stale full-replacement input would clobber
+/// the newer writer.
+pub(crate) const PERSONA_REVISION_CONFLICT: &str = "persona-revision-conflict:";
+
+/// Locate the persona to edit and enforce compare-and-swap in one step, so the
+/// revision guard and the write target can never diverge.
+///
+/// `expected_updated_at` is the definition revision the editor was seeded with.
+/// When present, it must still equal the persisted record's `updated_at`; a
+/// mismatch means another writer committed since the editor opened, and this
+/// full-replacement input would silently clobber their newer fields — so the
+/// edit is rejected before the caller mutates anything. `None` skips the check
+/// (legacy callers, instance-only saves).
+///
+/// Because the caller holds the store lock across load → this guard → write,
+/// the compared `updated_at` is the authoritative persisted value, closing the
+/// check-to-write window a pre-write refetch alone cannot.
+fn find_persona_for_update<'a>(
+    personas: &'a mut [AgentDefinition],
+    id: &str,
+    expected_updated_at: Option<&str>,
+) -> Result<&'a mut AgentDefinition, String> {
+    let persona = personas
+        .iter_mut()
+        .find(|record| record.id == id)
+        .ok_or_else(|| format!("agent {id} not found"))?;
+    if let Some(expected) = expected_updated_at {
+        if persona.updated_at != expected {
+            return Err(format!(
+                "{PERSONA_REVISION_CONFLICT}{} changed while you were editing",
+                persona.display_name
+            ));
+        }
+    }
+    Ok(persona)
+}
 
 /// Return value of the `update_persona` command. Uses flatten so all
 /// `AgentDefinition` fields appear at the top level of the JSON response —
@@ -145,17 +198,19 @@ pub async fn update_persona(
 /// [`update_persona`] enqueues best-effort, while
 /// [`sharing::update_persona_and_publish`] prepares a strict publication and
 /// returns the event so the caller can await relay acceptance.
-pub(super) async fn update_persona_with<R: Send + 'static>(
+pub(super) async fn update_persona_with<Rt: tauri::Runtime + 'static, R: Send + 'static>(
     input: UpdatePersonaRequest,
-    app: AppHandle,
-    retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
+    app: tauri::AppHandle<Rt>,
+    retain: impl FnOnce(&tauri::AppHandle<Rt>, &AppState, &AgentDefinition) -> Result<R, String>
+        + Send
+        + 'static,
 ) -> Result<(AgentDefinition, R), String> {
     use tauri::Manager;
 
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
-    let (result, retained, profile_sync_params) = tokio::task::spawn_blocking({
+    let (result, retain_result, profile_sync_params) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(AgentDefinition, R, ProfileSyncParams), String> {
+        move || -> Result<(AgentDefinition, Result<R, String>, ProfileSyncParams), String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
@@ -172,10 +227,25 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .map_err(|error| error.to_string())?;
             let mut personas = load_personas(&app)?;
             pending::project_active_persona_sharing(&app, &state, &mut personas);
-            let persona = personas
-                .iter_mut()
-                .find(|record| record.id == input.id)
-                .ok_or_else(|| format!("agent {} not found", input.id))?;
+            // In test builds, fire the pre-guard observer (if installed) with a
+            // reference to the state while the store lock is still held. Tests
+            // use this to assert that `managed_agents_store_lock.try_lock()`
+            // fails here — proving the guard and the comparison are inside the
+            // same lock scope. The observer fires on every code path, so moving
+            // the lock acquisition to after this call turns RED.
+            #[cfg(test)]
+            {
+                if let Ok(observer_guard) = PRE_GUARD_OBSERVER.lock() {
+                    if let Some(ref observer) = *observer_guard {
+                        observer(&state);
+                    }
+                }
+            }
+            let persona = find_persona_for_update(
+                &mut personas,
+                &input.id,
+                input.expected_updated_at.as_deref(),
+            )?;
 
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;
@@ -212,7 +282,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let result = persona.clone();
             save_personas(&app, &personas)?;
 
-            let retained = retain(&app, &state, &result)?;
+            // Capture the retain result WITHOUT propagating the error yet.
+            // Linked managed-agent persistence (name/avatar propagation) and
+            // relay profile sync are independent of strict publication — a
+            // transient publication failure must not skip those local effects.
+            // Return the retain error after completing all linked work so the
+            // coordinator sees the accurate "definition saved but publication
+            // failed" error and can attempt the publish-only retry seam, which
+            // will now find the linked identities already updated.
+            let retain_result = retain(&app, &state, &result);
             try_regenerate_nest(&app);
 
             // If the avatar, display_name, or effective description changed,
@@ -291,7 +369,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 Vec::new()
             };
 
-            Ok((result, retained, sync_params))
+            Ok((result, retain_result, sync_params))
         }
     })
     .await
@@ -322,6 +400,12 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             }
         }
     }
+
+    // Propagate the retain error only after all linked identity effects have
+    // completed (local managed-agent store write and relay kind:0 profile sync).
+    // A strict publication failure must not skip these: the coordinator's
+    // publish-only retry will see the linked identities already in sync.
+    let retained = retain_result?;
 
     Ok((result, retained))
 }

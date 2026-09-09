@@ -281,10 +281,19 @@ export function EnvVarsEditor({
   }, [focusKey]);
 
   // One-shot focus: scroll the matching required-key row into view and focus
-  // its value input. Re-runs whenever `requiredKeys` changes so the effect
-  // fires when the target key materializes asynchronously (e.g., the runtime
-  // file-config query completes after the card click). The one-shot guard
-  // ensures each requested target focuses exactly once.
+  // its value input. Re-runs whenever the required-key SET changes so the
+  // effect fires when the target key materializes asynchronously (e.g., the
+  // runtime file-config query completes after the card click). The one-shot
+  // guard ensures each requested target focuses exactly once.
+  //
+  // The dep is `requiredKeys`'s CONTENT signature, not its identity:
+  // `advancedRequiredEnvKeys` is a fresh `filter()` array on every render, so
+  // an identity dep re-runs on content-equal re-renders (routine while
+  // discovery/file-config queries settle) and the cleanup cancels the pending
+  // focus rAF before it fires — the already-latched guard then blocks every
+  // retry, permanently stranding focus. A content signature re-runs only when
+  // the set actually changes, matching the intent above.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — depend on requiredKeys content, not identity (see comment); focusKey is the other trigger
   React.useEffect(() => {
     if (!focusKey) return;
     if (focusFiredRef.current) return;
@@ -301,7 +310,7 @@ export function EnvVarsEditor({
     });
 
     return () => cancelAnimationFrame(id);
-  }, [focusKey, requiredKeys]);
+  }, [focusKey, requiredKeys.join("\u0000")]);
 
   function emit(next: Row[]) {
     setRows(next);

@@ -10,7 +10,7 @@ use crate::managed_agents::{
     AgentDefinition,
 };
 
-pub(super) struct PreparedPersonaPublication {
+pub(crate) struct PreparedPersonaPublication {
     pub scope: RetentionScope,
     pub event: nostr::Event,
     pub retained: RetainedEvent,
@@ -64,8 +64,8 @@ pub(in crate::commands) fn retain_persona_pending_at(
 /// exact share tag. The explicit share toggle passes `Some(shared)`. Returning
 /// the retained event lets that command immediately await relay acceptance
 /// without rebuilding or re-signing a different NIP-33 head.
-pub(super) fn prepare_persona_publication(
-    app: &AppHandle,
+pub(super) fn prepare_persona_publication<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     persona: &AgentDefinition,
     shared_override: Option<bool>,
@@ -104,8 +104,8 @@ fn retained_persona_is_shared(row: Option<&RetainedEvent>) -> bool {
 /// never present an unshared persona as published. The durable share state
 /// lives in the retention head, so nothing is lost: the true value reappears
 /// once the identity is signable again.
-pub(super) fn project_active_persona_sharing(
-    app: &AppHandle,
+pub(super) fn project_active_persona_sharing<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     personas: &mut [AgentDefinition],
 ) {
@@ -156,7 +156,7 @@ fn project_persona_sharing_at(
     Ok(())
 }
 
-pub(super) fn prepare_persona_publication_at(
+pub(crate) fn prepare_persona_publication_at(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
     persona: &AgentDefinition,

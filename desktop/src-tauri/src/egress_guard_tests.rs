@@ -274,9 +274,17 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/archive/mod_tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
     ("src/commands/team_snapshot/tests.rs", 1, 0),
-    // Mock-relay route in its in-file tests; production publish goes through
-    // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
-    ("src/commands/personas/sharing.rs", 1, 0),
+    // Mock-relay routes in its in-file tests (one in the existing spawn_relay
+    // fixture and one in the new P2 counter-server fixture); production publish
+    // goes through the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
+    ("src/commands/personas/sharing.rs", 2, 0),
+    // Counter-server fixture in the P2 relay-sync regression test; production
+    // publish goes through the guarded boundary-1 funnel.
+    (
+        "src/commands/personas/update/concurrent_edit_tests.rs",
+        1,
+        0,
+    ),
     // Loopback submit relay in `identity_archive.rs`'s in-file regen tests;
     // production archive/unarchive publish through the guarded boundary-1
     // funnel via `submit_event`.

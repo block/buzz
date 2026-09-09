@@ -95,4 +95,11 @@ export type UpdatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  /**
+   * Seed-time definition revision for the backend's lock-held compare-and-swap.
+   * When present the backend rejects the write if the persisted `updated_at`
+   * has advanced since the editor was seeded — preventing a stale full-replacement
+   * from clobbering a concurrent writer. Omit (undefined) to skip the check.
+   */
+  expectedUpdatedAt?: string;
 };

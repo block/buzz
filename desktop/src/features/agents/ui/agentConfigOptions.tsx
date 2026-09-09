@@ -14,8 +14,8 @@ export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
  * offering it for new selections would create a regression path.
  * OSS builds pass an empty `Set` so v1 remains visible.
  *
- * All three dialog sites that show a provider picker import this constant —
- * `AgentDefinitionDialog`, `AgentInstanceEditDialog`, and
+ * All dialog sites that show a provider picker import this constant —
+ * `AgentDefinitionDialog`, `AgentEditMergedDialog`, and
  * `AgentDefaultsSettingsCard` — making it the single source of truth for
  * which provider ids to suppress on Block builds.
  */

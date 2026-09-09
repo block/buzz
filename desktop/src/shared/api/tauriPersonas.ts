@@ -127,6 +127,9 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     envVars: input.envVars,
     // Same absent-vs-present contract as envVars for the behavioral quad.
     behavior: input.behavior,
+    // Seed-time revision for the backend's lock-held compare-and-swap. Omitted
+    // (undefined) skips the check for legacy/instance-only callers.
+    expectedUpdatedAt: input.expectedUpdatedAt,
   };
 }
 

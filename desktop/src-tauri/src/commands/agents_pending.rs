@@ -22,8 +22,8 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 /// only runtime fields produces an identical row and never re-enqueues a
 /// publish. Best-effort: a failure here is logged and swallowed so a retention
 /// hiccup never blocks the disk-authoritative write.
-pub(crate) fn retain_managed_agent_pending(
-    app: &AppHandle,
+pub(crate) fn retain_managed_agent_pending<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {

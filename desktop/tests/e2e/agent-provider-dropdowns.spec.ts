@@ -171,11 +171,10 @@ test.describe("agent provider dropdown screenshots", () => {
 
     await page.getByRole("menuitem", { name: "Edit" }).click();
 
-    const dialog = page.getByTestId("persona-dialog");
+    const dialog = page.getByTestId("edit-agent-dialog");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
 
-    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
-
+    // No tabs in the merged dialog — all fields are directly visible.
     // Regression: the runtime trigger must not be empty — the auto-seed effect
     // must have run and selected the app default (buzz-agent in the mock catalog).
     const runtimeTrigger = dialog.locator("#persona-runtime");
@@ -217,7 +216,7 @@ test.describe("agent provider dropdown screenshots", () => {
     await installMockBridge(page, {
       globalAgentConfig: {
         provider: "databricks_v2",
-        model: "global-databricks-model",
+        model: "global-openai-model",
         env_vars: {},
       },
       personas: [
@@ -236,17 +235,16 @@ test.describe("agent provider dropdown screenshots", () => {
       .click();
     await page.getByRole("menuitem", { name: "Edit" }).click();
 
-    const dialog = page.getByTestId("persona-dialog");
+    const dialog = page.getByTestId("edit-agent-dialog");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
-    await expect(
-      dialog.getByRole("tab", { name: "Customize for this agent" }),
-    ).toBeVisible();
+    // No tabs in the merged dialog — all fields are directly visible.
+    // Codex runtime is already selected (seeded from definition), no "Harness default" text.
     await expect(
       dialog.getByText("Harness default", { exact: true }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(dialog.getByText(/Databricks/i)).toHaveCount(0);
 
-    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+    // Model combobox is visible without any tab click.
     await expect(
       dialog.getByRole("combobox", { name: /model/i }),
     ).toBeVisible();

@@ -198,6 +198,11 @@ mod adopt;
 mod pending;
 mod sharing;
 pub use adopt::add_team_from_catalog;
+#[cfg(test)]
+pub(crate) use pending::prepare_team_publication_at;
+pub(crate) use pending::refresh_for_persona_at;
+#[cfg(test)]
+pub(crate) use pending::REFRESH_READ_OBSERVER;
 pub use sharing::set_team_shared;
 
 /// Refresh the shared 30178 catalog heads of every team that includes

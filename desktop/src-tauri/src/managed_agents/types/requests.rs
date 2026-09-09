@@ -132,6 +132,14 @@ pub struct UpdatePersonaRequest {
     /// present = validate and replace the fields as a unit.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Seed-time definition revision (`updated_at`) captured when the editor
+    /// opened. When present, `update_persona_with` performs a lock-held
+    /// compare-and-swap: if the persisted persona's `updated_at` no longer
+    /// matches, the save is rejected before any write so a stale
+    /// full-replacement input cannot clobber a newer concurrent writer. Absent
+    /// (legacy callers, instance-only saves) skips the check.
+    #[serde(default)]
+    pub expected_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

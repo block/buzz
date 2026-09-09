@@ -20,6 +20,22 @@ use crate::managed_agents::{
 
 use buzz_core_pkg::kind::KIND_TEAM_CATALOG;
 
+/// Test-only observer called inside `refresh_or_retract_shared_head_at` after
+/// it reads the existing shared kind:30178 head (the authoritative T) but
+/// before it retains the refreshed head (T+1). Tests use this to inject a
+/// racing write — simulating a concurrent unshare — between the read and the
+/// write, and to assert that the `managed_agents_store_lock` held by
+/// `publish_and_refresh_teams_at` serializes the two operations correctly.
+///
+/// Moving `refresh_for_persona_at` outside the lock (mutation target) causes
+/// the racing unshare to win the UPSERT after `retain_event`, so the final
+/// retained head is SHARED rather than UNSHARED — the prescribed RED signal.
+#[cfg(test)]
+type RefreshReadObserver = Box<dyn Fn() + Send>;
+#[cfg(test)]
+pub(crate) static REFRESH_READ_OBSERVER: std::sync::Mutex<Option<RefreshReadObserver>> =
+    std::sync::Mutex::new(None);
+
 /// A signed catalog head, retained and awaiting relay acceptance.
 ///
 /// Only the retained-row coordinate is carried, not the signed event itself:
@@ -145,7 +161,7 @@ pub(super) fn prepare_team_publication(
     })
 }
 
-pub(super) fn prepare_team_publication_at(
+pub(crate) fn prepare_team_publication_at(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
     team: &TeamRecord,
@@ -331,6 +347,19 @@ pub(super) fn refresh_or_retract_shared_head_at(
         return Ok(RefreshOrRetractOutcome::Noop);
     }
 
+    // Fire the test-only read observer BEFORE retaining the refreshed head.
+    // Tests use this to race a concurrent unshare between the authoritative
+    // shared-T read above and the retain below — proving that the caller's
+    // `managed_agents_store_lock` must span this entire read+retain sequence.
+    #[cfg(test)]
+    {
+        if let Ok(obs) = REFRESH_READ_OBSERVER.lock() {
+            if let Some(ref f) = *obs {
+                f();
+            }
+        }
+    }
+
     // Rebuild; on failure, purge + tombstone immediately so the stale shared
     // head is not left public.
     let rebuilt = build_team_catalog_event(team, members, true);
@@ -437,14 +466,15 @@ pub(super) fn refresh_shared_team_catalog_heads_for_persona<R: tauri::Runtime>(
     }
 }
 
-/// Testable seam for [`refresh_shared_team_catalog_heads_for_persona`].
+/// File-system seam for [`refresh_shared_team_catalog_heads_for_persona`].
 ///
-/// Reads teams and personas from flat JSON files in `base_dir` rather than
-/// through the Tauri store. Calls the SAME `resolve_and_refresh_or_retract_at`
-/// that production uses — the seam is a thin file-loading shim with no
-/// independent logic. Tests therefore exercise the exact production code path.
-#[cfg(test)]
-pub(super) fn refresh_for_persona_at(
+/// Reads teams and personas from flat JSON files in `base_dir` using the same
+/// dual-store rule as boot reconciliation: legacy `personas.json` when
+/// non-empty, otherwise keyless definition records from `managed-agents.json`
+/// (see [`crate::event_sync::read_persona_definitions`]). This makes the seam
+/// correct on both pre-fold and post-fold installs. Calls the SAME
+/// `resolve_and_refresh_or_retract_at` that the AppHandle path uses.
+pub(crate) fn refresh_for_persona_at(
     base_dir: &std::path::Path,
     keys: &nostr::Keys,
     db_path: &std::path::Path,
@@ -454,15 +484,28 @@ pub(super) fn refresh_for_persona_at(
 
     let teams: Vec<crate::managed_agents::TeamRecord> =
         read_json_store(&base_dir.join("teams.json"))?;
-    let personas: Vec<crate::managed_agents::AgentDefinition> =
-        read_json_store(&base_dir.join("personas.json"))?;
+    let personas = crate::event_sync::read_persona_definitions(base_dir)?;
 
     for team in &teams {
         if team.is_builtin || !team.persona_ids.iter().any(|id| id == persona_id) {
             continue;
         }
-        // Identical call to production — no parallel implementation.
-        let _ = resolve_and_refresh_or_retract_at(db_path, keys, team, &personas);
+        let outcome = resolve_and_refresh_or_retract_at(db_path, keys, team, &personas);
+        match outcome {
+            Ok(RefreshOrRetractOutcome::RemovalQueued { ref reason }) => {
+                eprintln!(
+                    "buzz-desktop: team-catalog-refresh: retracting '{}' after persona edit — {reason}",
+                    team.name
+                );
+            }
+            Err(ref e) => {
+                eprintln!(
+                    "buzz-desktop: team-catalog-refresh: '{}' after persona edit — {e}",
+                    team.name
+                );
+            }
+            _ => {}
+        }
     }
     Ok(())
 }

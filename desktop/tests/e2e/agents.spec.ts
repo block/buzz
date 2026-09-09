@@ -309,7 +309,7 @@ test("built-in persona edits persist", async ({ page }) => {
   await page.getByLabel("Open actions for Fizz").click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
 
-  const dialog = page.getByTestId("persona-dialog");
+  const dialog = page.getByTestId("edit-agent-dialog");
   await dialog.getByLabel("Agent name").fill("My Fizz");
   await dialog.getByLabel("Description").fill("Helps teams ship reliably.");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
@@ -1655,9 +1655,9 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
-  const editDialog = page.getByTestId("persona-dialog");
+  const editDialog = page.getByTestId("edit-agent-dialog");
   const catalogPublishNotice = editDialog.getByTestId(
-    "persona-dialog-catalog-publish-notice",
+    "edit-agent-dialog-catalog-publish-notice",
   );
   await expect(catalogPublishNotice).toHaveCount(0);
   await expect(
