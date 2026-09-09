@@ -423,16 +423,6 @@ function TextFieldSpecimen() {
   );
 }
 
-function CodeInputSpecimen() {
-  return (
-    <div className="component-specimen-stack">
-      <SpecimenGroup label="Six-digit verification code">
-        <CodeInput label="Verification code" defaultValue="284619" />
-      </SpecimenGroup>
-    </div>
-  );
-}
-
 /**
  * The parts of Tabs, per variant.
  *
@@ -1019,7 +1009,6 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   "conversation-header": ConversationHeaderSpecimen,
   "panel-header": PanelHeaderSpecimen,
   "text-field": TextFieldSpecimen,
-  "code-input": CodeInputSpecimen,
   "search-field": SearchFieldSpecimen,
   "navigation-section": NavigationSectionSpecimen,
   "navigation-item": NavigationItemSpecimen,

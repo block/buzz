@@ -379,21 +379,6 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     composes: [],
   },
   {
-    slug: "code-input",
-    name: "CodeInput",
-    purpose:
-      "A segmented numeric field for short verification and device-pairing codes.",
-    behavior:
-      "Native numeric inputs with one-time-code autofill, paste distribution, and keyboard movement",
-    variants: ["six-digit", "disabled"],
-    status: "proposed",
-    collection: "components",
-    owner: "desktop-new Mobile pairing",
-    source: "shared/ui/CodeInput.tsx",
-    baseUi: [],
-    composes: [],
-  },
-  {
     slug: "search-field",
     name: "SearchField",
     purpose: "A compact filter field with a search cue and clear action.",
