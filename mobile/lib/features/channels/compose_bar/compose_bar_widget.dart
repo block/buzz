@@ -487,6 +487,37 @@ class ComposeBar extends HookConsumerWidget {
             visit == authorizationVisit.value &&
             authorizationRevision == draftRevision.value &&
             identical(config, ref.read(relayConfigProvider));
+        void ensureAuthorizationCurrent() {
+          if (!context.mounted) throw const _ComposeAuthorizationCancelled();
+          if (visit != authorizationVisit.value ||
+              !identical(config, ref.read(relayConfigProvider))) {
+            throw StateError('Community changed during authorization');
+          }
+          if (authorizationRevision != draftRevision.value) {
+            throw const _ComposeAuthorizationCancelled();
+          }
+        }
+
+        Future<void> authorize(Set<String> keys, {bool prepare = false}) async {
+          if (keys.isEmpty) return;
+          ensureAuthorizationCurrent();
+          try {
+            await authorizeAgentMentions(
+              readAuthorization,
+              keys,
+              currentPubkey,
+              channelId,
+              isAuthorizationCurrent,
+              prepare: prepare,
+            );
+          } catch (_) {
+            // A stale request is cancellation, not an access decision.
+            ensureAuthorizationCurrent();
+            rethrow;
+          }
+          ensureAuthorizationCurrent();
+        }
+
         // Resolved before any await: see
         // `_reportSendCancelledByCommunitySwitch`.
         final messenger = ScaffoldMessenger.maybeOf(context);
@@ -533,14 +564,7 @@ class ComposeBar extends HookConsumerWidget {
         // Agent failures stop publication; the original draft keeps its keys.
         Future<void> addMentionedNonMembers() async {
           final keys = intendedAgentKeys.intersection(outgoing.pubkeys.toSet());
-          await authorizeAgentMentions(
-            readAuthorization,
-            keys,
-            currentPubkey,
-            channelId,
-            isAuthorizationCurrent,
-            prepare: true,
-          );
+          await authorize(keys, prepare: true);
           await outgoing.addNonMembers(
             channelActions,
             scan: scan,
@@ -551,13 +575,7 @@ class ComposeBar extends HookConsumerWidget {
               'Mention invitation failed. Draft kept; retry or remove the mention.',
             );
           }
-          await authorizeAgentMentions(
-            readAuthorization,
-            keys,
-            currentPubkey,
-            channelId,
-            isAuthorizationCurrent,
-          );
+          await authorize(keys);
         }
 
         if (queuedAttachments.isEmpty) {
@@ -643,9 +661,13 @@ class ComposeBar extends HookConsumerWidget {
               outgoing.pubkeys,
               mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
+          } on _ComposeAuthorizationCancelled {
+            // Keep the newer draft without displaying a false access error.
           } catch (error) {
             if (cancellation.isCancelled) return;
-            if (context.mounted) {
+            if (error is StateError) {
+              _reportSendCancelledByCommunitySwitch(messenger);
+            } else if (context.mounted) {
               uploadError.value = _formatUploadError(error);
             }
             if (context.mounted &&

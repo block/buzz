@@ -70,57 +70,74 @@ void _publicationTests() {
     });
   }
 
-  testWidgets(
-    'editing while authorization waits cancels publication without overwriting new draft',
-    (tester) async {
-      final key = 'd' * 64;
-      final signer = nostr.Keys.generate();
-      final pending = Completer<List<AgentDirectoryEntry>>();
-      var reads = 0;
-      var sent = 0;
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(signer.nsec),
-          currentPubkey: signer.public,
-          relayAgents: [_testAgent(key)],
-          channels: [
-            _makeCurrentChannel(channelType: 'dm'),
-            _makeSharedMemberChannel(),
-          ],
-          authorizationReader: (_, _, _, _) {
-            reads++;
-            return pending.future;
-          },
-          onSend: (_, _, {mediaTags = const []}) async {
-            sent++;
-          },
-        ),
-      );
-      await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Helper Bot'));
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
-      await tester.pump();
-      expect(reads, 1);
-      await tester.enterText(find.byType(TextField), 'new intent');
-      pending.complete([
-        AgentDirectoryEntry(
-          pubkey: key,
-          respondTo: 'anyone',
-          channelIds: ['channel-1'],
-        ),
-      ]);
-      await tester.pumpAndSettle();
-      expect(sent, 0);
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'new intent',
-      );
-    },
-  );
+  for (final switchCommunity in [false, true]) {
+    testWidgets(
+      'authorization cancellation reports scope change only: $switchCommunity',
+      (tester) async {
+        final key = 'd' * 64;
+        final signer = nostr.Keys.generate();
+        final pending = Completer<List<AgentDirectoryEntry>>();
+        var reads = 0;
+        var sent = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            relayConfig: () => _SwitchableRelayConfigNotifier(
+              RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+            ),
+            relayAgents: [_testAgent(key)],
+            channels: [
+              _makeCurrentChannel(channelType: 'dm'),
+              _makeSharedMemberChannel(),
+            ],
+            authorizationReader: (_, _, _, _) {
+              reads++;
+              return pending.future;
+            },
+            onSend: (_, _, {mediaTags = const []}) async {
+              sent++;
+            },
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pump();
+        expect(reads, 1);
+        if (switchCommunity) {
+          ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+              .read(relayConfigProvider.notifier)
+              .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+          await tester.pump();
+        } else {
+          await tester.enterText(find.byType(TextField), 'new intent');
+        }
+        pending.complete([
+          AgentDirectoryEntry(
+            pubkey: key,
+            respondTo: 'anyone',
+            channelIds: ['channel-1'],
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(sent, 0);
+        expect(
+          find.text('Message not sent: the community changed'),
+          switchCommunity ? findsOneWidget : findsNothing,
+        );
+        expect(find.textContaining('Could not authorize'), findsNothing);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          switchCommunity ? '' : 'new intent',
+        );
+      },
+    );
+  }
   testWidgets('revocation after upload retains agent draft and attachment', (
     tester,
   ) async {
