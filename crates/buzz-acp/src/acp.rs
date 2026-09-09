@@ -1874,10 +1874,9 @@ impl AcpClient {
                 // Advertised slash commands (ACP slash-commands extension).
                 // Forward the complete latest list through the encrypted observer
                 // stream so Desktop can offer commands for the originating agent.
-                let commands = update["availableCommands"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let Some(commands) = update["availableCommands"].as_array() else {
+                    return false;
+                };
                 let names: Vec<&str> = commands
                     .iter()
                     .filter_map(|command| command["name"].as_str())
@@ -3983,6 +3982,16 @@ sleep 1"#,
                 ]
             })
         );
+        let mut empty = msg.clone();
+        empty["params"]["update"]["availableCommands"] = serde_json::json!([]);
+        let _ = client.handle_session_update(&empty);
+        let events = observer.snapshot();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].payload, serde_json::json!({ "commands": [] }));
+
+        empty["params"]["update"]["availableCommands"] = serde_json::Value::Null;
+        let _ = client.handle_session_update(&empty);
+        assert_eq!(observer.snapshot().len(), 2);
     }
 
     #[tokio::test]

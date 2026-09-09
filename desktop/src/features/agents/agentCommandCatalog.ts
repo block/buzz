@@ -6,17 +6,20 @@ const MAX_COMMANDS_PER_AGENT = 256;
 const MAX_COMMAND_NAME_LENGTH = 128;
 const MAX_COMMAND_DESCRIPTION_LENGTH = 512;
 
+/** A sanitized command advertised by an ACP connector. */
 export type AgentCommand = {
   name: string;
   description: string | null;
 };
 
+/** The latest complete command snapshot and its observer ordering key. */
 export type AgentCommandCatalogEntry = {
   commands: readonly AgentCommand[];
   seq: number;
   timestamp: string;
 };
 
+/** Commands indexed by normalized agent pubkey within an owner and community. */
 export type AgentCommandCatalog = ReadonlyMap<string, AgentCommandCatalogEntry>;
 
 type PersistedCatalog = {
@@ -31,13 +34,25 @@ type AvailableCommandsEvent = {
 };
 
 const EMPTY_CATALOG: AgentCommandCatalog = new Map();
-// Managed-agent observer ingestion is owner-global; command capabilities belong
-// to the agent pubkey rather than whichever community currently renders it.
+let communityScope: string | null = null;
 const catalogByOwner = new Map<string, AgentCommandCatalog>();
 const listeners = new Set<() => void>();
 
 function storageKey(ownerPubkey: string): string {
-  return `${STORAGE_PREFIX}:${normalizePubkey(ownerPubkey)}`;
+  return `${STORAGE_PREFIX}:${encodeURIComponent(communityScope ?? "")}:${normalizePubkey(ownerPubkey)}`;
+}
+
+/** Scope both memory and persisted command catalogs to the active community. */
+export function initAgentCommandCatalog(communityId: string | null): void {
+  if (communityScope === communityId) return;
+  communityScope = communityId;
+  catalogByOwner.clear();
+  for (const listener of listeners) listener();
+}
+
+/** Retire the current community's memory cache before another community mounts. */
+export function resetAgentCommandCatalog(): void {
+  initAgentCommandCatalog(null);
 }
 
 function sanitizeCommand(value: unknown): AgentCommand | null {
@@ -66,6 +81,7 @@ function sanitizeCommand(value: unknown): AgentCommand | null {
   return { name, description };
 }
 
+/** Bound and sanitize an untrusted snapshot; null denotes a malformed payload. */
 export function parseAvailableCommandsPayload(
   payload: unknown,
 ): readonly AgentCommand[] | null {
@@ -114,7 +130,8 @@ function parseStoredCatalog(raw: string | null): AgentCommandCatalog {
         commands === null ||
         typeof candidate.seq !== "number" ||
         !Number.isSafeInteger(candidate.seq) ||
-        typeof candidate.timestamp !== "string"
+        typeof candidate.timestamp !== "string" ||
+        !Number.isFinite(Date.parse(candidate.timestamp))
       ) {
         continue;
       }
@@ -167,13 +184,20 @@ function isNewer(
   return incoming.seq > current.seq;
 }
 
+/** Record a newer complete snapshot, including an authoritative empty list. */
 export function recordAvailableCommandsUpdate(
   ownerPubkey: string,
   agentPubkey: string,
   event: AvailableCommandsEvent,
 ): boolean {
+  if (communityScope === null) return false;
   const commands = parseAvailableCommandsPayload(event.payload);
-  if (commands === null || !Number.isSafeInteger(event.seq)) return false;
+  if (
+    commands === null ||
+    !Number.isSafeInteger(event.seq) ||
+    !Number.isFinite(Date.parse(event.timestamp))
+  )
+    return false;
 
   const owner = normalizePubkey(ownerPubkey);
   const agent = normalizePubkey(agentPubkey);
@@ -192,18 +216,24 @@ export function recordAvailableCommandsUpdate(
   return true;
 }
 
+/** Read the active community's last known commands for an owner. */
 export function getAgentCommandCatalog(
   ownerPubkey: string | null,
 ): AgentCommandCatalog {
-  return ownerPubkey ? hydrate(ownerPubkey) : EMPTY_CATALOG;
+  return ownerPubkey && communityScope !== null
+    ? hydrate(ownerPubkey)
+    : EMPTY_CATALOG;
 }
 
+/** Subscribe to command snapshot or community changes. */
 export function subscribeAgentCommandCatalog(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
+/** Clear module state and subscriptions between tests. */
 export function resetAgentCommandCatalogForTests(): void {
+  communityScope = null;
   catalogByOwner.clear();
   listeners.clear();
 }

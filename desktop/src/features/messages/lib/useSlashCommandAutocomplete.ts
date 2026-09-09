@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { useAgentCommandCatalog } from "@/features/agents/useAgentCommandCatalog";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 import type { UseMentionsResult } from "./useMentions";
 import {
@@ -20,6 +20,7 @@ type ActiveQuery = {
   signature: string;
 };
 
+/** Complete advertised agent commands without changing command execution semantics. */
 export function useSlashCommandAutocomplete({
   channelId,
   ownerPubkey,
@@ -40,6 +41,13 @@ export function useSlashCommandAutocomplete({
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const dismissedSignatureRef = React.useRef<string | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a composer can be reused for a different channel or identity without unmounting
+  React.useEffect(() => {
+    setActiveQuery(null);
+    setSelectedIndex(0);
+    dismissedSignatureRef.current = null;
+  }, [channelId, ownerPubkey]);
+
   const providers = React.useMemo(
     () =>
       (membersQuery.data ?? [])
@@ -47,7 +55,7 @@ export function useSlashCommandAutocomplete({
         .map((member) => ({
           pubkey: normalizePubkey(member.pubkey),
           displayName:
-            member.displayName?.trim() || truncatePubkey(member.pubkey),
+            member.displayName?.trim() || truncateNpub(member.pubkey),
         })),
     [membersQuery.data],
   );
@@ -77,8 +85,10 @@ export function useSlashCommandAutocomplete({
   }, [suggestions.length]);
 
   const updateQuery = React.useCallback(
-    (value: string, cursorPosition: number) => {
-      const detected = detectSlashCommandQuery(value, cursorPosition);
+    (value: string, cursorPosition: number, isCodeContext = false) => {
+      const detected = isCodeContext
+        ? null
+        : detectSlashCommandQuery(value, cursorPosition);
       if (!detected) {
         dismissedSignatureRef.current = null;
         setActiveQuery(null);
@@ -166,7 +176,8 @@ export function useSlashCommandAutocomplete({
     (
       event: React.KeyboardEvent,
     ): { handled: boolean; suggestion?: SlashCommandSuggestion } => {
-      if (!isOpen || !activeQuery) return { handled: false };
+      if (!isOpen || !activeQuery || event.nativeEvent?.isComposing)
+        return { handled: false };
       if (event.key === "ArrowDown") {
         event.preventDefault();
         setSelectedIndex((current) =>
@@ -182,12 +193,11 @@ export function useSlashCommandAutocomplete({
         return { handled: true };
       }
       if (
-        event.key === "Tab" ||
-        (event.key === "Enter" &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.altKey &&
-          !event.shiftKey)
+        (event.key === "Tab" || event.key === "Enter") &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.shiftKey
       ) {
         event.preventDefault();
         return { handled: true, suggestion: suggestions[selectedIndex] };

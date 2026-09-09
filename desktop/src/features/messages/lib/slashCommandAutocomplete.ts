@@ -1,11 +1,13 @@
 import type { AgentCommandCatalog } from "@/features/agents/agentCommandCatalog";
 import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 
+/** A channel agent eligible to supply slash-command suggestions. */
 export type SlashCommandProvider = {
   pubkey: string;
   displayName: string;
 };
 
+/** A command bound to the specific agent that advertised it. */
 export type SlashCommandSuggestion = {
   agentDisplayName: string;
   agentPubkey: string;
@@ -13,18 +15,21 @@ export type SlashCommandSuggestion = {
   name: string;
 };
 
+/** Suggestions grouped by their originating agent. */
 export type SlashCommandGroup = {
   agentDisplayName: string;
   agentPubkey: string;
   commands: readonly SlashCommandSuggestion[];
 };
 
+/** A command query at message start or after leading mentions. */
 export type SlashCommandQuery = {
   leadingText: string;
   query: string;
   replaceFromOffset: number;
 };
 
+/** Detect a first-line command prefix without matching paths or arguments. */
 export function detectSlashCommandQuery(
   value: string,
   cursorPosition: number,
@@ -47,6 +52,7 @@ export function detectSlashCommandQuery(
   return { leadingText, query, replaceFromOffset: slashIndex };
 }
 
+/** Require a prefix made entirely of complete mention labels and separators. */
 export function resolveLeadingAgentMentionPubkeys(
   leadingText: string,
   candidates: readonly SlashCommandProvider[],
@@ -64,6 +70,7 @@ export function resolveLeadingAgentMentionPubkeys(
   return offset === leadingText.length ? [...pubkeys] : [];
 }
 
+/** Add the provider mention only when the message has no leading mentions. */
 export function buildSlashCommandInsertText(
   suggestion: SlashCommandSuggestion,
   hasLeadingAgentMention: boolean,
@@ -87,6 +94,7 @@ function commandRank(
   return null;
 }
 
+/** Filter by recipient and rank name matches before description matches. */
 export function buildSlashCommandGroups({
   catalog,
   providers,
