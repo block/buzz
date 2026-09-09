@@ -605,7 +605,7 @@
   }
 
   .text-field[data-invalid] .text-field-control {
-    border-color: var(--red-8);
+    border-color: var(--red-9);
     background: var(--red-3);
   }
 
@@ -624,9 +624,9 @@
   }
 
   .text-field[data-variant="soft"][data-invalid] .text-field-control {
-    border-color: var(--red-8);
+    border-color: var(--red-9);
     background: var(--bg-field-soft);
-    box-shadow: 0 0 0 2px var(--red-8);
+    box-shadow: 0 0 0 2px var(--red-9);
   }
 
   .text-field-error {
