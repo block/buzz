@@ -613,7 +613,7 @@
      visible for pointer and keyboard entry because the ring is the proposed
      interaction treatment being compared in the design-system specimen. */
   .text-field[data-variant="soft"] .text-field-control {
-    border-color: var(--neutral-5);
+    border: 0;
     background: var(--neutral-2);
     box-shadow: 0 0 0 1px var(--neutral-2);
     transition:
@@ -623,13 +623,11 @@
   }
 
   .text-field[data-variant="soft"] .text-field-control:focus {
-    border-color: var(--neutral-7);
     outline: none;
     box-shadow: 0 0 0 2px var(--neutral-7);
   }
 
   .text-field[data-variant="soft"][data-invalid] .text-field-control {
-    border-color: var(--red-9);
     background: var(--neutral-2);
     box-shadow: 0 0 0 2px var(--red-9);
   }
@@ -650,7 +648,6 @@
   }
 
   .text-field[data-variant="soft"][data-disabled] .text-field-control {
-    border-color: var(--neutral-5);
     background: var(--neutral-2);
     box-shadow: none;
   }
