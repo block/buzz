@@ -94,6 +94,11 @@ fn current_working_directory() -> Result<String> {
 /// Content is a bare status string (`"online"`, `"away"`, `"offline"`) matching
 /// the desktop client's format. The relay stores this in Redis and synthesizes
 /// it back on presence queries.
+/// How often an always-on harness republishes its presence. Presence is
+/// ephemeral with a server-side TTL; without a refresh the agent reads as
+/// offline in clients while it is still working.
+const PRESENCE_REFRESH_SECS: u64 = 60;
+
 async fn publish_presence(
     publisher: &relay::RelayEventPublisher,
     keys: &nostr::Keys,
@@ -2712,9 +2717,9 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
-    let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
+    let mut rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            vec![SubscriptionRule {
+            let mut rules = vec![SubscriptionRule {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
@@ -2729,7 +2734,37 @@ async fn tokio_main() -> Result<()> {
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 prompt_tag: Some("@mention".into()),
-            }]
+            }];
+            // A DM to the agent IS the address: nobody writes "@agent" inside a
+            // one-to-one conversation, so the mention rule makes DMs silently
+            // dead. Add a second rule scoped to the discovered DM channels with
+            // the requirement cleared. Group channels keep the mention rule (an
+            // agent must not answer every line in #general).
+            let dm_channels: Vec<String> = channel_info_map
+                .iter()
+                .filter(|(_, info)| info.channel_type == "dm")
+                .map(|(id, _)| id.to_string())
+                .collect();
+            if !dm_channels.is_empty() {
+                tracing::info!("dm channels answered without @mention: {}", dm_channels.len());
+                rules.push(SubscriptionRule {
+                    name: "dms".into(),
+                    channels: filter::ChannelScope::List(dm_channels),
+                    kinds: config.kinds_override.clone().unwrap_or_else(|| {
+                        vec![
+                            KIND_STREAM_MESSAGE,
+                            KIND_WORKFLOW_APPROVAL_REQUESTED,
+                            KIND_STREAM_REMINDER,
+                        ]
+                    }),
+                    require_mention: false,
+                    filter: None,
+                    compiled_filter: None,
+                    consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    prompt_tag: Some("dm".into()),
+                });
+            }
+            rules
         }
         SubscribeMode::All => {
             vec![SubscriptionRule {
@@ -2749,7 +2784,17 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    // Second half of the DM fix: the per-channel filter becomes the relay REQ,
+    // and require_mention there adds a server-side "#p" constraint — so a DM
+    // without a p tag never even reaches the client rules above.
+    for (channel_id, info) in &channel_info_map {
+        if info.channel_type == "dm" {
+            if let Some(filter) = channel_filters.get_mut(channel_id) {
+                filter.require_mention = false;
+            }
+        }
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2789,6 +2834,28 @@ async fn tokio_main() -> Result<()> {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
+        // Presence is an EPHEMERAL event with a server-side TTL, so publishing
+        // it once means an always-on agent reads as "offline" in clients a
+        // minute later while it is happily answering. Refresh it on a timer.
+        let presence_refresh_publisher = presence_publisher.clone();
+        let presence_refresh_keys = presence_keys.clone();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(PRESENCE_REFRESH_SECS));
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                if let Err(e) = publish_presence(
+                    &presence_refresh_publisher,
+                    &presence_refresh_keys,
+                    "online",
+                )
+                .await
+                {
+                    tracing::debug!("presence refresh failed: {e}");
+                }
+            }
+        });
     }
 
     if config.lazy_pool {
