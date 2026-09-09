@@ -464,8 +464,13 @@ for (const stage of ["add", "publish"] as const) {
   }
 }
 
-for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
-  test(`B1 authored deletion before thread switch preserves storage and ${incoming}`, async ({
+for (const { incoming, savedFirst } of [
+  "unrelated thread B draft",
+  "@RemoteScout hello",
+].flatMap((incoming) =>
+  [false, true].map((savedFirst) => ({ incoming, savedFirst })),
+)) {
+  test(`B1 authored deletion before thread switch preserves storage and ${incoming} (${savedFirst ? "persisted" : "unsaved"})`, async ({
     page,
   }) => {
     await install(page);
@@ -525,8 +530,6 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
     await page.getByRole("button", { name: "Invite", exact: true }).click();
     await waitForInviteGate(page);
     await expect(input).toHaveText("");
-    await input.fill("new authored text");
-    await input.fill("");
     const sourceRecord = () =>
       page.evaluate(([root, otherRoot]) => {
         const key = Object.keys(localStorage).find((key) =>
@@ -538,12 +541,44 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
           throw new Error("control B draft missing");
         return drafts[`thread:${root}`] ?? null;
       }, roots);
+    await input.fill("new authored text");
+    if (savedFirst) {
+      // Additional positive control: real scope cleanup saves live nonempty
+      // text, exact refs and selection. Keep the rapid unsaved case above.
+      await navigate(roots[1]);
+      expect(await sourceRecord()).toMatchObject({
+        content: "new authored text",
+        mentionRefs: [],
+        selectionStart: 17,
+        selectionEnd: 17,
+      });
+      await navigate(roots[0]);
+      await expect(input).toHaveText("new authored text");
+    }
+    await input.fill("");
     expect(await sourceRecord()).toBeNull();
-    // Expando proves the actual editor DOM host survived A -> B.
-    await input.evaluate((el) =>
-      el.setAttribute("data-lifecycle-host", "retained"),
-    );
+    // Read, don't poll: use the existing expando round trip to capture the
+    // actual PM document after native deletion. Assert only AFTER switching,
+    // so proof of deletion cannot wait away a rapid scope-cleanup race.
+    const deleted = await input.evaluate((el) => {
+      el.setAttribute("data-lifecycle-host", "retained");
+      const editor = (
+        el as HTMLElement & { editor: import("@tiptap/core").Editor }
+      ).editor;
+      return {
+        dom: el.textContent,
+        doc: editor.getJSON(),
+        from: editor.state.selection.from,
+        to: editor.state.selection.to,
+      };
+    });
     await navigate(roots[1]);
+    expect(deleted).toEqual({
+      dom: "",
+      doc: { type: "doc", content: [{ type: "paragraph" }] },
+      from: 1,
+      to: 1,
+    });
     await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
     await expect(input).toHaveText(incoming);
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
