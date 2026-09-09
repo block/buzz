@@ -258,41 +258,26 @@ class _DmAppBarTitle extends ConsumerWidget {
           key: const ValueKey('dm-header-avatar'),
           size: _dmHeaderAvatarSize,
           geometry: AvatarBadgeMaskGeometry.presenceDot,
-          avatar: isAgent
-              ? AgentAvatarSquircle(
-                  child: ColoredBox(
-                    color: animatedAvatar == null
-                        ? context.colors.primaryContainer
-                        : Colors.transparent,
-                    child: AvatarImageContent(
-                      imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                      fallback: Text(
-                        initial,
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onPrimaryContainer,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-                )
-              : ClipOval(
-                  child: ColoredBox(
-                    color: animatedAvatar == null
-                        ? context.colors.primaryContainer
-                        : Colors.transparent,
-                    child: AvatarImageContent(
-                      imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                      fallback: Text(
-                        initial,
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onPrimaryContainer,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
+          avatar: ClipRRect(
+            borderRadius: BorderRadius.circular(
+              isAgent ? _dmHeaderAvatarSize * 0.3 : _dmHeaderAvatarSize / 2,
+            ),
+            child: ColoredBox(
+              color: animatedAvatar == null
+                  ? context.colors.primaryContainer
+                  : Colors.transparent,
+              child: AvatarImageContent(
+                imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                fallback: Text(
+                  initial,
+                  style: context.textTheme.labelSmall?.copyWith(
+                    color: context.colors.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
+              ),
+            ),
+          ),
           badge: Center(
             child: FractionallySizedBox(
               widthFactor: _dmPresenceDotRatio,

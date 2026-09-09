@@ -53,7 +53,6 @@ import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
-import 'package:buzz/shared/widgets/agent_avatar_squircle.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
@@ -553,17 +552,18 @@ void main() {
       expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
       expect(avatar.badge, isNotNull);
       expect(
-        find.descendant(of: avatarFinder, matching: find.byType(ClipOval)),
-        findsOneWidget,
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(16),
       );
       expect(
-        find.descendant(
-          of: avatarFinder,
-          matching: find.byWidgetPredicate(
-            (widget) =>
-                widget is ClipPath && widget.clipper is AvatarBadgeMaskClipper,
-          ),
-        ),
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
         findsOneWidget,
       );
       final name = tester.widget<Text>(
@@ -685,11 +685,15 @@ void main() {
 
       final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
       expect(
-        find.descendant(
-          of: avatarFinder,
-          matching: find.byType(AgentAvatarSquircle),
-        ),
-        findsOneWidget,
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
       );
       expect(
         tester
@@ -703,24 +707,7 @@ void main() {
         isNull,
       );
       expect(
-        find.descendant(
-          of: avatarFinder,
-          matching: find.byWidgetPredicate(
-            (widget) =>
-                widget is ClipPath && widget.clipper is AvatarBadgeMaskClipper,
-          ),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-          of: avatarFinder,
-          matching: find.byWidgetPredicate(
-            (widget) =>
-                widget is ClipPath &&
-                widget.clipper is AgentAvatarSquircleClipper,
-          ),
-        ),
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
         findsOneWidget,
       );
     });
@@ -759,11 +746,15 @@ void main() {
 
       final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
       expect(
-        find.descendant(
-          of: avatarFinder,
-          matching: find.byType(AgentAvatarSquircle),
-        ),
-        findsOneWidget,
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
       );
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
