@@ -48,11 +48,11 @@ path = "tests/bin/auth_worker.rs"
 # the token cache used by inference and the desktop model picker.
 buzz-model-catalog = { path = "../buzz-model-catalog" }
 # Keep all GDK crates on the exact same Goose revision so shared types stay unified.
-goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
-goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
-goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
-goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
-goose-providers = { git = "https://github.com/aaif-goose/goose", rev = "5a9a13b72aaf8f9aa17ce064bd4d4d761d656982" }
+goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "2f2c92c24c1438cef142476ee6507df82e6c3fba" }
+goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "2f2c92c24c1438cef142476ee6507df82e6c3fba" }
+goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "2f2c92c24c1438cef142476ee6507df82e6c3fba" }
+goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "2f2c92c24c1438cef142476ee6507df82e6c3fba" }
+goose-providers = { git = "https://github.com/aaif-goose/goose", rev = "2f2c92c24c1438cef142476ee6507df82e6c3fba" }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 anyhow = "1"

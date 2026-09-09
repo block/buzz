@@ -443,6 +443,7 @@ mod tests {
             id: pubkey.to_string(),
             display_name: pubkey.to_string(),
             avatar_url: None,
+            description: None,
             system_prompt: String::new(),
             runtime: None,
             model: None,
