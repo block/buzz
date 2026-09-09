@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Button, Field, Input } from "@buzz/ui";
 import { CATALOG } from "../catalog/registry";
 import { PageHeader } from "./primitives";
@@ -67,7 +68,12 @@ export function ComponentsPage() {
             <div>
               <p className="text-meta text-tertiary">{entry.category}</p>
               <h2 id={`${entry.id}-title`} className="text-heading mt-1">
-                <a href={`#${entry.id}`}>{entry.name}</a>
+                <Link
+                  to="/design/components/$componentId"
+                  params={{ componentId: entry.id }}
+                >
+                  {entry.name}
+                </Link>
               </h2>
               <p className="text-caption text-secondary mt-2">
                 {entry.description}
@@ -76,6 +82,14 @@ export function ComponentsPage() {
             <div className="catalog-preview">
               <entry.Preview />
             </div>
+            <Link
+              to="/design/components/$componentId"
+              params={{ componentId: entry.id }}
+              className="text-label text-accent"
+              aria-label={`Explore ${entry.name}`}
+            >
+              Explore states →
+            </Link>
             <details className="catalog-source">
               <summary className="text-caption text-secondary">
                 View example source

@@ -13,6 +13,20 @@ pnpm --filter buzz-desktop-next dev
 Open `http://localhost:1430/design`. Use another port when needed:
 `pnpm --filter buzz-desktop-next dev --port 5188`.
 
+## Focused component pages
+
+Click a component heading or **Explore states** in the catalog to open
+`/design/components/<id>` (for example, `/design/components/input`). Every catalog
+entry has a dedicated URL with an isolated live playground, component-specific
+state guidance, and its example module. Fields, checkboxes, switches, tabs,
+progress, and meters also include side-by-side state samples using the production
+components. Reset example restores both the playground and its state samples.
+
+Use the component picker or Previous / Next links to move through the catalog.
+All components returns to that component's original catalog anchor. Direct links
+and refreshes work with the same SPA fallback as the rest of the site; unknown
+component IDs have a recovery link. Theme and density preferences are shared.
+
 ## Appearance
 
 The navigation contains independent theme and Normal / Compact controls. Density
