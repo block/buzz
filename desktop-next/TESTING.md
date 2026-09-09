@@ -50,9 +50,8 @@ stored values, save failure and retry, live foundation values, compositions,
 Glass tab selection, and all 55 examples at 390/884/1440 in both themes.
 
 Focused-page coverage visits all 55 catalog deep links and checks that only the
-selected playground renders. It exercises catalog links, previous/next navigation,
-the component picker, anchor return, unknown-ID recovery, reset of live and state
-examples, invalid/read-only/disabled fields, indeterminate checkbox interaction,
-disabled and selected tabs, portal density, refresh, and appearance preferences.
-Representative pages are checked at 390/884/1440 in both densities and audited in
-both themes, with distinct per-component screenshots.
+selected component renders in its shared container. It exercises eyebrow and
+nested navigation links, unknown-ID recovery, input and keyboard interactions,
+portal density, refresh, and appearance preferences. Representative pages are
+checked at 390/884/1440 in both densities and audited in both themes, with distinct
+per-component screenshots.

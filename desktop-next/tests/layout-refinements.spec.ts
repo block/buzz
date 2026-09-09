@@ -24,8 +24,8 @@ test("table cells align to the reading edge and scroll surfaces use thin bars", 
   await expect
     .poll(() => viewport.evaluate((node) => node.scrollTop))
     .toBeGreaterThan(0);
-  await page.goto("/design/components/input");
-  await page.getByText("View example module", { exact: true }).click();
+  await page.goto("/design/compositions");
+  await page.getByText("View the response data", { exact: true }).click();
   await expect(page.locator(".catalog-source pre")).toHaveCSS(
     "scrollbar-width",
     "thin",

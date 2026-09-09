@@ -31,19 +31,18 @@ test("every catalog entry links to its own focused component page", async ({
     await expect(
       page.getByRole("heading", { level: 1, name: entry.name, exact: true }),
     ).toBeVisible();
-    await expect(page.locator(".component-playground")).toHaveCount(1);
+    await expect(page.locator(".component-preview")).toHaveCount(1);
     await expect(page.locator(".catalog-entry")).toHaveCount(0);
-    expect(
-      await page
-        .getByRole("complementary", { name: "States to explore" })
-        .getByRole("listitem")
-        .count(),
-    ).toBeGreaterThan(0);
+    await expect(
+      page.getByRole("heading", { name: "Playground", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("complementary")).toHaveCount(0);
+    await expect(page.locator(".component-page details")).toHaveCount(0);
     await expect(page).toHaveTitle(`${entry.name} — Buzz Design System`);
   }
 });
 
-test("catalog navigation, picker, previous/next, reset, and invalid links work", async ({
+test("catalog and nested navigation preserve working examples and recover invalid links", async ({
   page,
 }) => {
   await page.goto("/design/components");
@@ -57,8 +56,6 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
   });
   await input.fill("A temporary draft");
   await expect(input).toHaveCSS("height", "32px");
-  await page.getByRole("button", { name: "Reset example" }).click();
-  await expect(input).toHaveValue("");
   const nav = page.getByRole("navigation", {
     name: "Design system",
     exact: true,
@@ -75,16 +72,8 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
     page.getByRole("button", { name: "Compact", exact: true }),
   ).toBeInViewport();
   await nav.getByRole("link", { name: "Input", exact: true }).click();
-  await page
-    .getByRole("link", { name: "Next: Textarea", exact: false })
-    .click();
-  await expect(page).toHaveURL(/\/textarea$/);
-  await page
-    .getByRole("link", { name: "Previous: Input", exact: false })
-    .click();
-  await expect(page).toHaveURL(/\/input$/);
-  await page.getByRole("combobox", { name: "Jump to component" }).click();
-  await page.getByRole("option", { name: "Dialog", exact: true }).click();
+  await expect(input).toHaveValue("");
+  await nav.getByRole("link", { name: "Dialog", exact: true }).click();
   await expect(page).toHaveURL(/\/dialog$/);
   await page.getByRole("button", { name: "Edit project", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -94,12 +83,8 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
   await expect(
     page.getByRole("heading", { level: 1, name: "Dialog" }),
   ).toBeVisible();
-  await page
-    .getByRole("link", { name: "All components", exact: false })
-    .filter({ hasText: "←" })
-    .click();
-  await expect(page).toHaveURL(/\/design\/components#dialog$/);
-  await expect(page.locator("#dialog")).toBeInViewport();
+  await nav.getByRole("link", { name: "All components", exact: true }).click();
+  await expect(page).toHaveURL(/\/design\/components$/);
   await page.goto("/design/components/not-a-component");
   await expect(
     page.getByRole("heading", { name: "Component not found" }),
@@ -108,46 +93,37 @@ test("catalog navigation, picker, previous/next, reset, and invalid links work",
   await expect(page.locator(".catalog-entry")).toHaveCount(55);
 });
 
-test("state samples use real validation, disabled, selection, and reset behavior", async ({
+test("focused examples retain input, disabled, and keyboard selection behavior", async ({
   page,
 }) => {
   await page.goto("/design/components/input");
-  const invalid = page.getByRole("textbox", { name: "Invalid", exact: true });
-  await expect(invalid).toHaveAttribute("aria-invalid", "true");
-  await expect(
-    page.getByText("Choose a different project name."),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("textbox", { name: "Disabled", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    page.getByRole("textbox", { name: "Read-only", exact: true }),
-  ).not.toBeEditable();
-  await page.goto("/design/components/checkbox");
-  const mixed = page.getByRole("checkbox", {
-    name: "Indeterminate",
+  const input = page.getByRole("textbox", {
+    name: "Project name",
     exact: true,
   });
-  await expect(mixed).toHaveAttribute("aria-checked", "mixed");
-  await mixed.focus();
-  await mixed.press("Space");
-  await expect(mixed).toBeChecked();
-  await expect(mixed).not.toHaveAttribute("aria-checked", "mixed");
-  await page.getByRole("button", { name: "Reset example" }).click();
-  await expect(mixed).toHaveAttribute("aria-checked", "mixed");
+  await input.fill("Keep my draft");
+  await page.getByRole("button", { name: "Compact", exact: true }).click();
+  await expect(input).toHaveValue("Keep my draft");
+  await expect(page.locator(".component-preview")).toHaveCSS("padding", "16px");
+  await page.goto("/design/components/buttons");
+  await expect(
+    page.getByRole("button", { name: "Unavailable", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(
+    page.getByText("1 actions taken", { exact: true }),
+  ).toBeVisible();
+  await page.goto("/design/components/checkbox");
+  const checkbox = page.getByRole("checkbox", {
+    name: "Notify me about replies",
+  });
+  await expect(checkbox).toBeChecked();
+  await checkbox.press("Space");
+  await expect(checkbox).not.toBeChecked();
   await page.goto("/design/components/tabs");
-  const tabs = page.getByRole("tablist", { name: "glass example" });
-  await expect(tabs.getByRole("tab", { name: "Files" })).toHaveAttribute(
-    "aria-disabled",
-    "true",
-  );
+  const tabs = page.getByRole("tablist", { name: "Project views" });
   await tabs.getByRole("tab", { name: "Activity" }).click();
   await expect(tabs.getByRole("tab", { name: "Activity" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await page.getByRole("button", { name: "Reset example" }).click();
-  await expect(tabs.getByRole("tab", { name: "Overview" })).toHaveAttribute(
     "aria-selected",
     "true",
   );

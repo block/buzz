@@ -43,33 +43,12 @@
   outline: 2px solid var(--ring-focus);
   outline-offset: 4px;
 }
-.component-workspace {
-  display: grid;
-  gap: var(--space-page-inset);
-  grid-template-columns: minmax(0, 1fr);
-}
-.component-playground {
-  display: grid;
-  align-items: center;
-  min-height: var(--size-catalog-preview);
-  padding-block: var(--space-panel-inset);
-}
-.component-playground > * {
+.component-preview > * {
   min-width: 0;
   max-width: 100%;
 }
-.component-state-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
-  gap: var(--space-panel-inset);
-}
 .component-page > header h1:focus {
   outline: none;
-}
-@media (min-width: 1280px) {
-  .component-workspace {
-    grid-template-columns: minmax(0, 1fr) 16rem;
-  }
 }
 @media (max-width: 760px) {
   .catalog-grid {

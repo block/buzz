@@ -17,18 +17,16 @@ Open `http://localhost:1430/design`. Use another port when needed:
 
 Click a section’s eyebrow link (the category followed by →) in the catalog to open
 `/design/components/<id>` (for example, `/design/components/input`). Every catalog
-entry has a dedicated URL with an isolated live playground, component-specific
-state guidance, and its example module. Source is shown only on these focused pages. Fields, checkboxes, switches, tabs,
-progress, and meters also include side-by-side state samples using the production
-components. Reset example restores both the playground and its state samples.
+entry has a dedicated URL with its title and live example in a small shared Card.
+The examples retain their interactions and variants. Component pages have no
+playground label, state guide, source disclosure, picker, or extra page actions.
 
-Every component is also indented beneath All components in the navigation, like
-Token table beneath Color. The navigation list scrolls independently so theme and
-density controls remain available. Use these links, the component picker, or
-Previous / Next links to move through the catalog.
-All components returns to that component's original catalog anchor. Direct links
-and refreshes work with the same SPA fallback as the rest of the site; unknown
-component IDs have a recovery link. Theme and density preferences are shared.
+Every component is indented beneath All components in the navigation, like Token
+table beneath Color. The navigation list scrolls independently so theme and
+density controls remain available. Use these links to move through the catalog.
+Direct links and refreshes work with the same SPA fallback as the rest of the
+site; unknown component IDs have a recovery link. Theme and density preferences
+are shared.
 
 ## Appearance
 
