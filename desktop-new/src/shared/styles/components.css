@@ -615,6 +615,11 @@
   .text-field[data-variant="soft"] .text-field-control {
     border-color: var(--neutral-5);
     background: var(--neutral-2);
+    box-shadow: 0 0 0 1px var(--neutral-2);
+    transition:
+      opacity 0.1s ease,
+      background 0.1s ease,
+      box-shadow 0.1s ease;
   }
 
   .text-field[data-variant="soft"] .text-field-control:focus {
