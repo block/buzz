@@ -15,6 +15,29 @@ class RelayHttpQueryClient {
   _ClientGeneration? _currentGeneration;
   final Set<_ClientGeneration> _generations = {};
 
+  /// Read relay metadata over the same owned transport as query requests.
+  Future<http.Response> get(
+    Uri url, {
+    required Map<String, String> headers,
+    required Duration timeout,
+  }) async {
+    final generation = _injectedClient == null
+        ? (_currentGeneration ??= _createGeneration())
+        : null;
+    generation?.acquire();
+    try {
+      return await (_injectedClient ?? generation!.client)
+          .get(url, headers: headers)
+          .timeout(timeout);
+    } on TimeoutException {
+      if (identical(_currentGeneration, generation)) _currentGeneration = null;
+      generation?.retire();
+      rethrow;
+    } finally {
+      generation?.release();
+    }
+  }
+
   Future<http.Response> post(
     Uri url, {
     required Map<String, String> headers,

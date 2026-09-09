@@ -149,6 +149,25 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return const SessionState(status: SessionStatus.disconnected);
   }
 
+  /// NIP-11 `self` is the membership signer; `pubkey` is only contact metadata.
+  Future<String> fetchRelaySelf() async {
+    final config = ref.read(relayConfigProvider);
+    final response = await _httpQueryClient.get(
+      Uri.parse(config.baseUrl),
+      headers: const {'Accept': 'application/nostr+json'},
+      timeout: const Duration(seconds: 8),
+    );
+    if (response.statusCode != 200) {
+      throw RelayException(response.statusCode, 'Relay authority unavailable');
+    }
+    final data = jsonDecode(response.body);
+    final key = data is Map ? data['self'] : null;
+    if (key is! String || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(key)) {
+      throw const FormatException('Relay membership authority unavailable');
+    }
+    return key.toLowerCase();
+  }
+
   /// Execute a one-shot query via the relay's HTTP bridge (`POST /query`).
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {

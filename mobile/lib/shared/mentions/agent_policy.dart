@@ -9,10 +9,12 @@ bool _newer(NostrEvent event, NostrEvent previous) =>
 /// is distinct from a failed read; failures must never revive runtime access.
 Future<List<NostrEvent>> _queryAgentFilters(
   RelaySessionNotifier session,
-  List<NostrFilter> filters,
-) async {
+  List<NostrFilter> filters, {
+  void Function()? checkCurrent,
+}) async {
   final events = <NostrEvent>[];
   for (var start = 0; start < filters.length; start += 10) {
+    checkCurrent?.call();
     events.addAll(
       await session.queryRelay(filters.skip(start).take(10).toList()),
     );
@@ -24,8 +26,10 @@ Future<List<NostrEvent>> _queryAgentFilters(
 /// directory. This does not expand discovery to owner-only coordinates yet.
 Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
   RelaySessionNotifier session,
-  List<NostrEvent> runtimeEvents,
-) async {
+  List<NostrEvent> runtimeEvents, {
+  Set<String>? requestedKeys,
+  void Function()? checkCurrent,
+}) async {
   final latest = <String, NostrEvent>{};
   for (final event in runtimeEvents.where((event) => event.kind == 10100)) {
     final previous = latest[event.pubkey];
@@ -33,19 +37,21 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
       latest[event.pubkey] = event;
     }
   }
+  final keys = requestedKeys ?? latest.keys.toSet();
   final profiles = latestProfileEvents(
     await _queryAgentFilters(session, [
-      for (final key in latest.keys)
+      for (final key in keys)
         NostrFilter(kinds: const [0], authors: [key], limit: 1),
-    ]),
+    ], checkCurrent: checkCurrent),
   );
   final owners = <String, String>{};
   for (final profile in profiles.values) {
     final owner = verifiedOaOwnerPubkey(profile);
-    if (owner != null && latest.containsKey(profile.pubkey)) {
+    if (owner != null && keys.contains(profile.pubkey)) {
       owners[profile.pubkey] = owner;
     }
   }
+  checkCurrent?.call();
   final policies = await _queryAgentFilters(session, [
     for (final owner in owners.entries)
       NostrFilter(
@@ -56,7 +62,8 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
         },
         limit: 1,
       ),
-  ]);
+  ], checkCurrent: checkCurrent);
+  checkCurrent?.call();
   return mergeAgentPolicies(latest.values, policies, owners);
 }
 

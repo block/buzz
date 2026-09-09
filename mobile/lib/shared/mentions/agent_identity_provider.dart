@@ -9,6 +9,7 @@ import '../../shared/crypto/signed_event.dart';
 import '../../shared/relay/relay.dart';
 
 part 'agent_policy.dart';
+part 'agent_authorization.dart';
 
 /// A relay agent parsed from its kind:10100 agent-profile event.
 ///
@@ -18,6 +19,9 @@ part 'agent_policy.dart';
 class AgentDirectoryEntry {
   final String pubkey;
   final String? displayName;
+
+  /// Owner authenticated by the agent's verified NIP-OA kind:0 attestation,
+  /// not a runtime ownership claim. Null means no authenticated owner here.
   final String? ownerPubkey;
   final String? respondTo;
   final List<String> respondToAllowlist;
@@ -70,8 +74,19 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);
+  final config = ref.read(relayConfigProvider);
+  var disposed = false;
+  ref.onDispose(() => disposed = true);
+  final viewer = ref.read(myPubkeyProvider);
   final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return resolveAgentPolicies(session, events);
+  if (disposed) return [];
+  return readAgentAuthorization(
+    session,
+    events.map((event) => event.pubkey).toSet(),
+    viewer: viewer,
+    isCurrent: () =>
+        !disposed && identical(config, ref.read(relayConfigProvider)),
+  );
 });
 
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
