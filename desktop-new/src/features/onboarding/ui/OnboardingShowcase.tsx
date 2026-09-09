@@ -131,31 +131,33 @@ function WelcomeStage() {
 function CheckEmailStage() {
   return (
     <OnboardingFrame legal>
-      <div className="onboarding-heading-lockup">
-        <h2 className="text-title text-primary">Check your email</h2>
-        <p className="text-body text-secondary">
-          We sent a code to{" "}
-          <strong className="text-primary font-semibold">
-            name@example.com
-          </strong>
-        </p>
-      </div>
-      <div className="onboarding-code-content">
-        <CodeInput
-          label="Verification code"
-          labelHidden
-          autoFocus
-          defaultValue="28"
-        />
-        <p className="text-body-sm text-tertiary">
-          Didn’t get the code?{" "}
-          <button
-            type="button"
-            className="onboarding-resend-action text-body-sm text-primary font-semibold"
-          >
-            Resend
-          </button>
-        </p>
+      <div className="onboarding-code-flow">
+        <div className="onboarding-heading-lockup">
+          <h2 className="text-title text-primary">Check your email</h2>
+          <p className="text-body text-secondary">
+            We sent a code to{" "}
+            <strong className="text-primary font-semibold">
+              name@example.com
+            </strong>
+          </p>
+        </div>
+        <div className="onboarding-code-content">
+          <CodeInput
+            label="Verification code"
+            labelHidden
+            autoFocus
+            defaultValue="28"
+          />
+          <p className="text-body-sm text-tertiary">
+            Didn’t get the code?{" "}
+            <button
+              type="button"
+              className="onboarding-resend-action text-body-sm text-primary font-semibold"
+            >
+              Resend
+            </button>
+          </p>
+        </div>
       </div>
       <div className="onboarding-actions">
         <IconButton

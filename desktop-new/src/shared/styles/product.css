@@ -124,10 +124,18 @@
     min-width: 7rem;
   }
 
+  .onboarding-code-flow,
   .onboarding-code-content {
     display: flex;
     flex-direction: column;
-    gap: var(--space-6);
+  }
+
+  .onboarding-code-flow {
+    gap: var(--space-2);
+  }
+
+  .onboarding-code-content {
+    gap: var(--space-3);
   }
 
   .onboarding-resend-action {
