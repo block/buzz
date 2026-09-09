@@ -16,6 +16,17 @@ const PulseScreen = React.lazy(async () => {
 });
 
 type PulseRouteSearch = {
+  feed?: string;
+  layout?: "combined";
+  conversation?: string;
+  dm?: string;
+  channel?: string;
+  post?: string;
+  reply?: string;
+  thread?: string;
+  agentSession?: string;
+  agentSessionChannel?: string;
+  channelManagement?: string;
   profile?: string;
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
@@ -24,7 +35,26 @@ type PulseRouteSearch = {
 function validatePulseSearch(
   search: Record<string, unknown>,
 ): PulseRouteSearch {
+  const stringValue = (key: string) =>
+    typeof search[key] === "string" && search[key].length > 0
+      ? search[key]
+      : undefined;
   return {
+    feed: ["search", "dm", "channel", "agent", "conversation"].includes(
+      String(search.feed),
+    )
+      ? String(search.feed)
+      : undefined,
+    layout: search.layout === "combined" ? "combined" : undefined,
+    conversation: stringValue("conversation"),
+    dm: stringValue("dm"),
+    channel: stringValue("channel"),
+    post: stringValue("post"),
+    reply: stringValue("reply"),
+    thread: stringValue("thread"),
+    agentSession: stringValue("agentSession"),
+    agentSessionChannel: stringValue("agentSessionChannel"),
+    channelManagement: stringValue("channelManagement"),
     profile:
       typeof search.profile === "string" && search.profile.length > 0
         ? search.profile

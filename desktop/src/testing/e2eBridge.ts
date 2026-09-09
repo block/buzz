@@ -11013,6 +11013,42 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (
+      filter.kinds?.includes(1) &&
+      !filter["#h"] &&
+      !filter["#a"] &&
+      !filter["#e"]
+    ) {
+      const authors = filter.authors ?? [
+        DEFAULT_MOCK_IDENTITY.pubkey,
+        ALICE_PUBKEY,
+        BOB_PUBKEY,
+      ];
+      const notes = authors
+        .flatMap((pubkey) => getMockUserNotes(pubkey))
+        .filter((note) => !filter.ids || filter.ids.includes(note.id))
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, filter.limit ?? 50);
+      for (const note of notes)
+        sendWsText(socket.handler, [
+          "EVENT",
+          subId,
+          { ...note, kind: 1, sig: "" },
+        ]);
+      if (filter.ids && filter.kinds.some((kind) => kind !== 1)) {
+        for (const events of mockMessages.values()) {
+          for (const event of events) {
+            if (
+              filter.ids.includes(event.id) &&
+              filter.kinds.includes(event.kind)
+            )
+              sendWsText(socket.handler, ["EVENT", subId, event]);
+          }
+        }
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
     const channelIds = filter["#h"] ?? [];
     if (channelIds.length > 0 && subId.startsWith("history-")) {
       const closeReason = mockChannelHistoryCloses.shift();
@@ -12800,6 +12836,32 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetUserNotes>[0],
           activeConfig,
         );
+      case "get_contact_list": {
+        const { pubkey } = payload as { pubkey: string };
+        if (getIdentity(activeConfig)) {
+          const events = await relayQuery(activeConfig, [
+            { kinds: [3], authors: [pubkey], limit: 1 },
+          ]);
+          return (
+            events[0] ?? {
+              id: "",
+              pubkey,
+              created_at: 0,
+              tags: [],
+              content: "",
+            }
+          );
+        }
+        return createMockEvent(
+          3,
+          "",
+          [
+            ["p", ALICE_PUBKEY],
+            ["p", BOB_PUBKEY],
+          ],
+          pubkey,
+        );
+      }
       case "get_global_notes":
         return handleGetGlobalNotes(
           payload as Parameters<typeof handleGetGlobalNotes>[0],

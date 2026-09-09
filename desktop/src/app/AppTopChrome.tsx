@@ -15,6 +15,7 @@ type AppTopChromeProps = {
   onGoBack: () => void;
   onGoForward: () => void;
   hasCommunityRail?: boolean;
+  hideSidebarTrigger?: boolean;
 };
 
 // Fixed px on purpose (button box + glyph): these controls sit beside the
@@ -58,6 +59,7 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
   hasCommunityRail = false,
+  hideSidebarTrigger = false,
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
@@ -131,7 +133,7 @@ export function AppTopChrome({
       }
     >
       <div className={cn("flex items-center gap-0.5", navRowAlignmentClass)}>
-        <TopChromeSidebarTrigger />
+        {!hideSidebarTrigger && <TopChromeSidebarTrigger />}
         <Button
           aria-label="Go back"
           className={HISTORY_ICON_BUTTON_CLASS}

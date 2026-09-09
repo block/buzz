@@ -10,6 +10,7 @@ type AppShellChannelSurfaceProps = {
   children: React.ReactNode;
   hasCommunityRail: boolean;
   isHuddleRoom: boolean;
+  isPulse?: boolean;
   isHuddleRoomStarting: boolean;
   mainInsetRef: React.RefObject<HTMLElement | null>;
   terminal?: React.ReactNode;
@@ -19,6 +20,7 @@ export function AppShellChannelSurface({
   children,
   hasCommunityRail,
   isHuddleRoom,
+  isPulse = false,
   isHuddleRoomStarting,
   mainInsetRef,
   terminal,
@@ -26,6 +28,7 @@ export function AppShellChannelSurface({
   const { isMobile, openMobile, state: sidebarState } = useSidebar();
   const hasCollapsedSidebarGutter =
     !isHuddleRoom &&
+    !isPulse &&
     !hasCommunityRail &&
     (isMobile ? !openMobile : sidebarState === "collapsed");
 

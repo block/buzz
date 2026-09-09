@@ -172,6 +172,7 @@ export function AppShell() {
     selectedView,
   });
   // Settings lives in history so back returns to the previous app entry.
+  const isPulse = location.pathname === "/pulse";
   const settingsOpen = location.pathname === "/settings";
   const locationSearchSection = (location.search as { section?: unknown })
     .section;
@@ -758,7 +759,7 @@ export function AppShell() {
             onViewHuddleChannel={viewHuddleChannel}
             onVisibilityChange={handleHuddleVisibilityChange}
           >
-            {hasCommunityRail && !isHuddleRoom ? (
+            {hasCommunityRail && !isHuddleRoom && !isPulse ? (
               <CommunityRail
                 activeCommunityId={communitiesHook.activeCommunity?.id ?? null}
                 onAddCommunity={addCommunityDialog.openDialog}
@@ -769,6 +770,8 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
+              open={isPulse ? false : undefined}
+              disableRail={isPulse}
               className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
@@ -778,7 +781,8 @@ export function AppShell() {
                     <AppTopChrome
                       canGoBack={canGoBack}
                       canGoForward={canGoForward}
-                      hasCommunityRail={hasCommunityRail}
+                      hasCommunityRail={hasCommunityRail && !isPulse}
+                      hideSidebarTrigger={isPulse}
                       onGoBack={goBack}
                       onGoForward={goForward}
                     />
@@ -825,7 +829,7 @@ export function AppShell() {
                     </div>
                   ) : (
                     <div className="relative flex min-h-0 flex-1 overflow-visible">
-                      {!isHuddleRoom ? (
+                      {!isHuddleRoom && !isPulse ? (
                         <AppSidebar
                           activeCommunity={communitiesHook.activeCommunity}
                           channels={sidebarChannels}
@@ -933,6 +937,7 @@ export function AppShell() {
                         onChange={setTerminalContextOverride}
                       >
                         <AppShellChannelSurface
+                          isPulse={isPulse}
                           hasCommunityRail={hasCommunityRail}
                           isHuddleRoom={isHuddleRoom}
                           isHuddleRoomStarting={isHuddleRoomStarting}
