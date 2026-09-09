@@ -51,18 +51,23 @@ Future<Set<String>> _ownedAgentKeys(
 
 // Separate subscription owner: a refresh must not tear down/replay its trigger.
 class _AgentDirectoryUpdates extends Notifier<int> {
+  Object? failure;
   @override
   int build() {
     final sessionState = ref.watch(relaySessionProvider);
     ref.watch(myPubkeyProvider);
     ref.watch(relayConfigProvider);
+    failure = null;
     var disposed = false;
+    var attempts = 0;
+    Timer? retry;
     void Function()? unsubscribe;
     Timer? debounce;
     ref.onDispose(() {
       disposed = true;
       unsubscribe?.call();
       debounce?.cancel();
+      retry?.cancel();
     });
     void changed() {
       if (disposed || debounce != null) return;
@@ -74,17 +79,26 @@ class _AgentDirectoryUpdates extends Notifier<int> {
 
     if (sessionState.status == SessionStatus.connected) {
       final session = ref.read(relaySessionProvider.notifier);
-      unawaited(() async {
+      Future<void> subscribe() async {
+        if (disposed) return;
+        attempts++;
         try {
           final close = await session.subscribeWithStatus(
             NostrFilter(
-              kinds: const [0, 10100, 30177, 39002],
+              kinds: const [0, 5, 10100, 30177, 39002],
               limit: 0,
               since: DateTime.now().millisecondsSinceEpoch ~/ 1000,
             ),
-            (_) => changed(),
+            (event) {
+              if (event.kind == 5 && !_isAgentCoordinateDeletion(event)) return;
+              changed();
+            },
             onClosed: (_) => changed(),
-            onStatusChanged: (_) => changed(),
+            onStatusChanged: (status) {
+              if (disposed) return;
+              if (status == RelaySubscriptionStatus.ready) failure = null;
+              changed();
+            },
           );
           if (disposed) {
             close();
@@ -92,10 +106,22 @@ class _AgentDirectoryUpdates extends Notifier<int> {
             unsubscribe = close;
           }
         } catch (error) {
-          // Suggestions may age during failure; publication always reads fresh.
-          debugPrint('[AgentDirectory] refresh subscription failed: $error');
+          if (disposed) return;
+          failure = error;
+          changed();
+          // Establishment can fail before the session installs status callbacks.
+          // Three attempts per session generation; exhausted failure stays
+          // visible to directory readers until reconnect/rebuild permits retry.
+          if (attempts < 3) {
+            retry = Timer(Duration(milliseconds: 250 * attempts), () {
+              retry = null;
+              unawaited(subscribe());
+            });
+          }
         }
-      }());
+      }
+
+      unawaited(subscribe());
     }
     return 0;
   }
@@ -103,3 +129,15 @@ class _AgentDirectoryUpdates extends Notifier<int> {
 
 final _agentDirectoryUpdatesProvider =
     NotifierProvider<_AgentDirectoryUpdates, int>(_AgentDirectoryUpdates.new);
+
+// Desktop build_agent_delete emits a kind:5 a-coordinate, not a 30177 event.
+bool _isAgentCoordinateDeletion(NostrEvent event) =>
+    verifySignedEvent(event) &&
+    event.tags.any((tag) {
+      if (tag.length < 2 || tag[0] != 'a') return false;
+      final coordinate = tag[1].split(':');
+      return coordinate.length == 3 &&
+          coordinate[0] == '30177' &&
+          coordinate[1] == event.pubkey &&
+          RegExp(r'^[0-9a-f]{64}$').hasMatch(coordinate[2]);
+    });

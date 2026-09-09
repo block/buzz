@@ -74,6 +74,8 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
   ref.watch(_agentDirectoryUpdatesProvider);
+  final failure = ref.read(_agentDirectoryUpdatesProvider.notifier).failure;
+  if (failure != null) throw failure;
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);

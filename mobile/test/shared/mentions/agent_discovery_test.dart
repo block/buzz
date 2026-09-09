@@ -13,6 +13,13 @@ class _Session extends PolicySession {
   void Function(NostrEvent)? changed;
   void Function(RelaySubscriptionStatus)? status;
   int closed = 0;
+  int attempts = 0;
+  int failures = 0;
+  NostrFilter? subscription;
+  void deliver(NostrEvent event) {
+    if (subscription?.kinds.contains(event.kind) == true) changed?.call(event);
+  }
+
   List<NostrEvent> Function(NostrFilter)? ownedPage;
   @override
   Future<String> fetchRelaySelf() async => authority;
@@ -23,8 +30,12 @@ class _Session extends PolicySession {
     void Function(String)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
   }) async {
+    attempts++;
+    if (attempts <= failures) throw StateError('establishment unavailable');
+    subscription = filter;
     changed = onEvent;
     status = onStatusChanged;
+    onStatusChanged(RelaySubscriptionStatus.ready);
     return () {
       closed++;
     };
@@ -148,6 +159,95 @@ void main() {
       c.dispose();
       expect(session.closed, 1);
       session.changed!(policy); // late events cannot invalidate a retired scope
+    },
+  );
+
+  test(
+    'failed establishment recovers while connected; coordinate delete refreshes',
+    () async {
+      final events = [owned, policy];
+      final session = _Session(events, relay.public)..failures = 1;
+      final c = container(session);
+      addTearDown(c.dispose);
+      await c.read(agentDirectoryProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await expectLater(
+        c.read(agentDirectoryProvider.future),
+        throwsStateError,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(session.attempts, 2);
+      expect((await c.read(agentDirectoryProvider.future)).length, 1);
+      final deny = signed(
+        owner,
+        30177,
+        {'name': 'Remote helper', 'parallelism': 1, 'respond_to': 'nobody'},
+        time: 101,
+        tags: [
+          ['d', agent.public],
+        ],
+      );
+      events.add(deny);
+      session.deliver(deny);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(
+        (await c.read(agentDirectoryProvider.future)).single.respondTo,
+        'nobody',
+      );
+      final deletion = signed(
+        owner,
+        5,
+        '',
+        tags: [
+          ['a', '30177:${owner.public}:${agent.public}'],
+        ],
+      );
+      events.remove(policy);
+      events.remove(deny);
+      session.deliver(
+        signed(
+          owner,
+          5,
+          '',
+          tags: [
+            ['a', '30000:${owner.public}:other'],
+          ],
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(
+        (await c.read(agentDirectoryProvider.future)).single.respondTo,
+        'nobody',
+      );
+      session.deliver(deletion);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(await c.read(agentDirectoryProvider.future), isEmpty);
+      session.status!(RelaySubscriptionStatus.ready);
+      session.deliver(deletion); // replay remains removed after reconnect
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(await c.read(agentDirectoryProvider.future), isEmpty);
+    },
+  );
+
+  test(
+    'establishment retries are bounded and retired scopes cannot retry',
+    () async {
+      final session = _Session([owned, policy], relay.public)..failures = 99;
+      final c = container(session);
+      await c.read(agentDirectoryProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(session.attempts, 3);
+      await expectLater(
+        c.read(agentDirectoryProvider.future),
+        throwsStateError,
+      );
+      c.dispose();
+      final retired = _Session([owned, policy], relay.public)..failures = 99;
+      final c2 = container(retired);
+      await c2.read(agentDirectoryProvider.future);
+      c2.dispose();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(retired.attempts, 1);
     },
   );
 
