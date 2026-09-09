@@ -48,7 +48,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         # worktrees skip onboarding and share the same identity. The per-worktree
         # identifier is kept so concurrent instances don't collide on
         # tauri-plugin-single-instance or the app data directory.
-        if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" ]]; then
+        if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" && -z "${BUZZ_PRIVATE_KEY:-}" ]]; then
             KEYRING_SERVICE="buzz-desktop-dev"
             KEYRING_BLOB=""
             case "$(uname -s)" in
