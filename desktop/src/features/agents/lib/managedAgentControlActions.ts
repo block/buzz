@@ -8,7 +8,14 @@ type DeleteManagedAgentInput = {
   forceRemoteDelete?: boolean;
 };
 
-type StartManagedAgent = (pubkey: string) => Promise<unknown>;
+export type StartManagedAgentInput =
+  | string
+  | {
+      pubkey: string;
+      expectedRelayUrl: string;
+      expectedSignerPubkey: string;
+    };
+type StartManagedAgent = (input: StartManagedAgentInput) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
 
@@ -37,9 +44,21 @@ export function canEnrollManagedAgentInCommunity(
   agent: Pick<ManagedAgent, "backend" | "backendAgentId" | "keyCustody">,
 ) {
   return (
-    agent.backend.type === "provider" &&
+    agent.backend?.type === "provider" &&
     agent.keyCustody === "provider" &&
     Boolean(agent.backendAgentId)
+  );
+}
+
+/** A registered identity whose initial attest acknowledgement is still pending. */
+export function needsProviderAttestationRecovery(
+  agent: Pick<
+    ManagedAgent,
+    "backend" | "backendAgentId" | "keyCustody" | "status"
+  >,
+) {
+  return (
+    canEnrollManagedAgentInCommunity(agent) && !isManagedAgentActive(agent)
   );
 }
 
@@ -85,15 +104,27 @@ export function resolveManagedAgentChannelId(
 
 export async function startManagedAgentWithRules({
   agent,
+  expectedRelayUrl,
+  expectedSignerPubkey,
   startManagedAgent,
 }: {
   agent: ManagedAgent;
+  expectedRelayUrl?: string;
+  expectedSignerPubkey?: string;
   startManagedAgent: StartManagedAgent;
 }) {
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
-  await startManagedAgent(agent.pubkey);
+  await startManagedAgent(
+    expectedRelayUrl && expectedSignerPubkey
+      ? {
+          pubkey: agent.pubkey,
+          expectedRelayUrl,
+          expectedSignerPubkey,
+        }
+      : agent.pubkey,
+  );
 }
 
 export async function respawnManagedAgentWithRules({

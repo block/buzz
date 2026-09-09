@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   canEnrollManagedAgentInCommunity,
+  needsProviderAttestationRecovery,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -74,6 +75,23 @@ test("pending provider attestation remains community-retryable after registratio
   });
 
   assert.equal(canEnrollManagedAgentInCommunity(providerAgent), true);
+  assert.equal(needsProviderAttestationRecovery(providerAgent), true);
+  assert.equal(
+    needsProviderAttestationRecovery({
+      ...providerAgent,
+      status: "deployed",
+    }),
+    false,
+  );
+  assert.equal(
+    needsProviderAttestationRecovery({
+      ...providerAgent,
+      backendAgentId: null,
+      keyCustody: "local",
+    }),
+    false,
+  );
+  assert.equal(needsProviderAttestationRecovery(agent()), false);
 });
 
 test("relay-mesh agents delegate start to the backend preflight", async () => {

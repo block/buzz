@@ -37,6 +37,7 @@ import {
   type PersonaDialogState,
 } from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityArchive } from "@/features/identity-archive/hooks";
 import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import {
@@ -121,6 +122,7 @@ export function UserProfilePanel({
   widthPx,
   transparentChrome = false,
 }: UserProfilePanelProps) {
+  const { activeCommunity } = useCommunities();
   const { globalConfig } = useGlobalAgentConfig();
   const isOverlay = useIsThreadPanelOverlay();
   const isSplitLayout = layout === "split";
@@ -453,6 +455,8 @@ export function UserProfilePanel({
     useAgentLifecycleActions({
       availability: presenceStatus,
       channels: channelsQuery.data,
+      expectedRelayUrl: activeCommunity?.relayUrl,
+      expectedSignerPubkey: currentPubkey,
       managedAgent,
       relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,

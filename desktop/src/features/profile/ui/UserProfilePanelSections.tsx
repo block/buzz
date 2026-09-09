@@ -8,6 +8,7 @@ import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAva
 import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
+  needsProviderAttestationRecovery,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -387,6 +388,9 @@ export function ProfileSummaryView({
         primaryActionsConcealed && "pointer-events-none",
       )
     : undefined;
+  const isAttestationRecovery = managedAgent
+    ? needsProviderAttestationRecovery(managedAgent)
+    : false;
 
   return (
     <div
@@ -426,7 +430,7 @@ export function ProfileSummaryView({
           followMutation={followMutation}
           agentActionDisabled={isAgentActionPending}
           agentStartBlockReason={
-            managedAgent
+            managedAgent && !isAttestationRecovery
               ? agentPresenceStartBlockReason(
                   isManagedAgentActive(managedAgent),
                   presenceStatus,
@@ -435,7 +439,9 @@ export function ProfileSummaryView({
           }
           agentActionLabel={
             isOwner === true && managedAgent
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? isAttestationRecovery
+                ? "Retry enrollment"
+                : getManagedAgentPrimaryActionLabel(managedAgent)
               : undefined
           }
           agentActionLive={

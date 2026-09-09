@@ -27,6 +27,7 @@ type AgentRuntimeAvatarControlProps = {
   availability?: PresenceStatus;
   isRestarting?: boolean;
   isStarting: boolean;
+  isEnrollmentRetry?: boolean;
   label: string;
   requiresRestart?: boolean;
   startTestId: string;
@@ -142,6 +143,7 @@ export function AgentRuntimeAvatarControl({
   isActive,
   isRestarting = false,
   isStarting,
+  isEnrollmentRetry = false,
   label,
   requiresRestart = false,
   startTestId,
@@ -151,14 +153,20 @@ export function AgentRuntimeAvatarControl({
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
   const isRestartAction = requiresRestart || isRestarting;
-  const actionLabel = isRestarting
-    ? "Restarting Agent"
-    : isStarting
-      ? "Starting Agent"
-      : isRestartAction
-        ? "Restart Agent"
-        : "Start Agent";
-  const actionText = isRestartAction ? "Restart" : "Start";
+  const actionLabel = isEnrollmentRetry
+    ? "Retry Agent Enrollment"
+    : isRestarting
+      ? "Restarting Agent"
+      : isStarting
+        ? "Starting Agent"
+        : isRestartAction
+          ? "Restart Agent"
+          : "Start Agent";
+  const actionText = isEnrollmentRetry
+    ? "Retry"
+    : isRestartAction
+      ? "Restart"
+      : "Start";
   const isPending = isStarting || isRestarting;
   const availabilityLabel = availability
     ? getPresenceLabel(availability)
@@ -170,8 +178,10 @@ export function AgentRuntimeAvatarControl({
   // A present identity need not be a process this supervisor owns. Replace
   // Start (even a stale Restart/error badge) without inventing Stop authority.
   const showStatusDot =
-    Boolean(startBlockReason) || (isActive && !isRestartAction);
-  const hasError = !isActive && !isPending && Boolean(errorLabel);
+    !isEnrollmentRetry &&
+    (Boolean(startBlockReason) || (isActive && !isRestartAction));
+  const hasError =
+    !isEnrollmentRetry && !isActive && !isPending && Boolean(errorLabel);
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
   const actionBadge = isRestartAction

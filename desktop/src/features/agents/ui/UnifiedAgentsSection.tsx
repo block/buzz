@@ -9,7 +9,10 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  isManagedAgentActive,
+  needsProviderAttestationRecovery,
+} from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -310,6 +313,7 @@ function AgentPersonaCard({
             availability={availability}
             isRestarting={restartingAgentPubkey === agent.pubkey}
             isStarting={startingAgentPubkey === agent.pubkey}
+            isEnrollmentRetry={needsProviderAttestationRecovery(agent)}
             label={title}
             requiresRestart={agent.needsRestart}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
@@ -414,6 +418,7 @@ function StandaloneAgentCard({
           availability={availability}
           isRestarting={restartingAgentPubkey === agent.pubkey}
           isStarting={startingAgentPubkey === agent.pubkey}
+          isEnrollmentRetry={needsProviderAttestationRecovery(agent)}
           label={title}
           requiresRestart={agent.needsRestart}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
