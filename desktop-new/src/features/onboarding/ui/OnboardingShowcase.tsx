@@ -8,6 +8,7 @@ import {
 import { type ReactNode, useState } from "react";
 
 import { Button } from "@/shared/ui/Button";
+import { CodeInput } from "@/shared/ui/CodeInput";
 import { IconButton } from "@/shared/ui/IconButton";
 import { Panel } from "@/shared/ui/Panel";
 import { TextField } from "@/shared/ui/TextField";
@@ -127,6 +128,43 @@ function WelcomeStage() {
   );
 }
 
+function CheckEmailStage() {
+  return (
+    <OnboardingFrame legal>
+      <div className="onboarding-heading-lockup">
+        <h2 className="text-title text-primary">Check your email</h2>
+        <p className="text-body text-secondary">
+          We sent a code to{" "}
+          <strong className="text-primary font-semibold">
+            name@example.com
+          </strong>
+        </p>
+      </div>
+      <div className="onboarding-code-content">
+        <CodeInput label="Verification code" labelHidden />
+        <p className="text-body-sm text-tertiary">
+          Didn’t get the code?{" "}
+          <button
+            type="button"
+            className="onboarding-resend-action text-body-sm text-primary font-semibold"
+          >
+            Resend
+          </button>
+        </p>
+      </div>
+      <div className="onboarding-actions">
+        <IconButton
+          aria-label="Go back"
+          icon={<IconArrowLeft size={20} stroke={1.7} aria-hidden="true" />}
+          variant="quiet"
+          size="large"
+          shape="round"
+        />
+      </div>
+    </OnboardingFrame>
+  );
+}
+
 const IDENTITY_POINTS = [
   {
     label: "Stored securely on this device",
@@ -225,6 +263,7 @@ function ProfileStage() {
 const STAGES = [
   { label: "Create a Buzz account", Component: AccountStage },
   { label: "Welcome back to Buzz", Component: WelcomeStage },
+  { label: "Check your email", Component: CheckEmailStage },
   { label: "Create a private identity key", Component: IdentityStage },
   { label: "Build your profile", Component: ProfileStage },
 ] as const;
@@ -233,7 +272,7 @@ export function OnboardingShowcase() {
   return (
     <div className="onboarding-showcase">
       <p className="onboarding-showcase-intro text-body text-secondary">
-        Four selected onboarding moments from Figma, rebuilt with the current
+        Five selected onboarding moments from Figma, rebuilt with the current
         Buzz backdrop, surface, type, and control system.
       </p>
       {STAGES.map(({ label, Component }) => (

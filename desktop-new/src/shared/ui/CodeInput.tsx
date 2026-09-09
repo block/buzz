@@ -8,6 +8,7 @@ import {
 
 export type CodeInputProps = {
   label: string;
+  labelHidden?: boolean;
   defaultValue?: string;
   disabled?: boolean;
   onValueChange?: (value: string) => void;
@@ -30,6 +31,7 @@ function digitsFrom(value: string): string[] {
  */
 export function CodeInput({
   label,
+  labelHidden = false,
   defaultValue = "",
   disabled = false,
   onValueChange,
@@ -104,7 +106,9 @@ export function CodeInput({
 
   return (
     <fieldset className="code-input" disabled={disabled}>
-      <legend className="code-input-label text-body-sm text-primary font-semibold">
+      <legend
+        className={`code-input-label text-body-sm text-primary font-semibold${labelHidden ? " sr-only" : ""}`}
+      >
         {label}
       </legend>
       <div className="code-input-group">

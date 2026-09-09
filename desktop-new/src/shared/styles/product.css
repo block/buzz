@@ -96,6 +96,7 @@
   }
 
   html[data-keyboard-navigation] .onboarding-profile-add:focus-visible,
+  html[data-keyboard-navigation] .onboarding-resend-action:focus-visible,
   html[data-keyboard-navigation] .onboarding-text-action:focus-visible {
     outline: 2px solid var(--purple-8);
     outline-offset: 2px;
@@ -121,6 +122,22 @@
 
   .onboarding-actions > .buzz-button[data-variant="primary"] {
     min-width: 7rem;
+  }
+
+  .onboarding-code-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+
+  .onboarding-resend-action {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: var(--type-weight-semibold);
+    cursor: pointer;
   }
 
   .onboarding-legal {
