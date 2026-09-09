@@ -94,8 +94,11 @@ export function MessageThreadSummaryRow({
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const lastReplyAuthorLabel = summary.lastReply?.author
+    ? ` by ${summary.lastReply.author}`
+    : "";
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply${lastReplyAuthorLabel} ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
     : `View thread with ${summary.replyCount} ${replyLabel}`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
@@ -256,11 +259,31 @@ export function MessageThreadSummaryRow({
                 </span>
                 <span className="inline-grid font-normal text-muted-foreground/70">
                   <span
-                    className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                    className="col-start-1 row-start-1 flex min-w-0 items-baseline gap-1"
                     data-testid="message-thread-summary-last-reply"
                   >
-                    last reply{" "}
-                    {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
+                    <span className="shrink-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0">
+                      {summary.lastReply?.author
+                        ? `last reply by ${summary.lastReply.author} `
+                        : "last reply "}
+                      {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
+                    </span>
+                    {summary.lastReply?.preview ? (
+                      <>
+                        <span
+                          aria-hidden="true"
+                          className="shrink-0 text-muted-foreground/50 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                        >
+                          ·
+                        </span>
+                        <span
+                          className="min-w-0 truncate text-muted-foreground/60 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                          data-testid="message-thread-summary-last-reply-preview"
+                        >
+                          {summary.lastReply.preview}
+                        </span>
+                      </>
+                    ) : null}
                   </span>
                   <span
                     className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"

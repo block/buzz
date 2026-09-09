@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildDescendantStatsByMessageId,
   buildMainTimelineEntries,
+  buildReplyPreview,
   buildThreadPanelData,
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
@@ -631,6 +632,9 @@ test("buildMainTimelineEntries renders a relay-only thread summary", () => {
     threadHeadId: "root",
     replyCount: 4,
     lastReplyAt: 9,
+    // The relay summary carries no reply text, so the last replier is named
+    // from the most-recent participant and the preview stays null.
+    lastReply: { author: "Alice", createdAt: 9, preview: null },
     // Relay returns participants most-recent-first (["alice", "bob"]); the
     // facepile renders them oldest-first so the last replier lands rightmost.
     participants: [
@@ -700,4 +704,166 @@ test("buildMainTimelineEntries merges local knowledge over the relay floor", () 
     entry.summary?.participants.map((participant) => participant.id),
     ["relay", "local"],
   );
+});
+
+test("thread summary names the most recent replier and previews the reply", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const first = message({
+    id: "first",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "bob",
+    author: "Bob",
+    body: "looking at it now",
+  });
+  const latest = message({
+    id: "latest",
+    createdAt: 5,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "ada",
+    author: "Ada",
+    body: "confirmed with the supplier, all good",
+  });
+
+  const [entry] = buildMainTimelineEntries([root, first, latest]);
+
+  assert.deepEqual(entry.summary?.lastReply, {
+    author: "Ada",
+    createdAt: 5,
+    preview: "confirmed with the supplier, all good",
+  });
+});
+
+test("thread summary takes the last reply from the deepest branch, not the shallowest", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const direct = message({
+    id: "direct",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    author: "Bob",
+    body: "first",
+  });
+  const nested = message({
+    id: "nested",
+    createdAt: 9,
+    parentId: "direct",
+    rootId: "root",
+    depth: 2,
+    author: "Ada",
+    body: "nested and newest",
+  });
+
+  const stats = buildDescendantStatsByMessageId([root, direct, nested]);
+
+  assert.deepEqual(stats.get("root").lastReply, {
+    author: "Ada",
+    createdAt: 9,
+    preview: "nested and newest",
+  });
+});
+
+test("a locally known reply keeps its preview when a relay summary covers the same thread", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const reply = message({
+    id: "reply",
+    createdAt: 9,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "ada",
+    author: "Ada",
+    body: "the text the relay summary does not carry",
+  });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 3,
+        descendantCount: 3,
+        lastReplyAt: 9,
+        participantPubkeys: ["ada", "bob"],
+      },
+    ],
+  ]);
+
+  const [entry] = buildMainTimelineEntries([root, reply], new Set(), summaries);
+
+  assert.equal(
+    entry.summary?.lastReply?.preview,
+    "the text the relay summary does not carry",
+  );
+});
+
+test("a newer relay reply outranks an older local one", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const stale = message({
+    id: "stale",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "bob",
+    author: "Bob",
+    body: "old news",
+  });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 4,
+        descendantCount: 4,
+        lastReplyAt: 40,
+        participantPubkeys: ["ada"],
+      },
+    ],
+  ]);
+  const profiles = { ada: { displayName: "Ada", avatarUrl: null } };
+
+  const [entry] = buildMainTimelineEntries(
+    [root, stale],
+    new Set(),
+    summaries,
+    profiles,
+  );
+
+  assert.deepEqual(entry.summary?.lastReply, {
+    author: "Ada",
+    createdAt: 40,
+    preview: null,
+  });
+});
+
+test("a thread with no replies has no last reply", () => {
+  const root = message({ id: "root", createdAt: 1 });
+
+  const [entry] = buildMainTimelineEntries([root]);
+
+  assert.equal(entry.summary, null);
+});
+
+test("buildReplyPreview keeps one line, collapses whitespace and truncates", () => {
+  assert.equal(buildReplyPreview("  hello   there  "), "hello there");
+  assert.equal(buildReplyPreview("\n\nfirst line\nsecond line"), "first line");
+  assert.equal(buildReplyPreview(""), null);
+  assert.equal(buildReplyPreview("   \n  "), null);
+  assert.equal(buildReplyPreview(undefined), null);
+  assert.equal(buildReplyPreview(null), null);
+
+  const long = "x".repeat(200);
+  const preview = buildReplyPreview(long);
+  assert.equal(preview.length, 123);
+  assert.ok(preview.endsWith("..."));
+});
+
+test("buildReplyPreview counts characters, not code units", () => {
+  const emoji = "🙂".repeat(200);
+  const preview = buildReplyPreview(emoji);
+
+  assert.equal([...preview].length, 123);
 });
