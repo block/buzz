@@ -1,3 +1,4 @@
+import { JUMP_TO_UNREAD_EVENT } from "@/shared/lib/keyboard-shortcuts";
 import * as React from "react";
 
 import {
@@ -524,6 +525,16 @@ const MessageTimelineBase = React.forwardRef<
       jumpToMessage(firstUnreadMessageId);
     }
   }, [firstUnreadMessageId, jumpToMessage]);
+  // Keyboard navigation uses the unread pill's existing jump path.
+  React.useEffect(() => {
+    const handleJumpToUnreadEvent = () => {
+      handleJumpToOldestUnread();
+    };
+    window.addEventListener(JUMP_TO_UNREAD_EVENT, handleJumpToUnreadEvent);
+    return () => {
+      window.removeEventListener(JUMP_TO_UNREAD_EVENT, handleJumpToUnreadEvent);
+    };
+  }, [handleJumpToOldestUnread]);
 
   // Scroll to the active search match when it changes. `jumpToMessage` updates
   // the scroll anchor (so the post-commit restore won't yank the view back off
@@ -705,6 +716,7 @@ const MessageTimelineBase = React.forwardRef<
     <TooltipProvider>
       <div
         className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        data-focused-message-list="main"
         onCopy={handleTimelineMentionCopy}
       >
         {showUnreadPill ? (

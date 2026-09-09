@@ -1,6 +1,7 @@
 import { isMacPlatform } from "@/shared/lib/platform";
 
 export const HUDDLE_SHORTCUT_EVENT = "buzz:huddle-shortcut";
+export const JUMP_TO_UNREAD_EVENT = "buzz:jump-to-unread";
 
 export type HuddleShortcutDetail = {
   channelId: string;
@@ -23,6 +24,38 @@ export type KeyboardShortcut = {
 
 export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   // Navigation
+  {
+    id: "previous-unread-conversation",
+    label: "Previous unread conversation",
+    description: "Open the previous unread conversation in sidebar order",
+    keys: "⌥⇧↑",
+    keysWindows: "Ctrl+Alt+Shift+↑",
+    category: "Navigation",
+  },
+  {
+    id: "next-unread-conversation",
+    label: "Next unread conversation",
+    description: "Open the next unread conversation in sidebar order",
+    keys: "⌥⇧↓",
+    keysWindows: "Ctrl+Alt+Shift+↓",
+    category: "Navigation",
+  },
+  {
+    id: "open-threads",
+    label: "Threads",
+    description: "Open the Threads filter in Inbox",
+    keys: "⇧⌘T",
+    keysWindows: "Ctrl+Shift+T",
+    category: "Navigation",
+  },
+  {
+    id: "jump-to-unread",
+    label: "Jump to unread messages",
+    description: "Jump to the unread position in the current conversation",
+    keys: "⇧⌘J",
+    keysWindows: "Ctrl+Shift+J",
+    category: "Navigation",
+  },
   {
     id: "quick-search",
     label: "Quick search",
@@ -148,6 +181,94 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
 
   // Messages
   {
+    id: "focus-messages",
+    label: "Focus messages",
+    description: "Move from the composer to the message timeline",
+    keys: "F6",
+    keysWindows: "F6",
+    category: "Messages",
+  },
+  {
+    id: "previous-message",
+    label: "Previous message",
+    description: "Focus the previous message in the timeline",
+    keys: "↑",
+    keysWindows: "↑",
+    category: "Messages",
+  },
+  {
+    id: "next-message",
+    label: "Next message",
+    description: "Focus the next message in the timeline",
+    keys: "↓",
+    keysWindows: "↓",
+    category: "Messages",
+  },
+  {
+    id: "reply-to-message",
+    label: "Reply in thread",
+    description: "Open a thread for the focused message",
+    keys: "T / →",
+    keysWindows: "T / →",
+    category: "Messages",
+  },
+  {
+    id: "return-to-channel",
+    label: "Return to conversation",
+    description: "Return from a focused thread message to its conversation",
+    keys: "←",
+    keysWindows: "←",
+    category: "Messages",
+  },
+  {
+    id: "focus-composer",
+    label: "Focus composer",
+    description: "Return from the focused message to its composer",
+    keys: "Escape",
+    keysWindows: "Escape",
+    category: "Messages",
+  },
+  {
+    id: "react-to-message",
+    label: "React to message",
+    description: "Open the reaction picker for the focused message",
+    keys: "R",
+    keysWindows: "R",
+    category: "Messages",
+  },
+  {
+    id: "edit-message",
+    label: "Edit message",
+    description: "Edit the focused message when you have permission",
+    keys: "E",
+    keysWindows: "E",
+    category: "Messages",
+  },
+  {
+    id: "mark-message-unread",
+    label: "Mark message unread",
+    description: "Mark the focused message unread",
+    keys: "U",
+    keysWindows: "U",
+    category: "Messages",
+  },
+  {
+    id: "copy-message-link",
+    label: "Copy message link",
+    description: "Copy a link to the focused message",
+    keys: "L",
+    keysWindows: "L",
+    category: "Messages",
+  },
+  {
+    id: "edit-last-message",
+    label: "Edit last message",
+    description: "Edit your last message from an empty composer",
+    keys: "↑",
+    keysWindows: "↑",
+    category: "Messages",
+  },
+  {
     id: "send-message",
     label: "Send message",
     description: "Send the current message",
@@ -226,8 +347,8 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     id: "format-strikethrough",
     label: "Strikethrough",
     description: "Toggle strikethrough formatting",
-    keys: "⌘⇧X",
-    keysWindows: "Ctrl+Shift+X",
+    keys: "⌘⇧S",
+    keysWindows: "Ctrl+Shift+S",
     category: "Formatting",
   },
   {

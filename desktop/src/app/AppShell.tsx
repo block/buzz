@@ -20,6 +20,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useUnreadConversationShortcuts } from "@/app/useUnreadConversationShortcuts";
 import { useAppShellKeyboardShortcuts } from "@/app/useAppShellKeyboardShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
@@ -696,6 +697,18 @@ export function AppShell() {
     markAllChannelsRead,
     markChannelRead,
     selectedView,
+  });
+  useUnreadConversationShortcuts({
+    disabled: settingsOpen || isHuddleRoom,
+    mutedChannelIds,
+    onNavigateChannel: (channelId) => {
+      void goChannel(channelId);
+    },
+    onNavigateHome: () => goHome(),
+    selectedChannelId,
+    selectedView,
+    threadPreviewChannelIds: unreadThreadChannelIds,
+    unreadChannelIds,
   });
   return (
     <PreventSleepProvider>

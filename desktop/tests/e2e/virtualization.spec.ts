@@ -894,3 +894,96 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   await page.getByTestId("message-scroll-to-latest").click();
   await expect(page.getByText("buffered live tail sentinel")).toBeVisible();
 });
+
+test("keyboard message focus stays clear of timeline chrome and preserves drafts", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-deep-history").click();
+  await expect(
+    page.locator('[data-message-id="mock-deep-history-599"]'),
+  ).toBeVisible();
+  const composer = page.getByTestId("message-input");
+  await composer.fill("Keep this draft");
+  await composer.press("F6");
+  await expect(
+    page.locator('[data-message-id="mock-deep-history-599"]'),
+  ).toBeFocused();
+  for (let index = 598; index >= 574; index -= 1) {
+    await page.keyboard.press("ArrowUp");
+    await expect(
+      page.locator(`[data-message-id="mock-deep-history-${index}"]`),
+    ).toBeFocused();
+  }
+  const focused = page.locator('[data-message-id="mock-deep-history-574"]');
+  await expect
+    .poll(async () => {
+      const row = await focused.boundingBox();
+      const header = await page.getByTestId("chat-title").boundingBox();
+      const input = await composer.boundingBox();
+      return Boolean(
+        row &&
+          header &&
+          input &&
+          row.y >= header.y + header.height &&
+          row.y + row.height <= input.y,
+      );
+    })
+    .toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveText("Keep this draft");
+});
+test("focused actions preserve editing and mark-unread focus", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const composer = page.getByTestId("message-input");
+  const own = page.locator('[data-message-id="mock-general-welcome"]');
+  await expect(own).toBeVisible();
+  await composer.press("F6");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  await expect(own).toBeFocused();
+  await page.keyboard.press("e");
+  await expect(composer).toBeFocused();
+  await expect(composer).toContainText("Welcome to");
+  await composer.fill("Edited using focused shortcut");
+  await composer.press("Enter");
+  await expect(own).toContainText("Edited using focused shortcut");
+  await expect(composer).toHaveText("");
+  await composer.press("ArrowUp");
+  await expect(composer).toContainText("Edited using focused shortcut");
+  await composer.press("Escape");
+  await composer.press("F6");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("l");
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_LAST_CLIPBOARD__?.text))
+    .toContain("mock-general-alice");
+  await page.keyboard.press("t");
+  const panel = page.getByTestId("message-thread-panel");
+  await expect(panel).toBeVisible();
+  await panel.getByTestId("message-input").press("F6");
+  await page.keyboard.press("ArrowLeft");
+  await expect(panel).toHaveCount(0);
+  await expect(
+    page.locator('[data-message-id="mock-general-alice"]'),
+  ).toBeFocused();
+  await page.keyboard.press("r");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await composer.press("F6");
+  await page.keyboard.press("u");
+  await expect(page.getByTestId("channel-general")).toHaveClass(/font-bold/);
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeFocused();
+  await composer.fill("treul");
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(composer).toHaveText("treul");
+});

@@ -16,11 +16,13 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
-import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { buildMentionClipboardHtml } from "@/features/messages/lib/mentionClipboard";
-import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  canCopyMessageLink,
+  copyMessageLink,
+} from "@/features/messages/lib/focusedMessageNavigation";
 import { useMessageMentionIdentities } from "@/features/messages/lib/useMessageMentionIdentities";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
@@ -56,32 +58,6 @@ import { ProtectedMessageAction } from "@protected-feature-components";
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
-
-/** Copying a message link is offered from both the hover action bar and the
- *  More menu; both paths share this exact link-building + toast behavior. */
-function copyMessageLink(channelId: string, message: TimelineMessage) {
-  const { rootId } = getThreadReference(message.tags ?? []);
-  const link = buildMessageLink({
-    channelId,
-    messageId: message.id,
-    threadRootId: rootId,
-  });
-  copyTextToClipboard(link, "Link copied to clipboard");
-}
-
-/** Gate shared by every copy-link surface: pending sends have no delivered
- *  event to link to, huddle system rows aren't linkable, and callers without
- *  a channelId (e.g. inbox preview rows) can't build the link. */
-function canCopyMessageLink(
-  message: TimelineMessage,
-  channelId: string | null | undefined,
-): channelId is string {
-  return (
-    !message.pending &&
-    message.kind !== KIND_HUDDLE_STARTED &&
-    Boolean(channelId)
-  );
-}
 
 function MoreActionsMenu({
   channelId,

@@ -50,6 +50,11 @@ import { SpoilerMark } from "./spoilerMark";
 import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
 import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
 import { useComposerMessageLinks } from "./useComposerMessageLinks";
+import {
+  focusLastRowForElement,
+  isFocusOverlayOpen,
+  shouldClaimComposerTimelineFocus,
+} from "./focusedMessageNavigation";
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -501,6 +506,31 @@ export function useRichTextEditor({
             !event.isComposing
           ) {
             return onLinkShortcutRef.current?.() ?? false;
+          }
+
+          // F6 moves focus into the timeline (explicit keyboard entry). Unlike
+          // ArrowUp edit-last it works with a non-empty draft — the draft is
+          // never modified — and it declines while autocomplete is open, IME
+          // is composing, modifiers are held, or a dialog/menu is open, so
+          // app and channel-navigation bindings keep the key.
+          if (event.key === "F6") {
+            if (
+              shouldClaimComposerTimelineFocus({
+                key: event.key,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                altKey: event.altKey,
+                shiftKey: event.shiftKey,
+                repeat: event.repeat,
+                isComposing: event.isComposing,
+                autocompleteOpen: isAutocompleteOpen?.current ?? false,
+                overlayOpen: isFocusOverlayOpen(),
+              })
+            ) {
+              event.preventDefault();
+              return focusLastRowForElement(view.dom);
+            }
+            return false;
           }
 
           if (event.key !== "ArrowUp") return false;

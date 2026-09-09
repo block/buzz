@@ -281,6 +281,33 @@ export function MessageThreadPanel({
     },
     [collapseThreadHeadReplies, onExpandReplies, threadHeadId],
   );
+  // ArrowLeft on a focused thread row returns to the source conversation:
+  // close the panel, then restore focus to the source message row in the
+  // main timeline (falling back to the main composer when the row is gone).
+  const handleThreadBack = React.useCallback(() => {
+    const sourceId = threadHeadId;
+    onClose();
+    if (!sourceId) return;
+    requestAnimationFrame(() => {
+      const escapeId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(sourceId)
+          : sourceId;
+      const sourceRow = document.querySelector<HTMLElement>(
+        `article[data-message-id="${escapeId}"]`,
+      );
+      if (sourceRow) {
+        sourceRow.focus({ preventScroll: true });
+        sourceRow.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="channel-drop-zone"] [data-testid="message-input"]',
+        )
+        ?.focus();
+    });
+  }, [onClose, threadHeadId]);
 
   const composerReplyTarget =
     replyTargetMessage && threadHead && replyTargetMessage.id !== threadHead.id
@@ -520,6 +547,7 @@ export function MessageThreadPanel({
       <div
         className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
         data-image-gallery-scope="thread"
+        data-focused-message-list="thread"
         ref={threadContentRef}
         style={
           hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
@@ -569,6 +597,7 @@ export function MessageThreadPanel({
                 }
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}
+                onNavigateBack={handleThreadBack}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={
                   onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
@@ -736,6 +765,7 @@ export function MessageThreadPanel({
                           }
                           onMarkUnread={onMarkUnread}
                           onMarkRead={onMarkRead}
+                          onNavigateBack={handleThreadBack}
                           onReply={onSelectReplyTarget}
                           onSendToChannel={stableSendToChannel}
                           onToggleReaction={onToggleReaction}

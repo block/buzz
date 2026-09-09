@@ -2,6 +2,10 @@ import * as React from "react";
 import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
+import {
+  consumePendingOpenInboxThreads,
+  subscribeOpenInboxThreads,
+} from "@/app/unreadNavigationEvents";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -579,6 +583,13 @@ export function HomeView({
       unreadOnly,
     ],
   );
+  // The global threads shortcut opens the existing Threads tab through the
+  // same selection-reset path as the filter menu. A pending request survives
+  // the navigation that mounts this view after the keypress.
+  React.useEffect(() => {
+    if (consumePendingOpenInboxThreads()) handleFilterChange("thread");
+    return subscribeOpenInboxThreads(() => handleFilterChange("thread"));
+  }, [handleFilterChange]);
 
   if (isLoading && !feed) {
     return <HomeLoadingState />;

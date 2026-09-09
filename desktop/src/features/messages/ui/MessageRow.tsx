@@ -58,6 +58,7 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { handleFocusedMessageKeyDown } from "@/features/messages/lib/focusedMessageNavigation";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -99,6 +100,7 @@ export const MessageRow = React.memo(
     onMarkUnread,
     onMarkRead,
     onToggleReaction,
+    onNavigateBack,
     onReply,
     onSendToChannel,
     onEntranceComplete,
@@ -151,6 +153,8 @@ export const MessageRow = React.memo(
       remove: boolean,
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
+    /** Thread surfaces only: ArrowLeft returns to the source conversation. */
+    onNavigateBack?: () => void;
     onSendToChannel?: (message: TimelineMessage) => Promise<void>;
     onUnfollowThread?: (message: TimelineMessage) => void;
     onEntranceComplete?: (messageId: string) => void;
@@ -888,10 +892,28 @@ export const MessageRow = React.memo(
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
               : "",
+            // Keyboard focus ring for focused-message navigation (F6 entry,
+            // ArrowUp/Down movement). Rows stay out of tab order
+            // (`tabIndex={-1}`); F6 is the explicit entry point.
+            "focus:outline-none focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60",
+            "focus:scroll-mt-[var(--channel-top-chrome-height,4.5rem)] focus:scroll-mb-[var(--composer-overlay-height,6rem)]",
           )}
+          data-message-focus="true"
           data-message-id={message.id}
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
+          onKeyDown={(event) =>
+            handleFocusedMessageKeyDown(event, {
+              channelId,
+              message,
+              onEdit,
+              onMarkUnread,
+              onNavigateBack,
+              onReply,
+              canOpenReactions: canToggleReactions,
+            })
+          }
+          tabIndex={-1}
         >
           {isThreadReplyLayout ? (
             <>
