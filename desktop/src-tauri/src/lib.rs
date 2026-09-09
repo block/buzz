@@ -569,6 +569,7 @@ pub fn run() {
             get_project_repo_snapshot,
             get_project_repo_file_content,
             get_project_repo_diff,
+            get_task_github,
             get_project_local_repo_diff,
             get_project_local_repo_snapshot,
             get_project_local_repo_file_content,

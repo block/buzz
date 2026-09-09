@@ -6,6 +6,7 @@ import {
   githubRepositoryUrl,
   nestChannels,
   parseChannelBackedTask,
+  taskParentChannel,
 } from "./channelBackedTask.ts";
 
 const CANVAS = `---
@@ -68,6 +69,14 @@ describe("githubRepositoryUrl", () => {
 });
 
 describe("channel-backed task hierarchy", () => {
+  it("keeps parent relationships when branch metadata is incomplete", () => {
+    assert.equal(
+      taskParentChannel(
+        CANVAS.replace(/branch:[\s\S]*?\n---/, 'branch: "sol/telemetry"\n---'),
+      ),
+      "parent",
+    );
+  });
   const channel = (id) => ({ id, name: id });
 
   it("reads channel links and recursively nests children", () => {

@@ -13,6 +13,8 @@ mod agent_update_rollback;
 mod agents;
 mod bestie;
 mod canvas;
+mod task_github;
+pub use task_github::*;
 mod channel_reconnect_repair;
 mod channel_templates;
 mod channel_window;

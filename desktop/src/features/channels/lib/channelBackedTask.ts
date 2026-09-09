@@ -14,9 +14,9 @@ function string(value: unknown): string | null {
 }
 
 /** Read the experimental channel-backed task contract from canvas frontmatter. */
-export function parseChannelBackedTask(
+function taskFrontmatter(
   content: string | null | undefined,
-): ChannelBackedTask | null {
+): Record<string, unknown> | null {
   const frontmatter = content?.match(
     /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/,
   )?.[1];
@@ -32,6 +32,21 @@ export function parseChannelBackedTask(
 
   const record = value as Record<string, unknown>;
   if (record.buzz_schema !== "channel-backed-task/v1") return null;
+  return record;
+}
+
+export function taskParentChannel(
+  content: string | null | undefined,
+): string | null {
+  const parent = string(taskFrontmatter(content)?.parent_channel);
+  return parent ? channelIdFromLink(parent) : null;
+}
+
+export function parseChannelBackedTask(
+  content: string | null | undefined,
+): ChannelBackedTask | null {
+  const record = taskFrontmatter(content);
+  if (!record) return null;
   if (!record.task || typeof record.task !== "object") return null;
   const task = record.task as Record<string, unknown>;
   const title = string(task.title);

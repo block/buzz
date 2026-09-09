@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { GitBranch, GitPullRequest, MessagesSquare } from "lucide-react";
 import * as React from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
 
 import { useCanvasQuery } from "@/features/channels/hooks";
 import {
@@ -13,6 +15,54 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { cn } from "@/shared/lib/cn";
+import { Markdown } from "@/shared/ui/markdown";
+import { invokeTauri } from "@/shared/api/tauri";
+
+type GithubReview = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  isDraft: boolean;
+  reviewDecision: string;
+  statusCheckRollup:
+    | {
+        name?: string;
+        context?: string;
+        detailsUrl?: string;
+        targetUrl?: string;
+        conclusion?: string;
+        status?: string;
+        state?: string;
+      }[]
+    | null;
+};
+type GithubChanges = {
+  html_url: string;
+  files: {
+    filename: string;
+    additions: number;
+    deletions: number;
+    patch?: string;
+    blob_url: string;
+  }[];
+};
+
+function useGithubTask(task: ChannelBackedTask, view: "changes" | "review") {
+  const repository = task.branch && githubRepositoryUrl(task.branch.repository);
+  return useQuery({
+    queryKey: ["task-github", repository, task.branch?.name, view],
+    enabled: Boolean(repository && task.branch),
+    queryFn: () =>
+      invokeTauri<GithubChanges | GithubReview[]>("get_task_github", {
+        repository: repository?.replace("https://github.com/", ""),
+        branch: task.branch?.name,
+        view,
+      }),
+    staleTime: 30_000,
+    retry: false,
+  });
+}
 
 type TaskView = "overview" | "changes" | "review" | "conversation";
 
@@ -25,13 +75,25 @@ const VIEWS: readonly TaskView[] = [
 
 function TaskLink({ href, children }: { href: string; children: string }) {
   return (
-    <a className="text-primary hover:underline" href={href}>
+    <a
+      className="text-primary hover:underline"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => {
+        event.preventDefault();
+        void openUrl(href).catch(() =>
+          toast.error("Could not open link in browser"),
+        );
+      }}
+    >
       {children}
     </a>
   );
 }
 
 function TaskOverview({ task }: { task: ChannelBackedTask }) {
+  const repository = task.branch && githubRepositoryUrl(task.branch.repository);
   return (
     <div
       className="mx-auto w-full max-w-3xl space-y-6 px-6 py-8"
@@ -52,13 +114,13 @@ function TaskOverview({ task }: { task: ChannelBackedTask }) {
         <div>
           <dt className="text-xs text-muted-foreground">Origin</dt>
           <dd className="mt-1">
-            <TaskLink href={task.originatingThread}>Open conversation</TaskLink>
+            <Markdown content={task.originatingThread} />
           </dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">Parent</dt>
           <dd className="mt-1">
-            <TaskLink href={task.parentChannel}>Open parent channel</TaskLink>
+            <Markdown content={task.parentChannel} />
           </dd>
         </div>
         <div className="sm:col-span-2">
@@ -66,7 +128,15 @@ function TaskOverview({ task }: { task: ChannelBackedTask }) {
             Implementation branch
           </dt>
           <dd className="mt-1 font-mono text-xs">
-            {task.branch?.name ?? "Not started"}
+            {repository && task.branch ? (
+              <TaskLink
+                href={`${repository}/tree/${encodeURIComponent(task.branch.name)}`}
+              >
+                {task.branch.name}
+              </TaskLink>
+            ) : (
+              (task.branch?.name ?? "Not started")
+            )}
           </dd>
         </div>
       </dl>
@@ -76,8 +146,10 @@ function TaskOverview({ task }: { task: ChannelBackedTask }) {
 
 function TaskChanges({ task }: { task: ChannelBackedTask }) {
   const branch = task.branch;
+  const github = useGithubTask(task, "changes");
+  const isGithub = Boolean(branch && githubRepositoryUrl(branch.repository));
   const diff = useQuery({
-    enabled: Boolean(branch),
+    enabled: Boolean(branch) && !isGithub,
     queryKey: ["channel-backed-task", branch?.repository, branch?.name, "diff"],
     queryFn: () =>
       getProjectRepoDiff({
@@ -88,6 +160,45 @@ function TaskChanges({ task }: { task: ChannelBackedTask }) {
     retry: 1,
     staleTime: 30_000,
   });
+  if (isGithub) {
+    if (github.isPending)
+      return <BuzzLoadingState label="Loading GitHub changes" />;
+    if (github.error)
+      return (
+        <EmptyView
+          title="Could not load GitHub changes"
+          description={github.error.message}
+        />
+      );
+    const changes = github.data as GithubChanges;
+    return (
+      <div className="mx-auto w-full max-w-4xl space-y-4 p-6">
+        <TaskLink href={changes.html_url}>
+          {branch?.name ?? "Branch changes"}
+        </TaskLink>
+        {changes.files.map((file) => (
+          <details key={file.filename} className="rounded border p-3" open>
+            <summary className="cursor-pointer font-mono text-xs">
+              {file.filename}{" "}
+              <span className="text-green-600">+{file.additions}</span>{" "}
+              <span className="text-red-600">−{file.deletions}</span>
+            </summary>
+            {file.patch ? (
+              <pre className="mt-3 overflow-x-auto whitespace-pre font-mono text-xs">
+                {file.patch}
+              </pre>
+            ) : (
+              <TaskLink href={file.blob_url}>View file on GitHub</TaskLink>
+            )}
+          </details>
+        ))}
+        <p className="text-xs text-muted-foreground">
+          GitHub returns patches for up to 300 files. The branch link opens the
+          complete comparison.
+        </p>
+      </div>
+    );
+  }
   if (!branch)
     return (
       <EmptyView
@@ -141,6 +252,7 @@ function TaskChanges({ task }: { task: ChannelBackedTask }) {
 }
 
 function TaskReview({ task }: { task: ChannelBackedTask }) {
+  const github = useGithubTask(task, "review");
   const repository = task.branch
     ? githubRepositoryUrl(task.branch.repository)
     : null;
@@ -148,6 +260,52 @@ function TaskReview({ task }: { task: ChannelBackedTask }) {
     repository && task.branch
       ? `${repository}/pulls?q=${encodeURIComponent(`is:pr head:${task.branch.name}`)}`
       : null;
+  if (repository && task.branch) {
+    if (github.isPending)
+      return <BuzzLoadingState label="Finding pull request" />;
+    if (github.error)
+      return (
+        <EmptyView
+          title="Could not load pull request"
+          description={github.error.message}
+        />
+      );
+    const prs = github.data as GithubReview[];
+    if (!prs.length)
+      return (
+        <EmptyView
+          title="No pull request yet"
+          description={`No pull request found for ${task.branch.name}.`}
+        />
+      );
+    const pr = prs.find((pr) => pr.state === "OPEN") ?? prs[0];
+    return (
+      <div className="mx-auto w-full max-w-3xl space-y-4 p-6">
+        <h2 className="text-lg font-semibold">
+          <TaskLink href={pr.url}>{`#${pr.number} ${pr.title}`}</TaskLink>
+        </h2>
+        <p className="text-sm">
+          {pr.isDraft ? "Draft" : pr.state} ·{" "}
+          {pr.reviewDecision || "No review decision"}
+        </p>
+        <ul className="space-y-2 text-sm">
+          {pr.statusCheckRollup?.map((check) => (
+            <li
+              key={
+                check.detailsUrl ??
+                check.targetUrl ??
+                check.name ??
+                check.context
+              }
+            >
+              {check.name ?? check.context}:{" "}
+              {check.conclusion || check.state || check.status}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
   return (
     <EmptyView
       action={

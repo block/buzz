@@ -1,10 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
-import {
-  channelIdFromLink,
-  parseChannelBackedTask,
-} from "@/features/channels/lib/channelBackedTask";
+import { taskParentChannel } from "@/features/channels/lib/channelBackedTask";
 import { getCanvases } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
 
@@ -23,8 +20,7 @@ export function useChannelBackedTaskParents(channels: Channel[]) {
   return React.useMemo(() => {
     const parents = new Map<string, string>();
     for (const channelId of channelIds) {
-      const task = parseChannelBackedTask(canvases.data?.[channelId]?.content);
-      const parentId = task && channelIdFromLink(task.parentChannel);
+      const parentId = taskParentChannel(canvases.data?.[channelId]?.content);
       if (parentId) parents.set(channelId, parentId);
     }
     return parents;
