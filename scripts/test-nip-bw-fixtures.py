@@ -37,6 +37,7 @@ class CorpusTests(unittest.TestCase):
             'missing scenario coverage': lambda d: [c.update(coverage=[]) for c in d['cases']],
             'unmarked production identity data': lambda d: d['provenance'].update(test_only=False),
             'conflicting permutation oracle': lambda d: next(c for c in d['cases'] if c['name'] == 'late-handoff-delivery')['expected'][-1].update(projection={'handoff': 'incorrect'}),
+            'resolved oracle regression': lambda d: next(c for c in d['cases'] if c['name'] == 'later-test-does-not-reopen')['expected'][-1]['projection']['issues'].update({d['events']['root_a']['event']['id']: 'implemented'}),
             'invalid outcome': lambda d: d['cases'][0]['expected'][0].update(outcome='maybe'),
         }
         for label, mutate in mutations.items():

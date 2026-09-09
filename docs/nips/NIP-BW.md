@@ -19,6 +19,12 @@ It is a regular, non-replaceable event, retained append-only by BW consumers.
 There is no `d` tag, replacement, latest-timestamp-wins, or deletion-as-undo.
 No production constant or kind registry is changed in P1.
 
+Product decision, 2026-09-09: a valid human acceptance closes its issue. Later
+faults require a new issue; features require a new change with a concrete delta.
+Later tests, builds, sibling rejections and handoff changes MUST NOT automatically
+reopen the accepted issue. The historical-review fold below makes this independent
+of delivery order; it adds no finality service, new record type or local latch.
+
 This advances VISION.md and VISION_SOVEREIGN.md: relay code and signed decisions
 remain authoritative; GitHub is a build mirror. Intentional tension with
 VISION_PROJECTS.md's standard-status interoperability: BW has stricter causal,
@@ -163,8 +169,11 @@ A successor of an ancestor is not silently discarded as stale: if independently
 valid at that ancestor it creates a fork, even when delivered late. A descendant
 of another object is `wrong-previous`; a duplicate of a processed ID is replay.
 Two valid genesis or successors produce visible `fork` containing sorted event
-IDs. All descendants and dependent side effects are blocked, including previously
-projected descendants (display their history as disputed, never erase signatures).
+IDs. Operational descendants and dependent side effects are blocked, including
+previously projected operational descendants. Display the dispute and preserve
+all signed history. Human review has the explicit historical-branch exception
+below: a technical fork does not erase a valid signed acceptance or manufacture
+a human rejection. Issue resolution and technical conflict flags are separate.
 There is no automatic fork winner or in-band fork repair in BW v1. Owner must
 resolve operationally before adopting a separately reviewed protocol revision;
 clients must not fabricate a merge or bypass with a new timestamp.
@@ -323,24 +332,47 @@ External Git input must show every implemented commit is an ancestor of relay_sh
 (including equality), and freeze readback must be the actual Relay stream head at
 freeze. A signed claim or a GitHub ref is insufficient.
 
-Only freeze creates a set. `release-set` may later close it with content
+Only freeze creates a set. Owner/coordinator under the pinned pipeline policy may
+later close it with content
 `{action:"close",set:freeze-id,outcome:"failed"|"aborted",reason}` and previous
 = lifecycle head (initially freeze). Frozen fields are never repeated or replaced.
 No close while an external provider run remains nonterminal; cancellation must
-first be read back. Completed sets need no close: after verdicts for all members,
-the set is completed even with partial rejection. A closed/completed set never
-reactivates. Failed run alone yields retryable active set, not terminal failed set.
-Active = frozen/requested/building/retryable/test-ready/partially-reviewed.
-Terminal = completed/failed/aborted. Active membership excludes other active sets.
-Two concurrent valid freezes sharing a member conflict and block both; no ID or
-timestamp tie-break. Closing one disputed claim is not an implicit conflict repair.
+first be read back. Close stops further builds; it does not revoke an existing
+successful run, artifact or human test authorization. A fully bound historical
+handoff or verdict may still arrive or be signed after close.
 
-Terminal status releases membership for new freezes. Accepted issues remain
-resolved forever in v1 and cannot be members again. Rejected issues enter rework;
-ready reset requires that verdict, a new delegate cycle if needed, and new
-in-development/implemented events. Failed/aborted sets allow reuse of an unchanged
-implemented event, or explicit ready reset referencing terminal_set. This avoids
-membership deadlock without mutating frozen membership or inheriting verdicts.
+Set completion is derived from immutable membership and valid historical verdicts
+for that exact set, across all its handoffs. Once every member has at least one
+such verdict, the set is `completed`, including partial rejection. A member's
+acceptance in some other set does not supply this set's missing artifact verdict.
+Completion takes precedence over close; a later or late-delivered close remains
+visible history but cannot turn completed into failed/aborted. Without complete
+member verdict coverage, a valid unconflicted close projects failed/aborted;
+otherwise the set is active. Close-chain conflicts remain visible and block
+operations without inventing completion or a human verdict.
+
+Active = frozen/requested/building/retryable/test-ready/partially-reviewed.
+Terminal = completed/failed/aborted. No terminal set becomes active again. An
+aborted/failed set may become completed through actual historical member verdicts;
+this terminal-to-terminal change neither dispatches work nor reopens an issue.
+New build requests for terminal sets reject `set-terminal`. Handoffs referencing
+an existing successful run may annotate even a terminal set; they cannot dispatch
+or clear accumulated verdicts. Failed run alone yields a retryable active set.
+Active membership excludes other active sets. Two concurrent valid freezes sharing
+a member conflict and block both; no ID or timestamp tie-break. Closing one disputed
+claim is not an implicit conflict repair.
+
+Terminal status releases membership for new freezes. A valid human acceptance
+makes its issue `resolved`, permanently under the same trust and verified evidence;
+that issue cannot be selected into a later freeze or reset to ready. Eligibility
+is evaluated at the freeze's authored time, with the applicable historical state;
+a later acceptance cannot rewrite an already frozen member list. It still resolves
+the issue in every view of that list, without inventing an artifact review in the
+other set. A coordinator can close a now-unnecessary active set normally.
+Rejected issues without any valid acceptance enter rework; ready reset requires
+that verdict, a new delegate cycle if needed, and new in-development/implemented
+events. Failed/aborted sets permit reuse of unchanged implemented work only for
+issues that remain unresolved. No membership is mutated and no verdict inherited.
 
 ## build-request and build-run
 
@@ -394,40 +426,90 @@ readback attesting immutable Tailnet availability. Other platforms use method
 and Windows must explicitly state unsigned status in human-readable text.
 Ephemeral CI artifact URLs alone fail `durability` even if hashes match.
 
-Handoffs form a previous chain per set. Evaluate supersession against the complete
-known history, never arrival order: an otherwise valid verdict on the old handoff
-with created_at <= the proposed successor's created_at prevents that successor
-(`handoff-locked`). Equal timestamps keep the verdict and the existing handoff;
-this is a cutoff rule, not selection between competing handoff heads. If no such
-verdict exists, the successor may select another allowed human or corrected
-artifacts. A verdict referring to the old handoff with created_at strictly after
-that valid successor rejects `old-handoff`. Recompute both records if one arrives
-late: retract the invalid derived projection and expose the reason while retaining
-both signed events. A fork of otherwise valid handoff successors remains conflict,
-not a timestamp winner. A conflicted verdict slot also prevents supersession.
-New artifacts never inherit any verdict, even when their bytes happen to match.
-As with policy cutoffs, timestamps do not prove real-world chronology; Host current
-canonical readback and role checks still gate any side effects.
+Handoffs form a previous chain per set. A successor selects the current handoff
+for operational display and future coordination; it does **not** revoke any prior
+handoff's exact artifact/tester binding. Historical handoffs remain reviewable.
+There is no verdict-time cutoff, `old-handoff` rejection or `handoff-locked` rule.
+A handoff can follow a verdict or a completed set, provided it references a verified
+successful run and fully verified artifacts. It never reopens the set or issue.
+Two otherwise valid successors still produce a visible `fork` and block operational
+selection; do not choose a timestamp winner. Each exact historical branch can
+still carry a valid human review. New artifacts start without verdicts, even when
+their bytes match an earlier artifact. A resolved issue does not imply that a new
+artifact has been accepted.
 
-## member-verdict
+## member-verdict and deterministic acceptance
 
 Content: set, test_ready, artifact, verdict (accepted/rejected), reason (nonempty).
-Issue tag must name a member. Artifact must belong to current test-ready and the
-exact set; tester signer must equal that handoff's chosen pinned-policy human.
-Either authorized Jari or Ania is enough when selected: no quorum and no name
-matching. Slot key `(set,test-ready,issue)` allows one immutable verdict. A second
-valid differing event for the slot produces `verdict-conflict` and blocks derived
-resolution for that issue (even two accepts); exact event replay is idempotent.
-There is no verdict overwrite. Human correction requires separately reviewed
-conflict resolution outside v1, not another timestamp.
+The issue must be an exact member of the referenced frozen set. The artifact must
+belong to the **referenced** handoff and its exact successful run/set; the signer
+must be that handoff's selected human in the pinned policy. Do not substitute the
+currently displayed handoff, tester, run, artifact or policy. Either authorized
+Jari or Ania is enough when selected: no quorum and no display-name authorization.
 
-Accepted resolves only this issue, rejected projects only this issue to rework.
-Accepted siblings stay resolved across sibling rejection and subsequent rework.
-Accept all means N individually signed events, never a batch wildcard verdict.
-Wrong member, foreign set/artifact, old handoff, terminal aborted/failed set or
-new-set artifact with old verdict all reject. Completed-set existing verdicts
-remain authoritative; no new slots or replacements may be added afterward.
-A new set after rework requires a new handoff and fresh individual verdicts.
+A valid historical verdict requires the complete exact reference closure: anchored
+repository and signed policy ancestry, enrolled issue and implemented/assignment
+history, frozen pipeline/set/member binding, request and successful run, artifact,
+handoff and selected tester. Check every event's shape, ID, signature, optional OA,
+roles, reference types/repository, causal ordering and required external evidence.
+Validate each referenced chain along its explicit previous/prior path at the
+relevant historical time, including policy version/effective-time rules. Competing
+valid branches and later operational head changes do not erase that branch's
+human-review evidence; this is the narrow exception to blocking operational
+projections on forks. No exception permits a forged signature, unauthorized signer,
+wrong repository/member/artifact, invalid chain edge, false Git/provider/download
+fact or missing proof. Such a verdict is rejected or pending and contributes
+nothing. A raw signed claim, prior local `accept` result or remembered UI state
+is never a substitute for replaying and verifying this closure.
+
+For a fixed trust context and verified external facts, let V(i) contain all valid
+historical verdicts for issue i in the supplied event history. Recompute from that
+history on every replay; no arrival-order winner, clock-based finalization, cache
+latch or new infrastructure is needed:
+
+1. If any v in V(i) says `accepted`, the issue is `resolved`.
+2. Otherwise, a valid `rejected` verdict puts that issue in rework until a valid
+   ready → in-development → implemented rework chain supersedes that rejection.
+3. With no valid verdict, use the ordinary workflow projection. A technical
+   conflict alone never produces `rework`, `rejected` or `resolved`.
+
+An accepted verdict cannot be superseded by rework. Adding handoffs, valid tests,
+builds, close records, valid competing branches or sibling verdicts cannot remove
+it from V(i). Missing historical dependencies may delay verification; when they
+arrive, recomputation must give the same result as receiving them first. Invalid
+proofs never qualify, even if previously asserted valid by a buggy client; this
+rule is not a promise to preserve a forgery or to ignore corrected external facts.
+
+Slot `(set,test-ready,issue)` is immutable. Two distinct valid event IDs for the
+slot produce `verdict-conflict` with sorted IDs, even if both say accepted; exact
+replay is idempotent. Keep all independently verified verdicts for the fold above:
+an acceptance still resolves the issue. A real signed rejection is evidence of
+a rejection, but cannot undo any valid acceptance. Technical conflict flags never
+stand in for a human's rejected verdict. No overwrite or invented human decision
+is permitted. Reviews in different handoffs are independent evidence for their
+own artifacts, not replacements of earlier evidence.
+
+Acceptance resolves only its own issue. Accepted siblings remain resolved during
+partial rejection, rework and new releases. Accept all means N individually signed
+verdicts. Completed, failed or aborted set status does not invalidate a fully bound
+historical review; set completion counts verdicts for that set only. Later verdicts
+may add artifact feedback or conflict flags but never clear prior member coverage.
+A new set after rework needs a new handoff and fresh artifact verdicts.
+
+Later defects in accepted work MUST be reported as a new 1621 issue root. Feature
+changes MUST use a new root classified `feature`, describing the concrete delta
+and its own acceptance criteria through the existing issue-update fields. A `related`
+edge may connect the new root to its accepted predecessor; it grants no authority
+to reset the predecessor. No new kind, follow-up schema, legacy status mutation
+or automatic reopening is introduced.
+
+Fixture projection `issues` maps real root IDs to workflow states; `conflicts`
+contains sorted real conflicting event IDs independently of issue state. The
+optional `artifact_verdicts[artifact-id][issue-id]` assertion is `unreviewed` with
+no valid verdict for those exact IDs, `accepted` or `rejected` with that sole
+value, and `conflict` when both values occur. This artifact feedback is not the
+issue-resolution fold. `issue_fields[issue-id]` asserts ordinary projected fields
+of that issue (for example a follow-up's type and concrete description).
 
 ## Corpus and P1 validation
 
@@ -450,7 +532,8 @@ NEVER be funded, deployed or treated as production identities.
 
 Run `python3 scripts/check-nip-bw-fixtures.py` and
 `python3 scripts/test-nip-bw-fixtures.py`. These check JSON/schema/corpus structure,
-ID preimages, references within the corpus, required coverage and checker rejection
+ID preimages, references within the corpus, required coverage, consistency of
+explicit resolved-state assertions across steps, and checker rejection
 of damaged corpora. They do **not** implement BW roles/folds. Optional Schnorr checking uses the
 public [BIP-340 reference](https://github.com/bitcoin/bips/blob/master/bip-0340/reference.py):
 download that file outside the repository, then pass
@@ -465,3 +548,27 @@ not either hashed document; no circular/self-referential digest. Any byte change
 invalidates its digest and independent review binding. P2 opens only after final
 technical checks, exact canonical remote readback and independent PASS at that
 commit and fixture digest. Source push with REVIEW AUSSTEHEND does not open P2.
+
+
+## Acceptance-correction regression inventory (2026-09-09)
+
+The eleven content schemas, primitive definitions, tag layouts and all 100 original
+signed event inputs are unchanged. Only projection/authority semantics change;
+Host and MyBuzz must use the same newly reviewed document and fixture digest.
+
+| Cases | Required invariant |
+|---|---|
+| old-verdict; late-handoff-delivery | Both orders accept the exact historical review and end resolved with the new handoff displayed. |
+| early-verdict-late-delivery; handoff-after-verdict | Equal timestamps do not revoke either handoff or acceptance. |
+| verdict-conflict; verdict-conflict-reversed | Accepted wins issue resolution in both orders; both signed IDs remain a visible conflict. |
+| acceptance-before/after-handoff-fork; technical-fork-without-verdict | A technical fork neither reopens an accepted issue nor invents a human rejection. |
+| forged-acceptance and its handoff permutations | Invalid signatures never contribute an acceptance. Existing role/tester/artifact negatives remain rejected. |
+| completed-set-handoff-first/last; completed-set-close-first/last; completed-set-conflict-first/last | Historical reviews accumulate across handoffs and close records; completed never becomes active and accepted members remain resolved. |
+| terminal-set-no-build | Close cannot authorize a subsequent build request. |
+| new-artifact-no-inherited-review; later-test-does-not-reopen | New artifact feedback is separate from permanent issue acceptance. |
+| complete-partial-reject; partial-reject-rework-new-set | Every asserted later step keeps the accepted sibling resolved during rework/build/test of the rejected sibling. |
+| new-bug-without-reopening; new-change-without-reopening | New root, classification and concrete delta; accepted predecessor remains resolved. |
+
+All expectations above are P1 contract oracles. The structural checker additionally
+rejects contradictory explicit resolved-state assertions and mismatched final
+projections for identical input permutations; it does not execute this workflow.

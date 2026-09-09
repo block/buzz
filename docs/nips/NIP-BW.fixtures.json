@@ -3633,6 +3633,501 @@
         "signature": true
       },
       "shape": true
+    },
+    "forged-verdict": {
+      "event": {
+        "pubkey": "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+        "created_at": 1800000016,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "member-verdict"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"test_ready\":\"6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a\",\"artifact\":\"8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308\",\"verdict\":\"accepted\",\"reason\":\"Fictional human test result\"}",
+        "id": "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+        "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "crypto": {
+        "id": true,
+        "signature": false
+      },
+      "shape": true
+    },
+    "handoff-fork": {
+      "event": {
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1800000018,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "test-ready"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "previous",
+            "6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"run\":\"78e9c8627b70374113b8f7bfc3bde1febb74c34770c0da8739d943caeba7524a\",\"artifacts\":[\"8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308\"],\"installation\":{\"method\":\"tailnet-download\",\"url\":\"https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe\",\"instructions\":\"Download over Tailnet and run locally\",\"unsigned\":true,\"immutable\":true},\"limitations\":\"Alternate signed handoff; unsigned Windows pilot\",\"tester\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\"}",
+        "id": "9f3f2399ef7725dc49d0021889a8861baae30abaced9fbb22999ad289ab3f84a",
+        "sig": "4f438b64ec53953fc869355d4c0891df2756d3f0efa88765acfe4e039976bd8e6d03125582491ef06b43a433c6eb4e27c1cae8b592e98189f1c5d92049d62a9f"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "verdict_b_accept": {
+      "event": {
+        "pubkey": "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+        "created_at": 1800000016,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "member-verdict"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"test_ready\":\"6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a\",\"artifact\":\"8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308\",\"verdict\":\"accepted\",\"reason\":\"Second member independently accepted\"}",
+        "id": "589626c70409e8e9cac4e4bbd33e31a86b84ac4a69bc2f84834f56950c275a12",
+        "sig": "3363b21b4283bb4e2bf71aef559d3a4cbda8026a26ec7d8284cb7cb38bc421321377ac48da9772abe81ea4361e128909f5cf817a2bd06e37edbb56816d034264"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "request-after-close": {
+      "event": {
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "created_at": 1800000020,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "build-request"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"worker\":\"2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4\",\"attempt\":1,\"retry_of\":null}",
+        "id": "93cfb5afabc92367b1daecd5d4d031a0d19d1c937d936490c43319d2afa30799",
+        "sig": "69040420585f6b5e8da99d4d78a537a229761d92bfbe254cc92bc634d80e7ad56663a1be2ba87d0e37141cd51e59a3ca157e3bdcff6e1333d3bb5d34299fb72d"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "artifact-later": {
+      "event": {
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1800000020,
+        "kind": 1063,
+        "tags": [
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "set",
+            "7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b"
+          ],
+          [
+            "run",
+            "78e9c8627b70374113b8f7bfc3bde1febb74c34770c0da8739d943caeba7524a"
+          ],
+          [
+            "platform",
+            "windows"
+          ],
+          [
+            "release",
+            "pilot-1"
+          ],
+          [
+            "url",
+            "https://download.example.invalid/immutable/11469d993756549f229df2d8751ae98da4c4a070885a5babf2e95e099fe8fba7/later.exe"
+          ],
+          [
+            "m",
+            "application/vnd.microsoft.portable-executable"
+          ],
+          [
+            "x",
+            "11469d993756549f229df2d8751ae98da4c4a070885a5babf2e95e099fe8fba7"
+          ],
+          [
+            "size",
+            "53"
+          ]
+        ],
+        "content": "Later fictional unsigned artifact",
+        "id": "61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87",
+        "sig": "8db74c1d34f9efb5ab7d01f5fce783e269cdd7c31af6915913951fae68e929de2e4d3b189bad78018454421edd9060884682d77570312d3e17f53d3f786eb572"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "handoff-later-artifact": {
+      "event": {
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1800000021,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "test-ready"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "previous",
+            "6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"run\":\"78e9c8627b70374113b8f7bfc3bde1febb74c34770c0da8739d943caeba7524a\",\"artifacts\":[\"61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87\"],\"installation\":{\"method\":\"tailnet-download\",\"url\":\"https://download.example.invalid/immutable/11469d993756549f229df2d8751ae98da4c4a070885a5babf2e95e099fe8fba7/later.exe\",\"instructions\":\"Download over Tailnet and run locally\",\"unsigned\":true,\"immutable\":true},\"limitations\":\"Unsigned Windows pilot; fixture only\",\"tester\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\"}",
+        "id": "6866b0d30ea7a97b4e4fc777602f31f29a1391b167e4a02272916a5e01220c88",
+        "sig": "8d1e2184a0b13f3bdc1a552a072b0e7312c91cd2d76356c229c9d1986b7a86783db78282ef37a8111f8ddb6437b4e16fa48754765d0438a26f3d1c5d08815e39"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "later-artifact-rejected": {
+      "event": {
+        "pubkey": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
+        "created_at": 1800000022,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "member-verdict"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc"
+          ]
+        ],
+        "content": "{\"set\":\"7e6f1cd96e26672db381e3e614cbfe2b869fdadb020dc7194f94ec886d80004b\",\"test_ready\":\"6866b0d30ea7a97b4e4fc777602f31f29a1391b167e4a02272916a5e01220c88\",\"artifact\":\"61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87\",\"verdict\":\"rejected\",\"reason\":\"Later regression: report a new issue; prior acceptance stands\"}",
+        "id": "202ad60f82c66997cb53866d2c8d73774f044c7e307b5474b74f1940d05c777a",
+        "sig": "502f635d0bc7ecc1ea5b08932c9a46269b9aa86b035169e7d7b62e7bdd3effe8292f8cbb7f19375dc269642df9f8f0bacd4d511d53088d0da8579c144ae6c104"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-bug": {
+      "event": {
+        "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "created_at": 1800000030,
+        "kind": 1621,
+        "tags": [
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "subject",
+            "Follow-up bug"
+          ]
+        ],
+        "content": "New regression in the later installer: repair startup without reopening the accepted issue.",
+        "id": "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295",
+        "sig": "356247aadc6b491d6d03729513d33f885e8cb9fcb8cf1ea71ab68deb5acffb3279933c4c7849a61cb30448cab2b6a39234062f028a2598851f43d148b784c638"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-bug-enroll": {
+      "event": {
+        "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "created_at": 1800000031,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-state"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295"
+          ]
+        ],
+        "content": "{\"state\":\"triage\"}",
+        "id": "997cef9bc242cc70f21e708d86b2ac8d3f7af2ad403d853957e4221ae38e9924",
+        "sig": "83b6afd41f33e27eba05d9ac07aab5c06ee9c1ab900e436903792a2b3b4c75b160e57183e74ac8d2d9d6bf63fb5d017c41f11afff6f1efa0e09a2600b8c8c4d2"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-bug-update": {
+      "event": {
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "created_at": 1800000032,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-update"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295"
+          ]
+        ],
+        "content": "{\"patch\":{\"description\":\"New regression in the later installer: repair startup without reopening the accepted issue.\",\"acceptance_criteria\":[\"Verify only the new bug delta\"],\"type\":\"bug\",\"priority\":\"P1\",\"platform\":\"windows\"}}",
+        "id": "54c63a75c17d02adffdd5d84cfebff1b3a48efc03ce15f85ddc88e166104c939",
+        "sig": "27db53ae9f04e62797d6d3068e833de1bbb355f9b80b500b7bb8dd0c67f45aed1b2f2a827159889febb033bc03ec6f5c048b78dbd762f2306a84374775a6bc98"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-bug-relation": {
+      "event": {
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "created_at": 1800000033,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-relation"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295"
+          ]
+        ],
+        "content": "{\"relation\":\"related\",\"target\":\"e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc\",\"operation\":\"add\"}",
+        "id": "f7027315f8dc2690814f54912003b30765e1a75f819509193ee125d7b9d614b0",
+        "sig": "16de7585cd37bfce8f2b9278bacfa2bc0753f924a2331da8c92a07dfd33cec63d406562b17b56c08b656fa18416eaefa09af1f23a3c419e207036b4d03d8ee92"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-change": {
+      "event": {
+        "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "created_at": 1800000030,
+        "kind": 1621,
+        "tags": [
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "subject",
+            "Follow-up change"
+          ]
+        ],
+        "content": "Concrete delta from accepted work: add CSV export with UTF-8 headers and its own tests.",
+        "id": "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae",
+        "sig": "79a266e4aa5b1665e9ab771317933bcd6f60c90a24a9104b57af8b4fe523045e03666dc250878c6afb051bf0549227f70a4b27efe4ab9b8d0a498b91de10e1ba"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-change-enroll": {
+      "event": {
+        "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "created_at": 1800000031,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-state"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae"
+          ]
+        ],
+        "content": "{\"state\":\"triage\"}",
+        "id": "301de39872210a83c85dd7befc3a3a6e7edf14f2c922b50f33bf62ea5a43edd0",
+        "sig": "ffa82bdc88cfc0fafde467645c8d035bb656dccbf2ce80e0affcf312322b4cb92a9292599db76d1f5479334c8ff65e8780df82409af8b6a989160b0b0c04adf2"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-change-update": {
+      "event": {
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "created_at": 1800000032,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-update"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae"
+          ]
+        ],
+        "content": "{\"patch\":{\"description\":\"Concrete delta from accepted work: add CSV export with UTF-8 headers and its own tests.\",\"acceptance_criteria\":[\"Verify only the new change delta\"],\"type\":\"feature\",\"priority\":\"P1\",\"platform\":\"windows\"}}",
+        "id": "7a909e360d87bfa69d4900482d9a291bc8317379a0ce9762c12a39b69bd44c66",
+        "sig": "e8c4e4af9c834f924d7482e5e098c46e9251aae82a90c756361edc6b707bdc4778fd8fbf96b9496cfdd5f9dce3093f4541ea2f4e57529b762516d94e84627b3e"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
+    },
+    "followup-change-relation": {
+      "event": {
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "created_at": 1800000033,
+        "kind": 46100,
+        "tags": [
+          [
+            "record",
+            "issue-relation"
+          ],
+          [
+            "a",
+            "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw"
+          ],
+          [
+            "policy",
+            "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+          ],
+          [
+            "issue",
+            "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae"
+          ]
+        ],
+        "content": "{\"relation\":\"related\",\"target\":\"e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc\",\"operation\":\"add\"}",
+        "id": "8761bb54682846653468f739102a9cd164d018e64a08b827072489a0d962a19a",
+        "sig": "13dd1ebd76c64cb080ea2c9b0e2189d207e5cb8dc2ed1c6877be3fb584d28db612a0d8e8773de55f7a94770615f4234d6665a20b8fd776a515e8e19d8cd8e126"
+      },
+      "crypto": {
+        "id": true,
+        "signature": true
+      },
+      "shape": true
     }
   },
   "cases": [
@@ -3901,7 +4396,11 @@
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
@@ -8257,7 +8756,11 @@
           "outcome": "reject",
           "stage": "role",
           "code": "unauthorized",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
         }
       ]
     },
@@ -15345,7 +15848,11 @@
           "outcome": "reject",
           "stage": "role",
           "code": "tester",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
         }
       ]
     },
@@ -15611,7 +16118,11 @@
           "outcome": "reject",
           "stage": "references",
           "code": "artifact-reference",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
         }
       ]
     },
@@ -15619,7 +16130,8 @@
       "name": "old-verdict",
       "coverage": [
         "old-verdict",
-        "new-handoff"
+        "new-handoff",
+        "historical-handoff-acceptance"
       ],
       "mode": "semantic",
       "now": 1800001000,
@@ -15882,13 +16394,13 @@
           "projection": {}
         },
         {
-          "outcome": "reject",
-          "stage": "causality",
-          "code": "old-handoff",
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
           "projection": {
             "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
             "issues": {
-              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
             }
           }
         }
@@ -15897,7 +16409,8 @@
     {
       "name": "late-handoff-delivery",
       "coverage": [
-        "handoff-order-convergence"
+        "handoff-order-convergence",
+        "historical-handoff-acceptance"
       ],
       "mode": "semantic",
       "now": 1800001000,
@@ -16157,7 +16670,11 @@
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
@@ -16166,7 +16683,7 @@
           "projection": {
             "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
             "issues": {
-              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
             }
           }
         }
@@ -16175,7 +16692,8 @@
     {
       "name": "early-verdict-late-delivery",
       "coverage": [
-        "handoff-equal-time"
+        "handoff-equal-time",
+        "historical-handoff-acceptance"
       ],
       "mode": "semantic",
       "now": 1800001000,
@@ -16442,7 +16960,7 @@
           "stage": "projection",
           "code": "valid",
           "projection": {
-            "handoff": "6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a",
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
             "issues": {
               "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
             }
@@ -16713,20 +17231,33 @@
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "conflict",
           "stage": "causality",
           "code": "verdict-conflict",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "conflicts": [
+              "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+              "4b23635e00a49c5a3337fecca0698365e4a6b1a1353f70eacb843180b81ca08a"
+            ]
+          }
         }
       ]
     },
     {
       "name": "handoff-after-verdict",
       "coverage": [
-        "handoff-after-verdict"
+        "handoff-after-verdict",
+        "historical-handoff-acceptance"
       ],
       "mode": "semantic",
       "now": 1800001000,
@@ -16986,14 +17517,18 @@
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
-          "outcome": "reject",
-          "stage": "causality",
-          "code": "handoff-locked",
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
           "projection": {
-            "handoff": "6f6619677ff5185bbc4a781dfa46fd8441cc99157bfa6e43819cec559fde458a",
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
             "issues": {
               "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
             }
@@ -17302,61 +17837,101 @@
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
           "stage": "projection",
           "code": "valid",
-          "projection": {}
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
         },
         {
           "outcome": "accept",
@@ -18145,6 +18720,5645 @@
           "stage": "attestation",
           "code": "auth-signature",
           "projection": {}
+        }
+      ]
+    },
+    {
+      "name": "verdict-conflict-reversed",
+      "coverage": [
+        "acceptance-conflict-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict-conflicting",
+        "verdict_a"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "rework"
+            }
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "verdict-conflict",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "conflicts": [
+              "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+              "4b23635e00a49c5a3337fecca0698365e4a6b1a1353f70eacb843180b81ca08a"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "forged-acceptance",
+      "coverage": [
+        "forged-acceptance"
+      ],
+      "mode": "crypto",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "forged-verdict"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "reject",
+          "stage": "signature",
+          "code": "signature",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "forged-acceptance-handoff-first",
+      "coverage": [
+        "forged-acceptance-order"
+      ],
+      "mode": "crypto",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "handoff-next",
+        "forged-verdict"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "reject",
+          "stage": "signature",
+          "code": "signature",
+          "projection": {
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "forged-acceptance-handoff-last",
+      "coverage": [
+        "forged-acceptance-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "forged-verdict",
+        "handoff-next"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "reject",
+          "stage": "signature",
+          "code": "signature",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9",
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "technical-fork-without-verdict",
+      "coverage": [
+        "technical-conflict-not-rejection"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "handoff-next",
+        "handoff-fork"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "fork",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            },
+            "conflicts": [
+              "9f3f2399ef7725dc49d0021889a8861baae30abaced9fbb22999ad289ab3f84a",
+              "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "acceptance-before-handoff-fork",
+      "coverage": [
+        "acceptance-survives-technical-conflict"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "handoff-next",
+        "handoff-fork"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "fork",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "conflicts": [
+              "9f3f2399ef7725dc49d0021889a8861baae30abaced9fbb22999ad289ab3f84a",
+              "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "acceptance-after-handoff-fork",
+      "coverage": [
+        "acceptance-survives-technical-conflict"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "handoff-next",
+        "handoff-fork",
+        "verdict_a"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "fork",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "implemented"
+            },
+            "conflicts": [
+              "9f3f2399ef7725dc49d0021889a8861baae30abaced9fbb22999ad289ab3f84a",
+              "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+            ]
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "conflicts": [
+              "9f3f2399ef7725dc49d0021889a8861baae30abaced9fbb22999ad289ab3f84a",
+              "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set",
+      "coverage": [
+        "completed-set"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-handoff-last",
+      "coverage": [
+        "completed-set-handoff-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "handoff-next"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-handoff-first",
+      "coverage": [
+        "completed-set-handoff-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "handoff-next",
+        "verdict_a",
+        "verdict_b_accept"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "handoff": "f5769bd40dbc693a84c17365bfb4136688da1d3f6e48bcae6bc6521c2c3d62a9"
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-close-last",
+      "coverage": [
+        "completed-set-close-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "close-failed"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-close-first",
+      "coverage": [
+        "completed-set-close-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "close-failed",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "set": "failed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "set": "failed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "set": "failed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "terminal-set-no-build",
+      "coverage": [
+        "terminal-set-no-build"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "close-failed",
+        "request-after-close"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "set": "failed"
+          }
+        },
+        {
+          "outcome": "reject",
+          "stage": "causality",
+          "code": "set-terminal",
+          "projection": {
+            "set": "failed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "new-artifact-no-inherited-review",
+      "coverage": [
+        "new-artifact-unreviewed"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          },
+          {
+            "url": "https://download.example.invalid/immutable/11469d993756549f229df2d8751ae98da4c4a070885a5babf2e95e099fe8fba7/later.exe",
+            "bytes_hex": "46696374696f6e616c206c6174657220756e7369676e656420696e7374616c6c6572207769746820612072656772657373696f6e0a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "artifact-later",
+        "handoff-later-artifact"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "artifact_verdicts": {
+              "8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "accepted",
+                "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "accepted"
+              },
+              "61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "unreviewed"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "later-test-does-not-reopen",
+      "coverage": [
+        "later-test-does-not-reopen"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          },
+          {
+            "url": "https://download.example.invalid/immutable/11469d993756549f229df2d8751ae98da4c4a070885a5babf2e95e099fe8fba7/later.exe",
+            "bytes_hex": "46696374696f6e616c206c6174657220756e7369676e656420696e7374616c6c6572207769746820612072656772657373696f6e0a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "artifact-later",
+        "handoff-later-artifact",
+        "later-artifact-rejected"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "artifact_verdicts": {
+              "8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "accepted",
+                "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "accepted"
+              },
+              "61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "unreviewed"
+              }
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "artifact_verdicts": {
+              "8e47461cc2614ead6e0a52278a3c92ade6bcd114fd8a332c40f2d5546e29d308": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "accepted",
+                "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "accepted"
+              },
+              "61475b3ebce622134d98fe7a7de15320854b7208d3ad430fd27b2d3565a94a87": {
+                "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "rejected"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "new-bug-without-reopening",
+      "coverage": [
+        "new-followup-bug"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "followup-bug",
+        "followup-bug-enroll",
+        "followup-bug-update",
+        "followup-bug-relation"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved",
+              "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295": "triage"
+            },
+            "set": "completed",
+            "issue_fields": {
+              "465dc6103d3197c1a8b1efa060845c8377d2ca52f5121770526a7c7934758295": {
+                "type": "bug",
+                "description": "New regression in the later installer: repair startup without reopening the accepted issue."
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "new-change-without-reopening",
+      "coverage": [
+        "new-followup-change"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "followup-change",
+        "followup-change-enroll",
+        "followup-change-update",
+        "followup-change-relation"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved",
+              "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae": "triage"
+            },
+            "set": "completed",
+            "issue_fields": {
+              "e05e4ee5c686fc943eb584d5536269df85ba2e69da024b24a687e15f6a6d4fae": {
+                "type": "feature",
+                "description": "Concrete delta from accepted work: add CSV export with UTF-8 headers and its own tests."
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-conflict-last",
+      "coverage": [
+        "completed-set-conflict-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict_a",
+        "verdict_b_accept",
+        "verdict-conflicting"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            }
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed"
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "verdict-conflict",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "conflicts": [
+              "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+              "4b23635e00a49c5a3337fecca0698365e4a6b1a1353f70eacb843180b81ca08a"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "completed-set-conflict-first",
+      "coverage": [
+        "completed-set-conflict-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "artifact",
+        "handoff",
+        "verdict-conflicting",
+        "verdict_a",
+        "verdict_b_accept"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "rework"
+            }
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "verdict-conflict",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved"
+            },
+            "conflicts": [
+              "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+              "4b23635e00a49c5a3337fecca0698365e4a6b1a1353f70eacb843180b81ca08a"
+            ]
+          }
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "issues": {
+              "e62948cd5ffabf13a2e9076ac236564bdb201f853d8fa89d2576999156bc78bc": "resolved",
+              "7b06c85c626cf41862412f217079ae4eeaeb217d633dfd0f198b044db7fef9c1": "resolved"
+            },
+            "set": "completed",
+            "conflicts": [
+              "321546fb192b27f53c8717bb781db0e6eb5f43bb49b01f72d896470531ef4a45",
+              "4b23635e00a49c5a3337fecca0698365e4a6b1a1353f70eacb843180b81ca08a"
+            ]
+          }
         }
       ]
     }

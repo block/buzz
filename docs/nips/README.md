@@ -26,3 +26,7 @@ NIP-BW adds the [P1 fixture corpus](NIP-BW.fixtures.json). Validate it with
 `python3 scripts/check-nip-bw-fixtures.py` and
 `python3 scripts/test-nip-bw-fixtures.py` from the repository root.
 These validate documentation inputs, not production workflow behavior.
+
+The 2026-09-09 NIP-BW acceptance correction preserves valid human acceptance
+across historical handoffs, technical conflicts and later tests. The corpus
+includes both delivery orders, completed sets and independent follow-up issues.

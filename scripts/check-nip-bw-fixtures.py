@@ -28,6 +28,13 @@ COVERAGE = {
     'resolved-sibling', 'rework-new-set', 'new-artifact-no-inheritance',
     'attestation-preserved', 'attestation-negative', 'set-failed', 'set-aborted',
     'handoff-order-convergence', 'handoff-equal-time', 'backlog-role',
+    'historical-handoff-acceptance', 'acceptance-conflict-order',
+    'forged-acceptance', 'forged-acceptance-order', 'technical-conflict-not-rejection',
+    'acceptance-survives-technical-conflict', 'completed-set',
+    'completed-set-handoff-order', 'completed-set-close-order', 'completed-set-conflict-order',
+    'terminal-set-no-build',
+    'new-artifact-unreviewed', 'later-test-does-not-reopen',
+    'new-followup-bug', 'new-followup-change',
 }
 OUTCOMES = {'accept', 'reject', 'pending', 'conflict', 'replay', 'ignore'}
 STAGES = {'envelope', 'id', 'signature', 'shape', 'attestation', 'references',
@@ -247,12 +254,24 @@ def validate(data):
         check_type(host['allowed'], 'bool', data)
         check_type(host['current_policy'], 'id', data)
         require(case['input'] and len(case['input']) == len(case['expected']), 'per-step expectations')
+        resolved_assertions = set()
         for label, expected in zip(case['input'], case['expected']):
             require(label in events, f'missing corpus event: {label}')
             used.add(label)
             require(set(expected) == {'outcome', 'stage', 'code', 'projection'}, 'expectation keys')
             require(expected['outcome'] in OUTCOMES and expected['stage'] in STAGES, 'expectation outcome/stage')
             require(isinstance(expected['code'], str) and expected['code'] and isinstance(expected['projection'], dict), 'expectation details')
+            # Oracle consistency only: do not infer a human verdict from event claims.
+            issues = expected['projection'].get('issues', {})
+            require(isinstance(issues, dict), 'issues projection must be an object')
+            for issue_id, state in issues.items():
+                check_type(issue_id, 'id', data)
+                require(state in {'triage', 'backlog', 'ready', 'in-development',
+                                  'implemented', 'resolved', 'rework', 'closed'}, 'issue projection state')
+                require(issue_id not in resolved_assertions or state == 'resolved',
+                        'resolved projection regressed')
+                if state == 'resolved':
+                    resolved_assertions.add(issue_id)
             if expected['outcome'] in ('accept', 'replay'):
                 require(all(events[label]['crypto'].values()) and events[label]['shape'], f'{label}: accepted invalid input')
         for download in case['external']['downloads']:
