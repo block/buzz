@@ -31,7 +31,7 @@ COVERAGE = {
     'historical-handoff-acceptance', 'acceptance-conflict-order',
     'forged-acceptance', 'forged-acceptance-order', 'technical-conflict-not-rejection',
     'acceptance-survives-technical-conflict', 'completed-set',
-    'completed-set-handoff-order', 'completed-set-close-order', 'completed-set-conflict-order',
+    'completed-set-handoff-order', 'completed-set-close-order', 'terminal-close-conflict-order', 'completed-set-conflict-order',
     'terminal-set-no-build',
     'new-artifact-unreviewed', 'later-test-does-not-reopen',
     'new-followup-bug', 'new-followup-change',

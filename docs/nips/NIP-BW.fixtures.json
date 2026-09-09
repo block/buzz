@@ -24361,6 +24361,540 @@
           }
         }
       ]
+    },
+    {
+      "name": "competing-close-failed-first",
+      "coverage": [
+        "terminal-close-conflict-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "close-failed",
+        "close-aborted"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "set": "failed"
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "head-conflict",
+          "projection": {
+            "set": "failed",
+            "conflicts": [
+              "0ea694885b5267c4062d18dcc15209960f0a168f0de8c4014bb43b93ec706a7a",
+              "1ea991ded24f632228b058cbfece6c7cd2f443e5c7ad73889ee8e885120e672f"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "competing-close-failed-last",
+      "coverage": [
+        "terminal-close-conflict-order"
+      ],
+      "mode": "semantic",
+      "now": 1800001000,
+      "trust": {
+        "community": "https://relay.example.invalid",
+        "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+        "owner": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "external": {
+        "git_readbacks": [
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "1111111111111111111111111111111111111111",
+            "observed_at": 1800000009
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "2222222222222222222222222222222222222222",
+            "observed_at": 1800000010
+          },
+          {
+            "repo": "30617:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:fictional-bw",
+            "stream": "windows-integration",
+            "head": "4444444444444444444444444444444444444444",
+            "observed_at": 1800000011
+          }
+        ],
+        "git_ancestry": [
+          {
+            "ancestor": "1111111111111111111111111111111111111111",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          },
+          {
+            "ancestor": "2222222222222222222222222222222222222222",
+            "descendant": "4444444444444444444444444444444444444444",
+            "is_ancestor": true
+          }
+        ],
+        "provider_readbacks": [
+          {
+            "request": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e",
+            "provider": "fixture-ci",
+            "run_id": "run-1",
+            "attempt": 1,
+            "url": "https://ci.example.invalid/runs/1",
+            "head": "4444444444444444444444444444444444444444",
+            "result": "success",
+            "observed_at": 1800000013,
+            "idempotency_key": "488b722ab879ab32101cbad74ae597668565858d69131a6fdc6ffb01fa8a050e"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://download.example.invalid/immutable/cbc6959eeaf81047a897b88e4d1a965a4bab4e62bfcaabc9ad49f287347c9976/pilot.exe",
+            "bytes_hex": "46696374696f6e616c20756e7369676e65642057696e646f777320696e7374616c6c65720a",
+            "immutable": true,
+            "tailnet": true,
+            "ephemeral": false
+          }
+        ],
+        "host_authorization": {
+          "allowed": true,
+          "current_policy": "161d81c824a63e646fd779a3c193412d06b74605509484f83ae700871a27cc1c"
+        }
+      },
+      "input": [
+        "repo",
+        "policy",
+        "root_a",
+        "enroll_a",
+        "update_a",
+        "accept_a",
+        "backlog_a",
+        "assign_a",
+        "ready_a",
+        "dev_a",
+        "implemented_a",
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+        "set",
+        "request",
+        "run",
+        "close-aborted",
+        "close-failed"
+      ],
+      "expected": [
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {}
+        },
+        {
+          "outcome": "accept",
+          "stage": "projection",
+          "code": "valid",
+          "projection": {
+            "set": "aborted"
+          }
+        },
+        {
+          "outcome": "conflict",
+          "stage": "causality",
+          "code": "head-conflict",
+          "projection": {
+            "set": "failed",
+            "conflicts": [
+              "0ea694885b5267c4062d18dcc15209960f0a168f0de8c4014bb43b93ec706a7a",
+              "1ea991ded24f632228b058cbfece6c7cd2f443e5c7ad73889ee8e885120e672f"
+            ]
+          }
+        }
+      ]
     }
   ]
 }

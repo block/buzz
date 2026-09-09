@@ -347,9 +347,15 @@ such verdict, the set is `completed`, including partial rejection. A member's
 acceptance in some other set does not supply this set's missing artifact verdict.
 Completion takes precedence over close; a later or late-delivered close remains
 visible history but cannot turn completed into failed/aborted. Without complete
-member verdict coverage, a valid unconflicted close projects failed/aborted;
-otherwise the set is active. Close-chain conflicts remain visible and block
-operations without inventing completion or a human verdict.
+member verdict coverage, collect all historically valid close records, validating
+signatures, authority, exact ancestry and provider quiescence on each referenced
+branch independently of competing closes. Any failed close projects `failed`;
+otherwise any aborted close projects `aborted`; only absence of valid closes leaves
+the set active. This outcome precedence selects no lifecycle-head winner and uses
+neither arrival order nor local memory. Competing closes remain `head-conflict`
+with sorted event IDs and block lifecycle operations, but never erase terminal
+status or invent a human verdict. Membership is released by that derived terminal
+status even when the close history conflicts; other freeze constraints still apply.
 
 Active = frozen/requested/building/retryable/test-ready/partially-reviewed.
 Terminal = completed/failed/aborted. No terminal set becomes active again. An
@@ -563,6 +569,7 @@ Host and MyBuzz must use the same newly reviewed document and fixture digest.
 | verdict-conflict; verdict-conflict-reversed | Accepted wins issue resolution in both orders; both signed IDs remain a visible conflict. |
 | acceptance-before/after-handoff-fork; technical-fork-without-verdict | A technical fork neither reopens an accepted issue nor invents a human rejection. |
 | forged-acceptance and its handoff permutations | Invalid signatures never contribute an acceptance. Existing role/tester/artifact negatives remain rejected. |
+| competing-close-failed-first/last | Concurrent failed/aborted closes remain terminal with visible head-conflict in either order; failed outcome takes precedence without choosing a head. |
 | completed-set-handoff-first/last; completed-set-close-first/last; completed-set-conflict-first/last | Historical reviews accumulate across handoffs and close records; completed never becomes active and accepted members remain resolved. |
 | terminal-set-no-build | Close cannot authorize a subsequent build request. |
 | new-artifact-no-inherited-review; later-test-does-not-reopen | New artifact feedback is separate from permanent issue acceptance. |
