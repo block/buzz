@@ -2,7 +2,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: var(--space-page-inset);
-  row-gap: 3rem;
+  row-gap: var(--space-catalog-gap);
 }
 .catalog-entry {
   display: flex;
@@ -13,7 +13,7 @@
 }
 .catalog-preview {
   padding-block: var(--space-panel-inset);
-  min-height: 10rem;
+  min-height: var(--size-catalog-preview);
   display: flex;
   align-items: center;
 }

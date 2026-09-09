@@ -23,7 +23,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-control-gap);
-    padding: 0.375rem 0.625rem;
+    padding: var(--space-chip-block) var(--space-chip-inline);
     border-radius: var(--radius-pill);
     background: var(--bg-inset);
     color: var(--text-secondary);

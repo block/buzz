@@ -2,7 +2,7 @@ import "../catalog/catalog.css";
 import { Link, Outlet } from "@tanstack/react-router";
 import { Fragment, type ReactNode } from "react";
 
-import { useColorScheme } from "@/shared/theme/useColorScheme";
+import { AppearanceControls } from "./AppearanceControls";
 
 /** A nav entry, optionally with children shown indented beneath it. */
 type NavItem = [label: string, to: string, children?: Array<[string, string]>];
@@ -66,8 +66,6 @@ function NavLink({
 }
 
 export function DesignSystemLayout() {
-  const { scheme, toggle } = useColorScheme();
-
   return (
     /* Narrow: the nav stacks above the content as a wrapped list, because a
        256px column beside a reading column leaves neither enough room. From lg
@@ -75,7 +73,7 @@ export function DesignSystemLayout() {
     <div className="flex min-h-screen flex-col bg-panel lg:flex-row">
       <nav
         aria-label="Design system"
-        className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:overflow-y-auto"
+        className="flex shrink-0 flex-col gap-8 px-4 py-8 lg:sticky lg:top-0 lg:h-screen lg:w-[16rem] lg:overflow-y-auto"
       >
         <div className="px-3">
           <Link to="/design" className="text-label text-primary">
@@ -122,14 +120,7 @@ export function DesignSystemLayout() {
           ))}
         </div>
 
-        <button
-          type="button"
-          onClick={toggle}
-          aria-label={`Switch to ${scheme === "light" ? "dark" : "light"} mode`}
-          className="mx-3 self-start rounded-lg bg-inset px-3 py-2 text-label text-secondary transition-colors hover:bg-hover hover:text-primary"
-        >
-          {scheme === "light" ? "Dark mode" : "Light mode"}
-        </button>
+        <AppearanceControls />
       </nav>
 
       <main className="min-w-0 flex-1 px-6 py-10 sm:px-10 lg:px-16">

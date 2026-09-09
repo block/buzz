@@ -13,6 +13,16 @@ pnpm --filter buzz-desktop-next dev
 Open `http://localhost:1430/design`. Use another port when needed:
 `pnpm --filter buzz-desktop-next dev --port 5188`.
 
+## Appearance
+
+The navigation contains independent theme and Normal / Compact controls. Density
+applies to every page, shared component, composition, and portaled overlay. It is
+saved locally, restored before mounting, and synchronized across open tabs. An
+unavailable storage write leaves the current visit usable and displays a retry
+message. Normal preserves the original dimensions; Compact retains text sizes
+while reducing spacing and control sizes. The Spacing and Radius pages show the
+values for the selected density.
+
 ## Packages and portability
 
 - `packages/design-tokens`: semantic registry, CSS roles, typography, geometry,
