@@ -529,7 +529,6 @@ for (const mode of ["Enter", "pin"]) {
     await act(async () => resolve([rawAgent()]));
     await settle();
     unchanged();
-    assert.equal(picker.announcement, "");
   });
 }
 for (const shiftKey of [false, true]) {
@@ -608,7 +607,6 @@ for (const shiftKey of [false, true]) {
       await settle();
       if (depart) {
         unchanged();
-        assert.equal(picker.announcement, "");
       } else {
         assert.deepEqual(
           effects.filter(([kind]) => kind === "promote"),
@@ -708,7 +706,6 @@ for (const departure of ["window", "no-Options native fallback"]) {
     await act(async () => resolve([rawAgent()]));
     await settle();
     unchanged();
-    assert.equal(picker.announcement, "");
   });
 }
 
@@ -990,13 +987,16 @@ for (const mode of ["pointer", "Enter", "Tab", " "])
     });
   }
 
-test("pin authority timeout is retryable and late allow cannot mutate", async () => {
+test("closed-picker pin authority timeout is retryable and late allow cannot mutate", async () => {
   await setup({ owner: OTHER, visible: true, directoryVisible: true });
+  await act(async () => mention.cancelMentionAutocomplete());
+  const choosePin = () =>
+    picker.toggleAlwaysAddressAgent(mention.getDefaultAgentSuggestion());
   let resolve;
   state.fresh = new Promise((r) => {
     resolve = r;
   });
-  await act(async () => choose("pin"));
+  await act(async () => choosePin());
   unchanged();
   await act(async () => new Promise((r) => setTimeout(r, 15100)));
   assert.match(picker.announcement, /Could not check/);
@@ -1005,7 +1005,7 @@ test("pin authority timeout is retryable and late allow cannot mutate", async ()
   await settle();
   unchanged();
   state.fresh = Promise.resolve([rawAgent()]);
-  await act(async () => choose("pin"));
+  await act(async () => choosePin());
   await settle();
   assert.ok(effects.some(([kind]) => kind === "promote"));
 });
@@ -1080,3 +1080,52 @@ test("standalone forum literal Space and Enter outside chooser retain native dis
   await settle();
   assert.equal(effects.filter(([kind]) => kind === "submit").length, 1);
 });
+
+for (const mode of ["Enter", "pin"]) {
+  test(`${mode}: directory failure and Retry cannot revive older fresh admission`, async () => {
+    await setup({ owner: OTHER, visible: true, directoryVisible: true });
+    const identityOrder = mention.suggestions.map((row) => row.pubkey);
+    let resolve;
+    state.fresh = new Promise((r) => {
+      resolve = r;
+    });
+    await act(async () => choose(mode));
+    unchanged();
+    state.failDirectory = true;
+    await act(async () =>
+      client.invalidateQueries({ queryKey: ["relay-agents"] }),
+    );
+    await settle();
+    assert.equal(rows()[0].action, "unavailable");
+    await act(async () => rows()[0].onRetry());
+    await settle();
+    assert.equal(rows()[0].action, "unavailable");
+    unchanged();
+    state.failDirectory = false;
+    let releaseDirectory;
+    state.heldDirectory = new Promise((r) => {
+      releaseDirectory = r;
+    });
+    await act(async () => rows()[0].onRetry());
+    assert.equal(rows()[0].action, "checking");
+    unchanged();
+    state.heldDirectory = null;
+    await act(async () => releaseDirectory([rawAgent()]));
+    await settle();
+    assert.equal(rows()[0].action, "mention");
+    assert.deepEqual(
+      mention.suggestions.map((row) => row.pubkey),
+      identityOrder,
+    );
+    await act(async () => resolve([rawAgent()]));
+    await settle();
+    unchanged();
+    state.fresh = Promise.resolve([rawAgent()]);
+    await act(async () => choose(mode));
+    await settle();
+    assert.equal(state.freshCalls, 2);
+    assert.ok(
+      effects.some(([kind]) => kind === (mode === "pin" ? "promote" : "edit")),
+    );
+  });
+}

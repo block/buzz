@@ -95,6 +95,7 @@ have not yet installed, they still wait for the required discovery to settle.
 Change the completion text or explicitly reopen to discover a new set of choices.
 Live access is checked again at selection, including for rows whose display
 snapshot originally permitted mentioning.
+Failed or pending Retry does not authorize cached choices.
 
 ## Fresh selection and pin admission
 
@@ -134,6 +135,8 @@ normal handling. Only successful insertion settles the mention caret.
 Selection is not a send permit: publication independently revalidates authority
 for the actual destination, including revocation after successful selection.
 Offline fresh admission therefore fails closed without clearing the draft.
+Loss of live choice eligibility abandons a pending admission immediately; a
+later Retry restoring that same row cannot revive the older operation.
 Focused coverage in `freshMentionChatJourney.test.mjs` mounts the production
 chat picker with Tiptap and the actual standalone `ForumComposer`; its DOM is
 JSDOM with fixture IPC, **not** browser or live-relay evidence. Browser,

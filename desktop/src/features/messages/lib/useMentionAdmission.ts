@@ -4,6 +4,7 @@ import { AgentMentionAuthorizationError } from "./agentMentionRevalidation";
 /** One cancellable prepare/commit owner. No caller may mutate while preparing. */
 export function useMentionAdmission(scope: object) {
   const activeKey = React.useRef<object | null>(null);
+  const activeValid = React.useRef<(() => boolean) | null>(null);
   const generation = React.useRef(0);
   const timer = React.useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -15,9 +16,15 @@ export function useMentionAdmission(scope: object) {
     releaseNavigation.current = undefined;
     generation.current += 1;
     activeKey.current = null;
+    activeValid.current = null;
     clearTimeout(timer.current);
     setStatus("");
   }, []);
+  // Losing live eligibility abandons this operation, even if Retry later
+  // restores the same row before its older prepare promise settles.
+  React.useLayoutEffect(() => {
+    if (activeValid.current && !activeValid.current()) cancel();
+  });
   // biome-ignore lint/correctness/useExhaustiveDependencies: scope changes abandon the operation even when the value returns later.
   React.useLayoutEffect(() => {
     cancel();
@@ -39,6 +46,7 @@ export function useMentionAdmission(scope: object) {
       cancel();
       if (!operation.valid()) return;
       activeKey.current = operation.key;
+      activeValid.current = operation.valid;
       // Admission belongs to the focused action, not the composer's wider
       // focus ownership. Observe its departure even inside an overlay/portal;
       // returning later must not resurrect the pending operation.
@@ -92,6 +100,7 @@ export function useMentionAdmission(scope: object) {
             releaseNavigation.current = undefined;
             clearTimeout(timer.current);
             activeKey.current = null;
+            activeValid.current = null;
             if (!committing && !operation.valid()) setStatus("");
           }
         }
