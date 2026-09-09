@@ -489,11 +489,11 @@ class ComposeBar extends HookConsumerWidget {
             identical(config, ref.read(relayConfigProvider));
         void ensureAuthorizationCurrent() {
           if (!context.mounted) throw const _ComposeAuthorizationCancelled();
-          if (visit != authorizationVisit.value ||
-              !identical(config, ref.read(relayConfigProvider))) {
+          if (!identical(config, ref.read(relayConfigProvider))) {
             throw StateError('Community changed during authorization');
           }
-          if (authorizationRevision != draftRevision.value) {
+          if (visit != authorizationVisit.value ||
+              authorizationRevision != draftRevision.value) {
             throw const _ComposeAuthorizationCancelled();
           }
         }
