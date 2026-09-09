@@ -118,9 +118,6 @@ export function SelectedRecipientChip({
               testId={testIds?.pubkey}
               variant="full"
             />
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              {user.pubkey}
-            </p>
           </PopoverContent>
         </Popover>
       ) : (

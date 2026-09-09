@@ -19,7 +19,7 @@ import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -44,7 +44,7 @@ function labelForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   return (
     profile?.displayName?.trim() ||
     profile?.nip05Handle?.trim() ||
-    truncatePubkey(pubkey)
+    truncateNpub(pubkey)
   );
 }
 
@@ -52,7 +52,7 @@ function reviewerSearchLabel(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -270,7 +270,7 @@ export function PullRequestReviewersRow({
                     </span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {candidate.isAgent ? "Agent · " : ""}
-                      {truncatePubkey(candidate.pubkey)}
+                      {truncateNpub(candidate.pubkey)}
                     </span>
                   </span>
                 </button>

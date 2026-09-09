@@ -491,7 +491,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
 
   await expect(page.getByTestId("profile-identity-details")).toBeHidden();
   await expandIdentity(page);
-  await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
+  // The mock identity pubkey is "deadbeef" repeated 8×; its canonical npub
+  // is npub1m6kmam774…zuz0, so the identity row shows the npub, not the hex.
+  await expect(page.getByTestId("profile-pubkey")).toContainText(
+    npubEncode("deadbeef".repeat(8)).slice(0, 8),
+  );
+  await expect(page.getByTestId("profile-pubkey")).not.toContainText(
+    "deadbeefdeadbeef",
+  );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
 
   await page.getByTestId("profile-metadata-edit").click();
@@ -1483,7 +1490,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(publicKeyCopy).toHaveAttribute("data-copied", "true");
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(agentPubkey);
+    .toBe(npubEncode(agentPubkey));
   await expect(page.getByTestId("user-profile-agent-instruction")).toHaveCount(
     0,
   );

@@ -1,12 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { npubEncode } from "nostr-tools/nip19";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
+import { waitForAnimations } from "../helpers/animations";
 import {
   installMockBridge,
   openNewMessagePage,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
-import { waitForAnimations } from "../helpers/animations";
 
 const SHOTS = "test-results/pubkey-display";
 
@@ -121,7 +122,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
     )
     .toBe(true);
   await expect(settledAgentNpub).not.toHaveCSS("opacity", "0");
-  await expect(settledAgentNpub).toHaveText("cafef00d…f00d");
+  await expect(settledAgentNpub).toHaveText(truncateNpub(AGENT_PUBKEY));
   await expect(
     settledAgentName.getByText("Pinky", { exact: true }),
   ).not.toHaveCSS("opacity", "1");
@@ -159,7 +160,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    truncateNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await page.mouse.move(1_100, 500);
   await expect(charlieNpub).toHaveCSS("opacity", "0");
@@ -190,11 +191,10 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieNameTrigger.click();
   await expect(charlieKeyPopover).toBeVisible();
   await expect(charliePubkey).toContainText("npub1");
-  // The shared PubKey widget is npub-only — no hex text or hex copy row in
-  // the widget itself. (D1a boundary: the chip's legacy raw-hex popover line
-  // is removed with the chip change in the descendant slice.)
-  await expect(charliePubkey).not.toContainText(TEST_IDENTITIES.charlie.pubkey);
-  await expect(charlieKeyPopover).toContainText(TEST_IDENTITIES.charlie.pubkey);
+  // The verify popover is npub-only — the raw hex line is gone.
+  await expect(charlieKeyPopover).not.toContainText(
+    TEST_IDENTITIES.charlie.pubkey,
+  );
   await waitForAnimations(page);
   await page.getByTestId("new-message-page").screenshot({
     path: `${SHOTS}/new-dm-selected-recipient-key.png`,
@@ -262,7 +262,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    truncateNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await expect(charlieName.getByText("charlie", { exact: true })).toHaveCSS(
     "opacity",

@@ -49,7 +49,7 @@ import {
 } from "@/shared/ui/dialog";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import {
   MODAL_SEARCH_INPUT_CLASS,
   MODAL_SEARCH_SHELL_CLASS,
@@ -641,7 +641,7 @@ export function MembersSidebar({
         managedAgentRuntime={managedAgentRuntime}
         member={member}
         memberIsBot={memberIsBot}
-        memberAvatarLabel={member.displayName ?? truncatePubkey(member.pubkey)}
+        memberAvatarLabel={member.displayName ?? truncateNpub(member.pubkey)}
         memberLabel={formatMemberName(member, currentPubkey)}
         moderationState={moderationStateByPubkey.get(
           normalizePubkey(member.pubkey),
@@ -886,7 +886,7 @@ export function MembersSidebar({
               <div className="mt-4 space-y-1 text-sm text-destructive">
                 {inviteSubmissionErrors.map((error) => (
                   <p key={`${error.pubkey}-${error.error}`}>
-                    {truncatePubkey(error.pubkey)}: {error.error}
+                    {truncateNpub(error.pubkey)}: {error.error}
                   </p>
                 ))}
               </div>

@@ -4176,8 +4176,26 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  // Generated members have no display name, so the roster sorts them by
+  // their npub fallback label: these sequential pubkeys share a `npub1qqq…`
+  // prefix and order by the checksum tail, not their numeric value. Resolve
+  // a generated member from the rows the initial window actually rendered
+  // instead of assuming `pubkeys[0]` sorts into that window.
+  const generatedPubkeySet = new Set(pubkeys);
+  const renderedPubkeys = await memberRows.evaluateAll((rows) =>
+    rows.map(
+      (row) =>
+        (row as HTMLElement).dataset.testid?.slice("sidebar-member-".length) ??
+        "",
+    ),
+  );
+  const firstRenderedGeneratedPubkey = renderedPubkeys.find((pubkey) =>
+    generatedPubkeySet.has(pubkey),
+  );
+  expect(firstRenderedGeneratedPubkey).toBeTruthy();
+
   const firstGeneratedRow = memberList.getByTestId(
-    `sidebar-member-${pubkeys[0]}`,
+    `sidebar-member-${firstRenderedGeneratedPubkey}`,
   );
   await expect
     .poll(() =>
@@ -4214,8 +4232,24 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
   });
+  // Fully scrolling must render the roster's true tail, and the tail
+  // endpoint must be known independently of whatever the virtual window
+  // happens to render. The sidebar's own roster accounting — the
+  // "Members · N" header — must read exactly the fixture-known total
+  // ("random" seeds alice, the mock identity, and bob; this test adds the
+  // 500 generated pubkeys on top), so fixture or classification drift
+  // fails loudly here instead of silently weakening the tail check.
+  const rosterCount = 3 + pubkeys.length;
+  await expect(memberList.getByText(/^Members · \d+$/)).toHaveText(
+    `Members · ${rosterCount}`,
+  );
+  // VirtualizedList stamps each rendered row with its item index, so the
+  // final item's row is a fixed target that no window sample can pick in
+  // its place: a virtualizer clamped mid-roster never renders it.
   await expect(
-    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+    memberList.locator(
+      `[data-index="${rosterCount - 1}"] > [data-testid^="sidebar-member-"]`,
+    ),
   ).toBeVisible();
 });
 
