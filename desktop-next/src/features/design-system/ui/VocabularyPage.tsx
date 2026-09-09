@@ -4,15 +4,12 @@ import {
   VOCABULARY,
 } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Section } from "./primitives";
+import { PageHeader, Section } from "./primitives";
 
 export function VocabularyPage() {
   return (
     <>
-      <PageHeader
-        title="Vocabulary"
-        intro="One list. Every token in the system is built from these words. Combining them freely is routine and needs no permission; introducing a new word is the thing the audit reports on its own line, because a new word changes the shape of the system rather than adding to it."
-      />
+      <PageHeader title="Vocabulary" />
 
       <Section title="The words">
         <div className="flex flex-col gap-0 rounded-xl bg-inset px-5 py-2">
@@ -39,10 +36,7 @@ export function VocabularyPage() {
         </div>
       </Section>
 
-      <Section
-        title="The grammar"
-        description="A name reads property, then role, then modifier, then material, then state. The order is fixed, so an agent writing a hover for a glass surface produces the same name every time instead of two equally plausible ones."
-      >
+      <Section title="The grammar">
         <div className="rounded-lg bg-inverse px-5 py-4">
           <code className="text-label text-on-inverse">{GRAMMAR}</code>
         </div>
@@ -65,12 +59,6 @@ export function VocabularyPage() {
           </div>
         </div>
       </Section>
-
-      <Note>
-        One modifier, one material, one state per name. A name that does not
-        parse under this grammar is reported by the audit with its correct
-        spelling.
-      </Note>
     </>
   );
 }

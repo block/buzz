@@ -42,10 +42,7 @@ export function ComponentPage({ entry }: { entry: CatalogEntry }) {
 export function ComponentNotFound() {
   return (
     <>
-      <PageHeader
-        title="Component not found"
-        intro="This component page does not exist. Explore the catalog to find an example."
-      />
+      <PageHeader title="Component not found" />
       <Link to="/design/components" className="text-label text-accent">
         Browse all components
       </Link>

@@ -5,7 +5,7 @@ import {
   type Role,
 } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Section, Swatch } from "./primitives";
+import { PageHeader, Section, Swatch } from "./primitives";
 
 /**
  * A role, sitting directly on the page.
@@ -34,7 +34,6 @@ function RoleRow({ role }: { role: Role }) {
             </span>
           ) : null}
         </div>
-        <p className="text-caption text-secondary">{role.use}</p>
         {role.exception ? (
           <p className="text-caption text-tertiary">
             Exception: {role.exception}
@@ -48,23 +47,14 @@ function RoleRow({ role }: { role: Role }) {
 export function ColourPage() {
   return (
     <>
-      <PageHeader
-        title="Colour"
-        intro="Three layers, and only the role layer is ever used when building a screen. Private ramps hold values; public roles hold meanings. Everything below is rendered from the token registry, so a token added there appears here automatically and this page cannot drift from the system."
-      />
+      <PageHeader title="Colour" />
 
-      <Section
-        title="Layer 1 — private ramps"
-        description="A ramp is a contrast instrument, not an assignment. It gives values with known perceptual relationships, so a role encodes a distance rather than a colour — which is what stays true when the palette changes. Components never reference these."
-      >
+      <Section title="Layer 1 — private ramps">
         <div className="flex flex-col gap-8">
           {RAMPS.map((ramp) => (
             <div key={ramp.id} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
                 <h3 className="text-label text-primary">{ramp.name}</h3>
-                <p className="max-w-2xl text-caption text-secondary">
-                  {ramp.description}
-                </p>
               </div>
               <div
                 className={`grid gap-3 ${
@@ -88,18 +78,12 @@ export function ColourPage() {
         </div>
       </Section>
 
-      <Section
-        title="Layer 2 — public roles"
-        description="The only layer a screen may use. Every role points at a ramp step, so changing a theme is a change of values rather than a change of code."
-      >
+      <Section title="Layer 2 — public roles">
         <div className="flex flex-col gap-8">
           {ROLE_GROUPS.map((group) => (
             <div key={group.id} className="flex flex-col gap-2">
               <div className="flex flex-col gap-1">
                 <h3 className="text-label text-primary">{group.name}</h3>
-                <p className="max-w-2xl text-caption text-secondary">
-                  {group.description}
-                </p>
               </div>
               <div className="mt-1 flex flex-col">
                 {group.roles.map((role) => (
@@ -111,10 +95,7 @@ export function ColourPage() {
         </div>
       </Section>
 
-      <Section
-        title="Deliberate exceptions"
-        description="Literal values exist only in the ramps, and nothing above a ramp holds one — except these. The list is short and complete on purpose: a vague exception policy is how a layered system quietly erodes."
-      >
+      <Section title="Deliberate exceptions">
         {/* No swatch here to do the separating, so these entries keep a little
             structure — the token name leads and the spacing groups it with its
             reason. Still no card: this is prose, not data. */}
@@ -129,13 +110,6 @@ export function ColourPage() {
           ))}
         </div>
       </Section>
-
-      <Note>
-        Every dark value in this system is authored rather than observed — the
-        design exploration it was derived from is light-only. Toggle the mode in
-        the sidebar and treat anything that looks wrong as a finding, not a
-        given.
-      </Note>
     </>
   );
 }

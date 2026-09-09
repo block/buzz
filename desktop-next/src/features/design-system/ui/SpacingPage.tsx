@@ -6,14 +6,11 @@ export function SpacingPage() {
   if (!group) throw new Error("Missing foundation group");
   return (
     <>
-      <PageHeader title={group.name} intro={group.description} />
+      <PageHeader title={group.name} />
       <Section title="Spacing roles">
         <FoundationRoles name="Spacing" />
       </Section>
-      <Section
-        title="Controls and layers"
-        description="Shared dimensions, padding, and overlay stacking keep components in proportion."
-      >
+      <Section title="Controls and layers">
         <FoundationRoles name="Controls" />
       </Section>
     </>

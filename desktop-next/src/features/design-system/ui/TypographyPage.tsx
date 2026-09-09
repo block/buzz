@@ -5,7 +5,7 @@ import {
   type TypeRole,
 } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Row, Rows, Section, Specimens } from "./primitives";
+import { PageHeader, Row, Rows, Section, Specimens } from "./primitives";
 
 /**
  * Every specimen below is set in the role it documents, so the page is the
@@ -27,7 +27,6 @@ function RoleSpecimen({ role }: { role: TypeRole }) {
           {role.size} / {role.lineHeight} / {role.tracking} / {role.weight}
         </span>
       </div>
-      <p className="max-w-xl text-caption text-secondary">{role.use}</p>
     </div>
   );
 }
@@ -35,15 +34,9 @@ function RoleSpecimen({ role }: { role: TypeRole }) {
 export function TypographyPage() {
   return (
     <>
-      <PageHeader
-        title="Typography"
-        intro="Nine sizes, ten roles, two faces. A role carries its whole setting — size, line height, letter spacing, weight — because those four are one decision rather than four, so text-body alone produces correctly set text and there is nothing left to get wrong."
-      />
+      <PageHeader title="Typography" />
 
-      <Section
-        title="The faces"
-        description="Both already ship in every current Buzz client, so this is a decision to keep rather than to make. Inter is drawn for interface text at small sizes, which is most of this product."
-      >
+      <Section title="The faces">
         <Specimens>
           {TYPE_FAMILIES.map((family) => (
             <div key={family.token} className="flex flex-col gap-1.5">
@@ -55,18 +48,12 @@ export function TypographyPage() {
                 {family.name}
               </p>
               <code className="text-code text-accent">{family.token}</code>
-              <p className="max-w-xl text-caption text-secondary">
-                {family.use}
-              </p>
             </div>
           ))}
         </Specimens>
       </Section>
 
-      <Section
-        title="The roles"
-        description="Named for the job the text does, never for its size. text-title, not text-28 — a size name is a value in disguise and goes stale the moment the ramp moves. Each specimen is set in the role it documents."
-      >
+      <Section title="The roles">
         <Specimens>
           {TYPE_ROLES.map((role) => (
             <RoleSpecimen key={role.token} role={role} />
@@ -75,7 +62,7 @@ export function TypographyPage() {
       </Section>
 
       {TYPE_RAMPS.map((ramp) => (
-        <Section key={ramp.id} title={ramp.name} description={ramp.description}>
+        <Section key={ramp.id} title={ramp.name}>
           <Rows>
             {ramp.steps.map((step) => (
               <Row key={`${ramp.id}-${step.step}`}>
@@ -94,43 +81,20 @@ export function TypographyPage() {
         </Section>
       ))}
 
-      <Section
-        title="Two rules"
-        description="Both are inherited rather than invented — the existing client learned each of them the expensive way."
-      >
+      <Section title="Two rules">
         <Rows>
           <Row>
             <p className="text-label text-primary">
               Every size is relative. Never px.
-            </p>
-            <p className="mt-1.5 max-w-xl text-caption text-secondary">
-              Fixed pixel text freezes against keyboard zoom and ignores the
-              person's font-size preference. The current client shipped a
-              message-timeline regression from exactly this and now has a CI
-              guard rejecting arbitrary size literals. This ramp derives
-              entirely from one virtual rem, so both dials work by construction.
             </p>
           </Row>
           <Row>
             <p className="text-label text-primary">
               No all-caps, and no tracked-out labels.
             </p>
-            <p className="mt-1.5 max-w-xl text-caption text-secondary">
-              A capitalised label is harder to read than the sentence-case
-              version and reads as enterprise chrome. Section labels earn their
-              quietness from size and colour — text-meta on text-tertiary —
-              rather than from being shouted. There is no uppercase utility in
-              this system.
-            </p>
           </Row>
         </Rows>
       </Section>
-
-      <Note>
-        Inter Variable is bundled with the catalog, and JetBrains Mono covers
-        code. Fonts load from local assets. Every component uses these named
-        roles so type stays consistent as the system evolves.
-      </Note>
     </>
   );
 }

@@ -84,9 +84,6 @@ export function DesignSystemLayout() {
           <Link to="/design" className="text-label text-primary">
             Buzz Design System
           </Link>
-          <p className="mt-1 text-caption text-tertiary">
-            Rendered from the tokens themselves
-          </p>
         </div>
 
         <div className="design-nav-sections flex min-h-0 max-h-80 flex-1 flex-col gap-6 overflow-y-auto lg:max-h-none lg:gap-7">

@@ -26,10 +26,7 @@ export function ComponentsPage() {
   );
   return (
     <>
-      <PageHeader
-        title="Components"
-        intro="A shared visual language, built in the open. Quiet surfaces, confident actions, and accessible behavior — all using the same Buzz roles."
-      />
+      <PageHeader title="Components" />
       <div className="bui-stack mb-10">
         <Field.Root>
           <Field.Label>Find a component</Field.Label>
@@ -77,9 +74,6 @@ export function ComponentsPage() {
               <h2 id={`${entry.id}-title`} className="text-heading mt-1">
                 {entry.name}
               </h2>
-              <p className="text-caption text-secondary mt-2">
-                {entry.description}
-              </p>
             </div>
             <div className="catalog-preview">
               <entry.Preview />

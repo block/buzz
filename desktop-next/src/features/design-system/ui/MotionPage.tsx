@@ -8,11 +8,8 @@ export function MotionPage() {
   if (!group) throw new Error("Missing foundation group");
   return (
     <>
-      <PageHeader title={group.name} intro={group.description} />
-      <Section
-        title="Try the feedback"
-        description="Press an action, or open a surface. The same shared durations and easing apply everywhere; your system’s reduced-motion preference removes movement."
-      >
+      <PageHeader title={group.name} />
+      <Section title="Try the feedback">
         <ButtonsDemo />
         <PopoverDemo />
       </Section>

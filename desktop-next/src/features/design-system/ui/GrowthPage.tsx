@@ -1,6 +1,6 @@
 import { GROWTH_PROCEDURE } from "@/shared/tokens/registry";
 
-import { Note, PageHeader, Section } from "./primitives";
+import { PageHeader, Section } from "./primitives";
 
 const AUDIT: Array<[string, string]> = [
   [
@@ -39,15 +39,9 @@ const AUDIT: Array<[string, string]> = [
 export function GrowthPage() {
   return (
     <>
-      <PageHeader
-        title="Growing the system"
-        intro="Need something the system doesn't have? Add it, mark it proposed, keep working. There is no gate and no separate mechanism for one-offs — the moment the legal path is slower than writing a raw value, the system starts being bypassed."
-      />
+      <PageHeader title="Growing the system" />
 
-      <Section
-        title="The procedure"
-        description="Runs per change, by whoever needs the value. Nothing here needs permission, and every addition arrives in the same change that needed it, carrying its values, its description, and its owner."
-      >
+      <Section title="The procedure">
         <ol className="flex flex-col gap-2 rounded-xl bg-inset px-5 py-4">
           {GROWTH_PROCEDURE.map((step, index) => (
             <li key={step} className="flex gap-3">
@@ -60,10 +54,7 @@ export function GrowthPage() {
         </ol>
       </Section>
 
-      <Section
-        title="The audit"
-        description="Runs on a schedule rather than per change. It reports rather than silently rewrites, except where the fix is unambiguous. Growth without pruning is how a system accumulates thirteen transparencies of one colour."
-      >
+      <Section title="The audit">
         <div className="rounded-xl bg-inset px-5">
           {AUDIT.map(([check, action]) => (
             <div
@@ -78,12 +69,6 @@ export function GrowthPage() {
           ))}
         </div>
       </Section>
-
-      <Note>
-        Promotion from proposed to core is a metadata change, not a rename.
-        Renaming call sites would give promotion a migration cost, and anything
-        with a cost does not happen.
-      </Note>
     </>
   );
 }

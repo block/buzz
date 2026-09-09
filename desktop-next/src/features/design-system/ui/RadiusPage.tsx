@@ -6,7 +6,7 @@ export function RadiusPage() {
   if (!group) throw new Error("Missing foundation group");
   return (
     <>
-      <PageHeader title={group.name} intro={group.description} />
+      <PageHeader title={group.name} />
       <Section title="Corner roles">
         <FoundationRoles name="Radius" />
       </Section>

@@ -13,20 +13,17 @@ import type { ReactNode } from "react";
 
 export function PageHeader({
   title,
-  intro,
   status,
 }: {
   title: string;
-  intro: string;
   status?: string;
 }) {
   return (
-    <header className="mb-14 flex flex-col gap-4">
+    <header className="mb-8">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-title text-primary">{title}</h1>
         {status ? <StatusPill>{status}</StatusPill> : null}
       </div>
-      <p className="max-w-2xl text-body-lg text-secondary">{intro}</p>
     </header>
   );
 }
@@ -41,49 +38,16 @@ export function StatusPill({ children }: { children: ReactNode }) {
 
 export function Section({
   title,
-  description,
   children,
 }: {
   title: string;
-  description?: string;
   children: ReactNode;
 }) {
   return (
     <section className="mb-14 flex flex-col gap-5">
-      <div className="flex flex-col gap-2">
-        <h2 className="text-heading text-primary">{title}</h2>
-        {description ? (
-          <p className="max-w-2xl text-body text-secondary">{description}</p>
-        ) : null}
-      </div>
+      <h2 className="text-heading text-primary">{title}</h2>
       {children}
     </section>
-  );
-}
-
-export function Note({ children }: { children: ReactNode }) {
-  return (
-    <p className="max-w-2xl rounded-xl bg-inset px-5 py-4 text-caption text-secondary">
-      {children}
-    </p>
-  );
-}
-
-export function Stub({ what, decide }: { what: string; decide: string[] }) {
-  return (
-    <div className="flex max-w-2xl flex-col gap-4 rounded-xl bg-inset px-6 py-5">
-      <p className="text-body text-secondary">{what}</p>
-      <div className="flex flex-col gap-2">
-        <p className="text-label text-tertiary">Still to decide</p>
-        <ul className="flex list-disc flex-col gap-1.5 pl-4">
-          {decide.map((item) => (
-            <li key={item} className="text-caption text-secondary">
-              {item}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
   );
 }
 

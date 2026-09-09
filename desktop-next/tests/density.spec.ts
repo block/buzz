@@ -39,7 +39,7 @@ test("density changes geometry throughout without changing type or losing a draf
   await expect(page.locator(".catalog-grid")).toHaveCSS("row-gap", "32px");
   await expect(page.locator("main header").first()).toHaveCSS(
     "margin-bottom",
-    "42px",
+    "24px",
   );
   await expect(draft).toHaveCSS("min-height", "64px");
 

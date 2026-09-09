@@ -98,14 +98,8 @@ export function CompositionsPage() {
   const [saved, setSaved] = useState(false);
   return (
     <>
-      <PageHeader
-        title="Built from the same pieces"
-        intro="Product screens and generated responses share one visual language. These examples compose the library directly, without a second set of styles or a desktop bridge."
-      />
-      <Section
-        title="Project workspace"
-        description="Identity, progress, and focused actions. Color earns its place through status."
-      >
+      <PageHeader title="Built from the same pieces" />
+      <Section title="Project workspace">
         <div className="grid gap-6 md:grid-cols-2">
           <Card>
             <div className="bui-inline">
@@ -151,10 +145,7 @@ export function CompositionsPage() {
           </Card>
         </div>
       </Section>
-      <Section
-        title="Settings"
-        description="Labels, help, validation, and action emphasis form one consistent flow."
-      >
+      <Section title="Settings">
         <Card>
           <Tabs.Root defaultValue="profile">
             <Tabs.List aria-label="Settings section">
@@ -202,10 +193,7 @@ export function CompositionsPage() {
           </Tabs.Root>
         </Card>
       </Section>
-      <Section
-        title="Generated responses"
-        description="An agent supplies a versioned data snapshot. The host validates it and maps known actions to explicit callbacks."
-      >
+      <Section title="Generated responses">
         <div className="bui-inline mb-6">
           <Button
             variant="outline"
