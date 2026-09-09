@@ -280,3 +280,14 @@ test("every foundation page renders its public vocabulary without errors", async
   }
   expect(errors).toEqual([]);
 });
+
+test("styled navigation preserves link semantics and opens the component catalog", async ({
+  page,
+}) => {
+  await page.goto("/design");
+  await page
+    .getByRole("link", { name: "Explore 54 examples", exact: true })
+    .click();
+  await expect(page).toHaveURL("/design/components");
+  await expect(page.locator(".catalog-entry")).toHaveCount(54);
+});

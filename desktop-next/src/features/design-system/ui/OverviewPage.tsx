@@ -17,11 +17,16 @@ export function OverviewPage() {
         intro="Quiet foundations. Expressive possibilities. A complete web component foundation for Buzz, with Inter, Lucide, and the same semantic roles from the smallest control to an agent’s response."
       />
       <div className="bui-inline mb-12">
-        <Button nativeButton={false} render={<Link to="/design/components" />}>
+        <Button
+          nativeButton={false}
+          role="link"
+          render={<Link to="/design/components" />}
+        >
           Explore {CATALOG.length} examples <ArrowRight aria-hidden="true" />
         </Button>
         <Button
           nativeButton={false}
+          role="link"
           variant="outline"
           render={<Link to="/design/compositions" />}
         >

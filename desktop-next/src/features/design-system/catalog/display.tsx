@@ -30,7 +30,11 @@ export function CardDemo() {
       <p className="text-body text-secondary">
         A quiet container for a focused group of ideas.
       </p>
-      <Button nativeButton={false} render={<Link to="/design/compositions" />}>
+      <Button
+        nativeButton={false}
+        role="link"
+        render={<Link to="/design/compositions" />}
+      >
         Explore compositions
       </Button>
     </Card>
@@ -129,6 +133,7 @@ export function EmptyDemo() {
       action={
         <Button
           nativeButton={false}
+          role="link"
           render={<Link to="/design/compositions" />}
         >
           See an example project
