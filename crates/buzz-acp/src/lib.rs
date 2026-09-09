@@ -4641,6 +4641,25 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Returns `true` when the provider has rejected the turn for a terminal
+/// capacity/usage condition for the current retry window rather than a
+/// transient transport failure.
+fn is_terminal_provider_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("session limit hit")
+        || message.contains("session limit reached")
+        || message.contains("hit your session limit")
+        || message.contains("usage limit reached")
+        || message.contains("usage limit exceeded")
+        || message.contains("hit your usage limit")
+        || message.contains("usage credits required")
+        || message.contains("quota exceeded")
+        || message.contains("insufficient_quota")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4797,6 +4816,15 @@ fn handle_prompt_result(
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
                     and then re-send."
                     .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_terminal_provider_error(e))
+            {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — terminal provider capacity error"
+                );
+                let content = "⚠️ The provider refused this request because of a session, usage or credit limit. It will not resume automatically. Please re-send once access is available.".to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
@@ -10921,6 +10949,35 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn terminal_provider_error_requires_a_concrete_rejection_phrase() {
+        let cases = [
+            ("You've hit your session limit · resets 4pm", true),
+            ("Usage limit reached for this provider", true),
+            ("Usage credits required for 1M context", true),
+            ("Quota exceeded", true),
+            ("insufficient_quota", true),
+            ("quota service temporarily unavailable", false),
+            ("This document discusses the session limit", false),
+            ("The session was interrupted", false),
+            ("Internal error while connecting to the provider", false),
+            ("429 Too Many Requests; retry-after: 5", false),
+        ];
+        for (message, expected) in cases {
+            let error = acp::AcpError::AgentError {
+                code: -32603,
+                message: message.to_string(),
+            };
+            assert_eq!(is_terminal_provider_error(&error), expected, "{message}");
+        }
+        assert!(!is_terminal_provider_error(&acp::AcpError::Io(
+            std::io::Error::other("quota service temporarily unavailable")
+        )));
+        assert!(!is_terminal_provider_error(&acp::AcpError::WriteTimeout(
+            std::time::Duration::from_secs(5)
+        )));
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -11012,10 +11069,10 @@ mod error_outcome_emission_tests {
         );
     }
 
-    /// A non-auth application error (e.g. usage credits) must still follow the
-    /// standard requeue path so today's behavior is unchanged.
+    /// A terminal provider capacity error must take the immediate dead-letter
+    /// path; removing that branch must leave the event queued for retry.
     #[tokio::test]
-    async fn non_auth_application_error_is_requeued() {
+    async fn terminal_provider_error_dead_letters_immediately() {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -11033,10 +11090,9 @@ mod error_outcome_emission_tests {
             cancel_reason: None,
         };
 
-        // Usage-credits error — AgentError but NOT an auth error.
         let usage_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "Usage credits required for 1M context".to_string(),
+            code: -32603,
+            message: "Usage limit reached for this provider".to_string(),
         };
 
         let agent = dummy_agent(0).await;
@@ -11087,16 +11143,102 @@ mod error_outcome_emission_tests {
             None,
         );
 
-        // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
+        // Terminal provider error: batch is dead-lettered immediately.
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "terminal provider error must not requeue the batch"
+        );
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            0,
+            "terminal provider error must dead-letter the event"
+        );
+    }
+
+    /// A generic provider error remains retryable and preserves the batch.
+    #[tokio::test]
+    async fn non_terminal_application_error_is_requeued() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let usage_error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error while connecting to the provider".to_string(),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(usage_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        // Generic transient provider error: batch remains queued for retry.
         assert_eq!(
             queue.pending_channels(),
             1,
-            "non-auth application error must requeue the batch for retry"
+            "transient provider error must requeue the batch"
         );
         assert_eq!(
             queue.queued_event_count(channel_id),
             1,
-            "non-auth application error must preserve the event for retry"
+            "transient provider error must preserve the event"
         );
     }
 }
