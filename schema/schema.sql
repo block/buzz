@@ -1893,3 +1893,17 @@ CREATE INDEX idx_relay_operator_audit_target
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
 
+-- ── Storage accounting snapshot ─────────────────────────────────────────────
+-- Deployment-global singleton produced by the isolated S3 accounting worker.
+
+CREATE TABLE storage_accounting_snapshots (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    snapshot JSONB NOT NULL CHECK (jsonb_typeof(snapshot) = 'object'),
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
+    max_objects BIGINT NOT NULL CHECK (max_objects > 0),
+    code_sha TEXT NOT NULL CHECK (octet_length(code_sha) BETWEEN 1 AND 128)
+);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('storage_accounting_snapshots', 'deployment-global completed media accounting handoff');
