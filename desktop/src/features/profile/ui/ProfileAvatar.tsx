@@ -2,7 +2,7 @@ import * as React from "react";
 import { UserRound } from "lucide-react";
 
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
-import { squareEmojiAvatarDataUrl } from "./ProfileAvatarEditor.utils";
+import { avatarSourceUrlForShape } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -70,10 +70,7 @@ export function ProfileAvatar({
   const initials = getInitials(initialsLabel ?? label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
-  const shapedAvatarUrl =
-    shape === "squircle" && presentedAvatarUrl
-      ? squareEmojiAvatarDataUrl(presentedAvatarUrl)
-      : presentedAvatarUrl;
+  const shapedAvatarUrl = avatarSourceUrlForShape(presentedAvatarUrl, shape);
 
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.

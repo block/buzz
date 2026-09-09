@@ -269,6 +269,15 @@ export function squareEmojiAvatarDataUrl(avatarUrl: string) {
     : avatarUrl;
 }
 
+export function avatarSourceUrlForShape(
+  avatarUrl: string | null,
+  shape: "circle" | "squircle",
+) {
+  return shape === "squircle" && avatarUrl
+    ? squareEmojiAvatarDataUrl(avatarUrl)
+    : avatarUrl;
+}
+
 export function parseEmojiAvatarDataUrl(
   avatarUrl: string,
 ): EmojiAvatarDescriptor | null {
@@ -280,14 +289,15 @@ export function parseEmojiAvatarDataUrl(
     const svg = decodeURIComponent(
       avatarUrl.slice(EMOJI_AVATAR_DATA_URL_PREFIX.length),
     );
-    const color = svg.match(/<rect\b[^>]*\sfill="([^"]+)"/u)?.[1];
-    const emoji = svg.match(/<text\b[^>]*>(.*?)<\/text>/u)?.[1];
+    const match = svg.match(
+      /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512"(?: rx="(?:112|256)")? fill="([^"]+)"\/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">(.*?)<\/text><\/svg>$/u,
+    );
 
-    if (!color || !emoji) {
+    if (!match) {
       return null;
     }
 
-    return { color, emoji: unescapeSvgText(emoji) };
+    return { color: match[1], emoji: unescapeSvgText(match[2]) };
   } catch {
     return null;
   }
