@@ -6,6 +6,7 @@ export type TextFieldProps = Omit<ComponentProps<typeof Input>, "className"> & {
   label: string;
   description?: string;
   error?: string;
+  variant?: "inset" | "soft";
 };
 
 /**
@@ -20,6 +21,7 @@ export function TextField({
   disabled,
   name,
   type = "text",
+  variant = "inset",
   ...inputProps
 }: TextFieldProps) {
   return (
@@ -28,6 +30,7 @@ export function TextField({
       disabled={disabled}
       invalid={Boolean(error)}
       name={name}
+      data-variant={variant}
     >
       <Field.Label className="text-field-label text-body-sm text-primary font-semibold">
         {label}

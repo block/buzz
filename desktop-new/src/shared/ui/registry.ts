@@ -361,7 +361,16 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     purpose:
       "A labeled, single-line form control with optional supporting or error text.",
     behavior: "Base UI Field and Input",
-    variants: ["text", "email", "password", "description", "error", "disabled"],
+    variants: [
+      "inset",
+      "soft",
+      "text",
+      "email",
+      "password",
+      "description",
+      "error",
+      "disabled",
+    ],
     status: "proposed",
     collection: "components",
     owner: "desktop-new Onboarding",

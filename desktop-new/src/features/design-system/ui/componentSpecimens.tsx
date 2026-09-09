@@ -356,7 +356,7 @@ function PanelSpecimen() {
 function TextFieldSpecimen() {
   return (
     <div className="component-specimen-stack">
-      <SpecimenGroup label="Content">
+      <SpecimenGroup label="Inset — content">
         <div className="w-full max-w-sm">
           <TextField
             label="Email address"
@@ -366,7 +366,7 @@ function TextFieldSpecimen() {
           />
         </div>
       </SpecimenGroup>
-      <SpecimenGroup label="States">
+      <SpecimenGroup label="Inset — states">
         <div className="component-specimen-stack w-full max-w-sm">
           <Specimen>
             <TextField label="Name" placeholder="Enter your name" />
@@ -381,6 +381,34 @@ function TextFieldSpecimen() {
           </Specimen>
           <Specimen prop="disabled">
             <TextField label="Workspace" defaultValue="Buzz" disabled />
+          </Specimen>
+        </div>
+      </SpecimenGroup>
+      <SpecimenGroup label="Soft — neutral fill and focus ring">
+        <div className="component-specimen-stack w-full max-w-sm">
+          <Specimen prop='variant="soft"'>
+            <TextField
+              label="Name"
+              placeholder="Enter your name"
+              variant="soft"
+            />
+          </Specimen>
+          <Specimen prop='variant="soft" error="Enter a valid email address"'>
+            <TextField
+              label="Email address"
+              defaultValue="not-an-email"
+              error="Enter a valid email address"
+              type="email"
+              variant="soft"
+            />
+          </Specimen>
+          <Specimen prop='variant="soft" disabled'>
+            <TextField
+              label="Workspace"
+              defaultValue="Buzz"
+              disabled
+              variant="soft"
+            />
           </Specimen>
         </div>
       </SpecimenGroup>

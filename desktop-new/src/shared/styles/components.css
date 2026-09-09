@@ -587,7 +587,8 @@
     font: inherit;
     transition:
       border-color var(--duration-state) var(--easing-state),
-      background-color var(--duration-state) var(--easing-state);
+      background-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
   }
 
   .text-field-control::placeholder {
@@ -608,6 +609,26 @@
     background: var(--red-3);
   }
 
+  /* A quieter filled field for dense forms. Unlike the inset variant, focus is
+     visible for pointer and keyboard entry because the ring is the proposed
+     interaction treatment being compared in the design-system specimen. */
+  .text-field[data-variant="soft"] .text-field-control {
+    border-color: var(--neutral-5);
+    background: var(--neutral-3);
+  }
+
+  .text-field[data-variant="soft"] .text-field-control:focus {
+    border-color: var(--neutral-7);
+    outline: none;
+    box-shadow: 0 0 0 2px var(--neutral-7);
+  }
+
+  .text-field[data-variant="soft"][data-invalid] .text-field-control {
+    border-color: var(--red-8);
+    background: var(--neutral-3);
+    box-shadow: 0 0 0 2px var(--red-8);
+  }
+
   .text-field-error {
     color: var(--red-11);
   }
@@ -621,6 +642,12 @@
 
   .text-field[data-disabled] .text-field-control::placeholder {
     color: var(--text-disabled);
+  }
+
+  .text-field[data-variant="soft"][data-disabled] .text-field-control {
+    border-color: var(--neutral-5);
+    background: var(--neutral-3);
+    box-shadow: none;
   }
 
   .navigation-section {
