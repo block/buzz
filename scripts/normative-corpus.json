@@ -2035,20 +2035,19 @@
     "id": "uncurated-dbv2-gpt-6-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-gpt-6",
-    "_note": "Probes a non-5 gpt version with no exact record or prefix rule.",
+    "_note": "Probes the bare gpt-6 stem: no exact record, binds to the gpt-6 prefix rule.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
         "medium",
         "high",
-        "xhigh"
+        "xhigh",
+        "max"
       ],
       "default_effort": "medium",
-      "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
       "registry_label": null
     }
   },

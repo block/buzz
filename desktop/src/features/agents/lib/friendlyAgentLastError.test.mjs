@@ -78,11 +78,19 @@ test("non-auth Agent reported error stays generic", () => {
   );
 });
 
-test("code -32002 → model-not-found copy (severity: denied)", () => {
+test("code -32002 → model-not-found copy naming the stamped model (severity: denied)", () => {
   const result = friendlyAgentLastError(
     "Agent reported error: llm model not found: (goose-claude-opus-4-8) 404 Not Found: ...",
     -32002,
   );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: 'Model "goose-claude-opus-4-8" was not found by the LLM provider (404) — open agent settings and select a different model from the dropdown.',
+  });
+});
+
+test("code -32002 without a stamped model falls back to the generic copy", () => {
+  const result = friendlyAgentLastError("llm model not found", -32002);
   assert.deepEqual(result, {
     severity: "denied",
     copy: MODEL_NOT_FOUND_COPY,

@@ -289,6 +289,23 @@ pub(crate) fn parse_v1_endpoints(json: &Value) -> Result<Vec<ModelEntry>, AgentE
     Ok(models)
 }
 
+/// Append v1 `databricks-*` (Databricks-managed) chat endpoints the v2 listing
+/// does not know yet. Workspace-created endpoints are left out: the gap this
+/// fills is new frontier models, not every team's custom endpoint.
+fn merge_v1_managed_endpoints(v2: &mut Vec<V2Endpoint>, v1: Vec<ModelEntry>) {
+    let known: HashSet<String> = v2.iter().map(|e| e.entry.id.to_ascii_lowercase()).collect();
+    v2.extend(
+        v1.into_iter()
+            .filter(|m| {
+                m.id.starts_with("databricks-") && !known.contains(&m.id.to_ascii_lowercase())
+            })
+            .map(|entry| V2Endpoint {
+                entry,
+                created_ms: None,
+            }),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // v2 — api/ai-gateway/v2/endpoints + Unity Catalog model-services
 // ---------------------------------------------------------------------------
@@ -340,9 +357,14 @@ async fn fetch_v2_models_with_policy(
         fetch_catalog_pages_with_policy(http, host, bearer, WORKSPACE_CATALOG_DESCRIPTOR, policy);
     let unity_catalog =
         fetch_catalog_pages_with_policy(http, host, bearer, UNITY_CATALOG_DESCRIPTOR, policy);
+    // The v2 listing lags the serving-endpoints registry: a Databricks-managed
+    // model can be READY and callable for days before v2 lists it (2026-09-09:
+    // `databricks-gpt-6-astra` was v1-only). Fill the gap from v1 so the
+    // picker offers it instead of forcing a hand-typed id. Best-effort.
+    let v1 = fetch_v1_models(http, host, bearer);
 
-    let (workspace, unity_catalog) = tokio::join!(workspace, unity_catalog);
-    let (workspace, unity_catalog, both_succeeded) = match (workspace, unity_catalog) {
+    let (workspace, unity_catalog, v1) = tokio::join!(workspace, unity_catalog, v1);
+    let (mut workspace, unity_catalog, both_succeeded) = match (workspace, unity_catalog) {
         (Ok(workspace), Ok(unity_catalog)) => (workspace, unity_catalog, true),
         (Ok(workspace), Err(error)) => {
             if matches!(&error, AgentError::LlmAuth(_)) && !allow_partial_auth_failure {
@@ -370,6 +392,14 @@ async fn fetch_v2_models_with_policy(
             return Err(combined_catalog_error(workspace_error, unity_catalog_error));
         }
     };
+    match v1 {
+        Ok(v1) => merge_v1_managed_endpoints(&mut workspace, v1),
+        Err(error) => tracing::warn!(
+            catalog = "workspace serving-endpoints v1",
+            error_kind = catalog_error_kind(&error),
+            "Databricks v1 catalog supplement unavailable; using v2 listing only"
+        ),
+    }
 
     Ok(merge_v2_models(
         workspace,
@@ -1569,6 +1599,39 @@ mod tests {
         let models = parse_v1_endpoints(&json).unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["my-llm", "my-completions", "no-state", "no-task"]);
+    }
+
+    #[test]
+    fn v1_managed_endpoints_supplement_v2_listing_without_duplicates() {
+        let entry = |id: &str| ModelEntry {
+            id: id.into(),
+            name: id.into(),
+        };
+        let mut v2 = vec![
+            V2Endpoint {
+                entry: entry("databricks-gpt-5-5"),
+                created_ms: Some(2),
+            },
+            V2Endpoint {
+                entry: entry("goose-claude-opus-5"),
+                created_ms: Some(1),
+            },
+        ];
+        let v1 = vec![
+            entry("databricks-gpt-6-astra"), // new managed model → added
+            entry("Databricks-GPT-5-5"),     // already listed (case-insensitive) → skipped
+            entry("kgoose-claude-fable-5"),  // workspace-created endpoint → skipped
+        ];
+        merge_v1_managed_endpoints(&mut v2, v1);
+        let ids: Vec<&str> = v2.iter().map(|e| e.entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "databricks-gpt-5-5",
+                "goose-claude-opus-5",
+                "databricks-gpt-6-astra"
+            ]
+        );
     }
 
     #[test]

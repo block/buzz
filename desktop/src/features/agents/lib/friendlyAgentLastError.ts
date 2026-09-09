@@ -42,6 +42,14 @@ export const RELAY_MESH_DENIED_COPY =
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";
 
+/** Name the rejected model when buzz-agent stamped it: `llm model not found: (<model>) 404 …`. */
+function modelNotFoundCopy(raw: string): string {
+  const model = /llm model not found: \(([^)]+)\)/.exec(raw)?.[1];
+  return model
+    ? `Model "${model}" was not found by the LLM provider (404) — open agent settings and select a different model from the dropdown.`
+    : MODEL_NOT_FOUND_COPY;
+}
+
 export const CLI_ACP_INTERNAL_ERROR_COPY =
   "The agent's harness reported an internal error. For Codex agents this can mean the configured model isn't supported by your installed codex-acp — check the model in `~/.codex/config.toml` or upgrade the adapter (`brew upgrade codex-acp`).";
 
@@ -80,7 +88,7 @@ export function friendlyAgentLastError(
       case -32001:
         return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
       case -32002:
-        return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
+        return { severity: "denied", copy: modelNotFoundCopy(trimmed) };
       case -32603: {
         // Standard JSON-RPC "Internal error" — emitted by external harnesses
         // (e.g. codex-acp) when the configured model is unsupported. Only

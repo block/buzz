@@ -260,6 +260,30 @@
       "normalization_policy": "openai-standard"
     },
     {
+      "id": "openai-gpt6",
+      "match_kind": "prefix",
+      "match_value": "gpt-6",
+      "match_aliases": [
+        "gpt6"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
       "id": "openai-gpt5-6",
       "match_kind": "prefix",
       "match_value": "gpt-5.6",

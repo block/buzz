@@ -730,7 +730,7 @@ mod tests {
     Q::Vector { id: "collision-gpt-5-6-probe", provider: "openai", raw_model_id: "gpt-5.6", note: Some("Probes a dotted minor version against the gpt-5 stem.") },
     Q::Vector { id: "collision-gpt-5-1-probe", provider: "openai", raw_model_id: "gpt-5.1", note: Some("Probes the gpt-5.1 prefix.") },
     Q::Section { group: "Uncurated DBv2 token probes", note: None },
-    Q::Vector { id: "uncurated-dbv2-gpt-6-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-6", note: Some("Probes a non-5 gpt version with no exact record or prefix rule.") },
+    Q::Vector { id: "uncurated-dbv2-gpt-6-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-6", note: Some("Probes the bare gpt-6 stem: no exact record, binds to the gpt-6 prefix rule.") },
     Q::Vector { id: "uncurated-dbv2-gpt-4o-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-4o", note: Some("Probes an uncatalogued gpt-4o databricks_v2 id.") },
     Q::Vector { id: "uncurated-dbv2-opus-5-bare-probe", provider: "databricks_v2", raw_model_id: "opus-5", note: Some("Probes a bare Claude code-name segment with no leading claude.") },
     Q::Vector { id: "uncurated-dbv2-sol-bare-probe", provider: "databricks_v2", raw_model_id: "sol", note: Some("Probes a bare OpenAI code name.") },
