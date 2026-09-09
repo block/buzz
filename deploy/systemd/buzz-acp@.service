@@ -1,0 +1,22 @@
+[Unit]
+Description=Buzz ACP agent (%i)
+Documentation=https://github.com/block/buzz/blob/main/docs/self-host-always-on-agents.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Environment file: /etc/buzz-acp/%i.env  (or EnvironmentFile= override)
+EnvironmentFile=-/etc/buzz-acp/%i.env
+EnvironmentFile=-/etc/buzz-acp/%i
+# Binary on PATH after `cargo install` / release build install
+ExecStart=/usr/local/bin/buzz-acp
+Restart=on-failure
+RestartSec=3
+# Harden lightly — agents need homedir tools; tighten further per site
+NoNewPrivileges=true
+# Limit runaway forks; raise if your agent spawns heavy tool trees
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target
