@@ -18,6 +18,7 @@ export default defineConfig({
     react(),
     {
       name: "license-notices",
+      apply: "build",
       closeBundle() {
         copyFileSync(
           "../packages/ui/THIRD_PARTY_NOTICES.md",

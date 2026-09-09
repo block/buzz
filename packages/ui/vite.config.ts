@@ -4,6 +4,7 @@ export default defineConfig({
   plugins: [
     {
       name: "license-notices",
+      apply: "build",
       closeBundle() {
         copyFileSync("THIRD_PARTY_NOTICES.md", "dist/THIRD_PARTY_NOTICES.md");
         copyFileSync("../../LICENSE", "dist/LICENSE");
