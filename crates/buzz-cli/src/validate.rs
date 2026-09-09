@@ -72,6 +72,30 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Reject content containing NUL bytes (0x00).
+///
+/// Rust strings and JSON can represent NUL, so this is not a Rust-level
+/// truncation. The real boundary is the OS command line: on Windows, a NUL
+/// byte in `--content` terminates the native command line before `buzz.exe`
+/// starts, so Clap receives only the prefix and the validator never sees the
+/// NUL. This validator is a defense for NULs that reach Buzz through other
+/// paths (stdin, file, or platforms where the NUL survives into the process).
+///
+/// The actionable workaround for the Windows `--content` case is to use a
+/// PowerShell literal here-string (single-quoted, so backtick escapes do not
+/// expand) and pipe it through stdin.
+pub fn validate_no_nul_bytes(content: &str) -> Result<(), CliError> {
+    if content.bytes().any(|b| b == 0) {
+        return Err(CliError::Usage(
+            "content contains a NUL byte (0x00), which can cause silent truncation — \
+             remove the NUL byte. On Windows, pass content via stdin using a \
+             PowerShell literal here-string (single-quoted) to avoid backtick expansion"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -274,6 +298,51 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    // --- validate_no_nul_bytes ---
+
+    #[test]
+    fn validate_no_nul_bytes_accepts_normal_content() {
+        assert!(validate_no_nul_bytes("hello world").is_ok());
+        assert!(validate_no_nul_bytes("unicode: café ☕ — em dash").is_ok());
+        assert!(validate_no_nul_bytes("").is_ok());
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_embedded_nul() {
+        let content = "before\0after";
+        let err = validate_no_nul_bytes(content).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(
+            err.to_string().contains("NUL"),
+            "error must mention NUL: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_leading_nul() {
+        let err = validate_no_nul_bytes("\0hello").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_trailing_nul() {
+        let err = validate_no_nul_bytes("hello\0").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_error_mentions_stdin_workaround() {
+        // The error must steer the operator toward stdin as the workaround,
+        // not toward --content (which would hit the same validator).
+        let err = validate_no_nul_bytes("hello\0world").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("stdin"), "error should mention stdin: {msg}");
+        assert!(
+            !msg.contains("--content -"),
+            "error should not recommend --content - (it hits the same validator): {msg}"
+        );
     }
 
     // --- percent_encode ---
