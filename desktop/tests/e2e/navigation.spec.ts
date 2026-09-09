@@ -577,7 +577,6 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     name: "Open repository relaytoolsobservabilityconsole-main",
   });
   await expect(sentChip).toBeVisible();
-  await expect(sentChip).toHaveClass(/fragmentable-inline-chip/);
   await expect(sentChip).toHaveClass(/wrapping-inline-chip/);
   await sentChip.evaluate((element) => {
     const container = element.parentElement;

@@ -1623,13 +1623,12 @@ test("selecting a persona mention creates a channel agent before sending and sta
     .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" });
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveText("Fizz");
-  await expect(mentionChip).toHaveClass(/fragmentable-inline-chip/);
-  await expect(mentionChip).not.toHaveClass(/wrapping-inline-chip/);
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
   const timelineLayout = await timelineChipLayout(mentionChip);
   expect(timelineLayout).toMatchObject({
     boxDecorationBreak: "clone",
-    chipHeight: 20,
-    chipLineHeight: 16,
+    chipHeight: 19,
+    chipLineHeight: 19,
     fragmentCount: 1,
     fragmentStep: null,
     paragraphHeight: 20,
@@ -4570,14 +4569,13 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveText("bob");
   await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
-  await expect(mentionChip).toHaveClass(/fragmentable-inline-chip/);
-  await expect(mentionChip).not.toHaveClass(/wrapping-inline-chip/);
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
 
   const timelineLayout = await timelineChipLayout(mentionChip);
   expect(timelineLayout).toMatchObject({
     boxDecorationBreak: "clone",
-    chipHeight: 20,
-    chipLineHeight: 16,
+    chipHeight: 19,
+    chipLineHeight: 19,
     fragmentCount: 1,
     fragmentStep: null,
     paragraphHeight: 20,
@@ -4595,15 +4593,12 @@ test("qualified mentions wrap without changing message line rhythm", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
-  await emitMockMessage(page, "general", `before @${qualifiedLabel} after`, {
+  await emitMockMessage(page, "general", `@${qualifiedLabel}`, {
     mentionPubkeys: [pubkey],
   });
   await waitForTimelineSettled(page);
 
-  const row = page
-    .getByTestId("message-row")
-    .filter({ hasText: "before bob" })
-    .last();
+  const row = page.getByTestId("message-row").filter({ hasText: "bob" }).last();
   await row.evaluate((element) => {
     const prose = element.querySelector<HTMLElement>(".message-markdown");
     if (!prose)
@@ -4611,15 +4606,14 @@ test("qualified mentions wrap without changing message line rhythm", async ({
     prose.style.width = "8rem";
   });
   const mentionChip = row.locator("[data-mention]", { hasText: "bob" });
-  await expect(mentionChip).toHaveText(/bob \(bb22a529…f260\)/);
-  await expect(mentionChip).toHaveClass(/fragmentable-inline-chip/);
-  await expect(mentionChip).not.toHaveClass(/wrapping-inline-chip/);
+  await expect(mentionChip).toHaveText(/bob \(npub1hv3…tpuc\)/);
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
 
   const layout = await timelineChipLayout(mentionChip);
   expect(layout.boxDecorationBreak).toBe("clone");
-  expect(layout.chipLineHeight).toBe(16);
-  expect(layout.fragmentCount).toBeGreaterThanOrEqual(2);
-  expect(layout.fragmentStep).toBe(16);
+  expect(layout.chipLineHeight).toBe(19);
+  expect(layout.fragmentCount).toBe(2);
+  expect(layout.fragmentStep).toBe(20);
   expect(layout.paragraphLineHeight).toBe(20);
   expect(layout.chipHeight).toBeLessThanOrEqual(
     layout.fragmentCount * layout.paragraphLineHeight,

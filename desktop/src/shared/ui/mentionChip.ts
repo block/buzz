@@ -45,10 +45,7 @@ export function inlineChipLeadingEnd(label: string): number {
 }
 
 /** Allows a long chip to fragment into separately decorated line boxes. */
-export const FRAGMENTABLE_INLINE_CHIP_CLASSES = "fragmentable-inline-chip";
-
-/** Gives fragmentable entity links their roomier inter-line rhythm. */
-export const WRAPPING_INLINE_CHIP_CLASSES = `${FRAGMENTABLE_INLINE_CHIP_CLASSES} wrapping-inline-chip`;
+export const WRAPPING_INLINE_CHIP_CLASSES = "wrapping-inline-chip";
 
 export type InlineChipIconKind =
   | "agent"

@@ -4,9 +4,9 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { formatMentionDisplayLabel } from "@/shared/lib/mentionDisplay";
 import {
-  FRAGMENTABLE_INLINE_CHIP_CLASSES,
   inlineChipIconClasses,
   inlineChipLeadingEnd,
+  WRAPPING_INLINE_CHIP_CLASSES,
 } from "@/shared/ui/mentionChip";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { useMarkdownRuntime } from "./runtimeContext";
@@ -49,7 +49,7 @@ export function createMarkdownMention(interactive: boolean) {
         data-mention-label={mentionLabel}
         data-mention-pubkey={pubkey}
         className={cn(
-          FRAGMENTABLE_INLINE_CHIP_CLASSES,
+          WRAPPING_INLINE_CHIP_CLASSES,
           isAgentMention && "agent-mention-highlight",
         )}
         title={mentionLabel}
