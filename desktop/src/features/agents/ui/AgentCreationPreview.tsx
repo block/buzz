@@ -974,19 +974,19 @@ export function AgentCreationPreview({
                   <button
                     aria-label={`Add ${assetLabel}`}
                     className={cn(
-                      "relative flex items-center justify-center bg-background text-primary shadow-xs transition-[background-color,border-color,color,filter,scale] duration-150 ease-out hover:scale-[1.02] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
+                      "group/add-avatar relative flex items-center justify-center bg-transparent text-primary shadow-xs transition-[background-color,border-color,color,filter,scale] duration-150 ease-out hover:scale-[1.02] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
                       isCompact ? "h-16 w-16" : "h-36 w-36",
                       isRoundedSquare
                         ? cn(
                             "border-2 border-dashed border-border hover:border-primary/60 hover:bg-primary/5",
                             isCompact ? "rounded-2xl" : "rounded-[2rem]",
                           )
-                        : "rounded-squircle border-0",
+                        : "border-0",
                       isDragOverAvatar &&
                         !isAvatarMenuOpen &&
                         (isRoundedSquare
                           ? "border-primary/70 bg-primary/5 ring-2 ring-primary/15"
-                          : "bg-primary/5 ring-2 ring-primary/30"),
+                          : "ring-2 ring-primary/30"),
                     )}
                     disabled={disabled || isUploading}
                     title={`Add ${assetLabel}`}
@@ -995,7 +995,7 @@ export function AgentCreationPreview({
                     {isRoundedSquare ? null : (
                       <svg
                         aria-hidden="true"
-                        className="pointer-events-none absolute inset-0 h-full w-full text-border transition-colors duration-150 ease-out group-hover/avatar-preview:text-primary/60"
+                        className="pointer-events-none absolute inset-0 h-full w-full rounded-squircle bg-background text-border transition-colors duration-150 ease-out group-hover/add-avatar:bg-primary/5 group-hover/add-avatar:text-primary/60"
                         data-testid={`${testIdPrefix}-empty-outline`}
                         preserveAspectRatio="none"
                         viewBox="0 0 1 1"

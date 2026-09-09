@@ -1677,7 +1677,15 @@ test("project overview presents collapsible context beside grouped activity", as
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        displayName: "tyler",
+        isAgent: true,
+        pubkey: DEFAULT_MOCK_PUBKEY,
+      },
+    ],
+  });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
@@ -1744,6 +1752,23 @@ test("project overview presents collapsible context beside grouped activity", as
       .getByTestId("projects-overview-stats-pod")
       .getByTestId("projects-overview-people"),
   ).toHaveCount(0);
+  await page.getByTestId("projects-section-projects").click();
+  await page.getByRole("button", { name: "Grid layout" }).click();
+  const projectPeopleButton = page.locator(
+    'button[aria-label="View tyler\'s profile"]',
+  );
+  await expect(projectPeopleButton).toBeVisible();
+  await projectPeopleButton.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(projectPeopleButton).toBeFocused();
+  await expect(projectPeopleButton).toHaveCSS("clip-path", "none");
+  await expect(projectPeopleButton).not.toHaveCSS("box-shadow", "none");
+  await expect(projectPeopleButton.locator(":scope > span")).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
+  await page.getByTestId("projects-section-all").click();
   await expect(
     page
       .getByTestId("projects-overview-context-panel")

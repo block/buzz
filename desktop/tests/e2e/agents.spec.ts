@@ -347,7 +347,17 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   const addAvatarButton = page.getByLabel("Add avatar");
   await expect(addAvatarButton).toHaveCSS("border-top-width", "0px");
+  await addAvatarButton.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(addAvatarButton).toBeFocused();
+  await expect(addAvatarButton).toHaveCSS("clip-path", "none");
+  await expect(addAvatarButton).not.toHaveCSS("box-shadow", "none");
   const emptyOutline = page.getByTestId("agent-avatar-empty-outline");
+  await expect(emptyOutline).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
   await expect(emptyOutline).toBeVisible();
   await expect(emptyOutline.locator("path")).toHaveAttribute(
     "d",
