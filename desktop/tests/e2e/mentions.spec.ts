@@ -94,20 +94,9 @@ async function timelineChipLayout(chip: Locator) {
     if (!paragraph) throw new Error("Timeline chip is missing its paragraph");
     const chipBounds = element.getBoundingClientRect();
     const paragraphBounds = paragraph.getBoundingClientRect();
-    const contentRange = document.createRange();
-    contentRange.selectNodeContents(element);
-    const visibleFragmentRects = Array.from(
-      contentRange.getClientRects(),
-    ).filter((rect) => rect.width > 0 && rect.height > 0);
-    const fragmentTops: number[] = [];
-    for (const rect of visibleFragmentRects.sort((a, b) => a.top - b.top)) {
-      if (
-        fragmentTops.length === 0 ||
-        rect.top - fragmentTops[fragmentTops.length - 1] > 2
-      ) {
-        fragmentTops.push(rect.top);
-      }
-    }
+    const chipFragmentRects = Array.from(element.getClientRects())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .sort((a, b) => a.top - b.top);
     const chipStyle = getComputedStyle(element);
     return {
       boxDecorationBreak:
@@ -115,10 +104,18 @@ async function timelineChipLayout(chip: Locator) {
         chipStyle.getPropertyValue("-webkit-box-decoration-break"),
       chipHeight: chipBounds.height,
       chipLineHeight: Number.parseFloat(chipStyle.lineHeight),
-      fragmentCount: fragmentTops.length,
+      fragmentCount: chipFragmentRects.length,
+      fragmentGap:
+        chipFragmentRects.length > 1
+          ? Math.round(chipFragmentRects[1].top - chipFragmentRects[0].bottom)
+          : null,
+      fragmentHeight:
+        chipFragmentRects.length > 0
+          ? Math.round(chipFragmentRects[0].height)
+          : null,
       fragmentStep:
-        fragmentTops.length > 1
-          ? Math.round(fragmentTops[1] - fragmentTops[0])
+        chipFragmentRects.length > 1
+          ? Math.round(chipFragmentRects[1].top - chipFragmentRects[0].top)
           : null,
       paragraphHeight: paragraphBounds.height,
       paragraphLineHeight: Number.parseFloat(
@@ -1627,9 +1624,11 @@ test("selecting a persona mention creates a channel agent before sending and sta
   const timelineLayout = await timelineChipLayout(mentionChip);
   expect(timelineLayout).toMatchObject({
     boxDecorationBreak: "clone",
-    chipHeight: 19,
-    chipLineHeight: 19,
+    chipHeight: 17,
+    chipLineHeight: 18,
     fragmentCount: 1,
+    fragmentGap: null,
+    fragmentHeight: 17,
     fragmentStep: null,
     paragraphHeight: 20,
     paragraphLineHeight: 20,
@@ -4574,9 +4573,11 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   const timelineLayout = await timelineChipLayout(mentionChip);
   expect(timelineLayout).toMatchObject({
     boxDecorationBreak: "clone",
-    chipHeight: 19,
-    chipLineHeight: 19,
+    chipHeight: 17,
+    chipLineHeight: 18,
     fragmentCount: 1,
+    fragmentGap: null,
+    fragmentHeight: 17,
     fragmentStep: null,
     paragraphHeight: 20,
     paragraphLineHeight: 20,
@@ -4611,13 +4612,23 @@ test("qualified mentions wrap without changing message line rhythm", async ({
 
   const layout = await timelineChipLayout(mentionChip);
   expect(layout.boxDecorationBreak).toBe("clone");
-  expect(layout.chipLineHeight).toBe(19);
+  expect(layout.chipLineHeight).toBe(18);
   expect(layout.fragmentCount).toBe(2);
+  expect(layout.fragmentHeight).toBe(17);
+  expect(layout.fragmentGap).toBeGreaterThanOrEqual(1);
   expect(layout.fragmentStep).toBe(20);
   expect(layout.paragraphLineHeight).toBe(20);
   expect(layout.chipHeight).toBeLessThanOrEqual(
     layout.fragmentCount * layout.paragraphLineHeight,
   );
+
+  const trigger = mentionChip.locator("xpath=..");
+  await expect(trigger).toHaveCSS("display", "inline");
+  await expect(trigger).toHaveAttribute("role", "button");
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  await trigger.press("Enter");
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
 test("clicking author name opens user profile panel", async ({ page }) => {

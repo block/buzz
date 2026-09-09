@@ -50,10 +50,9 @@ type UserProfilePopoverProps = {
   pubkey: string;
   triggerElement?: "div" | "span";
   /**
-   * Extra classes for the inline-flex trigger wrapper. The wrapper is a flex
-   * item at most call sites, and its `min-width: auto` refuses to shrink below
-   * the nowrap width of truncating children — pass `min-w-0 max-w-full` when
-   * the trigger wraps truncating text so the ellipsis can engage.
+   * Extra classes for the trigger wrapper, which defaults to inline-flex.
+   * Use `min-w-0 max-w-full` when truncating flex content must shrink, or
+   * `inline` when prose content must fragment across lines.
    */
   triggerClassName?: string;
   /** Accessible name for interactive trigger content that is visually hidden. */
