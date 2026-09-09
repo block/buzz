@@ -11,6 +11,8 @@ mod mcp;
 pub mod model_capabilities;
 mod permission;
 pub mod realtime;
+mod realtime_audio;
+mod realtime_session;
 pub mod types;
 mod wire;
 
@@ -79,6 +81,7 @@ struct App {
 }
 
 struct Session {
+    realtime: realtime_session::RealtimeSession,
     id: String,
     mcp: Arc<McpRegistry>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
@@ -373,7 +376,7 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
                 "protocolVersion": negotiated_version,
                 "agentCapabilities": {
                     "loadSession": false,
-                    "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
+                    "promptCapabilities": { "image": false, "audio": app.cfg.openai_api == config::OpenAiApi::Realtime, "embeddedContext": false },
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
                 "agentInfo": { "name": "buzz-agent", "version": env!("CARGO_PKG_VERSION") },
@@ -566,6 +569,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             busy: false,
             active_run_id: None,
             steer_tx: None,
+            realtime: realtime_session::RealtimeSession::default(),
             original_task: None,
             handoff_count: 0,
             last_request_input_tokens: None,
@@ -622,6 +626,15 @@ async fn cancel_session(app: &Arc<App>, params: Value) {
 /// On success: stores `model_id` on the session and responds `{ sessionId, modelId }`.
 /// The override is picked up by the next `session/prompt` call on this session.
 async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    if app.cfg.openai_api == config::OpenAiApi::Realtime {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "realtime: model is fixed for the session",
+        )
+        .await;
+    }
     let p: SessionSetModelParams = match decode(params, "session/set_model") {
         Ok(p) => p,
         Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
@@ -673,6 +686,15 @@ async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &W
 /// we reply `{ runId, messageId }`, then emit a `queuedSteer` session/update so
 /// the client can correlate the accepted steer with its eventual pickup.
 async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    if app.cfg.openai_api == config::OpenAiApi::Realtime {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "realtime: steer is not supported; cancel then prompt",
+        )
+        .await;
+    }
     let p: SessionSteerParams = match decode(params, "_goose/unstable/session/steer") {
         Ok(p) => p,
         Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
@@ -833,7 +855,28 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         turn_pricing_identity: &mut turn_pricing_identity,
         usage_baseline,
     };
-    let result = ctx.run(p.prompt).await;
+    let result = if app.cfg.openai_api == config::OpenAiApi::Realtime {
+        let mut realtime = {
+            let mut sessions = app.sessions.lock().await;
+            sessions
+                .get_mut(&sid)
+                .map(|s| std::mem::take(&mut s.realtime))
+        };
+        match realtime.as_mut() {
+            Some(state) => {
+                let result = state.run(&mut ctx, p.prompt).await;
+                if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
+                    if let Some(state) = realtime.take() {
+                        s.realtime = state;
+                    }
+                }
+                result
+            }
+            None => Err(AgentError::Cancelled),
+        }
+    } else {
+        ctx.run(p.prompt).await
+    };
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
         s.busy = false;
         // Clear run state so a late steer can't queue into a finished turn.

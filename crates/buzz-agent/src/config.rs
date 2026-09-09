@@ -519,13 +519,15 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-/// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
-/// (`auto|chat|responses`); ignored when `provider = Anthropic`. `Auto`
+/// Which OpenAI-family API to call. Set via `OPENAI_COMPAT_API`
+/// (`auto|chat|responses|realtime`); ignored when `provider = Anthropic`. `Auto`
 /// picks Responses for `*.openai.com`, Chat Completions otherwise, and
 /// permits a one-shot chat→responses upgrade on a "use /v1/responses"
 /// provider error.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OpenAiApi {
+    /// Persistent standard Realtime WebSocket sessions (manual text turns).
+    Realtime,
     Chat,
     Responses,
     Auto,
@@ -801,6 +803,12 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.openai_api == OpenAiApi::Realtime
+            && (!self.hook_servers.is_disabled() || self.require_reply)
+        {
+            return Err("config: realtime does not yet support hooks or require-reply; use the coding API for those policies".into());
+        }
+
         const MIN_HISTORY_BYTES: usize = 4096;
         const MIN_LINE_BYTES: usize = 1024;
         const MIN_TOOL_RESULT_TEXT_BYTES: usize = 1024;
@@ -958,6 +966,7 @@ fn parse_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
     match raw.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "chat" | "chat-completions" | "chat_completions" => Ok(OpenAiApi::Chat),
         "responses" => Ok(OpenAiApi::Responses),
+        "realtime" => Ok(OpenAiApi::Realtime),
         "auto" | "" => Ok(OpenAiApi::Auto),
         other => Err(format!(
             "config: OPENAI_COMPAT_API={other} not supported (use auto|chat|responses)"
