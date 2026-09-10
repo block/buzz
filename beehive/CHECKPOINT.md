@@ -2124,3 +2124,17 @@ preserved. Trace row emission measured separately. CPU/wall gaps cannot establis
 kernel service or fully measure all instrumentation/descheduling overhead. No
 payloads, async durability redesign, policy/deadline/assertion changes or blind run.
 Evidence: WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/DATABRICKS_BFCE. Final full not yet run.
+
+## Databricks bfce — final full outcome
+
+Executable `2ea103d74`: strict PASS, ONE FULL DEFAULT concurrent installed-enabled
+run 116/117, zero skips/cancels, natural289.084s. Three new installed journeys all
+PASS: Databricks token, external-OAuth-local-config fixture, Anthropic diagnostic
+→ local-add OpenRouter → public selection → normal conversion/replacement →
+Start/Restart. Full gate OPEN: conflicting-id aggregate2646ms vs unchanged<2500.
+598-row failure trace/zero dropped preserved; relay async rename await766.413ms
+before Start batch durability differs from prior journal-dominant observation.
+No kernel/scheduling root cause proven, historical2572/2612 remain unresolved.
+No rerun or speculative fix. DATABRICKS_BFCE_RESULT.md records exact contracts,
+source-only variants, installed/source hashes, raw evidence and limits. This final
+record is documentation-only after tested executable; no real OAuth/provider calls.
