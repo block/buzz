@@ -1964,3 +1964,31 @@ ACP/Codex-native fallback, vendor readiness claim, login or install execution.
 Next: ONE final strict + FULL DEFAULT concurrent installed-enabled suite on this
 candidate; source/binary identities and raw outcome in RECOVERY_FCD9. Prior focused
 custom 1/1 and diagnostics 5/5 are surviving evidence, not repeated-to-green tests.
+
+## Recovery fcd99859 — final gate outcome (executable candidate dd97d91405)
+
+Strict PASS. ONE FULL DEFAULT concurrent installed-enabled suite finished naturally
+105/106 in 161.721s, zero skip/cancel. All seven installed normal journeys (including
+custom, 20.009s) and all four R1 preview regressions PASS. R1 status: FIXED and
+production-wizard VERIFIED; no independent re-review claimed. Full gate remains
+OPEN: admission-cancel.test.ts:134 wrong-authority control elapsed 2572ms versus
+unchanged <2500ms assertion. Prior authority/Start/Stop/journal assertions passed;
+remaining control loop cases were not reached in that test. Raw receipts, event
+order and storage timestamps retained; underlying cause UNCLASSIFIED, no rerun,
+serial masking, inflated deadline, weakened assertion or speculative runtime fix.
+Evidence: WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/RECOVERY_FCD9 (full-default.log,
+strict-final.log, binding-focused.log, source/binary hashes, RESULT.md). Final
+publication adds documentation only after this tested executable candidate.
+
+Delivered ten source-grounded preset diagnostics and local custom registration;
+only explicit Goose-native custom contract has fixture conversation acceptance.
+Real installed buzz-acp/Buzz CLI signed same-agent two-channel/later replies,
+fresh-session model/profile Restart, history/Y preservation and privacy/injection/
+missing-key/neutral Stop checks passed; vendor adapters are TypeScript fixtures.
+No claim ten vendors operational. Remaining provider contracts, mesh/compute,
+real authentication/inference/live acceptance and full-product parity remain open.
+Codex/Claude/NORMAL/CLI scoped reviews CLOSED; historical broker/tool report
+COMPLETE, causes UNCLASSIFIED, not classified by this suite or actively assigned.
+Next bounded gate work: instrument actual admission control replay/receipt latency
+at existing owners using this preserved raw failure; do not rerun-to-green or
+attribute storage/event-loop delays without distinguishing observations.

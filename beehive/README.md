@@ -769,3 +769,11 @@ protocol-2 native profile capability or fresh exact session model evidence fails
 closed before prompting. Save/Stop are credential-neutral. See
 `CODEX_SOURCE_29C7.md` for exact source, fixture/installed evidence and support limits;
 older statements above about entirely unimplemented Codex are historical.
+
+### Local preset/custom ACP setup
+
+See [PRESET_CUSTOM_SOURCE_8D6D.md](PRESET_CUSTOM_SOURCE_8D6D.md) for the ten
+source-pinned diagnostic presets, owner-only structured custom JSON and wizard
+journey. Preset discovery is not authentication/readiness; arbitrary ACP adapters
+are not assumed to support native model/profile contracts. Only the explicitly
+opted-in Goose-native custom contract has fixture conversation acceptance here.
