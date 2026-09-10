@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure';
 import {
@@ -362,4 +362,74 @@ test('real loopback HTTP journey through fetchRelayTransport with server-side NI
     server.close();
     await once(server, 'close');
   }
+});
+
+test('chunked body over the acquisition cap is rejected mid-stream and the reader is cancelled', async () => {
+  // No Content-Length on this route, so the only enforceable bound is during
+  // acquisition, and the server deliberately never finishes the body: the
+  // transport must reject while bytes are still arriving (never wait for a
+  // completion that does not happen) and must cancel the reader, which the
+  // server observes as a connection teardown. A regression to read-then-check
+  // would hang on the unfinished body until the abort backstop rejects.
+  let serverResponse: ServerResponse | undefined;
+  const server = createServer((request, response) => {
+    assert.equal(request.url, '/unbounded');
+    serverResponse = response;
+    response.writeHead(200, { 'content-type': 'application/json' }); // no content-length → chunked transfer
+    response.write(Buffer.alloc(300_000, 0x78)); // over the 256 KB cap; response.end() is never called
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  try {
+    const backstop = new AbortController();
+    setTimeout(() => backstop.abort(), 4000).unref?.(); // a regression must fail the suite, not hang it
+    const start = Date.now();
+    await assert.rejects(
+      fetchRelayTransport()({ url: `http://127.0.0.1:${address.port}/unbounded`, method: 'GET', headers: {}, body: undefined, timeoutMs: 2000, signal: backstop.signal }),
+      /bounded size/,
+    );
+    assert.ok(Date.now() - start < 2000, 'rejected while the body was still arriving, not after completion');
+    // The cancelled reader released the connection server-side and the
+    // oversized body never completed.
+    assert.ok(serverResponse, 'server response observed');
+    const tornDown = serverResponse.closed || await Promise.race([
+      once(serverResponse, 'close').then(() => true),
+      new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 2000).unref?.(); }),
+    ]);
+    assert.ok(tornDown, 'the server observed the cancelled reader as a connection close');
+    assert.equal(serverResponse.writableFinished, false, 'the oversized body never completed');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('an unsettled host signer is bounded by the operation timeout and cancellation like the transport', async () => {
+  const relayKey = generateSecretKey(), hostKey = generateSecretKey();
+  const neverSettles: HostAuthorizationSigner = { hostPublicKey: getPublicKey(hostKey), signHttpAuthentication: () => new Promise<string>(() => {}) };
+  const fixture = scriptedRelay({ relayKey, enforced: true });
+  const input = { relay: 'wss://relay.example.com', inviteCode: 'v2.fixture-code', transport: fixture.transport, now: NOW };
+  const settlesWithin = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, new Promise<never>((_, reject) => { setTimeout(() => reject(Error('test bound exceeded')), 500).unref?.(); })]);
+
+  // The injected signer is an async boundary: a key access that never settles
+  // cannot hold the claim open past the operation's own timeout, and no
+  // request leaves the module while it hangs.
+  await assert.rejects(settlesWithin(claimRelayMembershipInvite({ ...input, signer: neverSettles, timeoutMs: 40 })), /Host authorization signer timed out/);
+  assert.equal(fixture.requests.length, 0);
+
+  // Pre-aborted and mid-flight caller cancellation both reach the signer await.
+  const preAborted = new AbortController();
+  preAborted.abort();
+  await assert.rejects(settlesWithin(claimRelayMembershipInvite({ ...input, signer: neverSettles, signal: preAborted.signal, timeoutMs: 5000 })), /Host authorization signer cancelled/);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 10).unref?.();
+  await assert.rejects(settlesWithin(claimRelayMembershipInvite({ ...input, signer: neverSettles, signal: controller.signal, timeoutMs: 5000 })), /Host authorization signer cancelled/);
+  assert.equal(fixture.requests.length, 0);
+
+  // The gated query's signer await is equally bounded: discovery runs, then
+  // the unsettled signer is abandoned before any POST /query leaves.
+  await assert.rejects(settlesWithin(verifyDirectMembershipEvidence({ relay: 'wss://relay.example.com', signer: neverSettles, transport: fixture.transport, timeoutMs: 40, now: NOW })), /Host authorization signer timed out/);
+  assert.deepEqual(fixture.requests.map(request => request.method), ['GET']);
 });

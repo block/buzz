@@ -114,10 +114,32 @@ export function fetchRelayTransport(fetcher: typeof globalThis.fetch = globalThi
   return async request => {
     const response = await fetcher(request.url, { method: request.method, headers: request.headers, body: request.body, redirect: 'error', signal: request.signal });
     const declared = Number(response.headers.get('content-length'));
-    if (declared > MAX_BODY_BYTES) throw Error('Relay response exceeds bounded size');
-    const bodyText = await response.text();
-    if (bodyText.length > MAX_BODY_BYTES) throw Error('Relay response exceeds bounded size');
-    return { status: response.status, bodyText };
+    if (declared > MAX_BODY_BYTES) {
+      try { await response.body?.cancel(); } catch { /* release is best-effort; the refusal stands */ }
+      throw Error('Relay response exceeds bounded size');
+    }
+    if (response.body === null) return { status: response.status, bodyText: '' };
+    // A chunked body carries no usable Content-Length, so bytes are acquired
+    // incrementally and the reader is cancelled the moment the cap is exceeded
+    // or the stream fails: an oversized body is rejected while it is still
+    // arriving — never buffered whole first — and the connection is released
+    // instead of being left to drain an already-refused body.
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || value === undefined) break;
+        received += value.byteLength;
+        if (received > MAX_BODY_BYTES) throw Error('Relay response exceeds bounded size');
+        chunks.push(value);
+      }
+    } catch (error) {
+      try { await reader.cancel(); } catch { /* an already failed stream needs no release */ }
+      throw error;
+    }
+    return { status: response.status, bodyText: new TextDecoder().decode(Buffer.concat(chunks, received)) };
   };
 }
 
@@ -143,11 +165,13 @@ function hexPublicKey(value: unknown, label: string): string {
   return value;
 }
 
-function requestScope(timeoutMs: number, external?: AbortSignal) {
+/** One bounded request's timeout/cancel scope, shared by the transport race
+ * and the signer await; `messages` names the boundary that aborted. */
+function requestScope(timeoutMs: number, external?: AbortSignal, messages: { readonly timeout: string; readonly cancelled: string } = { timeout: 'Relay HTTP request timeout', cancelled: 'Relay HTTP request cancelled' }) {
   const controller = new AbortController();
   const abort = (message: string) => { if (!controller.signal.aborted) controller.abort(Error(message)); };
-  const timer = setTimeout(() => abort('Relay HTTP request timeout'), timeoutMs);
-  const cancel = () => abort('Relay HTTP request cancelled');
+  const timer = setTimeout(() => abort(messages.timeout), timeoutMs);
+  const cancel = () => abort(messages.cancelled);
   if (external?.aborted) cancel();
   else external?.addEventListener('abort', cancel, { once: true });
   return { signal: controller.signal, done: () => { clearTimeout(timer); external?.removeEventListener('abort', cancel); } };
@@ -215,12 +239,32 @@ function tagValues(event: Event, name: string): string[] {
   return event.tags.filter(tag => tag[0] === name && tag.length >= 2).map(tag => tag[1]);
 }
 
+/** The injected signer is an async boundary exactly like the transport: its
+ * await is raced against the operation's own timeout and caller
+ * cancellation, so a signer that never settles cannot hold a claim or an
+ * evidence run open. Signer misuse still surfaces directly once the signer
+ * settles; only the settling itself is bounded here. */
+async function boundedSigner(signer: HostAuthorizationSigner, request: { url: string; method: 'POST'; payloadSha256Hex: string }, timeoutMs: number, signal?: AbortSignal): Promise<string> {
+  const scope = requestScope(timeoutMs, signal, { timeout: 'Host authorization signer timed out', cancelled: 'Host authorization signer cancelled' });
+  const attempt = signer.signHttpAuthentication(request);
+  void attempt.catch(() => {}); // an abandoned attempt must not reject unhandled later
+  try {
+    return await Promise.race([attempt, new Promise<never>((_, reject) => {
+      // Same pre-aborted guard as the transport race: an abort whose event
+      // has already fired must reject immediately, not wait for a listener.
+      if (scope.signal.aborted) reject(scope.signal.reason);
+      else scope.signal.addEventListener('abort', () => reject(scope.signal.reason), { once: true });
+    })]);
+  } finally { scope.done(); }
+}
+
 /** Signer output is fully re-verified before any request leaves the module,
- * binding the signature to the exact host identity, URL, method and payload. */
-async function nip98Authorization(signer: HostAuthorizationSigner, url: string, body: string, now: number): Promise<string> {
+ * binding the signature to the exact host identity, URL, method and payload;
+ * the signer's own await stays inside the caller's timeout/cancellation. */
+async function nip98Authorization(signer: HostAuthorizationSigner, url: string, body: string, now: number, timeoutMs: number, signal?: AbortSignal): Promise<string> {
   const hostPublicKey = hexPublicKey(signer.hostPublicKey, 'host public key');
   const payloadSha256Hex = digest(body).toString('hex');
-  const serialized = await signer.signHttpAuthentication({ url, method: 'POST', payloadSha256Hex });
+  const serialized = await boundedSigner(signer, { url, method: 'POST', payloadSha256Hex }, timeoutMs, signal);
   let event: Event;
   try { event = parseEvent(JSON.parse(serialized)); } catch { throw Error('Signer returned a malformed NIP-98 event'); }
   if (event.kind !== NIP98_KIND) throw Error('Signer returned a non-NIP-98 event kind');
@@ -289,12 +333,13 @@ export async function claimRelayMembershipInvite(input: {
   const policyReceipt = input.policyReceipt === undefined ? undefined : text(input.policyReceipt, 2048);
   const now = input.now ?? Math.floor(Date.now() / 1000);
   const transport = input.transport ?? fetchRelayTransport();
+  const timeoutMs = boundedTimeout(input.timeoutMs);
   const url = `${origin}api/invites/claim`;
   const body = JSON.stringify(policyReceipt === undefined ? { code: inviteCode } : { code: inviteCode, policy_receipt: policyReceipt });
-  const authorization = await nip98Authorization(input.signer, url, body, now);
+  const authorization = await nip98Authorization(input.signer, url, body, now, timeoutMs, input.signal);
   let response: { status: number; bodyText: string };
   try {
-    response = await relayFetch({ transport, url, method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', authorization }, body, timeoutMs: boundedTimeout(input.timeoutMs), signal: input.signal });
+    response = await relayFetch({ transport, url, method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', authorization }, body, timeoutMs, signal: input.signal });
   } catch (error) {
     throw Error(`Invite claim request failed before a relay outcome; commit status unknown (${safeReason(error)})`);
   }
@@ -370,7 +415,7 @@ export async function verifyDirectMembershipEvidence(input: {
   if (relaySelf !== null) {
     const url = `${origin}query`;
     const body = JSON.stringify([{ kinds: [ROSTER_KIND], authors: [relaySelf] }]);
-    const authorization = await nip98Authorization(input.signer, url, body, now);
+    const authorization = await nip98Authorization(input.signer, url, body, now, timeoutMs, input.signal);
     try {
       const response = await relayFetch({ transport, url, method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', authorization }, body, timeoutMs, signal: input.signal });
       if (response.status === 200) {
