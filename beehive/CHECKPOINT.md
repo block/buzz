@@ -2159,3 +2159,16 @@ observation-old-instrumented.log, observation-fix-goose.log, final-protocol2-dri
 strict-delivery.log. Original failures preserved. Full final gate pending here.
 Installed Buzz transport/CLI plus TypeScript provider fixture only: no real vendor,
 OAuth login/refresh, inference, or production current-kind40002 claim.
+
+Final default installed-enabled run at 8426b2ba1604f9d854900198b04bca2a0e91b932:
+121/122, natural 314.383s, zero skipped/cancelled. All 13 normal wizard journeys
+and both installed Move cases passed. Sole failure: installed-conversation's old
+Buzz assertion required profile text duplicated in each turn prompt, contradicting
+the corrected native session/new input boundary. That assertion now checks exact
+native-session-inputs.jsonl systemPrompt values (nonempty evidence), retaining the
+signed-reply and lifecycle assertions. Direct strict and focused installed-conversation
+2/2 passed after this test-only correction. No second full run: **final full gate
+is not green**, and the post-full test correction has focused validation only.
+Original full log is retained as MODEL_PROVIDER_CORRECTION/full-default-final.log;
+post-full logs strict-post-full.log and installed-conversation-corrected.log.
+Historical admission timing failures remain unresolved, not reclassified by this run.

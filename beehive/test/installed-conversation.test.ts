@@ -96,7 +96,11 @@ for (const goose of [false, true]) test(`installed buzz-acp completes multi-conv
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
     assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting\./);
-    if (!goose) assert.match(readFileSync(join(dir, 'received-prompts.jsonl'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY/);
+    if (!goose) {
+      const inputs = readFileSync(join(dir, 'native-session-inputs.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.ok(inputs.length > 0);
+      for (const input of inputs) assert.equal(input.systemPrompt, 'BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting.');
+    }
     if (goose) assert.match(evidence.session, /^goose-[0-9]+-1$/); else assert.equal(evidence.session, 'conversation-session');
     assert.equal(evidence.agentPublicKey, agent);
     assert.equal(evidence.model, goose ? 'goose-model-a' : 'databricks-claude-haiku-4-5');
