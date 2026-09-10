@@ -5,7 +5,11 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
-## Current published-candidate continuation 4341 — U1 policy recovery
+## Published continuation 4341 — U1 policy recovery
+
+UX source committed/pushed as `4fa4fd146961f91fdace04f3c6fb59e6300e2473`;
+exact origin head and clean worktree verified after push. This documentation-only
+follow-up records that immutable tested source head.
 
 R1 was separately committed and pushed as
 `64305a7a0020da0faa599b46be37b538b9533945`; origin branch verified at that exact
@@ -46,8 +50,8 @@ Final semantic candidate: strict TypeScript + full installed-enabled package sui
 `ux-full.log`; production-bound regression source `test/policy-tui.test.ts`.
 Binary hashes freshly rechecked and match the two pins below. No dependency changes.
 No repo-wide just ci, GitHub CI approval, production admission, real provider/OAuth,
-PR/merge/release, or full delivery claim. Source candidate is the commit containing
-this section; publication record with exact head follows in the workspace evidence.
+PR/merge/release, or full delivery claim. Tested source is the immutable `4fa4fd146961f91fdace04f3c6fb59e6300e2473`
+listed above; the following checkpoint-only commit does not change executable source.
 Configured Logan Johnson author/committer + DCO verified before push; no crypto signer.
 
 Completed independent TOOLS_RECONNECT and INTENT_TUI reviews are consumed. The new
