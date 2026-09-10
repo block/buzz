@@ -63,7 +63,12 @@ async function addMessageStep(
 ) {
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The outgoing trigger inspector also labels its input "Message text".
+  const stepText = dialog
+    .getByLabel("Message text", { exact: true })
+    .and(dialog.locator("#wf-step-0-text"));
+  await stepText.fill("Workflow notification");
+  await expect(stepText).toHaveValue("Workflow notification");
 }
 
 async function createEnabled(
@@ -288,6 +293,7 @@ test("round-trips and reopens structured message-text conditions", async ({
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
+  await waitForAnimations(page);
   const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
   const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
   const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
@@ -299,7 +305,6 @@ test("round-trips and reopens structured message-text conditions", async ({
     Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
   ).toBeLessThan(1);
   expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
-  await waitForAnimations(page);
   await matchControls.screenshot({
     path: "test-results/workflow-message-condition-operators.png",
   });
