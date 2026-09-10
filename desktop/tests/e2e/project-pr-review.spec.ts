@@ -6,6 +6,7 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const SHOTS = "test-results/project-pr-review";
 const RECOVERY_SHOTS = "test-results/project-pr-conflict-recovery";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
+const REVIEWER_HUMAN_PUBKEY = "b".repeat(64);
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 
 async function expectSinglePrimaryTextColumn(row: Locator) {
@@ -1481,9 +1482,23 @@ test("channels tab opens the latest matching conversation without leaving the pr
   page,
 }) => {
   await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+    window.localStorage.setItem("buzz:text-scale", "1.5");
+  });
   await installMockBridge(page, {
     searchProfiles: [
       {
+        avatarUrl:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" fill="%23F4B942"/%3E%3C/svg%3E',
+        displayName: "reviewer human",
+        isAgent: false,
+        pubkey: REVIEWER_HUMAN_PUBKEY,
+      },
+      {
+        avatarUrl:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" fill="%237657FF"/%3E%3C/svg%3E',
         displayName: "reviewer agent",
         isAgent: true,
         pubkey: REVIEWER_AGENT_PUBKEY,
@@ -1515,9 +1530,9 @@ test("channels tab opens the latest matching conversation without leaving the pr
       });
     },
     {
-      latestAuthor: REVIEWER_AGENT_PUBKEY,
+      latestAuthor: REVIEWER_HUMAN_PUBKEY,
       latestContent,
-      olderAuthor: TEST_IDENTITIES.alice.pubkey,
+      olderAuthor: REVIEWER_AGENT_PUBKEY,
       olderContent,
       repoToken: `${DEFAULT_MOCK_PUBKEY} buzz`,
     },
@@ -1541,14 +1556,64 @@ test("channels tab opens the latest matching conversation without leaving the pr
     name: "View reviewer agent's profile",
   });
   const discussedHuman = channelRow.getByRole("button", {
-    name: "View alice's profile",
+    name: "View reviewer human's profile",
   });
   await expect(discussedAgent).toBeVisible();
   await expect(discussedHuman).toBeVisible();
-  await discussedAgent.focus();
-  await expect(discussedAgent).toBeFocused();
+  await expect(
+    channelRow.getByRole("button", { name: /^View .*'s profile$/ }),
+  ).toHaveCount(2);
+  expect(
+    await channelRow
+      .getByRole("button", { name: /^View .*'s profile$/ })
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("aria-label")),
+      ),
+  ).toEqual(["View reviewer human's profile", "View reviewer agent's profile"]);
+  await page.locator("body").click({ position: { x: 0, y: 0 } });
+  await expect(discussedAgent).not.toBeFocused();
+  await expect(discussedHuman).not.toBeFocused();
+  await waitForAnimations(page);
+  await channelRow.screenshot({
+    caret: "hide",
+    path: `${SHOTS}/06-project-facepile-separator.png`,
+    scale: "css",
+  });
   await expect(discussedAgent).toHaveCSS("clip-path", "none");
-  await expect(discussedAgent).not.toHaveClass(/rounded-squircle/);
+  await expect(discussedAgent).not.toHaveClass(
+    /(?:^|\s)rounded-squircle(?:\s|$)/,
+  );
+  await expect(discussedAgent).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(discussedAgent).toHaveCSS("box-shadow", "none");
+  await expect(discussedAgent).toHaveCSS("overflow", "visible");
+  const agentSeparator = await discussedAgent.evaluate((element) => {
+    const style = getComputedStyle(element, "::before");
+    return {
+      backgroundColor: style.backgroundColor,
+      clipPath: style.clipPath,
+      content: style.content,
+      insetBottom: style.bottom,
+      insetLeft: style.left,
+      insetRight: style.right,
+      insetTop: style.top,
+      opacity: style.opacity,
+      position: style.position,
+    };
+  });
+  expect(agentSeparator).toMatchObject({
+    clipPath: /url\(["']?#rounded-squircle-clip["']?\)/,
+    content: /(?:""|none)/,
+    opacity: "1",
+    position: "absolute",
+  });
+  expect(agentSeparator.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(Number.parseFloat(agentSeparator.insetTop)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetRight)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetBottom)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetLeft)).toBeLessThan(0);
   await expect(
     discussedAgent.locator("[data-avatar-shape='squircle']"),
   ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
@@ -1558,9 +1623,13 @@ test("channels tab opens the latest matching conversation without leaving the pr
   ]);
   expect(agentBox).not.toBeNull();
   expect(humanBox).not.toBeNull();
-  expect((humanBox?.x ?? 0) - (agentBox?.x ?? 0)).toBeLessThan(
-    agentBox?.width ?? 0,
+  expect((agentBox?.x ?? 0) - (humanBox?.x ?? 0)).toBeLessThan(
+    humanBox?.width ?? 0,
   );
+
+  await discussedAgent.focus();
+  await expect(discussedAgent).toBeFocused();
+  await expect(discussedAgent).toHaveCSS("clip-path", "none");
 
   await channelRow.click();
 

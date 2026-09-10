@@ -340,6 +340,10 @@ test("built-in persona edits persist", async ({ page }) => {
 });
 
 test("searches agent avatar emoji with focus on open", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+  });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
@@ -364,6 +368,11 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
     return center?.closest("svg.lucide-plus") !== null;
   });
   expect(centerElement).toBe(true);
+  await waitForAnimations(page);
+  await page.screenshot({
+    caret: "hide",
+    path: "test-results/agents/agent-avatar-idle-layering.png",
+  });
   await addAvatarButton.focus();
   await page.keyboard.press("Tab");
   await page.keyboard.press("Shift+Tab");
@@ -374,6 +383,11 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
       (button) => getComputedStyle(button).boxShadow,
     ),
   ).not.toBe(idleShadow);
+  await waitForAnimations(page);
+  await page.screenshot({
+    caret: "hide",
+    path: "test-results/agents/agent-avatar-keyboard-focus.png",
+  });
   await expect(emptyOutline).toHaveCSS(
     "clip-path",
     /url\(["']?#rounded-squircle-clip["']?\)/,
