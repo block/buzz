@@ -2283,6 +2283,8 @@ async fn ingest_event_inner(
         )));
     }
 
+    super::media_access::validate_media_references(tenant, state, &event).await?;
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {

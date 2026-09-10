@@ -20,6 +20,8 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Local attachment publication authorization.
+pub mod media_access;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).

@@ -200,6 +200,19 @@ CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
 -- Cross-community dedup: same signed event may exist in two communities;
 -- (community_id, created_at, id) dedupes within one, allows across.
 
+-- Index references in existing events as well as new publications. The optional
+-- host filter keeps a foreign relay URL from granting access to a local blob.
+CREATE FUNCTION buzz_media_hashes(body TEXT, tags JSONB, media_host TEXT DEFAULT NULL)
+RETURNS TEXT[] LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT COALESCE(array_agg(DISTINCT lower(parts[2])), ARRAY[]::TEXT[])
+    FROM regexp_matches(
+        replace(body || ' ' || tags::TEXT, E'\\/', '/'),
+        '(?:https?://([^/[:space:]"<>]+))?/media/([0-9a-f]{64})(?=$|[^0-9a-f])',
+        'g'
+    ) AS parts
+    WHERE media_host IS NULL OR parts[1] IS NULL OR lower(parts[1]) = lower(media_host)
+$$;
+
 CREATE TABLE events (
     community_id UUID NOT NULL REFERENCES communities(id),
     id          BYTEA NOT NULL,
@@ -276,6 +289,9 @@ CREATE INDEX idx_events_not_before ON events (community_id, not_before)
 -- is supplied by the community-leading btree filters above (BitmapAnd), so this
 -- stays a single-column GIN. The search lane confirms the final spelling with
 -- EXPLAIN before its work lands (Quinn option A; Max's index-spelling caveat).
+-- idx_events_media_hashes is created by reconcile-schema-after-pgschema.sql:
+-- pgschema preserves its temporary schema name in function-based index expressions.
+
 CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 
 -- ── Event mentions ────────────────────────────────────────────────────────────
@@ -1893,3 +1909,16 @@ CREATE INDEX idx_relay_operator_audit_target
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
 
+
+-- A successful upload proves possession of the bytes, not merely knowledge of
+-- their hash. Keep this independently of optional moderation/audit recording.
+CREATE TABLE media_uploaders (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    pubkey BYTEA NOT NULL CHECK (length(pubkey) = 32),
+    PRIMARY KEY (community_id, sha256, pubkey)
+);
+
+CREATE TRIGGER community_write_fence_media_uploaders
+    BEFORE INSERT OR UPDATE OR DELETE ON media_uploaders
+    FOR EACH ROW EXECUTE FUNCTION enforce_community_write_fence();
