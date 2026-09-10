@@ -49,6 +49,13 @@ type UserProfilePopoverProps = {
   children: React.ReactNode;
   pubkey: string;
   triggerElement?: "div" | "span";
+  /**
+   * Extra classes for the inline-flex trigger wrapper. The wrapper is a flex
+   * item at most call sites, and its `min-width: auto` refuses to shrink below
+   * the nowrap width of truncating children — pass `min-w-0 max-w-full` when
+   * the trigger wraps truncating text so the ellipsis can engage.
+   */
+  triggerClassName?: string;
   /** Accessible name for interactive trigger content that is visually hidden. */
   triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
@@ -129,6 +136,7 @@ export function UserProfilePopover({
   children,
   pubkey,
   triggerElement = "div",
+  triggerClassName,
   triggerAriaLabel,
   enableProfilePanel = true,
   enableHoverPopover = true,
@@ -213,6 +221,7 @@ export function UserProfilePopover({
           onMouseLeave={handleMouseLeave}
           className={cn(
             "inline-flex",
+            triggerClassName,
             canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
           )}
         >
