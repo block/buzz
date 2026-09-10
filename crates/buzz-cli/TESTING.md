@@ -229,6 +229,10 @@ buzz messages search --query "CLI test" --limit 5 | jq .
 # messages edit
 buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .
 
+# messages edit from stdin
+printf 'Edited first line\n\nEdited second line\n' \
+  | buzz messages edit --event "$EVENT_ID" --content - | jq .
+
 # messages delete
 buzz messages delete --event "$REPLY_ID" | jq .
 ```
