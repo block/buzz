@@ -28,13 +28,17 @@ export function bootstrapHostIdentity(directory: string, label: string, owner: s
 }
 /** Reject legacy broad OA records rather than silently migrating their authority. */
 export function readHostIdentity(directory: string, credentials: CredentialBackend = systemCredentials): HostIdentity {
+  const value = readHostIdentityPublic(directory);
+  return { ...value, secret: readCredential(credentialReference('host', value.pairing.host), credentials) };
+}
+/** Read only Beehive-owned public enrollment state; exporting never needs credential access. */
+export function readHostIdentityPublic(directory: string): Omit<HostIdentity, 'secret'> {
   const value = object(readPrivate(join(directory, 'host-identity.json')));
   fields(value, ['version', 'pairing', 'key', 'registration']);
   if (value.version !== 3) throw Error('Legacy identity retained; explicit consent required for migration');
   const pairing = hostPairing(value.pairing);
-  const key = credentialReference('host', pairing.host);
-  if (JSON.stringify(value.key) !== JSON.stringify(key)) throw Error('Invalid host credential reference');
-  return { version: 3, pairing, secret: readCredential(key, credentials), registration: value.registration as HostRegistration | null };
+  if (JSON.stringify(value.key) !== JSON.stringify(credentialReference('host', pairing.host))) throw Error('Invalid host credential reference');
+  return { version: 3, pairing, registration: value.registration as HostRegistration | null };
 }
 /** Live startup uses the owner-approved bounded helper, never a synchronous OS call. */
 export async function readHostIdentityAsync(directory: string, credentials: CredentialBackend, signal?: AbortSignal): Promise<HostIdentity> {

@@ -85,7 +85,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   writeFileSync(helper, `import { readFileSync } from 'node:fs'; let input=''; for await (const b of process.stdin) input+=b; const secret=JSON.parse(readFileSync(${JSON.stringify(credentialFile)},'utf8'))[JSON.stringify(JSON.parse(input))]; process.stdout.write(JSON.stringify(secret ? {status:'present',secret} : {status:'missing'}));`);
   const loader = join(root, 'credential-helper-loader.mjs');
   writeFileSync(loader, `import { registerHooks } from 'node:module'; registerHooks({load(url,ctx,next){const r=next(url,ctx); if(!url.endsWith('/src/credential-helper.ts'))return r;return {...r,source:String(r.source).replace("new URL('./credential-helper-child.ts', import.meta.url)", ${JSON.stringify(`new URL(${JSON.stringify('file://' + helper)})`)})};}});`);
-  const hostChild = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'host', directory, relay.url, '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root }, stdio: ['ignore','pipe','pipe'] });
+  const hostChild = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'host', directory, ...(installed ? [relay.url] : []), '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root }, stdio: ['ignore','pipe','pipe'] });
   let hostOutput = ''; hostChild.stdout.on('data', b => hostOutput += b); hostChild.stderr.on('data', b => hostOutput += b);
   const hostExit = new Promise<number | null>(resolve => hostChild.on('close', resolve));
   const running = { async close() { if (hostChild.exitCode === null && hostChild.signalCode === null) hostChild.kill('SIGTERM'); assert.equal(await hostExit, 0, hostOutput); } };
@@ -96,7 +96,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   await foreign.ready;
   const path = join(root, 'catalog.json'); writePrivate(path, catalog);
   const env: NodeJS.ProcessEnv = { ...process.env }; delete env.BUZZ_PRIVATE_KEY; delete env.BUZZ_AUTH_TAG; delete env.BUZZ_RELAY_URL;
-  const child = spawn(process.execPath, ['src/cli.ts', 'tui', path, relay.url], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['src/cli.ts', 'tui', path, ...(installed ? [relay.url] : [])], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', b => output += b.toString()); child.stderr.on('data', b => output += b.toString());
   const exit = new Promise<number | null>((done, reject) => { child.on('exit', done); child.on('error', reject); });
   async function wait(predicate: () => boolean) { for (let n = 0; n < (installed ? 3000 : 400); n++) { if (predicate()) return; if (child.exitCode !== null) throw Error(output); await delay(20); } throw Error(`TUI observation timeout: ${output}`); }

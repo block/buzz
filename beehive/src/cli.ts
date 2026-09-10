@@ -1,10 +1,12 @@
+import { setupPath } from './setup-path.ts';
+import { randomUUID } from 'node:crypto';
 import { credentialHelperReader } from './credential-helper.ts';
 import { systemCredentials } from './credential-store.ts';
 import { privateHostTransport } from './host-transport.ts';
 import { verifyProductionAdmission } from './relay-admission.ts';
 import { installationPublicSlots } from './slots.ts';
 import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
-import { readHostIdentity, readHostIdentityAsync } from './host-identity.ts';
+import { readHostIdentity, readHostIdentityPublic, readHostIdentityAsync } from './host-identity.ts';
 import { verifyHostRegistration } from './host-registration.ts';
 import { setupOwner } from './host.ts';
 import { buzzProviderInput, buzzProviderGuidance, databricksOAuthGuidance } from './buzz-provider.ts';
@@ -37,8 +39,8 @@ import { prepareConversation } from './conversation.ts';
 const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
-// Default HOST state only, resolved from the current user's home (never cwd). Owner approval/catalog
-// files stay explicit and never land in this folder. An occupied default is never reinitialized.
+// Default HOST state only, resolved from the current user's home (never cwd).
+// Owner approval uses a separately chosen owner exchange folder. An occupied default is never reinitialized.
 const defaultHostDirectory = () => join(homedir(), '.beehive', 'host');
 const help = `Beehive — private host preview (explicit direct relay membership required)
 Command: beehive <command> from any directory once installed (one-time user link, reversible: ln -s <beehive-package>/bin/beehive.cjs <user bin on PATH>/beehive, e.g. ~/.local/bin); source fallback inside the package: node src/cli.ts <command>.
@@ -48,6 +50,7 @@ Command: beehive <command> from any directory once installed (one-time user link
   setup <host-directory> <identity-file>  LEGACY loopback diagnostic setup (owner key copied)
   provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
   reconcile-provision <host-directory> <binding-file> <genesis-file> Explicit exact first-provision recovery
+  catalog <approval-file>                  Automatic private catalog beside approval; prints tui command
   catalog <new-file> <registration-files...> Retain verified public host registrations
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
@@ -61,11 +64,12 @@ Command: beehive <command> from any directory once installed (one-time user link
   auth-info <host-directory> [binding-id]   Print local harness service context (no login)
   conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
+  host --owner-present                     Default host and retained registered relay
   host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
   host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
-  tui <catalog-file> <relay>                Private owner UI; hidden existing owner signer
+  tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
-The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval/catalog files remain explicit and separate from host state.
+The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval files are automatic in the separately chosen owner exchange folder. catalog <approval-file> saves beside the approval. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match registration.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
@@ -73,13 +77,13 @@ async function main() {
   if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
   } else if (command === 'provision-agent' || command === 'reconcile-provision') {
-    const directory = resolve(text(args[0]));
+    const directory = setupPath(text(args[0]));
     const identity = readHostIdentity(directory);
     verifyHostRegistration(identity.registration, identity.pairing);
-    const binding = object(readPrivate(resolve(text(args[1]))));
+    const binding = object(readPrivate(setupPath(text(args[1]))));
     if (['host', 'ownerSecret', 'ownerPublic', 'agentSecret'].some(key => Object.hasOwn(binding, key))) throw Error('Local binding file must not carry identity');
     const setup = validateSetup({ ...binding, host: identity.pairing.host, ownerPublic: identity.pairing.owner });
-    const genesis = validateGenesis(readPrivate(resolve(text(args[2]))));
+    const genesis = validateGenesis(readPrivate(setupPath(text(args[2]))));
     const secret = await readAgentSecret();
     if (command === 'reconcile-provision') reconcileCredentialProvision(directory, setup, secret, genesis);
     else provisionCredentialSlot(directory, setup, secret, genesis);
@@ -92,7 +96,7 @@ async function main() {
       args[0] = defaultHostDirectory();
       console.log(`Default host folder: ${args[0]} (pass an explicit directory for another host; existing installations are never reinitialized)`);
     }
-    const dir = resolve(text(args[0]));
+    const dir = setupPath(text(args[0]));
     if (args.length === 1 && !existsSync(join(dir, 'setup.json'))) {
       await enrollmentInput(dir); return;
     }
@@ -296,7 +300,7 @@ async function main() {
       throw Error('Immutable bindings cannot be rewritten: use migrate-slots first for a legacy installation, then local-setup action normal to convert the selected ACP binding to a NEW reference');
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
-    const entries = installationPublicSlots(resolve(text(args[0])));
+    const entries = installationPublicSlots(setupPath(text(args[0])));
     const setup = args[1] ? entries[0]!.bindings[text(args[1])] : entries[0]!.setup;
     if (!setup) throw Error('Unknown local binding');
     if (setup.mode === 'diagnostic-acp') { console.log('Setup/diagnostic only: authentication unverified, no model/native profile contract. Configure locally as the service user; no login/probe was run.'); return; }
@@ -336,10 +340,11 @@ async function main() {
       // Either the classic <host-directory> <relay> form, or the default host
       // folder with the relay first (beehive host <relay> --owner-present).
       const relayFirst = args.length > 0 && /^(wss|ws):\/\//.test(args[0]);
-      const directory = args.length === 0 || relayFirst ? defaultHostDirectory() : resolve(text(args[0]));
-      const url = text(args[relayFirst ? 0 : 1]);
+      const directory = args.length === 0 || args[0] === '--owner-present' || relayFirst ? defaultHostDirectory() : setupPath(text(args[0]));
+      const suppliedRelay = args[relayFirst ? 0 : 1];
+      const url = suppliedRelay && suppliedRelay !== '--owner-present' ? text(suppliedRelay) : readHostIdentityPublic(directory).pairing.relay;
       const privateInstallation = existsSync(join(directory, 'host-identity.json'));
-      if (privateInstallation && args[relayFirst ? 1 : 2] !== '--owner-present') throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
+      if (privateInstallation && !args.includes('--owner-present')) throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
       const credentials = privateInstallation ? { ...systemCredentials, readAsync: credentialHelperReader({ operatorApproved: true }) } : systemCredentials;
       const identity = privateInstallation ? await readHostIdentityAsync(directory, credentials, controller.signal) : undefined;
       if (identity && identity.pairing.relay !== url) throw Error('Wrong registered host relay; no network request sent');
@@ -359,21 +364,24 @@ async function main() {
       // Transport ready rejection caused by intentional startup cancellation.
     } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
   } else if (command === 'catalog') {
-    if (args.length < 2) throw Error('Catalog requires private registration files');
-    const registrations = args.slice(1).map(file => readPrivate(resolve(text(file))));
+    if (args.length < 1) throw Error('Use beehive catalog <approval-file>, or catalog <new-file> <approval-files...>');
+    const registrations = (args.length === 1 ? args : args.slice(1)).map(file => readPrivate(setupPath(text(file))));
     const first = object(object(registrations[0]).request);
     const catalog = verifyHostCatalog({ version: 1, owner: first.owner, relay: first.relay, registrations }, text(first.owner), text(first.relay));
-    writePrivate(resolve(text(args[0])), catalog, true);
+    const file = args.length === 1 ? join(dirname(setupPath(text(args[0]))), `catalog-${randomUUID()}.json`) : setupPath(text(args[0]));
+    writePrivate(file, catalog, true);
+    console.log(`Catalog saved: ${file}\nNext on owner computer: beehive tui ${shellQuote(file)}`);
     console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; fresh direct membership verification required when opening tui. Labels are not authority.`);
   } else if (command === 'tui') {
-    const identity = object(readPrivate(resolve(text(args[0]))));
+    const identity = object(readPrivate(setupPath(text(args[0]))));
+    if (args[1] === undefined && 'registrations' in identity) args[1] = text(identity.relay);
     const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;
     const secret = catalog ? await readAgentSecret('Owner') : text(identity.secret);
     if (catalog && publicKey(secret) !== catalog.owner) throw Error('Wrong catalog owner signer');
     const admission = catalog ? await verifyProductionAdmission(text(args[1]), secret) : undefined;
     const inventory = new Map<string,Message>();
     const profiles = new Profiles();
-    const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
+    const client = managementClient(join(dirname(setupPath(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       profiles.receive(m);
       if (m.type === 'inventory') {
         const key = JSON.stringify([m.host, m.agent]);

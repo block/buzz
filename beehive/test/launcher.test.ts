@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,9 +38,9 @@ async function runLauncher(installed: string, args: string[], env: NodeJS.Proces
   } finally { clearTimeout(timer); child.stdin.end(); }
 }
 
-const createJourney = (request: string, owner: string): [string, string][] => [
-  ['Enrollment [', 'create'], ['Host label: ', 'launcher-host'], ['Owner PUBLIC key (hex): ', publicKey(owner)],
-  ['Relay URL: ', 'wss://example.invalid'], ['NEW private pairing file: ', request],
+const createJourney = (owner: string): [string, string][] => [
+  ['Enrollment [', 'create'], ['Computer name [', 'launcher-host'], ['Owner PUBLIC key (hex,', publicKey(owner)],
+  ['Management relay URL (', 'wss://example.invalid'],
 ];
 
 function installInto(root: string, name = 'user bin dir'): string {
@@ -78,11 +78,10 @@ test('no-arg setup enrolls on the displayed default host folder via the isolated
     const cwd = join(root, 'unrelated cwd dir');
     mkdirSync(cwd);
     const owner = newKey();
-    const request = join(root, 'pairing request.json');
     const credentials = join(root, 'isolated fixture secrets.json');
-    const created = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), createJourney(request, owner), cwd);
+    const created = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), createJourney(owner), cwd);
     assert.equal(created.code, 0, created.output);
-    assert.equal(created.answered, 5, created.output);
+    assert.equal(created.answered, 4, created.output);
     const folder = join(home, '.beehive', 'host');
     assert.ok(created.output.includes(`Default host folder: ${folder}`), created.output);
     const identity = JSON.parse(readFileSync(join(folder, 'host-identity.json'), 'utf8')) as { version: number; pairing: { host: string; owner: string; label: string }; registration: unknown };
@@ -94,15 +93,15 @@ test('no-arg setup enrolls on the displayed default host folder via the isolated
     const fixture = readFileSync(credentials, 'utf8');
     assert.ok(fixture.includes(identity.pairing.host), 'host key stored in the isolated fixture');
     assert.equal(Object.keys(JSON.parse(fixture)).length, 1);
-    const files = [join(folder, 'host-identity.json'), request, credentials];
-    for (const file of [...files, created.output]) assert.ok(!file.includes(owner), 'owner secret never persisted or printed');
+    const files = [join(folder, 'host-identity.json'), join(folder, 'exchange', readdirSync(join(folder, 'exchange'))[0]!), credentials];
+    for (const value of [...files.map(file => readFileSync(file, 'utf8')), created.output]) assert.ok(!value.includes(owner), 'owner secret never persisted or printed');
     // A second default setup must refuse to replace the retained identity.
     const before = readFileSync(join(folder, 'host-identity.json'), 'utf8');
     const second = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), [
-      ['Enrollment [', 'create'], ['Host label: ', 'other-host'], ['Owner PUBLIC key (hex): ', publicKey(newKey())], ['Relay URL: ', 'wss://other.example.invalid'],
+      ['Enrollment [', 'create'],
     ], cwd);
     assert.equal(second.code, 1, second.output);
-    assert.ok(second.output.includes('Host identity already exists; no replacement or automatic migration'), second.output);
+    assert.ok(second.output.includes('Host identity already exists. Rerun setup'), second.output);
     assert.equal(readFileSync(join(folder, 'host-identity.json'), 'utf8'), before, 'retained identity unchanged');
     assert.ok(!existsSync(join(root, 'second request.json')));
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -118,9 +117,8 @@ test('explicit host directory setup is preserved through the launcher and leaves
     mkdirSync(cwd);
     const owner = newKey();
     const explicit = join(root, 'explicit host dir');
-    const request = join(root, 'pairing request.json');
     const credentials = join(root, 'isolated fixture secrets.json');
-    const created = await runLauncher(installed, ['setup', explicit], isolatedEnv(home, credentials), createJourney(request, owner), cwd);
+    const created = await runLauncher(installed, ['setup', explicit], isolatedEnv(home, credentials), createJourney(owner), cwd);
     assert.equal(created.code, 0, created.output);
     assert.ok(!created.output.includes('Default host folder:'), created.output);
     assert.ok(existsSync(join(explicit, 'host-identity.json')), 'identity lands in the explicit directory');
