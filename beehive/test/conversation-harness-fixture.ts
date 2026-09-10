@@ -5,9 +5,14 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
 if (process.env.BUZZ_AGENT_SYSTEM_PROMPT) writeFileSync('received-system-instructions', process.env.BUZZ_AGENT_SYSTEM_PROMPT);
+const claude = process.env.ANTHROPIC_MODEL !== undefined;
+if (claude) {
+  if (process.argv.length !== 2 || process.env.GOOSE_PROVIDER || process.env.BUZZ_AGENT_CONFIG_DIR || process.env.BUZZ_ACP_MODEL || process.env.ANTHROPIC_API_KEY !== 'fixture-claude-private-key' || !process.env.CLAUDE_CODE_EXECUTABLE || !process.env.HOME?.endsWith('service-home')) throw Error('Incorrect Claude private environment/argv');
+  writeFileSync('claude-env-checked', 'private key + CLI + dedicated HOME, no mixed provider vars');
+}
 const goose = process.env.GOOSE_PROVIDER !== undefined;
 if (goose && (process.env.BUZZ_AGENT_MODEL || process.env.BUZZ_AGENT_CONFIG_DIR || process.env.GOOSE_MODE !== 'auto')) throw Error('Mixed harness environment');
-const model = goose ? process.env.GOOSE_MODEL : process.env.BUZZ_AGENT_MODEL;
+const model = claude ? process.env.ANTHROPIC_MODEL : goose ? process.env.GOOSE_MODEL : process.env.BUZZ_AGENT_MODEL;
 const mode = readFileSync('mode', 'utf8');
 const nativeModel = () => ({ configOptions: [{ configId: 'goose-model', category: 'model', currentValue: mode === 'wrong-model' ? 'other' : model, options: [{ value: model }] }] });
 let tool: any; let configRejected = false;
@@ -24,6 +29,7 @@ setTimeout(() => process.exit(0), 60000).unref();
 const send = (m: any) => process.stdout.write(JSON.stringify(m) + '\n');
 for await (const line of createInterface({ input: process.stdin })) {
   const m = JSON.parse(line); let result: any;
+  if (claude) appendFileSync('claude-rpc-methods', JSON.stringify({method:m.method}) + '\n');
   if (goose) appendFileSync('goose-rpc-methods', JSON.stringify({method:m.method, configId:m.params?.configId, value:m.params?.value}) + '\n');
   if (!m.method) {
     if (m.result?.ok) {
@@ -33,7 +39,15 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     continue;
   }
-  if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: goose ? 'goose' : 'buzz-agent' } };
+  if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? 'goose' : 'buzz-agent' } };
+  else if (m.method === 'session/new' && claude) {
+    if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; }
+    sessionId = `claude-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
+    tool = m.params.mcpServers[0]; selected = model!;
+    if (m.params.systemPrompt !== undefined) throw Error('Claude must use native meta append');
+    if (m.params._meta?.systemPrompt) writeFileSync('received-system-instructions', m.params._meta.systemPrompt.append);
+    result = { sessionId, models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } };
+  }
   else if (m.method === 'session/new') { if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
@@ -41,10 +55,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   else if (m.method === 'session/load') { selected = ''; result = {}; }
   else if (m.method === 'session/set_model') {
+    if (claude) throw Error('Claude never accepts invented set_model acknowledgement');
     if (goose) throw Error('Goose must never receive unstable set_model');
     if (mode === 'reject' || (mode === 'optional-reack-fails' && configRejected)) { send({ jsonrpc: '2.0', id: m.id, error: { code: -1, message: 'secret-diagnostic' } }); continue; }
     selected = m.params.modelId; result = { sessionId, modelId: mode === 'wrong-model' ? 'other' : selected };
   } else if (m.method === 'session/set_config_option') {
+    if (claude) throw Error('Claude native config unsupported');
     if (goose) { if (m.params.configId !== 'goose-model' || m.params.value !== model) throw Error('Unsupported Goose config'); result = nativeModel(); }
     else if (mode !== 'optional-ok') {
       configRejected = true;
@@ -55,10 +71,11 @@ for await (const line of createInterface({ input: process.stdin })) {
     writeFileSync('cancel-observed', 'yes');
     if (prompt) send({ jsonrpc: '2.0', id: prompt, result: { stopReason: 'cancelled' } }); continue;
   } else if (m.method === 'session/prompt') {
-    if (goose && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
+    if ((goose || claude) && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
     appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
     if (selected !== model || m.params.sessionId !== sessionId) process.exit(8);
     writeFileSync('prompt-started', selected); prompt = m.id;
+    if (claude && mode === 'claude-drift') send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'current_model_update', currentModelId: 'wrong' } } });
     send({ jsonrpc: '2.0', id: 'reverse', method: 'client/fixture', params: {} });
     if (mode === 'delayed' || mode === 'cancel') continue;
     if (tool) {

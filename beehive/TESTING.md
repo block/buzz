@@ -532,3 +532,16 @@ including Restart, same identity, exact model/profile and unchanged sibling/hist
 Strict + one default concurrent installed-enabled full run: 78/78, natural 44.186s.
 This closes scoped service-subprocess continuity, not real Goose/provider or
 production kind40002/service deployment proof. See CHECKPOINT for historical failures.
+
+## Claude source-grounded subset (6f8d)
+
+`claude.test.ts`: actual owned source-shaped ACP session; dedicated closed env,
+owner-only local key file, missing/unsafe prerequisites, native model/profile,
+wrong model/package/auth rejection/drift and owned descendant absence. The vendor
+CLI is a Node placeholder and the adapter a TS fixture, not real Claude.
+`normal-conversation.test.ts` now retains both Goose cases and adds both Claude
+initial/selected-B cases through the same actual wizard/host CLI/TUI + installed
+buzz-acp/Buzz CLI four-signed-reply path. Private env is checked inside the fixture,
+private inputs absent from public inventory/output, wrong model/native/auth failures
+preserve actual; missing credential does not block Stop. No Codex acceptance is
+claimed. See CLAUDE_SOURCE_6F8D.md for precise source contract and limitations.

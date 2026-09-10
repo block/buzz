@@ -1,3 +1,4 @@
+import { CLAUDE_ADAPTER, claudeModels } from './claude.ts';
 import { gooseModels } from './acp.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createServer, type Socket } from 'node:net';
@@ -163,6 +164,7 @@ export class ConversationSession {
     });
     const injected = new Map<string, { original: RPC; session: string }>();
     let sequence = 0;
+    let claudeNative = false;
     const send = (target: NodeJS.WritableStream, msg: RPC) => {
       if (this.failed) return;
       if (!target.write(JSON.stringify(msg) + '\n')) this.fail('ACP transport backpressure limit');
@@ -176,6 +178,13 @@ export class ConversationSession {
       } else if (msg.id === undefined || (Object.hasOwn(msg, 'result') === Object.hasOwn(msg, 'error'))) throw Error();
       if (!fromHarness && msg.method) {
         const p = msg.params;
+        if (this.prepared.plan.harness === 'claude') {
+          if (['session/load', 'session/resume', 'session/set_model', 'session/set_config_option'].includes(msg.method)) throw Error('Claude requires fresh session/Restart; native settings unsupported');
+          if (msg.method === 'session/new') {
+            if (!claudeNative) throw Error('Claude native profile capability unavailable');
+            if (this.prepared.plan.instructions !== undefined) p._meta = { ...p._meta, systemPrompt: { append: this.prepared.plan.instructions } };
+          }
+        }
         // Session transport does not grant a shim authority to provision tools,
         // workspaces or credentials. Replace only empty upstream provisioning with
         // the host-local fixed CLI adapter; never forward a supplied command.
@@ -213,6 +222,10 @@ export class ConversationSession {
         const request = pending.get(msg.id);
         if (!request) throw Error();
         pending.delete(msg.id);
+        if (request.method === 'initialize' && this.prepared.plan.harness === 'claude') {
+          if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== CLAUDE_ADAPTER) throw Error('Claude native profile capability unavailable');
+          claudeNative = true;
+        }
         // B1: optional-setting application errors are recoverable upstream. Do
         // not assume rejection had no side effect: re-ack the exact model before
         // forwarding that original error. Model-changing errors remain fail-closed.
@@ -227,6 +240,10 @@ export class ConversationSession {
           }
           if (modelConfigs.size > 128) throw Error();
           sessions.delete(session);
+          if (this.prepared.plan.harness === 'claude') {
+            claudeModels(msg.result, this.prepared.plan.model);
+            sessions.add(session); send(socket, msg); return;
+          }
           if (this.prepared.plan.harness === 'goose') {
             gooseModels(msg.result, this.prepared.plan.model);
             sessions.add(session); send(socket, msg); return;

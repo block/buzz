@@ -722,3 +722,35 @@ preflight/replay/Stop controls. Production `host()` is in-process, not a service
 subprocess deployment proof. Real Goose/provider, current-kind40002 admission,
 Claude/Codex/other providers/presets/custom/mesh/compute and startup-signal cleanup
 remain unfinished; see CHECKPOINT for the exact full gate, not a full-product claim.
+
+## Claude Code: bounded API-key local binding
+
+Initial `setup` offers **4 Claude Code** with normal conversation as default;
+existing installations use `local-setup` → `add-claude`. Supply canonical installed
+`claude-agent-acp`, canonical `claude` vendor CLI, dedicated service HOME, an
+owner-only API-key file belonging to the host OS user, and approved exact model IDs.
+The wizard never prints/relays the file contents or runs install/login. Missing
+credentials must be provisioned locally. Subscription login, Bedrock/Vertex and
+other Claude auth/provider modes are **not implemented** by this binding.
+
+Bindings/keys/profiles are independent: reuse/new/import-standby and existing
+normal conversion operate unchanged; selecting a new binding remotely is
+selected-next only until explicit Restart. Standby still cannot Start. Remote
+configuration cannot provide env/executables/credentials. Fixed installation
+conversation/owner/trust/relay authority does not change with the binding.
+
+This preview requires ACP protocol 1 and exact initialize identity
+`@agentclientprotocol/claude-agent-acp` (native `_meta.systemPrompt.append` support).
+`session/new.models.currentModelId` must equal the requested startup model and the
+model must appear in availableModels **in that actual session**, before prompts.
+Missing/mismatched reports fail closed: no native config or unstable set_model is
+invented, no fallback model. Claude load/resume/optional native config are refused;
+model/profile changes need a fresh session via Restart. Drift fails the run.
+Catalog/key/executable presence is not authentication or provider attestation.
+
+Source and evidence: `CLAUDE_SOURCE_6F8D.md`. Real installed buzz-acp/Buzz CLI with
+source-shaped TS Claude fixtures passed normal wizard/host CLI/TUI conversations;
+no real Claude/provider login or inference has been tested. Codex remains unfinished,
+as do other providers/presets/custom/mesh/compute and production current-kind40002
+admission/full-product acceptance. This is a coherent Claude subset, not both-harness
+or full provider parity.

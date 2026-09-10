@@ -1,3 +1,4 @@
+import { claudeGuidance } from './claude.ts';
 import { readAgentSecret } from './key-input.ts';
 import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
@@ -53,16 +54,18 @@ async function main() {
     let ui = createInterface({ input: stdin, output: stdout });
     try {
       const name = text(await ui.question('Host name: '));
-      const mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose]: ');
-      if (!['1','2','3'].includes(mode)) throw Error('Choose 1, 2 or 3');
-      const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : mode === '3' ? 'Absolute installed Goose executable (runs acp): ' : 'Absolute installed buzz-agent executable: ')));
+      const mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose / 4 Claude Code]: ');
+      if (!['1','2','3','4'].includes(mode)) throw Error('Choose 1, 2, 3 or 4');
+      if (mode === '4') console.log(claudeGuidance);
+      const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : mode === '4' ? 'Absolute installed claude-agent-acp adapter: ' : mode === '3' ? 'Absolute installed Goose executable (runs acp): ' : 'Absolute installed buzz-agent executable: ')));
+      const claude = mode === '4' ? { cli: realpathSync(text(await ui.question('Absolute installed claude CLI: '))), apiKeyFile: text(await ui.question('Absolute owner-only local ANTHROPIC_API_KEY file (contents never relayed): ')), models: text(await ui.question('Operator-approved compatible exact Claude model IDs (comma-separated): ')).split(',').map(m => m.trim()) } : undefined;
       const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
       const additionalWorkspace = await ui.question('Additional allowed workspace (blank for none): ');
       const allowedWorkspaces = additionalWorkspace ? [workspace, realpathSync(text(additionalWorkspace))] : [workspace];
       const extra = mode === '1' ? text(await ui.question('Absolute fixture TypeScript script: ')) : '';
       const databricksHost = mode === '2' ? text(await ui.question('Databricks workspace HTTPS URL: ')) : undefined;
       if (databricksHost) { const url = new URL(databricksHost); if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin without credentials'); }
-      console.log(mode === '1' ? 'Fixture setup: no provider/login; trusted local executable, no agent credentials passed.' : mode === '3' ? 'Goose setup: own provider configuration, not Buzz Agent OAuth.' : `Buzz Agent Databricks v2 owns browser OAuth and refresh. Intended host/service credential context: uid ${process.getuid?.() ?? 'unknown'}, HOME=${shellQuote(join(dir, 'service-home'))}, BUZZ_AGENT_CONFIG_DIR=${shellQuote(join(dir, 'agent-config'))}, DATABRICKS_HOST=${shellQuote(databricksHost!)}. Run ${shellQuote(runner)} auth databricks in exactly that context as the service user; no login initiated. Missing executable: install buzz-agent locally. Missing auth: use auth-info after setup.`);
+      console.log(mode === '1' ? 'Fixture setup: no provider/login; trusted local executable, no agent credentials passed.' : mode === '4' ? claudeGuidance : mode === '3' ? 'Goose setup: own provider configuration, not Buzz Agent OAuth.' : `Buzz Agent Databricks v2 owns browser OAuth and refresh. Intended host/service credential context: uid ${process.getuid?.() ?? 'unknown'}, HOME=${shellQuote(join(dir, 'service-home'))}, BUZZ_AGENT_CONFIG_DIR=${shellQuote(join(dir, 'agent-config'))}, DATABRICKS_HOST=${shellQuote(databricksHost!)}. Run ${shellQuote(runner)} auth databricks in exactly that context as the service user; no login initiated. Missing executable: install buzz-agent locally. Missing auth: use auth-info after setup.`);
       const gooseProvider = mode === '3' ? text(await ui.question('Locally configured Goose provider ID: ')) : undefined;
       const gooseModels = mode === '3' ? text(await ui.question('Operator-approved compatible exact model IDs (comma-separated): ')).split(',').map(m => m.trim()) : undefined;
       if (mode === '3') console.log(`Goose owns provider credentials and ~/.config/goose/config.yaml under dedicated HOME=${join(dir, 'service-home')}. Configure locally as the host service OS user; not Desktop HOME or Buzz Agent OAuth. No login, authentication or catalog verified. GOOSE_MODE=auto; exact model fixed on fresh launch.`);
@@ -85,10 +88,10 @@ async function main() {
       } else if (identityAction !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
       if (mode !== '1') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
+      const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '4' ? 'claude' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(claude ? { claude, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
       const lock = join(dir, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
       try {
-        if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' ? '' : text(setup.databricksHost), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
+        if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' ? '' : text(setup.databricksHost), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
         provision(dir, setup, genesis);
       } finally { rmdirSync(lock); }
       migrateSlots(dir);
@@ -186,6 +189,11 @@ async function main() {
     const entries = installationSlots(resolve(text(args[0])));
     const setup = args[1] ? entries[0]!.bindings[text(args[1])] : entries[0]!.setup;
     if (!setup) throw Error('Unknown local binding');
+    if (setup.mode === 'claude') {
+      console.log(claudeGuidance);
+      console.log(`Service HOME=${shellQuote(text(setup.serviceHome))}; same host OS user required. Auth remains unverified; no credentials printed.`);
+      return;
+    }
     if (setup.mode === 'goose') {
       console.log(`Goose on host ${setup.host}: run/configure the installed Goose CLI ${shellQuote(setup.runner)} as the host service OS user (current uid ${process.getuid?.() ?? 'unknown'}) with HOME=${shellQuote(text(setup.serviceHome))}. Goose owns ~/.config/goose/config.yaml and provider credentials; GOOSE_PROVIDER=${shellQuote(text(setup.gooseProvider))}, GOOSE_MODE=auto; exact GOOSE_MODEL is selected remotely from approved models. Do not reuse Desktop HOME or Buzz Agent OAuth caches. No login/status command or authentication was inferred; executable found is not authenticated. Save/Stop need no provider login.`);
       return;

@@ -1,3 +1,4 @@
+import { CLAUDE_ADAPTER, claudeEnvironment, claudeModels, type ClaudeSetup } from './claude.ts';
 import { type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -5,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
 /** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose'; provider?: string; model: string; instructions?: string }>;
+export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude'; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -27,6 +28,11 @@ export function prepareAgent(input: AgentLaunch) {
   }
   accessSync(plan.executable, constants.X_OK);
   for (const p of [plan.workspace, plan.home, plan.configDirectory]) if (!statSync(p).isDirectory()) throw Error('Harness setup directory unavailable');
+  if (plan.harness === 'claude') {
+    identifier(plan.model);
+    if (plan.args.length || !plan.claude) throw Error('Claude requires a zero-argument ACP adapter and local CLI/key binding');
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(claudeEnvironment(plan.claude, plan.home, plan.model)), cliExecutableHash: hash(readFileSync(plan.claude.cli)) });
+  }
   if (plan.harness === 'goose') {
     identifier(plan.provider);
     identifier(plan.model);
@@ -125,6 +131,11 @@ export class AgentSession {
       if (msg.method === 'session/update') {
         const p = record(msg.params);
         const update = record(p.update);
+        if (this.prepared.plan.harness === 'claude' && update.sessionUpdate === 'config_option_update') {
+          if (!Array.isArray(update.configOptions)) throw Error('Invalid Claude model update');
+          for (const option of update.configOptions) if (record(option).category === 'model' && record(option).currentValue !== this.prepared.plan.model) throw Error('Claude model changed');
+        }
+        if (this.prepared.plan.harness === 'claude' && update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('Claude model changed');
         if (this.prepared.plan.harness === 'goose') {
           if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('Goose model changed');
           if (update.sessionUpdate === 'config_option_update') gooseModels(update, this.prepared.plan.model);
@@ -162,9 +173,10 @@ export class AgentSession {
   async catalog(): Promise<Catalog> {
     await this.owned.ready;
     const init = record(await this.request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'beehive', version: '0.0.1' } }));
-    if (init.protocolVersion !== 1 || record(init.agentInfo).name !== (this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
-    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [] }));
+    if (init.protocolVersion !== 1 || record(init.agentInfo).name !== (this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
+    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
     this.session = identifier(created.sessionId);
+    if (this.prepared.plan.harness === 'claude') return { state: 'reported', models: claudeModels(created, this.prepared.plan.model), authentication: 'unverified' };
     if (this.prepared.plan.harness === 'goose') return { state: 'reported', models: gooseModels(created, this.prepared.plan.model), authentication: 'unverified' };
     const models = record(created.models);
     if (!Array.isArray(models.availableModels) || models.availableModels.length > 1000) throw Error('Invalid ACP catalog');
@@ -176,7 +188,7 @@ export class AgentSession {
   async verify(): Promise<Evidence> {
     if (!this.session) throw Error('Create ACP session first');
     const model = this.prepared.plan.model;
-    if (this.prepared.plan.harness !== 'goose') {
+    if (!this.prepared.plan.harness) {
     const ack = record(await this.request('session/set_model', { sessionId: this.session, modelId: model }));
     if (ack.sessionId !== this.session || ack.modelId !== model) throw Error('Exact-model acknowledgement mismatch');
     }

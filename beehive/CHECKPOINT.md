@@ -1,3 +1,56 @@
+## Claude 6f8d — final executable / partial delivery
+
+Strict TypeScript PASS. Exactly ONE FULL DEFAULT concurrent installed-enabled
+suite: **86/86 PASS, zero skips/failures/cancellations, natural 87.493s** on
+Node24.15.0/pnpm11.4.0. No serial mask, timeout change, forced exit, assertion
+weakening or full-suite retry. All four reused normal wizard/host-CLI/TUI journeys
+(Goose and Claude initial/selected-B) passed; Claude adds six owned ACP/private-env
+cases. Final strict initially stopped before any full run on a test union-field
+narrowing error; that log survives as strict-3-union-narrowing-failed.log. Corrected
+with a typeof guard, not a cast/relaxed test. Earlier strict errors remain in logs.
+
+**Delivered:** bounded Claude API-key first-class choice through existing initial
+normal/diagnostic wizard and immutable add-claude binding, local service HOME/env,
+canonical CLI/adapter/key prerequisites, actual same-session model report before
+prompts, package-gated native profile, explicit fresh Restart. Existing reusable
+keys/bindings/assignment authority, profiles, sibling/history and fixed host control
+identity/relay/trust retained. Wrong-model/native-capability/auth failure preserves
+actual; missing local API key still allows Stop. No source or binary substitution.
+
+**Not delivered:** Codex, Claude subscription/Bedrock/Vertex/provider variants,
+Claude native optional settings/resume/load; those are explicit fail-closed gaps,
+not silently downgraded paths. Broader providers/presets/custom/mesh/compute,
+production/current-kind40002 admission and real service-user login remain. New
+Claude-specific hidden-standby/key-removal wizard matrices are not independently
+repeated; unchanged generic authority/hidden-import/missing-agent-key tests pass.
+No real Claude/Goose/provider login or inference, no full-product approval.
+
+REAL binaries (fresh SHA256, unchanged): buzz-acp 10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea;
+Buzz CLI 147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5.
+Claude adapter is a deterministic source-shaped TS fixture; vendor CLI is Node
+placeholder (no login/status execution). Four real signed replies per Claude
+journey, same identity, exact native profile/model/fresh session, public-inventory
+privacy assertions and owned process absence. No stronger provider attestation.
+
+Self-review inspected source shapes, private env allowlist, no BUZZ_ACP_MODEL dual
+Claude authority, local credential error redaction, vendor CLI hash in prepared
+inputs, immutable manifests/common pins, broker model-before-prompt and existing
+cancellation/optional-config semantics. Existing trusted-operator TOCTOU/POSIX
+in-group containment limits persist. Historical 71/73 failures remain unclassified;
+NORMAL_REVIEW_425FEB34 is CLOSED, no new independent review claimed for this delta.
+
+Source citations: CLAUDE_SOURCE_6F8D.md. Logs and source/binary hashes:
+/Users/loganj/.buzz/WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CLAUDE_6F8D/.
+Configured Logan Johnson <loganj@squareup.com> + DCO, no cryptographic signer or
+persistent configuration edits. Exact publication head is in terminal result and
+that directory's publication record. No owner stores/provider/production/Rust/native/
+client changes, repo-wide or GitHub CI, merge/release/PR claim.
+
+Next executable work: implement Codex's separate local auth/config/model/native
+profile-capability contract, not a Claude/Goose relabel, then reuse the same actual
+normal/selected-binding installed journeys. Claude's unimplemented auth/settings
+modes need separate source-grounded acceptance, not a universal credentials form.
+
 ## Recovery 5360 — final validation / publication candidate
 
 Recovered base HEAD: 425feb343e07f5d36fb7ee18b9502c0fd172b15d. The source
@@ -15,8 +68,9 @@ Both host CLI service journeys, pre-ready SIGINT/SIGTERM and policy driver pass.
 No serial mask, retry-to-green, timeout increase, force exit or weak assertions.
 No executable edits after this run; only acceptance documentation. The prior
 71/73 broker/reply-tool failures and older disconnect/admission observations
-remain separately scoped, not classified by nonrecurrence. Independent diagnosis
-and normal-transition review operate the immutable base and remain to consume.
+remain separately scoped, not classified by nonrecurrence. Historical broker/tool diagnosis remains unclassified. NORMAL_REVIEW_425FEB34
+is independently CLOSED: 6/6 recovered plus fresh strict/authority negatives;
+not a pending normal-transition review.
 
 Self-review: one natural host close promise owns startup abort and ready shutdown;
 all slots drain with allSettled, uncertain teardown retains lock, and CLI awaits
@@ -1777,3 +1831,58 @@ Final source adds successful trace output to the test log for inspection; no
 clock-order correctness assertion (wall clocks are diagnostic, not authority).
 Next command is strict + FULL DEFAULT concurrent installed-enabled exactly once;
 no concurrent reviewer full suite, serial mode, retry or deadline change.
+
+## Claude/Codex 6f8d — early source constraints
+
+Pinned source 051c3a270be9c73da9ab06700bcab7d5552fceaa read via git show
+in buzz-reference, not its working checkout. discovery/catalog.rs:50–119
+requires distinct vendor CLI + zero-argument ACP adapters, disables unstable
+model switching/native config for BOTH. Claude uses ANTHROPIC_MODEL alone
+(claude_config/mod.rs:1–27); native profile transport is gated by exact
+@agentclientprotocol/claude-agent-acp initialize identity, then
+_meta.systemPrompt.append (buzz-acp pool.rs:287–320, acp.rs:636–668).
+Codex is not Goose: catalog model/provider env mappings are absent and native
+profile support depends on negotiated protocol (pool.rs:315–320). No invented
+Goose extension or set_model acknowledgement will be used for these adapters.
+
+Implementation begins with Claude's source-supported startup-model/native-profile
+path; Codex remains explicitly unfinished unless its stricter proof fits. Service
+HOME and local Claude credential input must not become relay fields; executable
+presence is never authentication. Existing wizard/immutable bindings/host/broker
+owners will be reused, not a diagnostic runtime. No executable changes yet at
+this early checkpoint. NORMAL_REVIEW_425FEB34 is independently CLOSED (6/6 and
+strict/authority negatives), not pending. Historical broker/tool 71/73 failures
+remain unclassified by the baseline green 78/78.
+
+## Claude 6f8d — executable progress before full gate
+
+Claude API-key-only path is now implemented in existing setup/local-setup,
+immutable bindings, host AgentSession and actual conversation broker. New
+`claude.ts` validates dedicated service HOME context, canonical vendor CLI,
+owner-only service-user key file, closed ANTHROPIC_API_KEY/ANTHROPIC_MODEL env;
+no ambient provider env, login, status subprocess or universal credential form.
+Local credential presence remains unverified. Startup requires actual session
+currentModelId plus advertised exact model; missing report fails closed rather
+than sending invented set_model. Exact package identity gates native profile
+_meta.systemPrompt.append. Claude load/resume/config switching deliberately
+fail closed; native settings are not advertised by pinned source. Existing
+Buzz Agent optional-config/re-ack and Goose handling are unchanged.
+
+Actual NORMAL_A661/RECOVERY_5360 journey reused/parameterized, not bypassed:
+Claude initial normal wizard → actual host CLI → installed buzz-acp and Buzz CLI
+→ actual TUI Start/Restart: PASS, four signed same-identity replies, two channels,
+fresh session/profile/model, unchanged sibling/history. Selected diagnostic B →
+normal immutable conversion → same installed service/TUI journey also PASS, four
+signed replies. Wrong model, missing native capability, adapter auth rejection and
+missing private key file preserve the actual run; Stop still works with that file
+removed. Fixture validates private env and public inventory excludes private inputs.
+
+Standalone Claude production-bound ACP/private-env tests PASS 6/6, including drift
+and owned descendant ESRCH. Two strict iterations found test/code narrowing errors
+(one overly broad textual insertion corrected, one union field assertion narrowing
+being corrected); raw logs retained. No full suite run yet. Evidence directory
+WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CLAUDE_6F8D. Adapter/vendor are deterministic TS
+protocol fixture / Node placeholder, NOT installed Claude. Only buzz-acp/Buzz CLI
+are real installed binaries. No real provider calls. Codex remains UNIMPLEMENTED;
+source says no model env mapping/no native config, protocol-dependent profile
+transport and distinct auth/config context. Do not relabel Goose or Claude as Codex.

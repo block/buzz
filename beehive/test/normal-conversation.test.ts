@@ -20,25 +20,32 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
-  const goose = true;
+for (const claude of [false, true]) for (const converting of [false, true]) test(`${claude ? 'Claude' : 'Goose'} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+  const goose = !claude;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
   writeFileSync(join(dir, 'mode'), 'ok');
   const ownerSecret = newKey(); const owner = publicKey(ownerSecret);
   const identity = join(dir, 'owner.json'), installation = join(dir, 'host');
   writePrivate(identity, { secret: ownerSecret });
-  const runner = join(dir, 'goose');
-  writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (process.argv[2] !== 'acp') throw Error('acp required');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
+  const keyFile = join(dir, 'claude-key');
+  writeFileSync(keyFile, 'fixture-claude-private-key', { mode: 0o600 });
+  const runner = join(dir, claude ? 'claude-agent-acp' : 'goose');
+  writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (${claude ? 'process.argv.length !== 2' : "process.argv[2] !== 'acp'"}) throw Error('adapter argv mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
   const http = createServer();
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const address = http.address(); assert.ok(address && typeof address !== 'string');
   const setupOutput = await terminal(['setup', installation, identity], [
-    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: '3' },
-    { prompt: 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: claude ? '4' : '3' },
+    { prompt: claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    ...(claude ? [
+      { prompt: 'Absolute installed claude CLI: ', answer: realpathSync(process.execPath) },
+      { prompt: 'Absolute owner-only local ANTHROPIC_API_KEY file', answer: keyFile },
+      { prompt: 'Operator-approved compatible exact Claude model IDs', answer: 'claude-model-a' },
+    ] : []),
     { prompt: 'Allowed workspace (absolute directory): ', answer: dir },
     { prompt: 'Additional allowed workspace (blank for none): ', answer: '' },
-    { prompt: 'Locally configured Goose provider ID: ', answer: 'fixture-provider' },
-    { prompt: 'Operator-approved compatible exact model IDs (comma-separated): ', answer: 'goose-model-a' },
+    ...(!claude ? [{ prompt: 'Locally configured Goose provider ID: ', answer: 'fixture-provider' },
+    { prompt: 'Operator-approved compatible exact model IDs (comma-separated): ', answer: 'goose-model-a' }] : []),
     { prompt: 'Purpose [', answer: converting ? 'diagnostic' : '' },
     ...(!converting ? [
     { prompt: 'Absolute installed buzz-acp executable: ', answer: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!) },
@@ -57,15 +64,20 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
   const originalY = readFileSync(sibling.path);
   const originalA = structuredClone(entry.bindings.default);
   if (converting) await terminal(['local-setup', installation], [
-    { prompt: 'Local action [', answer: 'add-goose' },
+    { prompt: 'Local action [', answer: claude ? 'add-claude' : 'add-goose' },
     { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
-    { prompt: 'NEW immutable Goose binding ID: ', answer: 'B' },
-    { prompt: 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    { prompt: claude ? 'NEW immutable Claude binding ID: ' : 'NEW immutable Goose binding ID: ', answer: 'B' },
+    { prompt: claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    ...(claude ? [
+      { prompt: 'Absolute installed claude CLI: ', answer: realpathSync(process.execPath) },
+      { prompt: 'Absolute owner-only local ANTHROPIC_API_KEY file', answer: keyFile },
+      { prompt: 'Operator-approved compatible exact Claude model IDs', answer: 'claude-model-a' },
+    ] : []),
     { prompt: 'Allowed workspace (absolute directory): ', answer: dir },
-    { prompt: 'Existing dedicated service HOME', answer: entry.setup.serviceHome! },
-    { prompt: 'Locally configured Goose provider ID: ', answer: 'fixture-provider' },
-    { prompt: 'Operator-approved compatible exact model IDs', answer: 'goose-model-a' },
-    { prompt: 'Save NEW Goose binding only', answer: 'yes' },
+    { prompt: claude ? 'Existing dedicated Claude service HOME' : 'Existing dedicated service HOME', answer: entry.setup.serviceHome! },
+    ...(!claude ? [{ prompt: 'Locally configured Goose provider ID: ', answer: 'fixture-provider' },
+    { prompt: 'Operator-approved compatible exact model IDs', answer: 'goose-model-a' }] : []),
+    { prompt: claude ? 'Save NEW Claude binding only' : 'Save NEW Goose binding only', answer: 'yes' },
   ]);
   assert.ok(!setupOutput.includes(ownerSecret));
   // Lifecycle decisions come from signed public inventory, not a private journal.
@@ -229,12 +241,18 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
     assert.ok(authenticated, 'installed executable must authenticate with the provisioned key');
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
+    if (claude) {
+      assert.ok(existsSync(join(dir, 'claude-env-checked')));
+      assert.ok(!readFileSync(join(dir, 'claude-rpc-methods'), 'utf8').includes('session/set_model'));
+      for (const privateValue of ['fixture-claude-private-key', keyFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'private Claude context never advertised');
+      assert.ok(!setupOutput.includes('fixture-claude-private-key'));
+    }
     assert.equal(state().actual.evidence.source, 'external-buzz-conversation');
     assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /NORMAL-PROFILE-BOUNDARY/);
     assert.equal(state().actual.selection.behavior.revision, behavior.revision);
-    if (goose) assert.match(evidence.session, /^goose-[0-9]+-1$/); else assert.equal(evidence.session, 'conversation-session');
+    if (goose) assert.match(evidence.session, /^goose-[0-9]+-1$/); else assert.match(evidence.session, /^claude-[0-9]+-1$/);
     assert.equal(evidence.agentPublicKey, agent);
-    assert.equal(evidence.model, goose ? 'goose-model-a' : 'databricks-claude-haiku-4-5');
+    assert.equal(evidence.model, goose ? 'goose-model-a' : 'claude-model-a');
     assert.ok(delivered, 'the actual Buzz CLI must publish a signed threaded agent reply, not just return tool JSON');
     const unauthorized = event(9, [['h', channel], ['p', agent]], 'Not the configured owner.', recipientKey);
     const firstSubscription = subscriptionsBySocket.get(channel)!;
@@ -289,6 +307,17 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
       const rejected = message('restart', 'journey', agent, state().revision, {});
       assert.notEqual((await request(rejected)).body.result, 'accepted');
       assert.deepEqual(state().actual, actual, 'wrong model preflight preserves actual');
+      if (claude) {
+        for (const failure of ['missing-native', 'auth-rejected']) {
+          writeFileSync(join(dir, 'mode'), failure);
+          assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
+          assert.deepEqual(state().actual, actual);
+        }
+        rmSync(keyFile);
+        const failedAuth = await request(message('restart', 'journey', agent, state().revision, {}));
+        assert.match(String(failedAuth.body.result), /Claude API key prerequisite/);
+        assert.deepEqual(state().actual, actual);
+      }
       writeFileSync(join(dir, 'mode'), 'ok');
       const stop = message('stop', 'journey', agent, state().revision, {});
       assert.equal((await request(stop)).body.result, 'accepted');
