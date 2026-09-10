@@ -1614,6 +1614,17 @@ test("playback speed persists across videos and reloads", async ({ page }) => {
     const player = page
       .locator(`[data-message-id="${emitted.id}"]`)
       .getByTestId("video-player");
+    // Interacting with the previous player can leave the timeline reading an
+    // older row. Open buffered arrivals through the normal latest-message UI;
+    // subscription readiness alone does not make their rows visible.
+    await expect
+      .poll(async () => {
+        if (await player.isVisible()) return true;
+        const scrollToLatest = page.getByTestId("message-scroll-to-latest");
+        if (await scrollToLatest.isVisible()) await scrollToLatest.click();
+        return false;
+      })
+      .toBe(true);
     await expect(player).toBeVisible();
     await player.getByRole("button", { name: "Play video" }).click();
     return player;
