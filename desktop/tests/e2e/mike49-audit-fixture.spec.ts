@@ -1,21 +1,29 @@
 /**
- * MIKE-49 checkpoint 1: exercises the actual click -> Tauri `invoke` ->
- * render path for the fixture-only audit command
- * (`mike49_run_fixture_audit`), through the real mock-IPC boundary
- * (`@tauri-apps/api/mocks`' `mockIPC`, wired in `src/testing/e2eBridge.ts`)
- * rather than a component test rendering the panel with a mocked React
- * prop. No real identity, relay, or archive is reachable from this test —
- * `installMockBridge` never connects to a live relay, and this command
- * itself takes no `AppState` on the real Rust side (see
+ * MIKE-49 checkpoint 1: BROWSER evidence, with `@tauri-apps/api/mocks`'
+ * `mockIPC` (wired in `src/testing/e2eBridge.ts`) substituted for
+ * `window.__TAURI_INTERNALS__.invoke` — this proves the frontend's click ->
+ * `invoke()` call -> render path (explicit-run/loading/success/error/
+ * duplicate-run-guard states) against a JS-only canned response for
+ * `mike49_run_fixture_audit`. It does NOT execute the compiled Rust
+ * command, and it does NOT exercise Tauri's real IPC (de)serialization
+ * into a webview — `mockIPC` intercepts the call before either happens.
+ * No real identity, relay, or archive is reachable from this test either
+ * way: `installMockBridge` never connects to a live relay, and the real
+ * command itself takes no `AppState` (see
  * `desktop/src-tauri/src/commands/mike49_audit/command.rs`'s own module
  * doc comment).
  *
- * This does not re-verify the real Rust fixture/sanitizer logic — that is
- * covered by that crate's own `cargo test` suite (including the
- * `record_sanitizer_matches_the_pinned_python_reference_on_shared_examples`
- * parity test). It verifies the frontend's explicit-run/loading/success/
- * error/duplicate-run-guard states actually happen given a real
- * `invoke()` round trip.
+ * Compiled Rust command dispatch and its serialization into a (mock)
+ * webview are proven separately, via real `tauri::test::get_ipc_response`
+ * IPC dispatch with no browser involved, in
+ * `desktop/src-tauri/src/commands/mike49_audit/command.rs`'s
+ * `ipc_tests::native_ipc_round_trip_produces_the_same_report_shape_as_a_direct_call`.
+ * The Rust fixture/sanitizer logic itself (including
+ * `record_sanitizer_matches_the_pinned_python_reference_on_shared_examples`)
+ * is covered by that crate's own `cargo test` suite. Neither of those is a
+ * compiled, launched Tauri application with a real native window — a
+ * human visual click-through of the actual app remains the only step this
+ * checkpoint has not exercised.
  */
 
 import { expect, test, type Page } from "@playwright/test";

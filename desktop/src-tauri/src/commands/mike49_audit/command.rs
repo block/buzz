@@ -795,3 +795,120 @@ mod tests {
         }
     }
 }
+
+// ---- isolated native fixture-run trace -----------------------------------
+//
+// Drives `mike49_run_fixture_audit` through Tauri's REAL command-dispatch
+// and JSON-serialization machinery (`tauri::test::get_ipc_response`), not a
+// mocked React prop and not the JS-only `mockIPC` bridge the Playwright
+// spec (`desktop/tests/e2e/mike49-audit-fixture.spec.ts`) substitutes. This
+// is the compiled Rust command actually deserializing an `InvokeRequest`
+// and serializing its `Result<Mike49AuditReport, Mike49AuditError>` back
+// into an `InvokeResponseBody`, on a `MockRuntime` webview with no real
+// window, no `AppState`, no relay connection, and no signed-in identity --
+// the command itself takes no `AppState`, so there is nothing to mock out.
+//
+// This module must host the test (rather than a sibling file) because
+// `tauri::generate_handler!` resolves the hidden, macro-expanded
+// `__cmd__mike49_run_fixture_audit` helper via legacy textual macro scope,
+// not an importable path -- the same reason `lib.rs`'s own, real
+// `invoke_handler![...]` list references bare command names rather than
+// qualified paths. Registers ONLY this one command in its own
+// `invoke_handler`, not the full production handler list from
+// `lib.rs::run()` -- reusing that whole builder chain here would also run
+// its `.setup()` closure, which does touch the real `AppState`/relay flush
+// loop.
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![mike49_run_fixture_audit])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app builds without a real window, AppState, or relay connection")
+    }
+
+    fn invoke_request() -> tauri::webview::InvokeRequest {
+        tauri::webview::InvokeRequest {
+            cmd: "mike49_run_fixture_audit".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::default(),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        }
+    }
+
+    #[test]
+    fn native_ipc_round_trip_produces_the_same_report_shape_as_a_direct_call() {
+        let app = mock_app();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview builds without a real OS window");
+
+        let ipc_body = tauri::test::get_ipc_response(&webview, invoke_request())
+            .expect("mike49_run_fixture_audit must succeed over real IPC dispatch");
+        let ipc_report: Value = ipc_body
+            .deserialize()
+            .expect("command response must deserialize as JSON, same as a real webview would");
+
+        // `build_fixture()` mints a fresh disposable keypair and re-signs its
+        // event on every call (see `fixture.rs`), so `eventId`/`signer` on
+        // the verified record legitimately differ between this IPC call and
+        // a second, separate direct call below -- comparing those two
+        // fields for equality would be asserting non-determinism the
+        // fixture never promised. Everything else in the report shape
+        // (structure, counts, fixed strings/enums) must still match
+        // byte-for-byte: that's what the command macro's IPC (de)serialization
+        // could otherwise silently corrupt, and what a mocked-IPC Playwright
+        // spec cannot check because it never reaches this Rust code.
+        let strip_per_call_identity = |mut v: Value| {
+            if let Some(record) = v["records"].as_array_mut() {
+                for r in record.iter_mut() {
+                    r["eventId"] = Value::Null;
+                    r["signer"] = Value::Null;
+                }
+            }
+            v
+        };
+
+        let direct_report =
+            mike49_run_fixture_audit().expect("direct call must also succeed (same fixture shape)");
+        let direct_report_json =
+            serde_json::to_value(direct_report).expect("Mike49AuditReport serializes to JSON");
+
+        assert_eq!(
+            strip_per_call_identity(ipc_report.clone()),
+            strip_per_call_identity(direct_report_json),
+            "the report that crossed real Tauri IPC dispatch/serialization must match a direct \
+             in-process call in every field except the fixture's intentionally per-call disposable \
+             event id/signer -- proves the command macro's (de)serialization introduces no drift"
+        );
+
+        // Sanity: this is the real fixture-report shape (see `fixture.rs`), not an
+        // empty/degenerate response that would trivially "match" above.
+        assert!(ipc_report["records"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty()));
+        assert_eq!(ipc_report["records"].as_array().unwrap().len(), 2);
+        assert_eq!(ipc_report["simulated"], Value::Bool(true));
+    }
+
+    #[test]
+    fn native_ipc_dispatch_rejects_an_unregistered_command_name() {
+        let app = mock_app();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview builds without a real OS window");
+
+        let mut request = invoke_request();
+        request.cmd = "mike49_run_fixture_audit_typo".into();
+        let result = tauri::test::get_ipc_response(&webview, request);
+        assert!(
+            result.is_err(),
+            "an unregistered command name must not silently dispatch to the real handler"
+        );
+    }
+}
