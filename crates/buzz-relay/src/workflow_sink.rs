@@ -864,7 +864,7 @@ mod postgres_tests {
         let trigger_ctx_json = serde_json::to_value(&trigger_ctx).expect("serialize trigger");
         let run_id = state
             .db
-            .create_workflow_run(community, workflow_id, None, Some(&trigger_ctx_json))
+            .create_workflow_run(community, workflow_id, None, None, Some(&trigger_ctx_json))
             .await
             .expect("create workflow run");
 

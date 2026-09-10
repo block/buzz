@@ -92,12 +92,11 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// Most domain mutations still execute on the connection pool rather than this
+/// transaction, so their handlers rely on idempotency if event commit fails.
+/// Workflow definition ingest is the exception: it materializes the workflow
+/// revision on this same transaction so the signed event and revision pointer
+/// commit or roll back together.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -737,8 +736,8 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // Persist the signed definition and materialized revision atomically.
+    let mut tx = match persist_command_event(&state.db, tenant, event, Some(channel_id)).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -770,6 +769,7 @@ async fn handle_workflow_def(
     state
         .db
         .upsert_workflow(
+            &mut tx,
             community_id,
             workflow_id,
             Some(channel_id),
@@ -777,6 +777,7 @@ async fn handle_workflow_def(
             &workflow_name,
             &definition_json_final,
             &hash,
+            event.id.as_bytes(),
         )
         .await
         .map_err(|e| match e {
@@ -786,16 +787,14 @@ async fn handle_workflow_def(
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
-    // Drop the trigger-path cache entry so the new/updated definition fires on
-    // the next matching event instead of after the cache TTL.
-    state
-        .workflow_engine
-        .invalidate_channel_workflows(community_id, channel_id);
-
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
+    // Commit before cache invalidation so a concurrent refill can observe the new revision.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(community_id, channel_id);
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -916,6 +915,7 @@ async fn handle_workflow_trigger(
         .create_workflow_run(
             community_id,
             workflow_id,
+            workflow.definition_event_id.as_deref(),
             Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
         )

@@ -368,6 +368,9 @@ CREATE TABLE workflows (
     channel_id      UUID,
     definition      JSONB NOT NULL,
     definition_hash BYTEA NOT NULL,
+    definition_event_id BYTEA CHECK (
+        definition_event_id IS NULL OR octet_length(definition_event_id) = 32
+    ),
     status          workflow_status NOT NULL DEFAULT 'active',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -376,6 +379,23 @@ CREATE TABLE workflows (
     FOREIGN KEY (community_id, owner_pubkey) REFERENCES users (community_id, pubkey),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );
+
+
+-- A legacy writer does not mention definition_event_id. Column-targeted triggers
+-- fire even for equal-value rewrites, where comparing OLD/NEW would invent
+-- provenance. New writers rebind separately while still holding the row lock
+-- in the signed-event transaction. Operational status/enabled updates keep it.
+CREATE FUNCTION invalidate_workflow_revision() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.definition_event_id := NULL;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER workflows_invalidate_revision
+BEFORE UPDATE OF id, community_id, owner_pubkey, channel_id, name, definition, definition_hash
+ON workflows
+FOR EACH ROW EXECUTE FUNCTION invalidate_workflow_revision();
 
 CREATE INDEX idx_workflows_channel_active ON workflows (community_id, channel_id, status, enabled);
 -- Scheduler scans enabled schedule workflows; community_id returned per row so
@@ -388,6 +408,9 @@ CREATE TABLE workflow_runs (
     community_id        UUID NOT NULL REFERENCES communities(id),
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     workflow_id         UUID NOT NULL,
+    definition_event_id BYTEA CHECK (
+        definition_event_id IS NULL OR octet_length(definition_event_id) = 32
+    ),
     status              run_status NOT NULL DEFAULT 'pending',
     trigger_event_id    BYTEA,
     current_step        INT NOT NULL DEFAULT 0,
