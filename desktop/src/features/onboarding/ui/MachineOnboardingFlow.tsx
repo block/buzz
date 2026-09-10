@@ -16,8 +16,11 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import type { FeaturedCommunity } from "@/features/onboarding/featuredCommunities";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
+import { DiscoveryLanding } from "./DiscoveryLanding";
 import { DownloadKeyStep } from "./DownloadKeyStep";
 import {
   backupSessionToPasswordEntry,
@@ -46,6 +49,7 @@ import { SetupStep } from "./SetupStep";
 import type { DefaultConfigDraft } from "./types";
 
 export type MachineOnboardingPage =
+  | "discover"
   | "identity"
   | "key-import"
   | "backup"
@@ -84,7 +88,7 @@ export function MachineOnboardingFlow({
   navigateAfterComplete?: (nav: PostOnboardingNavigation) => void;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
-    identityLost ? "key-import" : (initialPage ?? "identity"),
+    identityLost ? "key-import" : (initialPage ?? "discover"),
   );
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
@@ -121,6 +125,7 @@ export function MachineOnboardingFlow({
   // security subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
   const reduceMotion = useReducedMotion() ?? false;
+  const communityOnboarding = useCommunityOnboarding();
   const isSecuritySubview = page === "backup" && backupSubview !== "created";
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
@@ -150,6 +155,39 @@ export function MachineOnboardingFlow({
       setIsPending(false);
     }
   }, [queryClient]);
+
+  /**
+   * EXPLORATION — one-click join from the discovery landing.
+   *
+   * Persists a fresh identity silently (no backup ceremony — that becomes a
+   * post-join nudge), completes machine onboarding, and starts a community
+   * onboarding transaction pointed at the chosen relay. The existing
+   * CommunityApp machinery then connects, checks/creates the profile, and
+   * lands the user in the community.
+   */
+  const quickJoinCommunity = React.useCallback(
+    async (community: FeaturedCommunity) => {
+      setIsPending(true);
+      setError(null);
+      try {
+        const identity = await getIdentity();
+        queryClient.setQueryData(["identity"], identity);
+        communityOnboarding.start({
+          source: "first-community",
+          relayUrl: community.relayUrl,
+          communityName: community.name,
+        });
+        complete(identity.pubkey);
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Failed to load identity",
+        );
+      } finally {
+        setIsPending(false);
+      }
+    },
+    [communityOnboarding, complete, queryClient],
+  );
 
   const loadRecoveredIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -253,40 +291,48 @@ export function MachineOnboardingFlow({
   }, [backupSession, backupSubview, identityWasImported]);
 
   const chromeBackAction =
-    page === "key-import" &&
-    (!identityLost || keyImportStage === "backup-password")
-      ? { disabled: isKeyImporting, onClick: backFromKeyImport }
-      : page === "backup" && backupSubview !== "created"
-        ? {
-            label: "Return to onboarding",
-            onClick: returnToCreatedKey,
-            testId: "backup-return-to-onboarding",
-          }
-        : page === "backup"
+    page === "identity"
+      ? {
+          onClick: () => {
+            setTransitionDirection("backward");
+            setPage("discover");
+          },
+          testId: "identity-back-to-discover",
+        }
+      : page === "key-import" &&
+          (!identityLost || keyImportStage === "backup-password")
+        ? { disabled: isKeyImporting, onClick: backFromKeyImport }
+        : page === "backup" && backupSubview !== "created"
           ? {
-              onClick: () => {
-                setTransitionDirection("backward");
-                setPage("identity");
-              },
+              label: "Return to onboarding",
+              onClick: returnToCreatedKey,
+              testId: "backup-return-to-onboarding",
             }
-          : page === "setup"
-            ? { onClick: backFromSetup }
-            : page === "config"
-              ? {
-                  disabled: isDefaultConfigSaving,
-                  onClick: () => {
-                    setTransitionDirection("backward");
-                    setPage("setup");
-                  },
-                }
-              : undefined;
+          : page === "backup"
+            ? {
+                onClick: () => {
+                  setTransitionDirection("backward");
+                  setPage("identity");
+                },
+              }
+            : page === "setup"
+              ? { onClick: backFromSetup }
+              : page === "config"
+                ? {
+                    disabled: isDefaultConfigSaving,
+                    onClick: () => {
+                      setTransitionDirection("backward");
+                      setPage("setup");
+                    },
+                  }
+                : undefined;
 
   return (
     <div
       className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
         isSecuritySubview ? "buzz-onboarding-security-theme" : ""
       } ${
-        page === "identity"
+        page === "discover" || page === "identity"
           ? "buzz-onboarding-welcome py-8"
           : "pb-28 pt-[106px]"
       }`}
@@ -294,7 +340,7 @@ export function MachineOnboardingFlow({
     >
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
-      {page !== "identity" && !isSecuritySubview ? (
+      {page !== "discover" && page !== "identity" && !isSecuritySubview ? (
         <OnboardingChrome
           current={page === "config" ? 4 : page === "setup" ? 3 : 2}
         />
@@ -302,10 +348,36 @@ export function MachineOnboardingFlow({
       <OnboardingFooterProvider backAction={chromeBackAction}>
         <div
           className={`relative flex w-full max-w-[1040px] flex-col items-center text-center ${
-            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
+            page === "discover" || page === "identity"
+              ? "my-auto"
+              : "buzz-onboarding-step-frame"
           }`}
         >
-          {page === "identity" ? (
+          {page === "discover" ? (
+            <OnboardingSlideTransition
+              className="flex w-full flex-col items-center text-center"
+              direction={transitionDirection}
+              transitionKey={`machine-discover-${transitionDirection}`}
+            >
+              <DiscoveryLanding
+                error={error}
+                isPending={isPending}
+                onAdvancedSetup={() => {
+                  setError(null);
+                  setTransitionDirection("forward");
+                  setPage("identity");
+                }}
+                onImportKey={() => {
+                  setError(null);
+                  setKeyImportDialog(null);
+                  setKeyImportStage("key-entry");
+                  setTransitionDirection("forward");
+                  setPage("key-import");
+                }}
+                onJoin={(community) => void quickJoinCommunity(community)}
+              />
+            </OnboardingSlideTransition>
+          ) : page === "identity" ? (
             <OnboardingSlideTransition
               className="flex w-full max-w-[720px] flex-col items-center text-center"
               direction={transitionDirection}
