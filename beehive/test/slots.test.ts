@@ -59,7 +59,7 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
     assert.throws(() => addSlot(source, newKey(), gx), /EEXIST/);
     // Actual remote TUI selects numbered slots, saves and starts both, then stops X.
     const terminal = spawn(process.execPath, ['src/cli.ts', 'tui', join(dir, 'identity.json'), url], { stdio: ['pipe', 'pipe', 'pipe'] }); children.push(terminal);
-    let output = ''; let index = 0;
+    let output = ''; let index = 0; let yBeforeRestart: Buffer | undefined; let oldRun = '';
     const steps: { prompt: string; value: string; gate?: () => boolean }[] = [
       { prompt: 'beehive> ', value: 'hosts' }, { prompt: 'beehive> ', value: 'select source' },
       { prompt: 'beehive> ', value: 'select 1' }, { prompt: 'beehive> ', value: 'save' },
@@ -69,7 +69,9 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
       { prompt: 'beehive> ', value: 'save' }, { prompt: 'Model: ', value: 'fixture-model' }, { prompt: 'Workspace: ', value: dir }, { prompt: 'Behavior profile: ', value: 'default' },
       { prompt: 'beehive> ', value: 'start', gate: () => journal(Y).revision === 1 },
       { prompt: 'beehive> ', value: 'show', gate: () => journal(Y).phase === 'running' },
-      { prompt: 'beehive> ', value: 'select 1' }, { prompt: 'beehive> ', value: 'stop' },
+      { prompt: 'beehive> ', value: 'select 1' },
+      { prompt: 'beehive> ', value: 'restart', gate: () => { yBeforeRestart = readFileSync(join(source, 'agents', Y, 'journal.json')); oldRun = journal(X).actual.run; return true; } },
+      { prompt: 'beehive> ', value: 'stop', gate: () => { if (journal(X).revision !== 3) return false; assert.notEqual(journal(X).actual.run, oldRun); assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBeforeRestart); return true; } },
       { prompt: 'beehive> ', value: 'agents', gate: () => journal(X).phase === 'stopped' }, { prompt: 'beehive> ', value: 'quit' },
     ];
     let pending = false; let cursor = 0;
@@ -83,12 +85,12 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
     assert.match(output, /Unknown or ambiguous host/);
     assert.match(output, new RegExp(`Selected source agent ${X}`)); assert.match(output, new RegExp(`Selected source agent ${Y}`));
     assert.match(output, /"phase": "running"/);
-    assert.equal(journal(X).revision, 3); assert.equal(journal(Y).revision, 2); assert.equal(journal(Y).phase, 'running');
+    assert.equal(journal(X).revision, 4); assert.equal(journal(Y).revision, 2); assert.equal(journal(Y).phase, 'running');
     const yBefore = readFileSync(join(source, 'agents', Y, 'journal.json'));
     const previous = Object.values(journal(Y).operations).map((o: any) => o.reply).find((r: Message) => r.body.result === 'accepted') as Message;
     assert.ok(previous);
     // Same operation ID on a different slot is not a receipt reservation conflict.
-    const stopX = message('stop', 'source', X, 3); stopX.id = String(previous.body.operation);
+    const stopX = message('stop', 'source', X, 4); stopX.id = String(previous.body.operation);
     assert.equal((await receipt(stopX)).body.result, 'accepted');
     assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBefore, 'Stop X cannot mutate Y receipt/revision/run');
     assert.equal((await receipt(message('stop', 'source', publicKey(newKey()), 0))).body.result, 'not-authority');

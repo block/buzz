@@ -2,7 +2,7 @@ import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID }
 import { schnorr } from '@noble/curves/secp256k1';
 
 /** Experimental private wire protocol; deliberately not a Nostr kind allocation. */
-export type Message = { v: 1; id: string; host: string; agent: string; type: 'inspect' | 'save' | 'start' | 'stop' | 'move' | 'prepare' | 'prepared' | 'grant' | 'inventory' | 'receipt'; revision: number; body: Record<string, unknown> };
+export type Message = { v: 1; id: string; host: string; agent: string; type: 'inspect' | 'save' | 'start' | 'restart' | 'stop' | 'move' | 'prepare' | 'prepared' | 'grant' | 'inventory' | 'receipt'; revision: number; body: Record<string, unknown> };
 export type Envelope = { v: 1; owner: string; nonce: string; ciphertext: string; tag: string; signature: string };
 /** Reject unknown envelope/message fields, oversized values and ambiguous revisions. */
 export function object(value: unknown): Record<string, unknown> {
@@ -19,7 +19,7 @@ export function fields(value: Record<string, unknown>, names: string[]) {
 export function parseMessage(value: unknown): Message {
   const m = object(value);
   fields(m, ['v','id','host','agent','type','revision','body']);
-  if (m.v !== 1 || !['inspect','save','start','stop','move','prepare','prepared','grant','inventory','receipt'].includes(String(m.type)) || !Number.isSafeInteger(m.revision) || Number(m.revision) < 0) throw Error('Invalid message');
+  if (m.v !== 1 || !['inspect','save','start','restart','stop','move','prepare','prepared','grant','inventory','receipt'].includes(String(m.type)) || !Number.isSafeInteger(m.revision) || Number(m.revision) < 0) throw Error('Invalid message');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(text(m.id))) throw Error('Invalid operation ID');
   text(m.host); text(m.agent); object(m.body);
   return m as Message;

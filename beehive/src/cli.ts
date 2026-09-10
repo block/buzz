@@ -149,7 +149,7 @@ async function main() {
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     try {
       for (;;) {
@@ -187,7 +187,7 @@ async function main() {
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') { console.log(JSON.stringify(current,null,2)); continue; }
-        if (!['save','start','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/stop/move/quit.'); continue; }
+        if (!['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};
         if (line === 'save') {
@@ -202,7 +202,7 @@ async function main() {
           if (await ui.question(`Move agent ${current.agent} from ${current.host} to ${target.host}, fresh execution, no workspace/session/credentials transferred; source cannot resume after grant. Confirm [yes/no]: `) !== 'yes') continue;
           body = { target: target.host, targetRevision: target.revision, selection: target.body.selectedNext };
         }
-        const request = message(line as 'save' | 'start' | 'stop' | 'move',current.host,current.agent,current.revision,body);
+        const request = message(line as 'save' | 'start' | 'restart' | 'stop' | 'move',current.host,current.agent,current.revision,body);
         try { client.submit(request); } catch (error) { console.log(error instanceof Error ? error.message : 'Operation not submitted'); continue; }
         console.log(`Durably pending ${line}: ${operationLabel(request)}; publication is NOT host acceptance.`);
       }

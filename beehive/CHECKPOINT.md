@@ -5,6 +5,65 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Restart continuation dad771 — partial product handoff
+
+Started clean published `a235638e0a879c3b93bec39b8b27f415c03ab181`; candidate is
+the commit containing this section. **Explicit per-agent Restart is implemented;
+named behavior profiles/applied instruction revisions are NOT implemented.** This
+is a working lifecycle increment, not completion of the delegated profile journey.
+
+Restart reuses the existing encrypted relay intent journal, per-slot assignment/CAS,
+operation reservation/receipt/outbox and Start/Stop ownership path. Captures selected
+inputs and fingerprints; checks local setup/key/executable/workspace before Stop.
+ACP prerequisite probe is identity-free and separately retained while the old run
+stays owned. Fully stopped probe, unchanged phase/fingerprint, complete old owned
+exit, cancellation recheck and final fingerprint precede fresh actual-run launch.
+Probe failure preserves the existing actual run; teardown uncertainty quarantines
+and retains handles. Valid Stop cancels queued/in-flight Restart; invalid authority,
+revision/body/previously-reserved ID cannot retract it. Save is serialized (after a
+successful Restart its old revision conflicts), never mixed into captured inputs.
+Assignment/root/grants remain untouched; no setup/key regeneration or schema rewrite.
+No promise of future provider/relay readiness from the independent prerequisite.
+
+Executable acceptance: `restart.test.ts` real relay/host/external fixtures verifies
+same identity/assignment, new actual run ID, duplicate replay with byte-identical
+journal, deleted setup preserving running actual without recreating key, same-batch
+Stop, ACP rejection preserving old run, invalid Stop inertness and authorized Stop
+interrupting four-second preflight with no revival after its original completion time.
+`slots.test.ts` actual TUI now runs Restart X while X/Y both run; X gets a new run,
+Y's complete receipt/revision/run journal remains byte-identical. These are fixture
+proofs, not actual applied behavior instructions or installed conversation Restart.
+
+Final executable strict passes; installed-enabled **default `npm test` 35/35**, no
+skips/failures, natural exit, **29.32s**. Earlier increment default full 34/34 30.55s;
+then targeted Restart/slots 6/6 17.99s. No serial invocation in this continuation,
+no changed test script/global timeout/ESRCH assertion, and no failed test attempts.
+Self-review added retention of failed probe teardown and a phase fence so heartbeat
+quarantine during preflight cannot be overwritten by a new launch. Binary hashes
+separately rechecked and match the prior pins. Evidence:
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/RESTART_DAD771/` (workspace absolute prefix
+`/Users/loganj/.buzz/`) holds default-full, targeted, check-final, default-final logs
+and installed hashes. No fresh dependency install was needed; lock unchanged.
+
+Consumed fresh independent `CONVERSATION_MOVE_REVIEW_A235638E.md`: no new blocking
+Move defect, M1 resolved through original-derived reproduction plus postacceptance
+restart sibling; independent default concurrent 33/33 (31.956s), additive installed
+Move 2/2 (26.987s), grant-time positive PID/ESRCH and exactly one pregrant source AUTH.
+This review covers a235638 Move, **not the new Restart delta**. Prior concurrent
+broker failure at 1990.69ms remains historically unclassified: original log has no
+stack/final summary. Neither reviewer nor current default green runs classify/fix it.
+Previous serial 33/33 150.15s remains valid only for its stated older serial mode.
+
+**ONE next executable action:** implement the remote nonsecret named behavior-profile
+owner and revisioned selected-next/applied-instruction snapshot, then extend the
+existing two-agent TUI Restart journey to prove actual instructions (not just labels).
+Do not treat this narrower increment as scope removal: named launch configurations,
+profile CRUD/use semantics, Restart lost-receipt/save-race/installed-conversation
+specific acceptance, local key/harness CRUD/guided setup, remaining Desktop harness/
+provider/preset/custom/mesh/compute, final UX, production kind-40002/admission and
+normal service-user Databricks OAuth/live exact-model gate remain. Source-grounded
+matrix is retained in README and workspace HARNESS_PROVIDER_UX_GROUNDING.md.
+
 ## Identity Move ff994 — executable completion checkpoint
 
 Candidate is the commit containing this section; publication/remote head is recorded

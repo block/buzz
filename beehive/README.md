@@ -37,7 +37,7 @@ On Block-managed machines, the public npm registry is policy-blocked. Append
 to the install command to use the approved mirror. No credentials or persistent
 registry config are needed. The committed lockfile is registry-agnostic.
 
-TUI: `agents`, `operations`, `reconcile`, `retry <number>`, `hosts`, `select <number or unique host-name>`, `show`, `start`, `save`, `stop`, `quit`.
+TUI: `agents`, `operations`, `reconcile`, `retry <number>`, `hosts`, `select <number or unique host-name>`, `show`, `start`, `restart`, `save`, `stop`, `quit`.
 Save asks for advertised model, workspace and independent behavior profile.
 Only one fixture model and the `default` profile are currently supported;
 profile authoring/versioning and useful multi-setup selection remain to build.
@@ -220,7 +220,7 @@ failure and retains the installation lock rather than falsely declaring all stop
 
 Setup/key enrollment remains local and offline; ordinary selections and lifecycle
 remain remote. Multiple selectable harness inventory entries, profile CRUD, key
-revocation UX, Restart and live-provider/production acceptance are still future work. Standby
+revocation UX and live-provider/production acceptance are still future work. Standby
 X elsewhere cannot Start without a grant, even while source X is stopped/unreachable. This is trusted-installation
 coordination, not physical host attestation, partition safety or exactly-once execution.
 
@@ -336,7 +336,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 | Local owner/key setup | New owner + separately generated agent key | nsec import, saved-owner verification, revocation/key removal UX |
 | Host inventory | Real relay, multiple independent slots, shared host harness, freshness | multiple selectable setups, service install, richer reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
-| Lifecycle | Start/Stop and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, Restart |
+| Lifecycle | Start/Stop and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, expanded Restart acceptance |
 | Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, production protocol compatibility and catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
@@ -395,3 +395,28 @@ bounded failure diagnostics remain, without added teardown delays or weaker asse
 Trust requires dedicated non-cloned/non-rollback installations, exclusive supervision
 and local provisioning; shared owner signatures do not attest physical hosts. No
 exactly-once/partition-safe transfer, workspace/session transfer or full parity claim.
+
+## Explicit remote Restart (incremental)
+
+Select the assigned agent row, then enter `restart`. No operation ID or config JSON
+is needed. Restart uses the existing durable relay intent/receipt journal and the
+same per-slot assignment, revision and Stop-cancellation authority as Start/Move.
+It captures selected-next, validates local inputs before stopping, and (for ACP)
+performs a bounded identity-free model/auth prerequisite probe while the old run
+remains owned. Probe teardown completes before old-run teardown and fresh launch.
+This does not claim future conversation readiness or provider attestation.
+
+Missing local setup/key or failed prerequisite preserves the existing actual run.
+After old-run exit, failures leave assigned/stopped (or quarantined for uncertain
+ownership), never a fallback run. An admitted Stop cancels pending Restart; queued
+Save cannot mix inputs and receives a revision conflict after successful Restart.
+Retry of the same operation replays its result, not another launch. Setup/credential
+stores remain local, and Restart never recreates a key. Trusted local executable
+replacement between final validation and spawn remains outside this preview.
+
+Current tests exercise actual two-agent TUI Restart X with Y's journal unchanged,
+fixture replay, missing setup and delayed ACP prerequisite cancellation. Named
+behavior profile authoring/revisions and actual applied-instruction evidence are
+**not implemented**: only the existing `default` profile selection works. Installed
+conversation Restart-specific acceptance remains to add; installed Move/Start tests
+remain separate reusable evidence, not a claim that this whole journey is complete.

@@ -240,3 +240,14 @@ not arbitrary escaping processes. Its pinned full run had 28 passes/two failures
 and timed out; do not relabel it green. Empty fixture PID bytes -> 0 was captured,
 separate from the still-unclassified older observation. Fixture publishes a successfully
 spawned positive PID atomically before cancellation tests; ESRCH remains mandatory.
+
+## Explicit Restart continuation dad771
+
+`restart.test.ts` exercises the real encrypted management relay and host admission:
+unchanged identity/assignment, fresh actual run ID, duplicate replay with byte-identical
+journal, missing setup preserving the old run without key restoration, same-batch Stop
+retraction, ACP prerequisite model rejection preserving actual state, invalid Stop
+inertness and authorized Stop interrupting a delayed probe with no late revival.
+`slots.test.ts` now drives `restart` in the real TUI subprocess while both agents run,
+asserting X's new run and Y's byte-identical receipt/revision/run journal.
+No profile-instruction or installed-conversation Restart acceptance is claimed.

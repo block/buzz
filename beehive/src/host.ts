@@ -67,6 +67,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   const livePreparations = new Set<string>();
   let preparationStage = 'not-prepared';
   save();
+  let restartProbe: AgentSession | undefined;
   let owned: OwnedProcess | ConversationSession | undefined;
   let acp: AgentSession | ConversationSession | undefined;
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
@@ -94,12 +95,13 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   function receive(m: Message) {
     // Cancellation is signalled outside the serialized mutation queue. Admission is
     // still exact-authority/revision and never bypasses durable receipt processing.
-    const operation = m.host === setup.host && ['save','start','stop','move'].includes(m.type);
+    const operation = m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type);
     const first = operation && !queuedOperations.has(m.id);
     if (operation) queuedOperations.add(m.id);
     // Reserve receive order too: a conflicting queued ID is not a Stop authority.
     if (first && !closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && state.assignment.assignedHost === setup.host && m.revision === state.revision && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) {
       retracted.set(m.id,m.revision);
+      restartProbe?.cancel();
       // Only an executing admission has a session to interrupt; queued admissions
       // and the pre-commit recheck consume the retraction inside handle().
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
@@ -115,6 +117,9 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     publish(inventory());
   }
   async function stopOwned() {
+    const hadProbe = !!restartProbe;
+    if (restartProbe) { await restartProbe.owned.stop(); restartProbe = undefined; }
+    if (!owned && hadProbe) return;
     if (!owned) throw Error('Unknown ownership; quarantined');
     await owned.stop(); owned = undefined; acp = undefined;
   }
@@ -278,8 +283,8 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     }
   }
   async function handle(m: Message) {
-    if (m.host === setup.host && ['save','start','stop','move'].includes(m.type)) queuedOperations.delete(m.id);
-    if (closing || persistenceFailed || m.host !== setup.host || !['inspect','save','start','stop','move','prepare','prepared','grant'].includes(m.type)) return;
+    if (m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type)) queuedOperations.delete(m.id);
+    if (closing || persistenceFailed || m.host !== setup.host || !['inspect','save','start','restart','stop','move','prepare','prepared','grant'].includes(m.type)) return;
     if (['prepare','prepared','grant'].includes(m.type)) { await exchange(m); return; }
     // Serialized Stop processing durably resolves that Stop's own retraction.
     if (m.type === 'stop' || m.type === 'save') retracted.delete(m.id);
@@ -295,9 +300,9 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     }
     let result = 'accepted';
     if (m.agent !== agent || state.assignment.assignedHost !== setup.host) result = 'not-authority';
-    else if (state.move && ['start','move'].includes(m.type)) result = 'Move reservation busy';
+    else if (state.move && ['start','restart','move'].includes(m.type)) result = 'Move reservation busy';
     else if (m.revision !== state.revision) result = 'revision-conflict';
-    else if ((state.phase === 'quarantined' || state.phase === 'transitioning') && !(m.type === 'stop' && (owned instanceof ConversationSession ? owned.connected : owned?.child.connected))) result = 'quarantined';
+    else if ((state.phase === 'quarantined' || state.phase === 'transitioning') && !(m.type === 'stop' && (restartProbe?.owned.child.connected || (owned instanceof ConversationSession ? owned.connected : owned?.child.connected)))) result = 'quarantined';
     else {
       // Reserve operation before any spawn/kill; interrupted admission never retries effects.
       const pending = message('receipt',setup.host,agent,state.revision,{ operation: m.id, fingerprint, result: 'interrupted-reconcile-locally' });
@@ -316,13 +321,37 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
           if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || selected.workspace !== setup.workspace || selected.profile !== 'default') throw Error('Unsupported selection');
           if (state.move) finishMove('Move cancelled before grant by save');
           state.selected = selected; result = 'saved; running configuration unchanged';
-        } else if (m.type === 'start') {
+        } else if (m.type === 'start' || m.type === 'restart') {
           fields(m.body,[]);
-          if (state.phase !== 'stopped') throw Error('Already running');
+          if (state.phase !== 'stopped' && !(m.type === 'restart' && state.phase === 'running')) throw Error('Already running');
           // A retracted admission never begins effects, including any spawn.
           if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
-          const { launch } = prepareLocal(state.selected);
-          state.actual = { selection: structuredClone(state.selected), executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
+          const phaseBeforePreparation = state.phase;
+          const selected = structuredClone(state.selected);
+          const prepared = prepareLocal(selected);
+          const { launch } = prepared;
+          if (m.type === 'restart') {
+            // Prerequisites are checked without replacing the old ownership handle
+            // or passing the signer to a second identity-bearing runtime.
+            if (launch) {
+              const probe = new AgentSession(launch); restartProbe = probe;
+              try { await probe.catalog(); await probe.verify(); }
+              finally {
+                try { await probe.owned.stop(); restartProbe = undefined; }
+                catch (error) { state.phase = 'quarantined'; throw error; }
+              }
+            }
+            if (closing || retracting(m.revision)) throw Error('Restart cancelled by Stop or host close');
+            if (state.phase !== phaseBeforePreparation) throw Error('Restart ownership changed during preflight; reconcile before launch');
+            if (prepareLocal(selected).token !== prepared.token) throw Error('Restart prepared inputs changed; existing run preserved');
+            if (state.phase === 'running') {
+              state.phase = 'transitioning'; save(); await stopOwned();
+              state.phase = 'stopped'; state.actual = null; save();
+            }
+            if (closing || retracting(m.revision)) throw Error('Restart cancelled after Stop');
+            if (prepareLocal(selected).token !== prepared.token) throw Error('Restart prepared inputs changed after Stop; assigned stopped');
+          }
+          state.actual = { selection: selected, executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
           state.phase = 'transitioning'; save();
           if (setup.mode === 'fixture') {
             owned = spawnOwned(setup.runner, setup.args, state.actual.selection.workspace, { PATH: '/usr/bin:/bin', BEEHIVE_FIXTURE: '1' });
@@ -382,7 +411,8 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     publish(inventory());
   }, async close() {
     if (closing) return; closing = true;
-    acp?.cancel(); await queue;
+    restartProbe?.cancel(); acp?.cancel(); await queue;
+    if (restartProbe) { await restartProbe.owned.stop(); restartProbe = undefined; }
     if (owned) {
       state.phase = 'transitioning'; save();
       try { await stopOwned(); state.phase = 'stopped'; state.actual = null; }
@@ -420,7 +450,7 @@ export async function host(directory: string, url: string) {
       const selected = slots.get(m.agent);
       if (selected) selected.receive(m);
       else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }
-      else if (['save','start','stop','move'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
+      else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
     }, () => { if (initialized) for (const s of slots.values()) s.replay(); });
     await client.ready;
   } catch (e) { client?.close(); rmdirSync(lock); throw e; }
