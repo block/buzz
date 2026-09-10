@@ -85,6 +85,7 @@ export class AgentSession {
   private buffer = '';
   private bytes = 0;
   private failed = false;
+  private stoppingProbe = false;
   private session = '';
   private codexModelVerified = false;
   private response = '';
@@ -122,7 +123,7 @@ export class AgentSession {
     return !this.failed;
   }
   private fail(reason: string) {
-    if (this.failed) return;
+    if (this.failed || (this.stoppingProbe && reason === 'Harness exited')) return;
     this.failed = true;
     // Caller retains the live group anchor for verified Stop, including protocol failures.
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error(reason)); }
@@ -137,6 +138,16 @@ export class AgentSession {
   /** Protocol failures invalidate readiness even if the OS process has not exited yet. */
   get healthy() { return !this.failed; }
 
+  /** Seal prerequisite evidence only after owned teardown/drain. Expected exit is
+   * not drift, but contradictory protocol output during teardown still is. */
+  async stopProbe() {
+    this.stoppingProbe = true;
+    const drained = new Promise<void>(resolve => this.child.once('close', () => resolve()));
+    await this.owned.stop();
+    await drained;
+
+  }
+
   private receive(msg: Record<string, unknown>) {
     if (msg.jsonrpc !== '2.0') throw Error('Invalid RPC version');
     if (typeof msg.method === 'string') {
@@ -148,14 +159,13 @@ export class AgentSession {
       if (msg.method === 'session/update') {
         const p = record(msg.params);
         const update = record(p.update);
-        if ((this.prepared.plan.harness === 'claude' || this.prepared.plan.harness === 'codex') && update.sessionUpdate === 'config_option_update') {
-          if (!Array.isArray(update.configOptions)) throw Error('Invalid Claude model update');
-          for (const option of update.configOptions) if (record(option).category === 'model' && record(option).currentValue !== this.prepared.plan.model) throw Error('Claude model changed');
-        }
-        if ((this.prepared.plan.harness === 'claude' || this.prepared.plan.harness === 'codex') && update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('Claude model changed');
-        if (this.prepared.plan.harness === 'goose') {
-          if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('Goose model changed');
-          if (update.sessionUpdate === 'config_option_update') gooseModels(update, this.prepared.plan.model);
+        // Only observations belonging to this owned session can invalidate its proof.
+        // Model acknowledgement is not permanent: keep this guard active after completion.
+        if (p.sessionId !== this.session) return;
+        if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('ACP model changed');
+        if (update.sessionUpdate === 'config_option_update') {
+          if (!Array.isArray(update.configOptions)) throw Error('Invalid ACP model update');
+          for (const option of update.configOptions) if (record(option).category === 'model' && record(option).currentValue !== this.prepared.plan.model) throw Error('ACP model changed');
         }
         if (p.sessionId !== this.session || !this.prompting) return;
         if (update.sessionUpdate === 'agent_message_chunk') {
@@ -189,9 +199,11 @@ export class AgentSession {
   /** Discover a session catalog, explicitly retaining its ambiguous authentication provenance. */
   async catalog(): Promise<Catalog> {
     await this.owned.ready;
-    const init = record(await this.request('initialize', { protocolVersion: this.prepared.plan.harness === 'codex' ? 2 : 1, clientCapabilities: {}, clientInfo: { name: 'beehive', version: '0.0.1' } }));
-    if (init.protocolVersion !== (this.prepared.plan.harness === 'codex' ? 2 : 1) || record(init.agentInfo).name !== (this.prepared.plan.harness === 'codex' ? CODEX_ADAPTER : this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
-    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...(this.prepared.plan.harness === 'codex' && this.prepared.plan.instructions !== undefined ? { systemPrompt: this.prepared.plan.instructions } : {}), ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
+    const nativeBuzz = !this.prepared.plan.harness;
+    const protocol = this.prepared.plan.harness === 'codex' || nativeBuzz ? 2 : 1;
+    const init = record(await this.request('initialize', { protocolVersion: protocol, clientCapabilities: {}, clientInfo: { name: 'beehive', version: '0.0.1' } }));
+    if (init.protocolVersion !== protocol || record(init.agentInfo).name !== (this.prepared.plan.harness === 'codex' ? CODEX_ADAPTER : this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
+    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...((this.prepared.plan.harness === 'codex' || nativeBuzz) && this.prepared.plan.instructions !== undefined ? { systemPrompt: this.prepared.plan.instructions } : {}), ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
     this.session = identifier(created.sessionId);
     if (this.prepared.plan.harness === 'codex') {
       const models = codexModels(created, this.prepared.plan.model);

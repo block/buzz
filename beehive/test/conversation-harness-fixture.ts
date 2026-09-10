@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, appendFileSync, renameSync } from 'node:fs
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
-if (process.env.BUZZ_AGENT_SYSTEM_PROMPT) writeFileSync('received-system-instructions', process.env.BUZZ_AGENT_SYSTEM_PROMPT);
+// Native profile evidence is recorded from session/new input, never the env fallback.
 const buzzProvider = process.env.BUZZ_AGENT_PROVIDER;
 if (['anthropic', 'openai-compat', 'openrouter'].includes(buzzProvider ?? '')) {
   const p = buzzProvider!;
@@ -45,7 +45,7 @@ const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setT
 await once(child, 'spawn');
 if (!Number.isSafeInteger(child.pid) || child.pid! <= 0) throw Error('Invalid fixture child PID');
 writeFileSync('descendant-pid', String(child.pid));
-process.on('SIGTERM', () => {});
+process.on('SIGTERM', () => { if (mode === 'teardown-drift') process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'current_model_update', currentModelId: 'other' } } }) + '\n'); });
 setTimeout(() => process.exit(0), 60000).unref();
 const send = (m: any) => process.stdout.write(JSON.stringify(m) + '\n');
 for await (const line of createInterface({ input: process.stdin })) {
@@ -73,7 +73,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     tool = m.params.mcpServers[0]; selected = model;
     result = { sessionId, ...(mode === 'missing-model' ? {} : { models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } }) };
   }
-  else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : (mode === 'missing-native' ? 'unknown' : 'buzz-agent') } };
+  else if (m.method === 'initialize') result = { protocolVersion: claude || goose || mode === 'wrong-protocol' ? 1 : Math.min(m.params.protocolVersion, 2), agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : (mode === 'missing-native' ? 'unknown' : 'buzz-agent') } };
   else if (m.method === 'session/new' && claude) {
     if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; }
     sessionId = `claude-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
@@ -82,7 +82,16 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (m.params._meta?.systemPrompt) writeFileSync('received-system-instructions', m.params._meta.systemPrompt.append);
     result = { sessionId, models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } };
   }
-  else if (m.method === 'session/new') { if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; } if (databricksFixture) sessionId = `${databricksKind}-${process.pid}-${++sessionNumber}`; if (buzzProvider && buzzProvider !== 'databricks_v2') sessionId = `${buzzProvider}-${process.pid}-${++sessionNumber}`; if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose || buzzProvider) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  else if (m.method === 'session/new') {
+    if (!goose) {
+      if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'native systemPrompt unsupported' } }); continue; }
+      if (process.env.BUZZ_AGENT_SYSTEM_PROMPT !== undefined && m.params.systemPrompt !== process.env.BUZZ_AGENT_SYSTEM_PROMPT) throw Error('Exact native Buzz profile input missing');
+      if (m.params.systemPrompt !== undefined) {
+        writeFileSync('received-system-instructions', m.params.systemPrompt);
+        appendFileSync('native-session-inputs.jsonl', JSON.stringify({ pid: process.pid, systemPrompt: m.params.systemPrompt }) + '\n');
+      }
+    }
+    if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; } if (databricksFixture) sessionId = `${databricksKind}-${process.pid}-${++sessionNumber}`; if (buzzProvider && buzzProvider !== 'databricks_v2') sessionId = `${buzzProvider}-${process.pid}-${++sessionNumber}`; if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose || buzzProvider) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
     if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported' } }); continue; }
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
@@ -113,6 +122,13 @@ for await (const line of createInterface({ input: process.stdin })) {
     appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
     if (selected !== model || m.params.sessionId !== sessionId) process.exit(8);
     writeFileSync('prompt-started', selected); prompt = m.id;
+    const drift = { jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: mode === 'config-drift' ? { sessionUpdate: 'config_option_update', configOptions: [{ category: 'model', currentValue: 'other' }] } : { sessionUpdate: 'current_model_update', currentModelId: 'other' } } };
+    if (['current-drift', 'config-drift'].includes(mode)) send(drift);
+    if (mode === 'coalesced-drift') {
+      process.stdout.write([{ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'completed' } } } }, { jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } }, drift].map(v => JSON.stringify(v) + '\n').join(''));
+      continue;
+    }
+
     if ((claude && mode === 'claude-drift') || (codex && mode === 'codex-drift')) send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'current_model_update', currentModelId: 'wrong' } } });
     send({ jsonrpc: '2.0', id: 'reverse', method: 'client/fixture', params: {} });
     if (mode === 'delayed' || mode === 'cancel') continue;

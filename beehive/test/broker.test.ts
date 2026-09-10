@@ -8,7 +8,7 @@ import { ConversationSession } from '../src/broker.ts';
 import { newKey, publicKey } from '../src/protocol.ts';
 
 test('broker enforces model, completion health, cancellation and owned teardown across escaped shims', async () => {
-  for (const mode of ['ok', 'optional-ok', 'optional-reject', 'optional-reack-fails', 'model-config-reject', 'reject', 'wrong-model', 'conflict', 'bad-tail', 'delayed', 'cancel', 'foreign-workspace', 'injected-mcp']) {
+  for (const mode of ['ok', 'optional-ok', 'optional-reject', 'optional-reack-fails', 'model-config-reject', 'reject', 'wrong-model', 'conflict', 'bad-tail', 'delayed', 'cancel', 'foreign-workspace', 'injected-mcp', 'wrong-protocol', 'missing-native', 'missing-profile', 'current-drift', 'config-drift', 'coalesced-drift']) {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-broker-test-')));
     const owner = publicKey(newKey());
     const executable = realpathSync(process.execPath); const runtime = join(dir, 'runtime');

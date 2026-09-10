@@ -139,6 +139,16 @@ for (const outcome of ['ok', 'reject'] as const) test(`two real hosts Move insta
     assert.match(String((await request('move', 'source', 1, { target: 'target', targetRevision: 0, selection: selected })).body.result), /preflight failed/);
     assert.equal(journal('source').phase, 'running');
     writeFileSync(targetSetupPath, savedSetup, { mode: 0o600 });
+    const preservedSource = journal('source');
+    for (const mode of ['current-drift', 'config-drift', 'coalesced-drift', 'teardown-drift', 'wrong-protocol', 'missing-profile']) {
+      writeFileSync(join(dir, 'mode'), mode);
+      assert.match(String((await request('move', 'source', 1, { target: 'target', targetRevision: 0, selection: selected })).body.result), /preflight failed/, mode);
+      assert.deepEqual(journal('source').actual, preservedSource.actual, mode);
+      assert.deepEqual(journal('source').assignment, preservedSource.assignment, mode);
+      assert.equal(journal('source').phase, 'running', mode);
+      assert.equal(journal('target').phase, 'stopped', mode);
+      for (const pid of sourcePids) assert.doesNotThrow(() => process.kill(pid, 0), mode);
+    }
     writeFileSync(join(dir, 'mode'), 'reject');
     assert.match(String((await request('move', 'source', 1, { target: 'target', targetRevision: 0, selection: selected })).body.result), /preflight failed/);
     assert.equal(journal('source').phase, 'running', 'failed identity-free ACP prerequisite probe preserves source');

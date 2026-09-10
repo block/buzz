@@ -27,7 +27,7 @@ test('external ACP boundary: snapshot, catalog provenance, exact-model same-sess
     assert.equal(Object.hasOwn(prepared.env, 'DATABRICKS_TOKEN'), false);
     assert.equal(Object.hasOwn(prepared.env, 'BUZZ_PRIVATE_KEY'), false);
     assert.throws(() => prepareAgent({ ...plan(dir), databricksHost: 'https://user:secret@example.com' }));
-    for (const mode of ['ok', 'empty', 'filtered', 'wrong-model', 'wrong-session', 'cancelled', 'reject', 'malformed', 'timeout', 'flood', 'bad-tail']) {
+    for (const mode of ['ok', 'empty', 'filtered', 'wrong-model', 'wrong-session', 'cancelled', 'reject', 'malformed', 'timeout', 'flood', 'bad-tail', 'current-drift', 'config-drift', 'coalesced-drift', 'foreign-drift', 'non-model']) {
       const s = new AgentSession(plan(dir, mode), 1500);
       try {
         if (['malformed', 'timeout', 'flood'].includes(mode)) { await assert.rejects(s.catalog()); continue; }
@@ -35,7 +35,7 @@ test('external ACP boundary: snapshot, catalog provenance, exact-model same-sess
         assert.equal(catalog.authentication, 'unverified');
         assert.equal(catalog.state, mode === 'empty' ? 'empty' : mode === 'filtered' ? 'filtered' : 'reported');
         assert.ok(!JSON.stringify(catalog).includes('DO-NOT-RELAY'));
-        if (['wrong-model', 'wrong-session', 'cancelled', 'reject', 'bad-tail'].includes(mode)) {
+        if (['wrong-model', 'wrong-session', 'cancelled', 'reject', 'bad-tail', 'current-drift', 'config-drift', 'coalesced-drift'].includes(mode)) {
           await assert.rejects(s.verify(), e => e instanceof Error && !e.message.includes('DO-NOT-RELAY'));
         } else {
           const evidence = await s.verify();
@@ -89,6 +89,32 @@ test('production host Start uses external ACP evidence; Save and Stop do not nee
     const stopped = JSON.parse(readFileSync(join(hostDir, 'journal.json'), 'utf8'));
     assert.equal(stopped.binding.host, 'acp-host'); assert.equal(stopped.phase, 'stopped');
     assert.ok(!readFileSync(join(dir, 'relay.json'), 'utf8').includes('fixture-session'));
+  } finally {
+    await h.close(); client.close(); for (const c of server.clients) c.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ['current-drift', 'config-drift', 'coalesced-drift', 'foreign-drift', 'non-model']) test(`diagnostic Start consuming boundary: ${mode}`, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-model-host-')));
+  const ownerSecret = newKey(), agentSecret = newKey(), agent = publicKey(agentSecret);
+  const p = plan(dir, mode);
+  provisionSetup(join(dir, 'setup.json'), { host: 'model-host', ownerSecret, agentSecret, runner: p.executable, args: p.args, workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: p.databricksHost });
+  const server = await relay(0, publicKey(ownerSecret), join(dir, 'relay.json'));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const url = `ws://127.0.0.1:${address.port}`;
+  const h = await host(dir, url), seen: Message[] = [];
+  const client = connect(url, ownerSecret, m => seen.push(m)); await client.ready;
+  try {
+    const op = message('start', 'model-host', agent, 0); client.send(op);
+    for (let n = 0; n < 200 && !seen.some(m => m.type === 'receipt' && m.body.operation === op.id); n++) await delay(25);
+    const receipt = seen.find(m => m.type === 'receipt' && m.body.operation === op.id); assert.ok(receipt);
+    const state = JSON.parse(readFileSync(join(dir, 'journal.json'), 'utf8'));
+    if (mode === 'foreign-drift' || mode === 'non-model') {
+      assert.equal(receipt.body.result, 'accepted'); assert.equal(state.actual.evidence.model, p.model);
+    } else {
+      assert.notEqual(receipt.body.result, 'accepted'); assert.equal(state.actual, null); assert.equal(state.phase, 'stopped');
+    }
   } finally {
     await h.close(); client.close(); for (const c of server.clients) c.terminate();
     await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });

@@ -294,9 +294,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           const probe = new AgentSession(prepared.launch); acp = probe; owned = probe.owned;
           try { await probe.catalog(); await probe.verify(); }
           finally {
-            try { await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; save(); }
+            try { await probe.stopProbe(); owned = undefined; acp = undefined; trace('host.stop-owned.end'); state.phase = 'stopped'; save(); }
             catch (error) { state.phase = 'quarantined'; save(); throw error; }
           }
+          if (!probe.healthy) throw Error('ACP prerequisite invalidated during teardown');
         }
         if (closing || prepareLocal(g.selection).token !== prepared.token) throw Error('Preparation changed or host closing');
         const token = prepared.token;
@@ -442,9 +443,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
               const probe = new AgentSession(launch); restartProbe = probe;
               try { await probe.catalog(); await probe.verify(); }
               finally {
-                try { await probe.owned.stop(); restartProbe = undefined; }
+                try { await probe.stopProbe(); restartProbe = undefined; }
                 catch (error) { state.phase = 'quarantined'; throw error; }
               }
+              if (!probe.healthy) throw Error('ACP prerequisite invalidated during teardown');
             }
             if (closing || retracting(m.revision)) throw Error('Restart cancelled by Stop or host close');
             if (state.phase !== phaseBeforePreparation) throw Error('Restart ownership changed during preflight; reconcile before launch');

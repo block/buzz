@@ -166,7 +166,7 @@ export class ConversationSession {
     });
     const injected = new Map<string, { original: RPC; session: string }>();
     let sequence = 0;
-    let claudeNative = false; let codexNative = false;
+    let claudeNative = false; let codexNative = false; let buzzNative = false;
     const send = (target: NodeJS.WritableStream, msg: RPC) => {
       if (this.failed) return;
       if (!target.write(JSON.stringify(msg) + '\n')) this.fail('ACP transport backpressure limit');
@@ -180,6 +180,15 @@ export class ConversationSession {
       } else if (msg.id === undefined || (Object.hasOwn(msg, 'result') === Object.hasOwn(msg, 'error'))) throw Error();
       if (!fromHarness && msg.method) {
         const p = msg.params;
+        // Pinned Buzz Agent's protocol-2 systemPrompt contract is deliberately
+        // agent-specific, not a capability inferred for arbitrary ACP v2 adapters.
+        if (!this.prepared.plan.harness) {
+          if (msg.method === 'initialize') p.protocolVersion = 2;
+          if (msg.method === 'session/new') {
+            if (!buzzNative) throw Error('Buzz Agent native profile contract unavailable');
+            if (this.prepared.plan.instructions !== undefined) p.systemPrompt = this.prepared.plan.instructions;
+          }
+        }
         if (this.prepared.plan.custom) {
           if (['session/load', 'session/resume'].includes(msg.method)) throw Error('Custom contract requires fresh session/Restart');
           if (msg.method === '_goose/unstable/session/system-prompt/set' && this.prepared.plan.instructions !== undefined) {
@@ -244,6 +253,10 @@ export class ConversationSession {
         if (this.prepared.plan.custom && request.method === '_goose/unstable/session/system-prompt/set') {
           if (msg.error !== undefined || !validID(request.params?.sessionId) || customProfiles.size >= 128) throw Error('Custom native profile rejected');
           customProfiles.add(request.params.sessionId);
+        }
+        if (request.method === 'initialize' && !this.prepared.plan.harness) {
+          if (msg.result?.protocolVersion !== 2 || msg.result?.agentInfo?.name !== 'buzz-agent') throw Error('Buzz Agent protocol 2 native profile contract unavailable');
+          buzzNative = true;
         }
         if (request.method === 'initialize' && this.prepared.plan.custom) {
           if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== 'goose') throw Error('Custom Goose-native contract unavailable');

@@ -88,6 +88,13 @@ test('ACP Restart preflight rejection preserves actual run; authorized Stop inte
     writeFileSync(join(dir, 'mode'), 'reject');
     assert.notEqual(await request(message('restart', 'acp-restart', agent, 1)), 'accepted');
     assert.deepEqual(journal().actual, original); assert.equal(journal().phase, 'running');
+    for (const mode of ['current-drift', 'config-drift', 'coalesced-drift', 'teardown-drift']) {
+      writeFileSync(join(dir, 'mode'), mode);
+      assert.notEqual(await request(message('restart', 'acp-restart', agent, 1)), 'accepted', mode);
+      assert.deepEqual(journal().actual, original, mode);
+      assert.equal(journal().phase, 'running', mode);
+      assert.equal(journal().revision, 1, mode);
+    }
     writeFileSync(join(dir, 'mode'), 'delayed');
     const restart = message('restart', 'acp-restart', agent, 1); client.send(restart);
     await until(() => { try { return readFileSync(join(dir, 'prompt-started'), 'utf8') === '1'; } catch { return false; } });

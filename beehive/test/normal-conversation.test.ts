@@ -335,6 +335,16 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     await delay(100); assert.ok(session.healthy, 'broker remains model-confirmed and healthy after later turns');
     const oldActual = state().actual;
     const manifest = readFileSync(join(installation, 'setup.json'));
+    const restartInstructions = 'NORMAL-PROFILE-BOUNDARY: freshly changed Restart behavior.';
+    const restartBehavior = { name: 'Normal profile', parent: behavior.revision, instructions: restartInstructions, revision: profileRevision('Normal profile', behavior.revision, restartInstructions) };
+    const profileClient = connect(managementURL, ownerSecret, m => seen.push(m)); await profileClient.ready;
+    profileClient.send(message('profile', 'profiles', 'profiles', 0, restartBehavior));
+    const changed = message('save', 'journey', agent, state().revision, { ...state().selected, profile: restartBehavior.revision, behavior: restartBehavior });
+    profileClient.send(changed);
+    for (let n = 0; n < 400 && !seen.some(m => m.type === 'receipt' && m.body.operation === changed.id); n++) await delay(20);
+    assert.match(String(seen.find(m => m.type === 'receipt' && m.body.operation === changed.id)?.body.result), /saved/);
+    profileClient.close();
+    assert.deepEqual(state().actual, oldActual);
     expected = inbound;
     await terminal(['tui', identity, managementURL], [
       { prompt: 'beehive> ', answer: 'select 1' },
@@ -348,9 +358,16 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     assert.deepEqual(readFileSync(join(installation, 'setup.json')), manifest);
     assert.deepEqual(readFileSync(sibling.path), originalY);
     assert.deepEqual(readFileSync(join(installation, 'setup.json')), convertedManifest);
-    assert.equal(state().actual.selection.behavior.revision, behavior.revision);
+    assert.equal(state().actual.selection.behavior.revision, restartBehavior.revision);
     assert.equal(replies.length, 4, 'Restart must produce a fresh installed signed reply');
     assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /NORMAL-PROFILE-BOUNDARY/);
+    if (buzz) {
+      assert.equal(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), restartInstructions);
+      const inputs = readFileSync(join(dir, 'native-session-inputs.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.ok(inputs.some(row => row.systemPrompt === instructions));
+      assert.ok(inputs.filter(row => row.systemPrompt === restartInstructions).length >= 2, 'fresh preflight and actual native session inputs');
+      assert.ok(new Set(inputs.filter(row => row.systemPrompt === restartInstructions).map(row => row.pid)).size >= 2);
+    }
     const controlSeen: Message[] = [];
     const control = connect(managementURL, ownerSecret, m => controlSeen.push(m)); await control.ready;
     const request = async (m: Message) => {
@@ -369,7 +386,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       assert.notEqual((await request(rejected)).body.result, 'accepted');
       assert.deepEqual(state().actual, actual, 'wrong model preflight preserves actual');
       if (!goose || custom) {
-        for (const failure of ['missing-native', ...(!custom ? ['auth-rejected'] : ['missing-profile']), ...(oauth ? ['missing-refresh'] : []), ...(codex ? ['wrong-protocol', 'missing-model'] : [])]) {
+        for (const failure of ['missing-native', ...(!custom ? ['auth-rejected'] : ['missing-profile']), ...(oauth ? ['missing-refresh'] : []), ...(codex ? ['wrong-protocol', 'missing-model'] : []), ...(!goose && !claude && !codex && !custom ? ['wrong-protocol', 'missing-profile', 'current-drift', 'config-drift', 'coalesced-drift'] : [])]) {
           writeFileSync(join(dir, 'mode'), failure);
           assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
           assert.deepEqual(state().actual, actual);
