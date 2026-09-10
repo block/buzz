@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { host } from '../src/host.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
-import { message, newKey, publicKey, type Message } from '../src/protocol.ts';
+import { message, newKey, publicKey, type Message, open } from '../src/protocol.ts';
 import { writePrivate } from '../src/storage.ts';
 
 async function until(predicate: () => boolean) {
@@ -28,7 +28,11 @@ test('a Stop received beside a pending Start cancels it before running, live and
       runner: process.execPath, args: acp ? [resolve('test/acp-fixture.ts'), 'delayed'] : [resolve('test/runner.ts')],
       workspace: dir, mode: acp ? 'buzz-agent-databricks-v2' : 'fixture',
       ...(acp ? { serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid' } : {}) });
-    const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
+    const storagePhases: { phase: string; at: number }[] = [];
+    const server = await relay(0, publicKey(secret), join(dir, 'relay.json'), async phase => {
+      storagePhases.push({ phase, at: Date.now() });
+      if (storagePhases.length > 64) storagePhases.shift();
+    });
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;
     const h = await host(dir, url);
@@ -47,7 +51,7 @@ test('a Stop received beside a pending Start cancels it before running, live and
       assert.notEqual(journal().operations[start.id].reply.body.result, 'accepted');
       assert.match(String(journal().operations[start.id].reply.body.result), /cancelled/);
       assert.equal(journal().phase, 'stopped'); assert.equal(journal().actual, null); assert.equal(journal().revision, 1);
-      assert.ok(Date.now() - began < 2500, 'Cancellation must not wait for the four-second fixture prompt');
+      assert.ok(Date.now() - began < 2500, `Cancellation must not wait for the four-second fixture prompt: ${JSON.stringify({ scenario, elapsed: Date.now() - began, storagePhases, receipts: seen.filter(m => m.type === 'receipt') })}`);
       assert.ok(!seen.some(m => m.type === 'inventory' && m.body.phase === 'running'), 'No live run may be left behind');
       await h.close(); await delay(200);
       assert.ok(!existsSync(join(dir, 'host.lock')), 'Verified stopped state must release the ownership lock');
@@ -68,7 +72,11 @@ test('same-batch Stop cancellation keeps authority, ordering, duplicate and revi
     const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
     provisionSetup(join(dir, 'setup.json'), { host: 'admission-host', ownerSecret: secret, agentSecret,
       runner: process.execPath, args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' });
-    const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
+    const storagePhases: { phase: string; at: number }[] = [];
+    const server = await relay(0, publicKey(secret), join(dir, 'relay.json'), async phase => {
+      storagePhases.push({ phase, at: Date.now() });
+      if (storagePhases.length > 64) storagePhases.shift();
+    });
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;
     const h = await host(dir, url);
@@ -123,7 +131,7 @@ test('same-batch Stop cancellation keeps authority, ordering, duplicate and revi
         assert.equal(receipt(stale.id), 'revision-conflict');
         assert.equal(journal().phase, 'stopped'); assert.equal(journal().revision, 1);
       }
-      assert.ok(Date.now() - began < 2500, 'Controls must resolve without waiting on a run');
+      assert.ok(Date.now() - began < 2500, `Controls must resolve without waiting on a run: ${JSON.stringify({ control, elapsed: Date.now() - began, storagePhases, receipts: seen.filter(m => m.type === 'receipt'), order: JSON.parse(readFileSync(join(dir, 'relay.json'), 'utf8')).map((e: unknown) => { const m = open(e, secret); return { type: m.type, id: m.id, revision: m.revision }; }) })}`);
       if (!['wrong-authority','conflicting-id','invalid-body'].includes(control)) assert.ok(!seen.some(m => m.type === 'inventory' && m.body.phase === 'running'), 'No live run may be left behind');
     } finally {
       await h.close(); ui.close(); for (const socket of server.clients) socket.terminate();

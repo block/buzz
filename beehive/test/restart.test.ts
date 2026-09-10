@@ -8,7 +8,7 @@ import { provisionSetup } from './provision.ts';
 import { host } from '../src/host.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
-import { message, newKey, publicKey, type Message } from '../src/protocol.ts';
+import { message, newKey, publicKey, type Message, open } from '../src/protocol.ts';
 
 test('Restart preserves identity, preflights before Stop, replays once and obeys same-batch Stop fencing', async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-restart-')));
@@ -68,7 +68,11 @@ test('ACP Restart preflight rejection preserves actual run; authorized Stop inte
   writeFileSync(wrapper, `import { readFileSync } from 'node:fs'; process.argv[2] = readFileSync('mode', 'utf8'); await import(${JSON.stringify(new URL(`file://${resolve('test/acp-fixture.ts')}`).href)});`);
   writeFileSync(join(dir, 'mode'), 'ok');
   provisionSetup(join(dir, 'setup.json'), { host: 'acp-restart', ownerSecret: secret, agentSecret, runner: realpathSync(process.execPath), args: [wrapper], workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid' });
-  const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
+  const storagePhases: { phase: string; at: number }[] = [];
+  const server = await relay(0, publicKey(secret), join(dir, 'relay.json'), async phase => {
+    storagePhases.push({ phase, at: Date.now() });
+    if (storagePhases.length > 64) storagePhases.shift();
+  });
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const url = `ws://127.0.0.1:${address.port}`, seen: Message[] = [];
   const h = await host(dir, url), client = connect(url, secret, m => seen.push(m)); await client.ready;
@@ -94,7 +98,7 @@ test('ACP Restart preflight rejection preserves actual run; authorized Stop inte
     await delay(100); assert.deepEqual(journal().actual, original);
     const began = Date.now();
     assert.equal(await request(message('stop', 'acp-restart', agent, 1)), 'accepted');
-    assert.ok(Date.now() - began < 2500, 'Stop interrupts four-second preflight');
+    assert.ok(Date.now() - began < 2500, `Stop interrupts four-second preflight: ${JSON.stringify({ elapsed: Date.now() - began, storagePhases, receipts: seen.filter(m => m.type === 'receipt'), order: JSON.parse(readFileSync(join(dir, 'relay.json'), 'utf8')).map((e: unknown) => { const m = open(e, secret); return { type: m.type, id: m.id, revision: m.revision }; }) })}`);
     assert.notEqual(journal().operations[restart.id].reply.body.result, 'accepted');
     assert.equal(journal().actual, null); assert.equal(journal().phase, 'stopped');
     await delay(4200); assert.equal(journal().actual, null);

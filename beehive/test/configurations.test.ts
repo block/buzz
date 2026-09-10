@@ -18,7 +18,7 @@ async function until(check: () => boolean) {
   for (let i = 0; i < 600; i++) { if (check()) return; await delay(20); }
   throw Error('Missing named-configuration evidence');
 }
-type Step = { prompt: string; answer: string; gate?: () => boolean };
+type Step = { prompt: string; answer: string; gate?: () => boolean; observedRevision?: number };
 async function terminal(args: string[], steps: Step[]) {
   const child = spawn(process.execPath, ['src/cli.ts', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
   let output = '', error = '', cursor = 0, index = 0, pending = false;
@@ -31,15 +31,25 @@ async function terminal(args: string[], steps: Step[]) {
     pending = true;
     void (async () => {
       if (step.gate) await until(step.gate);
+      if (step.observedRevision !== undefined) {
+        const deadline = Date.now() + 12000;
+        for (;;) {
+          const from = output.length; child.stdin.write('show\n');
+          await until(() => output.indexOf('beehive> ', from) >= 0);
+          if (output.slice(from).includes(`\n  "revision": ${step.observedRevision},\n`)) break;
+          assert.ok(Date.now() < deadline, 'TUI did not observe committed revision');
+          await delay(20);
+        }
+      }
       // Receipts and their inventory are distinct publications; wait for the TUI observation.
-      await delay(80); cursor = position + step.prompt.length; index++; pending = false;
+      await delay(80); cursor = step.observedRevision !== undefined ? output.length : position + step.prompt.length; index++; pending = false;
       child.stdin.write(`${step.answer}\n`);
     })().catch(e => { failure = e; child.kill('SIGTERM'); });
   });
   const timer = setTimeout(() => child.kill('SIGTERM'), 25000);
   try {
     const [code] = await once(child, 'exit');
-    if (failure) throw failure;
+    if (failure) throw Error(`Named TUI step ${index} (${steps[index]?.answer}): ${String(failure)}\n${error}\n${output.slice(-16000)}`);
     assert.equal(code, 0, `${error}\n${output}`); assert.equal(index, steps.length, output);
     return output;
   } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); }
@@ -90,24 +100,24 @@ test('real local wizard: two keys share one setup; real TUI named candidates lea
       { prompt: p, answer: 'select 2', gate: () => journal(X).phase === 'running' },
       { prompt: p, answer: 'start' },
       { prompt: p, answer: 'select 1', gate: () => { if (journal(Y).phase !== 'running') return false; actual = journal(X).actual; sibling = readFileSync(slots[1]!.path); return true; } },
-      { prompt: p, answer: 'config-new' },
+      { prompt: p, answer: 'config-new', observedRevision: 1 },
       { prompt: 'New configuration name (copies selected-next, same identity/setup): ', answer: 'Alternative' },
       { prompt: 'actual run unchanged? [yes/no]: ', answer: 'yes' },
-      { prompt: p, answer: 'save', gate: () => journal(X).revision === 2 },
+      { prompt: p, answer: 'save', observedRevision: 2, gate: () => journal(X).revision === 2 },
       { prompt: 'Model: ', answer: 'fixture-model' }, { prompt: 'Workspace: ', answer: workspace }, { prompt: 'Behavior profile: ', answer: 'default' },
-      { prompt: p, answer: 'config-select default', gate: () => journal(X).revision === 3 },
+      { prompt: p, answer: 'config-select default', observedRevision: 3, gate: () => journal(X).revision === 3 },
       { prompt: 'actual run unchanged? [yes/no]: ', answer: 'yes' },
-      { prompt: p, answer: 'config-select Alternative', gate: () => journal(X).revision === 4 },
+      { prompt: p, answer: 'config-select Alternative', observedRevision: 4, gate: () => journal(X).revision === 4 },
       { prompt: 'actual run unchanged? [yes/no]: ', answer: 'yes' },
-      { prompt: p, answer: 'configurations', gate: () => { if (journal(X).revision !== 5) return false; assert.deepEqual(journal(X).actual, actual); assert.deepEqual(readFileSync(slots[1]!.path), sibling); return true; } },
+      { prompt: p, answer: 'configurations', observedRevision: 5, gate: () => { if (journal(X).revision !== 5) return false; assert.deepEqual(journal(X).actual, actual); assert.deepEqual(readFileSync(slots[1]!.path), sibling); return true; } },
       { prompt: p, answer: 'restart' },
       { prompt: p, answer: 'show', gate: () => { if (journal(X).revision !== 6) return false; assert.equal(journal(X).actual.selection.configuration.name, 'Alternative'); assert.equal(journal(X).actual.selection.configuration.revision, 3); assert.equal(journal(X).actual.selection.workspace, workspace); assert.equal(journal(X).actual.harnessSetup.id, 'default'); assert.deepEqual(journal(X).actual.harnessSetup, journal(Y).actual.harnessSetup); assert.deepEqual(journal(X).runs[actual.run], actual); assert.deepEqual(readFileSync(slots[1]!.path), sibling); return true; } },
       { prompt: p, answer: 'select target' }, { prompt: p, answer: 'config-new' },
       { prompt: 'New configuration name (copies selected-next, same identity/setup): ', answer: 'Destination' },
       { prompt: 'actual run unchanged? [yes/no]: ', answer: 'yes' },
-      { prompt: p, answer: 'save', gate: () => targetJournal().revision === 1 },
+      { prompt: p, answer: 'save', observedRevision: 1, gate: () => targetJournal().revision === 1 },
       { prompt: 'Model: ', answer: 'fixture-model' }, { prompt: 'Workspace: ', answer: workspace }, { prompt: 'Behavior profile: ', answer: 'default' },
-      { prompt: p, answer: 'start', gate: () => targetJournal().revision === 2 },
+      { prompt: p, answer: 'start', observedRevision: 2, gate: () => targetJournal().revision === 2 },
       { prompt: p, answer: 'quit' },
     ]);
     await until(() => seen.some(m => m.type === 'receipt' && m.host === 'target' && m.body.result === 'not-authority'));

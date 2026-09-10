@@ -451,3 +451,29 @@ continuity and live Goose/provider authentication are NOT established. All sourc
 shape assertions and installed evidence remain separately attributed. Full default
 concurrent package results/failures are recorded in CHECKPOINT, not replaced by these
 focused passes. No transport deadline, test default, or assertion was weakened.
+
+## Nonblocking durable development relay
+
+`relay-persistence.test.ts` binds the actual async atomic writer at controlled
+write/rename/directory boundaries (no timing sleeps). While a write is suspended,
+a second real HTTP WebSocket upgrade and ping/pong complete; both readers see only
+committed history. Concurrent publications and duplicate retain exact signed order,
+reconnect and reopened relay replay the identical JSON snapshot, 0600/0700 and temp
+cleanup hold. Write/rename failures neither echo nor poison a queued sibling.
+Close drains pending durability even after publisher disconnect. A post-rename
+fsync failure is uncertain, not a guaranteed rejection: no echo, subsequent commits
+and readers fenced, close callback receives the error. The unacknowledged replacement
+may be recovered on reopen. This is file/directory fsync evidence, not power-loss
+simulation. The fixture-only optional phase hook is not exposed through CLI/env.
+Full-history JSON encoding/replay and the 10,000-entry limit remain; this change is
+not append-log/compaction or unbounded history support. Existing synchronous storage
+helpers for host journals, keys and configuration are intentionally untouched.
+
+Async durability no longer blocks unrelated test polling: a host's private journal
+commit is not proof the TUI has consumed its subsequent inventory, and submitting a
+profile is not proof its numbered row exists. Config fixture now queries actual
+`show` revisions (captured stale Save/revision-conflict); slots queries actual
+`profiles` for exact instructions before numbered actions. Original outer deadlines,
+CAS assertions and operation counts remain. Admission failure assertions retain
+bounded fixture storage phases, actual receipts and durable receive order rather
+than assigning elapsed-time failure to storage without evidence.

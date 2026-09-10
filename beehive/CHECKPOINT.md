@@ -5,6 +5,140 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Relay persistence 796787 — publication gate
+
+**Final exact source:** strict passes; DEFAULT concurrent installed-enabled full
+**69/70**, natural **33.226s**, zero skips/cancellations (`publication-strict.log`,
+`publication-full-installed-default.log`). All relay durability/upgrade/fault/drain/
+restart tests, actual slots standby workflow, admission controls, ACP Restart, profiles,
+Move and installed conversation tests pass. One remaining failure in unchanged
+`disconnect.test.ts:26`: ENOENT reading fresh fixture `term-seen`, after group-absence
+assertion passed. That test uses spawnOwned directly, not the relay; no causal claim
+beyond that source boundary. **Full engineering acceptance remains OPEN.** No repeat
+run or out-of-scope containment repair. Prior preflight timing failure did not recur;
+its cause remains unclassified, not retroactively closed by this pass.
+
+Concrete fix is committed/published with this checkpoint; final exact hash/clean-tree
+verification is in the terminal and workspace publication record. No production
+harness, wizard, client, native/Rust, credentials or provider changes. Fixtures only
+now observe actual durable TUI revisions/profiles, with original outer timeouts and
+assertions. New admission/Restart failure messages retain actual elapsed/receipts/
+order/storage phases. Source hashes remain separate from installed executable hashes.
+History remains bounded full JSON snapshots/replay, not compaction or power-loss proof.
+Next: retain/classify the outstanding unrelated fixture and historical timing evidence,
+then wizard-to-installed Goose conversation continuity / remaining parity. No full
+product/live provider/current-kind-40002 or repository CI acceptance claim.
+
+## Final fixture self-review follow-up
+
+The 69/70 executable result below remains retained, not erased. Before commit,
+self-review caught config driver's new observation-query prompts could leave its
+old cursor pointing behind those prompts; cursor now advances past consumed query
+output before awaiting the next command response. This is fixture-only, no operation
+retry or increased deadline. The residual Restart timing assertion now retains
+actual elapsed/receipt/order/storage phase evidence on failure (same bound). Final
+strict/default gate for these exact fixture changes follows; production relay source
+is unchanged from the 69/70 run. No further blind reruns are planned.
+
+## Relay persistence 796787 — retained pre-cursor gate
+
+Concrete relay-only fix implemented: async atomic batched snapshots, serialized
+commit ownership, exact envelope/order/dedup, persist-before-echo/history, bounded
+queue, pre-replacement failure isolation, post-replacement uncertainty fencing,
+and close/drain. Host/key/state synchronous helpers and transport deadlines unchanged.
+Final executable strict passes. Final exact DEFAULT concurrent installed-enabled
+package gate **69/70**, zero skips/cancellations, natural **32.234s**. New relay
+regressions, actual slots standby/HTTP handshake, admission controls, profile/Move,
+configuration observation and installed conversation tests PASS. One residual:
+`restart.test.ts:97` Stop interrupting ACP preflight exceeded unchanged <2500ms
+bound. Actual Stop result was accepted (preceding assertion passed); elapsed detail
+was not captured by that unchanged test. Cause UNCLASSIFIED, not attributed to
+storage or treated as acceptance. No further blind rerun. Full-suite engineering
+acceptance remains OPEN. No full-product/provider/production protocol claim.
+
+Exact logs and separate source/binary hashes:
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/RELAY_796787/` in the workspace;
+`final-exact-{strict,full-installed-default}.log`, `final-source.sha256`,
+`installed-binaries.sha256`. All earlier failures retained. No test retry, serial
+mode, force exit, assertion weakening or deadline inflation. New observation queries
+are bounded under original TUI outer deadlines, not retries of lifecycle operations.
+No repo-wide CI executed. Node24.15.0 / pnpm11.4.0; no dependency/config edits.
+
+Self-review: received-prefix batch has one writer; history mutates only after both
+fsyncs; readers connecting during I/O replay old history then receive the commit;
+duplicate pending signatures cannot rewrite or reorder. Failed snapshot leaves no
+temp and no echo; later queued batch survives. Uncertain replacement stops further
+commit/replay, reports close error, and may be recovered unacknowledged on reopen.
+Close does not cancel already received work (even after disconnect), and waits for
+I/O before its callback. JSON encoding/full replay and 10,000-entry history/queue
+bounds remain; not compaction, cross-process multiwriter safety, or power-loss proof.
+
+Next: separately resolve/instrument the residual preflight Stop timing failure,
+then wizard-to-installed Goose conversation continuity and remaining parity. Prior
+F1/F2/K1/A-B reviews are not reopened or claimed to cover this new relay delta.
+Commit uses verified configured Logan Johnson <loganj@squareup.com> author/committer
+and DCO; no cryptographic signing claim. Published exact head follows in terminal.
+
+## Relay persistence 796787 — implementation checkpoint
+
+Sole writer continuation from d22ce81. Original relay writes the growing JSON
+snapshot synchronously per publication (file fsync + directory fsync), inside
+its WS message handler. Measured p93062 dial 2445545 -> error 2447560 is
+2015ms; the supplied parent trace attributes delayed accept to synchronous
+persistence, not slow upgrade processing. The broader 2442459 -> 2447559
+interval is 5100ms, NOT 2100ms. Historical admission failure is unclassified.
+Plan: relay-only asynchronous atomic snapshots, serialized commit ownership,
+commit-before-visibility and drain-on-close; retain synchronous host/key helpers.
+Deterministic storage-phase barriers/faults will bind the production writer.
+No deadline/reconnect policy changes. Strict + focused production-path
+relay/admission/slots/profile/Move/reconnect tests pass **22/22** (natural 20.989s).
+Five new barrier/fault regressions pass, including legacy file reopen and actual
+WS replay on restart. Final DEFAULT concurrent installed-enabled gate is next.
+Pre-replacement failure closes the publisher 1011 without history mutation, then
+queued siblings continue. Post-replacement directory failure is explicitly
+UNCERTAIN: no echo/history visibility, fence subsequent commits/readers, close
+callback reports the error; reopen may recover that unacknowledged replacement.
+Close stops admission and drains already queued work; disconnect does not cancel
+accepted queue entries. Snapshot format and synchronous host/key helpers unchanged.
+Logs (including first strict closure-narrowing error, now fixed) are retained at
+workspace WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/RELAY_796787/.
+
+### Iteration before final batched snapshot gate
+
+Initial one-snapshot-per-publication async candidate: DEFAULT installed-enabled
+full **64/70**, natural 34.775s; failures admission (2), cancellation, configurations,
+policy TUI (actual output shows stale revision 0 vs expected 1), slots. Retained
+`full-installed-default.log`; do not relabel as success or causally classify all.
+Per-publication fsync retains unnecessary serial throughput cost, so the queue now
+commits the currently received prefix as ONE atomic snapshot. No delayed fsync,
+no new format/append-log and no visibility before the entire batch is durable.
+A blocked snapshot regression now queues two more distinct publications plus a
+duplicate: exactly two snapshots, all three ordered unique envelopes on disk/replay.
+Focused batch iteration **14/15** (configuration observation timeout); bounded TUI
+failure output added, no waits/assertions changed. Diagnostic focused concurrent
+**15/15**; isolated config diagnostic **2/2** (nonrecurrence does not classify the
+timeout). Admission assertions now retain control/scenario, elapsed, actual receipts,
+persisted order and last 64 storage phase timestamps on failure. No timeout increase.
+Final batched candidate strict/full DEFAULT gate is next; source hashes stored apart
+from installed binary hashes. Self-review separated post-commit delivery exceptions
+from write failures; unexpected tail errors fence clients and surface at close.
+
+### Final observation-bound fixture gate
+
+Batched DEFAULT installed-enabled run **68/70**, natural 32.130s, no skips:
+admission/cancellation and new relay tests pass; config/slots TUI fixtures fail.
+Config bounded transcript proves Save issued against stale observed revision after
+private journal advance, then `revision-conflict` (step 13). Fixture now asks actual
+`show` for the required revision before issuing dependent commands, matching the
+existing slots pattern; no production wizard/harness changes. Slots source likewise
+issued numbered profile actions immediately after pending publication; it now asks
+actual `profiles` for the exact immutable instructions before using those rows.
+No operation retries, timeout/assertion relaxation, serial execution or force exit.
+Slots now preserves bounded step/output on driver failure. Focused observations plus
+relay **11/11**, natural 17.769s. Historical slots timeout here lacks a transcript,
+so the source race correction is not retroactive proof of that particular timeout.
+Final exact candidate DEFAULT concurrent installed-enabled gate follows.
+
 ## Goose / integrated local entry 768f — published partial checkpoint
 
 Final strict passes. Exactly one final **FULL DEFAULT concurrent installed-enabled
