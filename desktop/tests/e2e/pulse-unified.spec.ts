@@ -688,36 +688,17 @@ test("For you renders more than three summary rows", async ({ page }) => {
   await expect(page.getByTestId("pulse-conversation")).toHaveCount(0);
 });
 
-test("app variations combine conversations by recency and preserve selection and drafts", async ({
+test("combined conversations preserve recency, selection, and drafts for legacy links", async ({
   page,
 }) => {
   await seed(page);
-  const menu = page.getByRole("button", {
-    name: "App variations",
-    exact: true,
-  });
-  await menu.focus();
-  await page.keyboard.press("Enter");
   await expect(
-    page.getByRole("menuitemradio", {
-      name: "Combined conversations",
-      exact: true,
-    }),
-  ).toHaveAttribute("aria-checked", "true");
-  await page
-    .getByRole("menuitemradio", { name: "Combined conversations", exact: true })
-    .click();
+    page.getByRole("button", { name: "App variations", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Refresh messages", exact: true }),
+  ).toBeVisible();
   await expect(page.getByTestId("pulse-tabs")).toHaveCount(0);
-  await expect(
-    page
-      .getByTestId("pulse-app-navigation")
-      .getByRole("button", { name: "Agents", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page
-      .getByTestId("app-top-chrome")
-      .getByRole("button", { name: "App variations" }),
-  ).toBeVisible();
   const list = page.getByTestId("pulse-combined-list");
   const detail = page.getByTestId("pulse-combined-detail");
   const all = list.getByRole("button", { name: "All messages", exact: true });
@@ -860,39 +841,21 @@ test("app variations combine conversations by recency and preserve selection and
   await page.getByTestId("unified-pulse").screenshot({
     path: "test-results/pulse-prototype/11-combined-conversations.png",
   });
-  await menu.click();
-  await expect(
-    page.getByRole("menuitemradio", {
-      name: "Combined conversations",
-      exact: true,
-    }),
-  ).toHaveAttribute("aria-checked", "true");
-  await page
-    .getByRole("menuitemradio", { name: "Separate feeds", exact: true })
-    .click();
-  await expect(page.getByTestId("pulse-tabs")).toHaveCount(0);
+  const legacyUrl = new URL(page.url());
+  const [route, query] = legacyUrl.hash.split("?");
+  const params = new URLSearchParams(query);
+  params.set("layout", "separate");
+  legacyUrl.hash = `${route}?${params}`;
+  await page.goto(legacyUrl.toString());
   await expect(
     page.getByTestId("pulse-conversation-group-divider"),
-  ).toHaveCount(1);
-  await expect(detail).toHaveAttribute(
-    "data-channel-id",
-    engineeringId ?? "missing",
-  );
-  const divider = page.getByTestId("pulse-conversation-group-divider");
-  expect((await boundsOf(alice)).y).toBeLessThan((await boundsOf(divider)).y);
-  expect((await boundsOf(engineering)).y).toBeGreaterThan(
-    (await boundsOf(divider)).y,
-  );
-  await page.reload();
-  await expect(divider).toBeVisible();
-  await waitForAnimations(page);
-  await page
-    .getByTestId("unified-pulse")
-    .screenshot({ path: "test-results/pulse-prototype/18-separate-rail.png" });
-  await menu.click();
-  await page
-    .getByRole("menuitemradio", { name: "Combined conversations", exact: true })
-    .click();
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", {
+      name: "Conversations by recent activity",
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(detail).toHaveAttribute(
     "data-channel-id",
     engineeringId ?? "missing",
@@ -1170,12 +1133,6 @@ test("live Pulse refresh and unread dots follow read state for channels and DMs"
   page,
 }) => {
   await seed(page);
-  await page
-    .getByRole("button", { name: "App variations", exact: true })
-    .click();
-  await page
-    .getByRole("menuitemradio", { name: "Combined conversations", exact: true })
-    .click();
   const list = page.getByTestId("pulse-combined-list");
   const detail = page.getByTestId("pulse-combined-detail");
   const all = list.getByRole("button", { name: "All messages", exact: true });
@@ -1248,23 +1205,17 @@ test("live Pulse refresh and unread dots follow read state for channels and DMs"
   await expect(
     page.getByRole("button", { name: "Refresh messages", exact: true }),
   ).toBeEnabled();
-  // The same read markers must drive the original, separate sidebars too.
+  // Later unread messages still clear independently in the combined list.
   await page.evaluate((pubkey) => {
     for (const channelName of ["engineering", "alice-tyler"]) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName,
         pubkey,
-        content: `Unread in separate ${channelName}`,
+        content: `More unread in ${channelName}`,
         createdAt: Math.floor(Date.now() / 1000) + 3,
       });
     }
   }, TEST_IDENTITIES.alice.pubkey);
-  await page
-    .getByRole("button", { name: "App variations", exact: true })
-    .click();
-  await page
-    .getByRole("menuitemradio", { name: "Separate feeds", exact: true })
-    .click();
   await page.getByRole("button", { name: "All messages", exact: true }).click();
   const channelRow = page
     .getByTestId("pulse-combined-list")
@@ -1886,42 +1837,34 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
       0,
     );
   }
-  for (const variation of ["Combined conversations", "Separate feeds"]) {
-    await page
-      .getByRole("button", { name: "App variations", exact: true })
-      .click();
-    await page
-      .getByRole("menuitemradio", { name: variation, exact: true })
-      .click();
-    for (const [name, contentTestId] of [
-      ["Projects", "projects-overview-layout"],
-      ["Agents", "agents-page-content"],
-      ["Workflows", "workflows-view"],
-    ]) {
-      const entry = apps.getByRole("button", { name, exact: true });
-      await entry.focus();
-      await page.keyboard.press("Enter");
-      const panel = main.getByTestId(`pulse-workspace-${name.toLowerCase()}`);
-      await expect(panel.getByTestId(contentTestId)).toBeVisible();
-      await expect(entry).toHaveAttribute("aria-current", "page");
-      await expect(apps).toBeVisible();
-      await expect(main).toHaveCSS("max-width", "960px");
-      await expect(page).toHaveURL(
-        new RegExp(`#/pulse\\?.*feed=${name.toLowerCase()}`),
-      );
-      await expect(page.getByTestId("open-pulse-view")).toHaveCount(0);
-      await expect(rail).toHaveCount(0);
-      await expect(main.getByTestId("pulse-app-heading")).toHaveCount(0);
-      const appBox = await boundsOf(apps);
-      const mainBox = await boundsOf(main);
-      const panelBox = await boundsOf(panel);
-      expect(mainBox.x).toBeGreaterThanOrEqual(appBox.x + appBox.width + 8);
-      expect(panelBox.width).toBeCloseTo(mainBox.width, 0);
-      expect(mainBox.x + mainBox.width / 2).toBeCloseTo(720, 0);
-      await page.reload();
-      await expect(panel.getByTestId(contentTestId)).toBeVisible();
-      await expect(entry).toHaveAttribute("aria-current", "page");
-    }
+  for (const [name, contentTestId] of [
+    ["Projects", "projects-overview-layout"],
+    ["Agents", "agents-page-content"],
+    ["Workflows", "workflows-view"],
+  ]) {
+    const entry = apps.getByRole("button", { name, exact: true });
+    await entry.focus();
+    await page.keyboard.press("Enter");
+    const panel = main.getByTestId(`pulse-workspace-${name.toLowerCase()}`);
+    await expect(panel.getByTestId(contentTestId)).toBeVisible();
+    await expect(entry).toHaveAttribute("aria-current", "page");
+    await expect(apps).toBeVisible();
+    await expect(main).toHaveCSS("max-width", "960px");
+    await expect(page).toHaveURL(
+      new RegExp(`#/pulse\\?.*feed=${name.toLowerCase()}`),
+    );
+    await expect(page.getByTestId("open-pulse-view")).toHaveCount(0);
+    await expect(rail).toHaveCount(0);
+    await expect(main.getByTestId("pulse-app-heading")).toHaveCount(0);
+    const appBox = await boundsOf(apps);
+    const mainBox = await boundsOf(main);
+    const panelBox = await boundsOf(panel);
+    expect(mainBox.x).toBeGreaterThanOrEqual(appBox.x + appBox.width + 8);
+    expect(panelBox.width).toBeCloseTo(mainBox.width, 0);
+    expect(mainBox.x + mainBox.width / 2).toBeCloseTo(720, 0);
+    await page.reload();
+    await expect(panel.getByTestId(contentTestId)).toBeVisible();
+    await expect(entry).toHaveAttribute("aria-current", "page");
   }
   await main
     .getByRole("button", { name: "Create Workflow", exact: true })
@@ -2245,12 +2188,6 @@ test("agent conversation rows replace unread dots with notification-sized workin
     rowBounds.x + rowBounds.width - indicatorBounds.x - indicatorBounds.width,
   ).toBeCloseTo(12, 0);
   await expect(humanRow.getByTestId("pulse-working-dots")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "App variations", exact: true })
-    .click();
-  await page
-    .getByRole("menuitemradio", { name: "Separate feeds", exact: true })
-    .click();
   await expect(working).toBeVisible();
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(dots.first()).toHaveCSS("animation-name", "none");

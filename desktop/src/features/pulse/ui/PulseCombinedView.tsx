@@ -6,7 +6,6 @@ import { sortConversationsByRecency } from "../lib/conversationRecency";
 import { PulseConversationSplitView } from "./PulseConversationSplitView";
 
 export function PulseCombinedView({
-  grouped = false,
   channels,
   conversations,
   currentPubkey,
@@ -15,7 +14,6 @@ export function PulseCombinedView({
   view,
   onSelectView,
 }: {
-  grouped?: boolean;
   channels: Channel[];
   conversations: PulseConversation[];
   currentPubkey?: string;
@@ -24,26 +22,16 @@ export function PulseCombinedView({
   view: PulseView;
   onSelectView: (view: PulseView) => void;
 }) {
-  const sorted = React.useMemo(() => {
-    const recent = sortConversationsByRecency(channels, conversations);
-    return grouped
-      ? [
-          ...recent.filter((channel) => channel.channelType === "dm"),
-          ...recent.filter((channel) => channel.channelType !== "dm"),
-        ]
-      : recent;
-  }, [channels, conversations, grouped]);
+  const sorted = React.useMemo(
+    () => sortConversationsByRecency(channels, conversations),
+    [channels, conversations],
+  );
   return (
     <PulseConversationSplitView
       channels={sorted}
       currentPubkey={currentPubkey}
       selectionKey="conversation"
-      grouped={grouped}
-      label={
-        grouped
-          ? "Direct messages and channels"
-          : "Conversations by recent activity"
-      }
+      label="Conversations by recent activity"
       testPrefix="pulse-combined"
       allMessages={{ content: children, scrollRef }}
       navigation={{ view, onSelectView }}

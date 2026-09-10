@@ -27,10 +27,9 @@ export const CLEAR_WORKSPACE_PANELS = Object.fromEntries(
   PULSE_WORKSPACE_KEYS.map((key) => [key, null]),
 ) as Record<(typeof PULSE_WORKSPACE_KEYS)[number], null>;
 
-/** Reuse feature navigation while retaining Pulse's rail and selected variation. */
+/** Reuse feature navigation while retaining Pulse's rail and selected conversation. */
 export function workspaceNavigationTarget(
   target: AppNavigationTarget,
-  layout: string | null,
   conversation: string | null,
 ): AppNavigationTarget {
   let feed: PulseView;
@@ -67,7 +66,6 @@ export function workspaceNavigationTarget(
     to: "/pulse",
     params: undefined,
     search: {
-      layout: layout ?? undefined,
       conversation: conversation ?? undefined,
       ...target.search,
       feed,

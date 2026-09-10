@@ -29,15 +29,14 @@ highlight opens Search filtered to those conversations. Failures expose a retry 
 than pretending an excerpt is an AI summary. Browser tests mock the model endpoint;
 live checks require the user-approved Codex connection.
 
-The ellipsis menu at the top right of the window switches between **Separate feeds**
-and **Combined conversations**. The latter has no top tabs: Search and For you
-appear as circular-icon rows above All messages in the persistent sidebar, and
-Agents is hidden. All messages opens the mixed DM and channel feed above
-a single 220px list of joined DMs and channels, sorted by the
-newest relay timestamp or loaded message. Selection is independent of list order,
-so incoming activity does not switch the open conversation. The variation and
-selected conversation live in the URL and survive reloads; both variations use
-the same conversation detail and draft storage within the 960px container.
+Messages uses a single combined conversation layout. Search and For you appear
+as circular-icon rows above All messages in the persistent sidebar. All messages
+opens the mixed DM and channel feed beside a 220px list of joined DMs and channels,
+sorted by the newest relay timestamp or loaded message. Selection is independent
+of list order, so incoming activity does not switch the open conversation. The
+selected conversation lives in the URL and survives reloads; conversation detail
+and draft storage stay within the 960px container. Older variation links open
+this same combined layout.
 
 Conversation detail uses message bubbles: incoming messages align left in gray,
 and messages authored by the signed-in viewer align right in the selected theme’s accent color, with its matching contrast text. This is scoped

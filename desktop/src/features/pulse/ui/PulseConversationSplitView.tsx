@@ -45,7 +45,6 @@ const SPLIT_VIEW_SEARCH_KEYS = [
 ] as const;
 
 export function PulseConversationSplitView({
-  grouped = false,
   channels,
   currentPubkey,
   search = "",
@@ -55,7 +54,6 @@ export function PulseConversationSplitView({
   allMessages,
   navigation,
 }: {
-  grouped?: boolean;
   channels: Channel[];
   currentPubkey?: string;
   search?: string;
@@ -203,7 +201,7 @@ export function PulseConversationSplitView({
           </>
         )}
         {visibleRows.length ? (
-          visibleRows.map((row, index) => {
+          visibleRows.map((row) => {
             const participant = row.participants[0];
             const working =
               row.channel.channelType === "dm" &&
@@ -212,81 +210,70 @@ export function PulseConversationSplitView({
               );
             const unread = isUnread(row.channel.id);
             return (
-              <React.Fragment key={row.channel.id}>
-                {grouped &&
-                  index > 0 &&
-                  (visibleRows[index - 1].channel.channelType === "dm") !==
-                    (row.channel.channelType === "dm") && (
-                    <div
-                      aria-hidden="true"
-                      data-testid="pulse-conversation-group-divider"
-                      className="my-2 border-t border-border/40"
-                    />
-                  )}
-                <button
-                  type="button"
-                  data-testid={`${testPrefix}-${row.channel.id}`}
-                  data-channel-name={row.channel.name}
-                  aria-description={
-                    [working && "Agent working", unread && "Unread messages"]
-                      .filter(Boolean)
-                      .join(". ") || undefined
-                  }
-                  aria-label={
-                    row.channel.channelType === "dm"
-                      ? `Open DM with ${row.name}`
-                      : `Open channel ${row.name}`
-                  }
-                  aria-current={
-                    selected?.id === row.channel.id ? "true" : undefined
-                  }
-                  onClick={() => selectConversation(row.channel)}
-                  className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${selected?.id === row.channel.id ? "bg-muted/70" : "hover:bg-muted/35"}`}
-                >
-                  {row.channel.channelType !== "dm" ? (
-                    <PulseChannelAvatar channel={row.channel} />
-                  ) : row.participants.length > 1 ? (
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      <Users aria-hidden className="h-4 w-4" />
-                    </span>
-                  ) : (
-                    <ProfileAvatarWithStatus
-                      avatarUrl={participant?.avatarUrl ?? null}
-                      label={row.name}
-                      avatarClassName="text-xs"
-                      className="h-7 w-7 shrink-0"
-                      geometry={AVATAR_STATUS_GEOMETRY}
-                      size={AVATAR_SIZE}
-                      status={
-                        presence.data?.[
-                          normalizePubkey(participant?.pubkey ?? "")
-                        ]
-                      }
-                      statusTestId="pulse-conversation-presence"
-                      shape={participant?.isAgent ? "squircle" : "circle"}
-                    />
-                  )}
-                  <span
-                    className={`min-w-0 truncate text-sm ${selected?.id === row.channel.id ? "font-semibold" : ""}`}
-                  >
-                    {row.name}
+              <button
+                type="button"
+                key={row.channel.id}
+                data-testid={`${testPrefix}-${row.channel.id}`}
+                data-channel-name={row.channel.name}
+                aria-description={
+                  [working && "Agent working", unread && "Unread messages"]
+                    .filter(Boolean)
+                    .join(". ") || undefined
+                }
+                aria-label={
+                  row.channel.channelType === "dm"
+                    ? `Open DM with ${row.name}`
+                    : `Open channel ${row.name}`
+                }
+                aria-current={
+                  selected?.id === row.channel.id ? "true" : undefined
+                }
+                onClick={() => selectConversation(row.channel)}
+                className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${selected?.id === row.channel.id ? "bg-muted/70" : "hover:bg-muted/35"}`}
+              >
+                {row.channel.channelType !== "dm" ? (
+                  <PulseChannelAvatar channel={row.channel} />
+                ) : row.participants.length > 1 ? (
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                    <Users aria-hidden className="h-4 w-4" />
                   </span>
-                  {working ? (
-                    <span
-                      aria-hidden="true"
-                      data-testid="pulse-working-dots"
-                      className="ml-auto flex shrink-0 items-center"
-                    >
-                      <TypingDots
-                        className="gap-[3px] [--typing-dot-lift:-2px]"
-                        dotClassName={PULSE_STATUS_DOT_CLASS}
-                      />
-                    </span>
-                  ) : unread ? (
-                    <PulseUnreadDot />
-                  ) : null}
-                </button>
-              </React.Fragment>
+                ) : (
+                  <ProfileAvatarWithStatus
+                    avatarUrl={participant?.avatarUrl ?? null}
+                    label={row.name}
+                    avatarClassName="text-xs"
+                    className="h-7 w-7 shrink-0"
+                    geometry={AVATAR_STATUS_GEOMETRY}
+                    size={AVATAR_SIZE}
+                    status={
+                      presence.data?.[
+                        normalizePubkey(participant?.pubkey ?? "")
+                      ]
+                    }
+                    statusTestId="pulse-conversation-presence"
+                    shape={participant?.isAgent ? "squircle" : "circle"}
+                  />
+                )}
+                <span
+                  className={`min-w-0 truncate text-sm ${selected?.id === row.channel.id ? "font-semibold" : ""}`}
+                >
+                  {row.name}
+                </span>
+                {working ? (
+                  <span
+                    aria-hidden="true"
+                    data-testid="pulse-working-dots"
+                    className="ml-auto flex shrink-0 items-center"
+                  >
+                    <TypingDots
+                      className="gap-[3px] [--typing-dot-lift:-2px]"
+                      dotClassName={PULSE_STATUS_DOT_CLASS}
+                    />
+                  </span>
+                ) : unread ? (
+                  <PulseUnreadDot />
+                ) : null}
+              </button>
             );
           })
         ) : (

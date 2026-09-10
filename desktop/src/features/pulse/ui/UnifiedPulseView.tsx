@@ -22,7 +22,7 @@ import {
 import { PulseAppNavigation, type PulseApp } from "./PulseAppNavigation";
 import { PulseWorkspacePage } from "./PulseWorkspacePage";
 import { PulseCombinedView } from "./PulseCombinedView";
-import { PulseVariationMenu } from "./PulseVariationMenu";
+import { PulseWindowActions } from "./PulseWindowActions";
 import {
   CLEAR_CONVERSATION_PANELS,
   PULSE_CONVERSATION_KEYS,
@@ -36,7 +36,6 @@ import { buildSummaryInput } from "../lib/pulseSummary";
 import { usePulseSummary } from "../usePulseSummary";
 const FEED_SEARCH_KEYS = [
   "feed",
-  "layout",
   ...PULSE_CONVERSATION_KEYS,
   ...PULSE_WORKSPACE_KEYS,
 ] as const;
@@ -61,7 +60,6 @@ export function UnifiedPulseView({
         values.profilePersona ||
         values.agentSession,
     );
-  const combined = values.layout !== "separate";
   const filter: PulseView = isPulseWorkspacePage(values.feed)
     ? values.feed
     : values.feed === "search"
@@ -105,15 +103,6 @@ export function UnifiedPulseView({
   const selectApp = (app: PulseApp) => {
     if (app === activeApp) return;
     setFilter(app === "messages" ? lastMessageView.current : app);
-  };
-  const setVariation = (next: "separate" | "combined") => {
-    if ((next === "combined") === combined) return;
-    if (!allowNavigation({ kind: "route", href: `/pulse?layout=${next}` }))
-      return;
-    applyPatch({
-      layout: next === "combined" ? null : "separate",
-    });
-    setBriefingFilter(null);
   };
   const [search, setSearch] = React.useState("");
   const [scrollElement, setScrollElement] =
@@ -359,9 +348,7 @@ export function UnifiedPulseView({
           )}
           data-expanded={expanded}
         >
-          <PulseVariationMenu
-            value={combined ? "combined" : "separate"}
-            onChange={setVariation}
+          <PulseWindowActions
             onRefresh={() => void feed.refresh()}
             refreshing={feed.query.isFetching}
           />
@@ -374,7 +361,6 @@ export function UnifiedPulseView({
                 <PulseWorkspacePage page={filter} />
               ) : (
                 <PulseCombinedView
-                  grouped={!combined}
                   channels={feed.channels}
                   conversations={feed.conversations}
                   currentPubkey={currentPubkey}

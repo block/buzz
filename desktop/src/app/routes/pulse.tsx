@@ -28,7 +28,6 @@ type PulseRouteSearch = ReturnType<typeof parseProjectDetailSearch> & {
   view?: "create" | "edit" | "duplicate";
   pane?: string;
   feed?: string;
-  layout?: "combined" | "separate";
   conversation?: string;
   dm?: string;
   channel?: string;
@@ -75,12 +74,6 @@ function validatePulseSearch(
     ].includes(String(search.feed))
       ? String(search.feed)
       : undefined,
-    layout:
-      search.layout === "separate"
-        ? "separate"
-        : search.layout === "combined"
-          ? "combined"
-          : undefined,
     conversation: stringValue("conversation"),
     dm: stringValue("dm"),
     channel: stringValue("channel"),
