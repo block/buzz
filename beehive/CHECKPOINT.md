@@ -3,7 +3,44 @@
 Worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440`, branch `beehive/cbfd9440`.
 Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
-this checkpoint (`git rev-parse HEAD`). No push/PR/merge/release.
+this checkpoint (`git rev-parse HEAD`). No merge/release.
+
+## Recovery 4200a3ab
+
+Recovered clean HEAD `f8f161ffc10f274e13b9e1cd984ca8ffc2897cfd`, not
+`023c9274767ef50fa0f5b37ef1883336f8be59fd`: the interrupted worker had already
+committed the multi-conversation/tool slice and its checkpoint. No untracked
+source or pending diffs survived. Remote branch lookup returned no ref and GitHub
+PR lookup for this branch returned `[]`; no previous push/PR found. All six task
+commits retain Logan Johnson author/committer and DCO. Recovery preserves that
+implementation rather than repeating it. Fresh recovery validation passed strict
+TypeScript and the installed-enabled full suite **12/12** on that source HEAD.
+Rehashed binaries match the pins below. Fresh signed reply IDs were
+`4629e63f8e838101943e41ab056c37610371f288ac51d63a0e3c3120c857b05f`,
+`e836d1d91e6cf93ae81fe4321071b95543bfc34fc5a5ee287eec7f1a1fdb3d01`,
+`90389c57ba6f33f4443cbb77cd7352c0ad1133f58da1f0741216f5d78a0a29a0`,
+all from agent `ea79535a7d50890ba23bbc960ffd780acecd31f9c9a1dd975dd0d7fbbac419f8`.
+No recovered PID was used for cleanup and no private run artifacts were read.
+
+## New continuation: host management transport recovery
+
+`client.ts` now supports opt-in bounded reconnect (eight attempts per lifetime,
+100ms exponential backoff capped at 2s, 2s handshake deadline). Initial connection
+failure still rejects readiness and unwinds the host lock; intentional close
+cancels pending retries. Only the host opts in: TUI reconnection and durable
+controller intent/ACK tracking are NOT implemented by this change. Exhaustion
+leaves management disconnected; host lifetime/ownership remain independent.
+
+The host replays durable receipts and publishes fresh inventory on reconnect.
+Replayed relay command history still passes through the existing operation-ID,
+fingerprint and revision guards. `reconnect.test.ts` drops the actual host socket,
+publishes Start while disconnected, observes acceptance after automatic replay,
+drops the socket again after commit, and verifies the identical receipt, actual
+run and single revision/operation survive. Stop still tears down the owned run;
+intentional host/client close cannot reconnect. This proves relay-persisted
+intent recovery, not recovery of controller intent that never reached the relay.
+The existing receipt outbox is retained, not ACK-pruned. No protocol change or
+new remote/local lifecycle endpoint. New delta requires independent review.
 
 ## Implemented: ordinary multi-conversation Buzz CLI tool authority
 
@@ -118,8 +155,14 @@ npm run check
 BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp npm test
 ```
 
-Strict TS, complete installed-enabled package suite **12/12**, and diff check pass;
-final candidate rerun before commit. Self-review added legacy-scope opt-in migration,
+Recovered source strict/full **12/12** passed, followed by strict TS and complete
+installed-enabled package suite **14/14** on the new reconnect candidate before
+commit; diff check passes. The new run observed agent
+`bf96b3237352b2038eb98b7907a5bc9a6927ce053c63b4fa4c7a6ac9ed53cb71` and replies
+`94382d6dc7fb2174455f8f88d23a2eccedef9e2e6f4b390ec9e3ada278d6a88b`,
+`f2842a378f033c62437ec7bb4662c19e37c8b9f490dfa8e56849ef16f23732c8`,
+`3db6e28555bfc0f940bfc63d877b7157a662bdda702225fed20e77be12e485c6`.
+The source candidate is the commit containing this recovery checkpoint. Self-review added legacy-scope opt-in migration,
 UTF-8/drain correctness and explicit relay/attestation/env override negatives. No
 repo-wide `just ci`, production operations, owner credential/profile reads or live
 provider calls. Configured Logan Johnson author/committer and DCO retained; no
@@ -127,10 +170,12 @@ cryptographic signing key configured, so no invented signer/signature claim.
 
 ## Remaining product scope / ONE next executable step
 
-**Next:** implement durable relay management ACK/reconnect replay with a dropped-
-connection test proving saved intent converges exactly once after host/controller
-reconnect, rather than requiring users to resubmit uncertain lifecycle operations.
-Independent delta review can proceed in parallel against this pinned artifact.
+**Next:** add a durable controller pending-intent journal and receipt matching,
+then wire TUI reconnect/replay so a command saved locally before socket loss
+converges using its original operation ID even if it never reached the relay.
+Use a dropped-before-publication and dropped-after-commit test; retain UNKNOWN
+until a matching host receipt. Host-side recovery is now implemented above.
+Independent multi-tool and reconnect delta review can proceed against this artifact.
 
 README retains the full parity matrix: reconnect/ACKs/crash recovery; multiple
 hosts/agents/setups and S1 two-host identity; reusable profiles/metadata/history;

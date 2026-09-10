@@ -99,8 +99,10 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
   remain pending; current journal is operator-trusted local state.
 - Relay history max 10,000 envelopes, per-envelope limit, slow-reader disconnect.
   Log full closes publisher; no compaction. Outbox retained without ACK pruning;
-  host auto-reconnect, relay ACKs and durable TUI pending intents are not yet
-  implemented. Lost connection means unknown, not stopped or success.
+  host auto-reconnect replays saved receipts and relay history with operation-ID
+  deduplication (eight attempts/lifetime, bounded backoff). Relay ACKs and durable
+  TUI pending intents/reconnect are not yet implemented. Lost connection means
+  unknown, not stopped or success; exhausted recovery needs operator attention.
 - Inventory has freshness, not liveness proof. Host starts no action based on peer
   agent presence. Only its locally bound agent is manageable.
 

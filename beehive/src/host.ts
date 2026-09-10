@@ -55,6 +55,12 @@ export async function host(directory: string, url: string) {
     // still exact-authority/revision and never bypasses durable receipt processing.
     if (!closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && m.revision === state.revision && state.phase === 'transitioning' && state.actual && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) acp?.cancel();
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
+  }, () => {
+    if (closing || !initialized) return;
+    // Replay committed receipts after transport recovery. Incoming relay history
+    // still traverses the fingerprint/revision fence; reconnect cannot repeat effects.
+    for (const m of state.outbox) publish(m);
+    publish(inventory());
   }); }
   catch (e) { rmdirSync(lock); throw e; }
   const publish = (m: Message) => { try { client.send(m); } catch { /* Durable outbox retained for reconnect/restart. */ } };

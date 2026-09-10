@@ -25,6 +25,11 @@ strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
   TUI subprocess sessions close/reopen while host survives; host restart retains
   assignment. F2 startup lock unwind and competing live lock exclusion; F3 deliberate
   Quit does not print UNKNOWN. F1 parent exit retains descendant ownership.
+- `reconnect.test.ts`: drop the actual host management socket, publish Start
+  while disconnected, verify relay-history recovery, drop after commit, then
+  verify the same receipt/actual run and one revision/operation. Stop and
+  intentional host/client close do not leak a reconnect. This is host recovery
+  only; unsent controller intent durability and receipt ACK pruning remain open.
 - `acp.test.ts`: external TypeScript ACP fixture under production supervisor,
   catalog provenance, model/session acknowledgement, completed text hash, wrong
   model/session, cancelled/rejected/timeout/malformed/flood cases. D3 completed
@@ -71,7 +76,7 @@ strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
   CLI error (returned without killing the session) all clean up the shim and any TERM-resistant in-group descendants.
 
 Tests never open existing owner keys/profiles/cache, production services or native
-client resources. With installed opt-in: 12/12 pass; without: 11 pass/1 explicit
+client resources. With installed opt-in: 14/14 pass; without: 13 pass/1 explicit
 skip. The installed fixture relay does not establish actual community admission,
 current relay compatibility, provider/model attestation. Multi-thread delivery is isolated legacy-binary evidence only.
 
@@ -89,7 +94,7 @@ management protocol are different seams; passing them does not prove current
 Buzz relay auth/member/owner semantics.
 
 No full repo `just ci`, multi-host Move, arbitrary escaped descendant containment,
-strong OS sandbox, hostile journal, log-full/reconnect/ACK, rollback, host SIGKILL
+strong OS sandbox, hostile journal, log-full/controller-reconnect/ACK, rollback, host SIGKILL
 recovery or real provider proof. Genuine ownership loss retains quarantine/lock;
 no stale numeric PID grants cleanup authority. See CHECKPOINT.md for exact next
 executable action and the wired broker, ordinary fixed-executable CLI tool, and remaining product scope.
