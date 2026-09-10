@@ -97,6 +97,8 @@ export function profilePanelTargetKey(
 
 export type UserProfilePanelProps = {
   canResetWidth?: boolean;
+  /** Surface styling supplied by the host layout. */
+  className?: string;
   currentPubkey?: string;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";

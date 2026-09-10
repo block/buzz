@@ -584,7 +584,7 @@ test("channel rail opens conversations and preserves drafts", async ({
   await expect(list).toHaveCSS("width", "220px");
   const all = list.getByRole("button", { name: "All messages", exact: true });
   const aggregate = page.getByTestId("pulse-all-messages-feed");
-  await expect(list.getByRole("button").nth(5)).toHaveText("All messages");
+  await expect(list.getByRole("button").nth(2)).toHaveText("All messages");
   await expect(all).toHaveAttribute("aria-current", "true");
   await expect(
     aggregate
@@ -710,7 +710,7 @@ test("app variations combine conversations by recency and preserve selection and
   await expect(page.getByTestId("pulse-tabs")).toHaveCount(0);
   await expect(
     page
-      .getByTestId("pulse-combined-list")
+      .getByTestId("pulse-app-navigation")
       .getByRole("button", { name: "Agents", exact: true }),
   ).toBeVisible();
   await expect(
@@ -724,7 +724,7 @@ test("app variations combine conversations by recency and preserve selection and
   const aggregate = page.getByTestId("pulse-all-messages-feed");
   await expect(list.getByRole("button").nth(0)).toHaveText("Search");
   await expect(list.getByRole("button").nth(1)).toHaveText("For you");
-  await expect(list.getByRole("button").nth(5)).toHaveText("All messages");
+  await expect(list.getByRole("button").nth(2)).toHaveText("All messages");
   await list.getByRole("button", { name: "Search", exact: true }).click();
   await expect(
     page.getByRole("searchbox", { name: "Search loaded feed" }),
@@ -1347,7 +1347,7 @@ test("side panels expand Pulse and terminal docks beside the conversation", asyn
   await expect(container).toHaveCSS("max-width", "none");
   await expect
     .poll(async () => (await boundsOf(container)).width)
-    .toBeGreaterThan(1400);
+    .toBeGreaterThan(1300);
   const conversationBounds = await boundsOf(detail);
   const terminalBounds = await boundsOf(terminal);
   expect(terminalBounds.x).toBeGreaterThanOrEqual(
@@ -1355,8 +1355,9 @@ test("side panels expand Pulse and terminal docks beside the conversation", asyn
   );
   expect(terminalBounds.height).toBeGreaterThan(700);
   const expandedBounds = await boundsOf(container);
-  expect(expandedBounds.x).toBe(8);
-  expect(expandedBounds.width).toBe(1584);
+  const appsBounds = await boundsOf(page.getByTestId("pulse-app-navigation"));
+  expect(expandedBounds.x).toBe(appsBounds.x + appsBounds.width + 8);
+  expect(expandedBounds.x + expandedBounds.width).toBe(1592);
   const chatHeader = detail.getByTestId("chat-header");
   const terminalHeader = terminal.getByTestId("terminal-header");
   expect((await boundsOf(terminalHeader)).height).toBe(
@@ -1817,6 +1818,20 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
   await seed(page);
   const rail = page.getByTestId("pulse-combined-list");
   const main = page.getByTestId("pulse-main-container");
+  const apps = page.getByTestId("pulse-app-navigation");
+  await expect(main.getByTestId("pulse-app-heading")).toHaveCount(0);
+  await expect(
+    apps.getByRole("button", { name: "Messages", exact: true }),
+  ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(apps.locator("button > svg")).toHaveCount(4);
+  for (const width of [1600, 1280, 900]) {
+    await page.setViewportSize({ width, height: 960 });
+    const box = await boundsOf(main);
+    expect(box.x + box.width / 2).toBeCloseTo(width / 2, 0);
+    const navBox = await boundsOf(apps);
+    expect(box.x).toBeGreaterThanOrEqual(navBox.x + navBox.width);
+  }
+  await page.setViewportSize({ width: 1440, height: 960 });
   await expect(
     rail
       .getByRole("button")
@@ -1824,8 +1839,16 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
       .first(),
   ).toHaveText("Search");
   await expect(rail.getByRole("button").nth(1)).toHaveText("For you");
-  for (const [index, name] of ["Projects", "Agents", "Workflows"].entries()) {
-    await expect(rail.getByRole("button").nth(index + 2)).toHaveText(name);
+  await expect(apps.getByRole("button")).toHaveText([
+    "Messages",
+    "Projects",
+    "Agents",
+    "Workflows",
+  ]);
+  for (const name of ["Projects", "Agents", "Workflows"]) {
+    await expect(rail.getByRole("button", { name, exact: true })).toHaveCount(
+      0,
+    );
   }
   for (const variation of ["Combined conversations", "Separate feeds"]) {
     await page
@@ -1839,24 +1862,29 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
       ["Agents", "agents-page-content"],
       ["Workflows", "workflows-view"],
     ]) {
-      const entry = rail.getByRole("button", { name, exact: true });
+      const entry = apps.getByRole("button", { name, exact: true });
       await entry.focus();
       await page.keyboard.press("Enter");
       const panel = main.getByTestId(`pulse-workspace-${name.toLowerCase()}`);
       await expect(panel.getByTestId(contentTestId)).toBeVisible();
-      await expect(entry).toHaveAttribute("aria-current", "true");
-      await expect(rail).toBeVisible();
+      await expect(entry).toHaveAttribute("aria-current", "page");
+      await expect(apps).toBeVisible();
       await expect(main).toHaveCSS("max-width", "960px");
       await expect(page).toHaveURL(
         new RegExp(`#/pulse\\?.*feed=${name.toLowerCase()}`),
       );
       await expect(page.getByTestId("open-pulse-view")).toHaveCount(0);
-      const railBox = await boundsOf(rail);
+      await expect(rail).toHaveCount(0);
+      await expect(main.getByTestId("pulse-app-heading")).toHaveCount(0);
+      const appBox = await boundsOf(apps);
+      const mainBox = await boundsOf(main);
       const panelBox = await boundsOf(panel);
-      expect(panelBox.x).toBeCloseTo(railBox.x + railBox.width, 0);
+      expect(mainBox.x).toBeGreaterThanOrEqual(appBox.x + appBox.width + 8);
+      expect(panelBox.width).toBeCloseTo(mainBox.width, 0);
+      expect(mainBox.x + mainBox.width / 2).toBeCloseTo(720, 0);
       await page.reload();
       await expect(panel.getByTestId(contentTestId)).toBeVisible();
-      await expect(entry).toHaveAttribute("aria-current", "true");
+      await expect(entry).toHaveAttribute("aria-current", "page");
     }
   }
   await main
@@ -1865,11 +1893,11 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
   const editor = page.getByRole("dialog", { name: "Create workflow" });
   await expect(editor).toBeVisible();
   await expect(page).toHaveURL(/#\/pulse\?.*view=create/);
-  await expect(rail).toBeVisible();
+  await expect(apps).toBeVisible();
   await page.goBack();
   await expect(editor).toHaveCount(0);
   await expect(main.getByTestId("workflows-view")).toBeVisible();
-  await rail.getByRole("button", { name: "Projects", exact: true }).click();
+  await apps.getByRole("button", { name: "Projects", exact: true }).click();
   await main.getByTestId("projects-section-projects").click();
   const project = main.locator(
     '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
@@ -1878,20 +1906,32 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
   await project.click();
   await expect(page).toHaveURL(/#\/pulse\?.*projectId=/);
   await expect(main.getByTestId("pulse-workspace-projects")).toBeVisible();
-  await expect(rail).toBeVisible();
+  await expect(apps).toBeVisible();
   await page.goBack();
   await main.getByTestId("projects-section-projects").click();
   await expect(project).toBeVisible();
+  await apps.getByRole("button", { name: "Messages", exact: true }).click();
+  await expect(rail).toBeVisible();
   await rail.locator('[data-channel-name="bob-tyler"]').click();
   await expect(main.getByTestId("message-input")).toBeVisible();
   await expect(main.getByTestId("pulse-workspace-projects")).toHaveCount(0);
+  const composer = main.getByTestId("message-input");
+  await composer.fill("Keep this draft while switching apps");
+  await apps.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(rail).toHaveCount(0);
+  await apps.getByRole("button", { name: "Messages", exact: true }).click();
+  await expect(composer).toHaveText("Keep this draft while switching apps");
+  await waitForAnimations(page);
+  await page
+    .getByTestId("unified-pulse")
+    .screenshot({ path: "test-results/pulse-prototype/apps-messages.png" });
   await rail.getByRole("button", { name: "For you", exact: true }).click();
   await expect(main.getByTestId("pulse-briefing")).toBeVisible();
-  await rail.getByRole("button", { name: "Projects", exact: true }).click();
+  await apps.getByRole("button", { name: "Projects", exact: true }).click();
   await main.getByTestId("projects-section-projects").click();
   await expect(project).toBeVisible();
   await waitForAnimations(page);
-  await main.screenshot({
+  await page.getByTestId("unified-pulse").screenshot({
     path: "test-results/pulse-prototype/workspace-projects.png",
   });
 });
@@ -2140,4 +2180,55 @@ test("agent conversation rows replace unread dots with notification-sized workin
   await setWorking("turn_completed");
   await expect(working).toHaveCount(0);
   await expect(unread).toHaveCount(0);
+});
+
+test("workspace profile panels share the main container's frame and remain resizable", async ({
+  page,
+}) => {
+  await seed(page);
+  await page
+    .getByTestId("pulse-app-navigation")
+    .getByRole("button", { name: "Projects", exact: true })
+    .click();
+  // Exercise a profile deep link through the real Pulse route and profile panel.
+  await page.evaluate((pubkey) => {
+    const [path, query] = location.hash.split("?");
+    const params = new URLSearchParams(query);
+    params.set("profile", pubkey);
+    location.hash = `${path}?${params}`;
+  }, TEST_IDENTITIES.bob.pubkey);
+  const panel = page.getByTestId("user-profile-panel");
+  const main = page.getByTestId("pulse-main-container");
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveCSS("border-radius", "24px");
+  await expect(panel).toHaveCSS("border-width", "0px");
+  await expect(main).toHaveAttribute("data-expanded", "true");
+  await waitForAnimations(page);
+  const panelBox = await boundsOf(panel);
+  const mainBox = await boundsOf(main);
+  expect(panelBox.y).toBe(mainBox.y);
+  expect(panelBox.height).toBe(mainBox.height);
+  expect(panelBox.x - mainBox.x - mainBox.width).toBeCloseTo(8, 0);
+  expect(panelBox.x + panelBox.width).toBe(1432);
+  await page.screenshot({
+    path: "test-results/pulse-prototype/workspace-profile-frame.png",
+  });
+  const handle = await boundsOf(
+    panel.getByTestId("user-profile-resize-handle"),
+  );
+  // Use the part of the resize target inside the rounded surface.
+  const x = panelBox.x + 2;
+  const y = handle.y + handle.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x - 40, y, { steps: 5 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await boundsOf(panel)).width)
+    .toBeGreaterThan(panelBox.width + 20);
+  await panel.getByRole("button", { name: "Close panel", exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(main).toHaveCSS("max-width", "960px");
+  const restored = await boundsOf(main);
+  expect(restored.x + restored.width / 2).toBeCloseTo(720, 0);
 });

@@ -6,15 +6,7 @@ import {
   CLEAR_WORKSPACE_PANELS,
   type PulseView,
 } from "../lib/workspaceNavigation";
-import {
-  Inbox,
-  Search,
-  MessageCircle,
-  Users,
-  Folders,
-  Bot,
-  Zap,
-} from "lucide-react";
+import { Inbox, Search, MessageCircle, Users } from "lucide-react";
 import { allowNavigation } from "@/app/navigation/navigationGuard";
 import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -62,7 +54,6 @@ export function PulseConversationSplitView({
   testPrefix,
   allMessages,
   navigation,
-  workspaceContent,
 }: {
   grouped?: boolean;
   channels: Channel[];
@@ -75,7 +66,6 @@ export function PulseConversationSplitView({
     content: React.ReactNode;
     scrollRef: React.RefCallback<HTMLDivElement>;
   };
-  workspaceContent?: React.ReactNode;
   navigation?: {
     view: PulseView;
     onSelectView: (view: PulseView) => void;
@@ -176,9 +166,6 @@ export function PulseConversationSplitView({
             [
               { id: "search", label: "Search", icon: Search },
               { id: "all", label: "For you", icon: Inbox },
-              { id: "projects", label: "Projects", icon: Folders },
-              { id: "agents", label: "Agents", icon: Bot },
-              { id: "workflows", label: "Workflows", icon: Zap },
             ] as const
           ).map(({ id, label, icon: Icon }) => (
             <button
@@ -308,37 +295,36 @@ export function PulseConversationSplitView({
           </p>
         )}
       </nav>
-      {workspaceContent ??
-        (!selected && allMessages ? (
-          <div
-            ref={allMessages.scrollRef}
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto"
-            data-testid={
-              navigation?.view === "search"
-                ? "pulse-search-feed"
-                : navigation?.view === "all"
-                  ? "pulse-briefing-feed"
-                  : "pulse-all-messages-feed"
-            }
-          >
-            {allMessages.content}
-          </div>
-        ) : (
-          <div
-            className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
-            data-testid={`${testPrefix}-detail`}
-            data-channel-id={selected?.id}
-          >
-            {selected ? (
-              <PulseChannelDetail channel={selected} />
-            ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-                <MessageCircle aria-hidden className="h-6 w-6" />
-                <p>Select a conversation</p>
-              </div>
-            )}
-          </div>
-        ))}
+      {!selected && allMessages ? (
+        <div
+          ref={allMessages.scrollRef}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+          data-testid={
+            navigation?.view === "search"
+              ? "pulse-search-feed"
+              : navigation?.view === "all"
+                ? "pulse-briefing-feed"
+                : "pulse-all-messages-feed"
+          }
+        >
+          {allMessages.content}
+        </div>
+      ) : (
+        <div
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          data-testid={`${testPrefix}-detail`}
+          data-channel-id={selected?.id}
+        >
+          {selected ? (
+            <PulseChannelDetail channel={selected} />
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+              <MessageCircle aria-hidden className="h-6 w-6" />
+              <p>Select a conversation</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

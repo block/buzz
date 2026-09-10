@@ -10,6 +10,7 @@ import { cn } from "@/shared/lib/cn";
 type UserProfilePanelFrameProps = {
   addAgentToChannelDialog: React.ReactNode;
   canResetWidth?: boolean;
+  className?: string;
   editAgentDialog: React.ReactNode;
   headerActions: React.ReactNode;
   headerLeftContent: React.ReactNode;
@@ -32,6 +33,7 @@ type UserProfilePanelFrameProps = {
 export function UserProfilePanelFrame({
   addAgentToChannelDialog,
   canResetWidth,
+  className,
   editAgentDialog,
   headerActions,
   headerLeftContent,
@@ -53,7 +55,7 @@ export function UserProfilePanelFrame({
   return (
     <AuxiliaryPanel
       canResetWidth={canResetWidth}
-      className="relative"
+      className={cn("relative", className)}
       isSinglePanelView={isSinglePanelView}
       layout={isSplitLayout ? "split" : "standalone"}
       onClose={onClose}

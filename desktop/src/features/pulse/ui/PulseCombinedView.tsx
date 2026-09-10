@@ -13,7 +13,6 @@ export function PulseCombinedView({
   scrollRef,
   children,
   view,
-  workspaceContent,
   onSelectView,
 }: {
   grouped?: boolean;
@@ -23,7 +22,6 @@ export function PulseCombinedView({
   scrollRef: React.RefCallback<HTMLDivElement>;
   children: React.ReactNode;
   view: PulseView;
-  workspaceContent?: React.ReactNode;
   onSelectView: (view: PulseView) => void;
 }) {
   const sorted = React.useMemo(() => {
@@ -49,7 +47,6 @@ export function PulseCombinedView({
       testPrefix="pulse-combined"
       allMessages={{ content: children, scrollRef }}
       navigation={{ view, onSelectView }}
-      workspaceContent={workspaceContent}
     />
   );
 }

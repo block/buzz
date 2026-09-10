@@ -19,6 +19,7 @@ import {
   PULSE_WORKSPACE_KEYS,
   CLEAR_WORKSPACE_PANELS,
 } from "../lib/workspaceNavigation";
+import { PulseAppNavigation, type PulseApp } from "./PulseAppNavigation";
 import { PulseWorkspacePage } from "./PulseWorkspacePage";
 import { PulseCombinedView } from "./PulseCombinedView";
 import { PulseVariationMenu } from "./PulseVariationMenu";
@@ -91,6 +92,19 @@ export function UnifiedPulseView({
     });
     setBriefingFilter(null);
     return true;
+  };
+  const activeApp: PulseApp = isPulseWorkspacePage(filter)
+    ? filter
+    : "messages";
+  const lastMessageView = React.useRef<PulseView>(
+    values.conversation ? "conversation" : "all",
+  );
+  React.useEffect(() => {
+    if (!isPulseWorkspacePage(filter)) lastMessageView.current = filter;
+  }, [filter]);
+  const selectApp = (app: PulseApp) => {
+    if (app === activeApp) return;
+    setFilter(app === "messages" ? lastMessageView.current : app);
   };
   const setVariation = (next: "separate" | "combined") => {
     if ((next === "combined") === combined) return;
@@ -332,56 +346,58 @@ export function UnifiedPulseView({
   );
   return (
     <div
-      className={cn(
-        "flex min-h-0 flex-1 flex-col py-[12px]",
-        expanded && "px-[8px]",
-      )}
+      className="flex min-h-0 flex-1 gap-2 px-[8px] py-[12px]"
       data-testid="unified-pulse"
     >
-      <div
-        data-testid="pulse-main-container"
-        className={cn(
-          "relative mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[24px] bg-background",
-          !expanded && "max-w-[960px]",
-        )}
-        data-expanded={expanded}
-      >
-        <PulseVariationMenu
-          value={combined ? "combined" : "separate"}
-          onChange={setVariation}
-          onRefresh={() => void feed.refresh()}
-          refreshing={feed.query.isFetching}
-        />
-        <div className="pulse-conversation-workspace flex min-h-0 flex-1">
-          <div
-            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
-            data-testid="pulse-scroll-area"
-          >
-            <PulseCombinedView
-              grouped={!combined}
-              channels={feed.channels}
-              conversations={feed.conversations}
-              currentPubkey={currentPubkey}
-              scrollRef={setScrollElement}
-              view={filter}
-              workspaceContent={
-                isPulseWorkspacePage(filter) ? (
-                  <PulseWorkspacePage page={filter} />
-                ) : undefined
-              }
-              onSelectView={setFilter}
+      <PulseAppNavigation active={activeApp} onSelect={selectApp} />
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <div
+          data-testid="pulse-main-container"
+          className={cn(
+            "relative mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[24px] bg-background",
+            !expanded && "max-w-[960px]",
+          )}
+          data-expanded={expanded}
+        >
+          <PulseVariationMenu
+            value={combined ? "combined" : "separate"}
+            onChange={setVariation}
+            onRefresh={() => void feed.refresh()}
+            refreshing={feed.query.isFetching}
+          />
+          <div className="pulse-conversation-workspace flex min-h-0 flex-1">
+            <div
+              className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+              data-testid="pulse-scroll-area"
             >
-              {content}
-            </PulseCombinedView>
-          </div>
-          <div
-            className="pulse-terminal-side-host"
-            data-testid="pulse-terminal-panel"
-          >
-            {terminal}
+              {isPulseWorkspacePage(filter) ? (
+                <PulseWorkspacePage page={filter} />
+              ) : (
+                <PulseCombinedView
+                  grouped={!combined}
+                  channels={feed.channels}
+                  conversations={feed.conversations}
+                  currentPubkey={currentPubkey}
+                  scrollRef={setScrollElement}
+                  view={filter}
+                  onSelectView={setFilter}
+                >
+                  {content}
+                </PulseCombinedView>
+              )}
+            </div>
+            <div
+              className="pulse-terminal-side-host"
+              data-testid="pulse-terminal-panel"
+            >
+              {terminal}
+            </div>
           </div>
         </div>
       </div>
+      {!expanded && (
+        <div aria-hidden="true" className="w-[64px] shrink-0 lg:w-[180px]" />
+      )}
     </div>
   );
 }

@@ -103,6 +103,7 @@ export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
   canResetWidth,
+  className,
   currentPubkey,
   isSinglePanelView = false,
   layout = "standalone",
@@ -976,6 +977,7 @@ export function UserProfilePanel({
     <UserProfilePanelFrame
       addAgentToChannelDialog={addAgentToChannelDialog}
       canResetWidth={canResetWidth}
+      className={className}
       editAgentDialog={editAgentDialog}
       headerActions={headerActions}
       headerLeftContent={headerLeftContent}

@@ -75,6 +75,7 @@ export function PulseScreen() {
           !(values.feed === "channel" && values.channel) ? (
             <UserProfilePanel
               canResetWidth={threadPanelWidth.canReset}
+              className="my-[12px] mr-[8px] h-auto overflow-hidden rounded-[24px] border-0"
               currentPubkey={identityQuery.data?.pubkey}
               onClose={handleCloseProfilePanel}
               onOpenDm={handleOpenDm}
