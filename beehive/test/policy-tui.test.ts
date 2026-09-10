@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { host } from '../src/host.ts';
 import { relay } from '../src/relay.ts';
+import { managementClient } from '../src/intents.ts';
 import { connect } from '../src/client.ts';
 import { message, newKey, publicKey, open } from '../src/protocol.ts';
 import { writePrivate } from '../src/storage.ts';
@@ -118,12 +119,12 @@ test('actual TUI: policy repair, bounded unchanged retry, lost committed receipt
       assert.equal(attempts.length, beforeReopen, 'reopen never republishes blocked intent');
       await ui.command('operations');
       if (loss === 'before-publication') {
-        assert.match(ui.output, /1\. policy-host stop at revision 1: unknown/);
+        assert.match(ui.output, new RegExp(`1\\. policy-host stop \\| agent ${agent} \\| operation ${operation.id} at revision 1: unknown`));
         await ui.command('reconcile'); await delay(150);
         assert.equal(attempts.length, beforeReopen, 'query is not a retry');
         await ui.command('retry 1', '[yes/no]: '); await ui.command('yes');
       }
-      await until(() => ui.output.includes('policy-host stop: completed | accepted'));
+      await until(() => ui.output.includes(`policy-host stop | agent ${agent} | operation ${operation.id}: completed | accepted`));
       assert.equal(journal().revision, 2); assert.equal(journal().phase, 'stopped');
       assert.equal(Object.keys(journal().operations).length, 2, 'one Start and original Stop only');
       assert.equal(journal().operations[operation.id].reply.body.result, 'accepted');
@@ -144,5 +145,52 @@ test('actual TUI: policy repair, bounded unchanged retry, lost committed receipt
       for (const s of server.clients) s.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test('actual reopened TUI identifies both same-host/action/revision blocked agents in rows and retry confirmations', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-two-agent-recovery-')));
+  const secret = newKey(), agents = [publicKey(newKey()), publicKey(newKey())];
+  writePrivate(join(dir, 'identity.json'), { secret });
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const url = `ws://127.0.0.1:${address.port}`;
+  let attempts = 0;
+  server.on('connection', socket => socket.on('message', raw => {
+    if (open(JSON.parse(String(raw)), secret).type === 'stop') { attempts++; socket.close(1008, 'Fixture policy'); }
+  }));
+  const client = managementClient(join(dir, 'management-intents'), url, secret, () => {});
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    await client.ready;
+    const requests = agents.map(agent => message('stop', 'shared', agent, 0));
+    for (const request of requests) client.submit(request);
+    await until(() => client.status().every(o => o.retryAvailable)); client.close();
+    const before = attempts;
+    child = spawn(process.execPath, ['src/cli.ts', 'tui', join(dir, 'identity.json'), url], { stdio: ['pipe','pipe','pipe'] });
+    let output = ''; child.stdout!.on('data', d => { output += String(d); }); child.stderr!.on('data', d => { output += String(d); });
+    await until(() => output.includes('beehive> '));
+    async function command(line: string, prompt = 'beehive> ') {
+      const offset = output.length; child!.stdin!.write(`${line}\n`);
+      await until(() => output.slice(offset).includes(prompt)); return output.slice(offset);
+    }
+    const rows = await command('operations');
+    for (const request of requests) {
+      const label = `shared stop | agent ${request.agent} | operation ${request.id}`;
+      const row = rows.split('\n').find(line => line.includes(label)); assert.ok(row, rows);
+      assert.ok(row.includes('at revision 0: unknown'));
+      const number = row.match(/^(\d+)\./)?.[1]; assert.ok(number);
+      const warning = await command(`retry ${number}`, '[yes/no]: ');
+      assert.ok(warning.includes(`Retry original ${label} at revision 0 ONCE`), warning);
+      await command('no');
+    }
+    child.stdin!.write('quit\n'); await until(() => child!.exitCode !== null);
+    assert.equal(child.exitCode, 0, output); assert.equal(attempts, before, 'declined retry never publishes either agent');
+  } finally {
+    client.close();
+    if (child && child.exitCode === null) { child.kill(); await new Promise<void>(resolve => child!.once('exit', () => resolve())); }
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });
   }
 });

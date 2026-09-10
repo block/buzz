@@ -5,6 +5,92 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## RECOVERED 9ff7 — executable fixture transaction, partial product handoff
+
+Recovered actual HEAD and actual remote both at
+`8ba5fa9cd474aab5ce48fa255b194f8d3173aec1`, with no prior transaction commit/push.
+Preserved dirty checkpoint/cli/host/intents/protocol and untracked handoff/move test.
+A RECOVERED entry was written before implementation or long validation. The commit
+containing this section is the new executable candidate (publication recorded in the
+terminal result). Historical sections below are superseded by this current state.
+
+**Recovered:** source reservation, target preparation, source Stop, durable one-way
+consumed authority + exact grant/outbox, validated predecessor chain, idempotent target
+accept/fresh Start, TUI Move intent, three initial tests. **New:** validated Stop/Save
+before cancelling Move; exact pending Move retry republishes prepare rather than a
+terminal interrupted receipt; non-fixture/conversation Move explicitly refused before
+source effects because metadata preparation is not exact-model ready. Shared status,
+rows and retry confirmations now identify host + full agent + operation; Move includes
+endpoints. Source Start never resumes after consumption, including service restart.
+No source-validator relaxation without successor chain; no authority rollback.
+
+Observable tests: actual two-host subprocess + actual TUI Move X leaves source Y's
+journal byte-identical; standby denied before grant; wrong target revision preserves
+running source; reverse successor rejects historical grant. Fault-injected relay
+loses grant and source receipt before receipt storage; inspect recovers outbox once.
+Target key deletion and prepared setup change after grant both leave target assigned
+stopped and source irrevocably denied, including after source service restart. Delayed
+prepared replies cover exact pending retry, valid Stop/Save cancellation, malformed
+Stop/unsupported Save inertness and late Start denial. Target admission failure here
+is not a claim of a live-provider launch failure or moved conversation response.
+
+Consumed `ASSIGNMENT_SLOTS_REVIEW_8BA5FA9C.md`: F1 fixed, actual reopened two-agent
+same-host/action/revision blocked-operation TUI regression checks each row and retry
+confirmation. Declining either sends neither; immutable intent/receipt fences retained.
+Consumed `RECOVERY_VERIFICATION_8A67B967.md` findings remain closed, not pending.
+
+Consumed new `DESCENDANT_EXIT_EBC8B3CB.md` report during this run. It reproduces the
+invalid fixture PID failure signature and reports group/member teardown probes green;
+historical raw PID/errno were not captured, so invalid PID versus PID reuse remains
+unproved. **Containment gate remains OPEN, not cleared by these runs.** At the exact
+reply-tool absence assertion, added raw PID, errno, spawn/error provenance and bounded
+per-PID state diagnostics on recurrence, retaining ESRCH requirement and no extra
+sleep. No owned.ts/supervisor teardown change or reconstructed PID kill authority.
+Existing live anchors remain the only teardown authority; stronger full-lifetime
+provenance and the historical observation still require reconciliation. Do not call
+this preview safe Move or an exactly-once/partition-safe transfer.
+
+Validation evidence: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/MOVE_9FF7_EVIDENCE/`.
+Recovered strict + Move **3/3** passed; new targeted TUI/Move **5/5** passed, expanded
+Move **4/4** passed. First candidate full installed-enabled **30/30**, zero skips,
+19.90s (`check.log`, `full.log`). Late self-review then corrected pending Move retry
+semantics; targeted **4/4** passed (`pending-retry.log`). Final-source strict/full
+**30/30 pass, zero skips**, 19.12s (`check-final.log`, `full-final.log`). No failing executable run occurred in this
+recovery; earlier worker test history is unknown. Initial discovery directory scan
+timed out; no state mutation. Prior historical failing suite remains documented below.
+Installed binary hashes are separate from source identity; both freshly match the
+retained pins (`installed-binaries.sha256`).
+
+**ONE next executable action:** run the instrumented installed-enabled full suite at
+this immutable candidate under the original contention configuration, retaining raw
+failure capture if it recurs, to reconcile the still-open source-exit observation
+before promoting fixture Move or implementing exact-ready conversation/provider Move.
+Do not repeat resolved slots-label or R1/U1 reviews. Broader gate also needs independent
+review of this new authority transaction; no installed moved-identity reply attempted.
+
+Scope: dedicated trusted non-cloned/non-rollback installations/exclusive supervision;
+shared-owner signatures bind trusted protocol traffic, not physical host attestation.
+Root/assignment persists stopped. TUI sends intents only; hosts share existing
+management relay. No keys/workspaces/sessions/credentials transferred or regenerated,
+no unreachable-source takeover, new controller/registry/HTTP route, provider/login,
+production kind-40002/admission/OAuth proof, Rust/native or owner-store access.
+README parity matrix retains profiles/key CRUD/Restart/harness/provider/preset/mesh/
+compute/real UI/live acceptance. No repo-wide CI, PR, merge or release claimed.
+
+## Move continuation 84e0 — implementation in progress
+
+Starting exact published `8ba5fa9cd474aab5ce48fa255b194f8d3173aec1`.
+Implementing per-slot durable reservation → target prepared → source exit →
+outgoing-consumed (grant and outbox in one journal write) → incoming-accepted →
+fresh ordinary Start. Genesis stays pinned; only prefix-extending validated grant
+lineage can replace initial-host authority. Preparation is not authority. Save/Stop
+invalidate an outstanding source reservation; post-grant failures never undo it.
+Next code path: host slot relay exchanges and immutable local preparation digest,
+then actual two-host execution tests and TUI destination selection.
+The descendant-exit report is not yet present at its supplied public path. Existing
+25/25 is not resolution; final safe/conversation Move acceptance remains gated on
+that investigation and causal regression. No containment changes in this stage.
+
 ## Slot continuation e0a5 — working single-installation slice
 
 Started from verified published `ebc8b3cb24fe0eefe5b8f239a88555786eadbf14`.

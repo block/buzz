@@ -194,3 +194,25 @@ positions amid coalesced async status reports. A subsequent new reconciliation t
 exposed the initial-history hydration gap above, fixed at the host connection owner.
 No containment assertion, delay or existing test was weakened. The historical
 reply-tool descendant-exit observation remains a separate open investigation.
+
+## Recovered fixture Move and recovery labels
+
+`move.test.ts` executes two real host subprocesses plus actual TUI and relay: Move X,
+Y byte-identical, standby Start denied, wrong target revision preserves running source,
+reverse successor and historical grant replay. Fault-injected real host/relay tests
+lose grant and source receipt before receipt storage, replay outbox, remove target key
+or change prepared setup, and verify assigned/stopped target and revoked source even
+after source service restart. Delayed prepared replies exercise valid Stop/Save
+cancellation, invalid Stop/Save inertness and late Start fencing. These are fixture
+launch/admission tests, not provider readiness or destination conversation replies.
+
+`policy-tui.test.ts` reopens two same-host/action/revision blocked operations and checks
+both agent identities and operation IDs in numbered rows AND each retry confirmation;
+declining sends neither. Existing immutable-envelope policy-retry tests remain.
+
+Consumed `DESCENDANT_EXIT_EBC8B3CB.md`: exact historical cause remains unproved
+(invalid fixture PID vs reuse); the group probes are evidence, not safe-Move approval.
+`reply-tool.test.ts` now captures raw PID, actual probe errno, fixture spawn/error
+provenance, and bounded per-PID process state on failure. It does not wait longer or
+weaken ESRCH, and does not kill any PID obtained from observations. Full-suite green
+results without recurrence do not classify the historical failure.

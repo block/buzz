@@ -11,6 +11,7 @@ import { readPrivate, writePrivate } from './storage.ts';
 import { createGenesis, validateGenesis } from './assignment.ts';
 import { prepareConversation } from './conversation.ts';
 
+const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
@@ -27,7 +28,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
 assignment-export accepts agent public key after filename when several slots exist.
-No Move, provider login RPC or production relay support yet.`;
+Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC or production relay support.`;
 async function main() {
   if (command === 'identity') {
     const dir = resolve(text(args[0]));
@@ -144,18 +145,18 @@ async function main() {
       }
     }, () => {
       console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
-      for (const operation of client.status()) console.log(`${operation.request.host} ${operation.request.type}: ${operation.state} | ${operation.result ?? operation.publication}`);
+      for (const operation of client.status()) console.log(`${operationLabel(operation.request)}: ${operation.state} | ${operation.result ?? operation.publication}`);
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     try {
       for (;;) {
         const line = (await ui.question('beehive> ')).trim();
         if (line === 'quit') break;
         if (line === 'operations') {
-          client.status().forEach((o, index) => console.log(`${index + 1}. ${o.request.host} ${o.request.type} at revision ${o.request.revision}: ${o.state} | ${o.result ?? o.publication}${o.retryAvailable ? ` | reconcile, then retry ${index + 1}` : ''}`));
+          client.status().forEach((o, index) => console.log(`${index + 1}. ${operationLabel(o.request)} at revision ${o.request.revision}: ${o.state} | ${o.result ?? o.publication}${o.retryAvailable ? ` | reconcile, then retry ${index + 1}` : ''}`));
           console.log('Historical results are not current host state. Reconcile queries receipts without retrying blocked work.'); continue;
         }
         if (line === 'reconcile') { client.reconcile(); console.log('Reconnecting/querying host results; blocked work stays blocked. Connection alone proves neither policy repair nor completion.'); continue; }
@@ -163,7 +164,7 @@ async function main() {
           const number = line.slice(6);
           const operation = /^[1-9][0-9]*$/.test(number) ? client.status()[Number(number) - 1] : undefined;
           if (!operation?.retryAvailable) { console.log('Use operations to choose an unresolved policy-blocked operation.'); continue; }
-          console.log(`Retry original ${operation.request.host} ${operation.request.type} at revision ${operation.request.revision} ONCE, with unchanged signature, ID and preconditions. It may already have executed. Reconcile first. Repair relay policy before retry; expired/invalid signed events cannot be repaired here. This does not cancel remote work or enable automatic retries.`);
+          console.log(`Retry original ${operationLabel(operation.request)} at revision ${operation.request.revision} ONCE, with unchanged signature, ID and preconditions. It may already have executed. Reconcile first. Repair relay policy before retry; expired/invalid signed events cannot be repaired here. This does not cancel remote work or enable automatic retries.`);
           if ((await ui.question('Attempt unchanged operation after policy repair? [yes/no]: ')) === 'yes') {
             try { client.retry(operation.request.id); console.log('Unchanged retry attempted; result UNKNOWN until host receipt. Automatic retry stays disabled.'); }
             catch (error) { console.log(error instanceof Error ? error.message : 'Retry not sent'); }
@@ -186,16 +187,24 @@ async function main() {
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') { console.log(JSON.stringify(current,null,2)); continue; }
-        if (!['save','start','stop'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/stop/quit.'); continue; }
+        if (!['save','start','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/stop/move/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};
         if (line === 'save') {
           console.log(`Allowed models: ${JSON.stringify(current.body.models)}; workspaces: ${JSON.stringify(current.body.workspaces)}; behavior profiles: ${JSON.stringify(current.body.profiles)}`);
           body = { model: await ui.question('Model: '), workspace: await ui.question('Workspace: '), profile: await ui.question('Behavior profile: ') };
         }
-        const request = message(line as 'save' | 'start' | 'stop',current.host,current.agent,current.revision,body);
+        if (line === 'move') {
+          const destinations = [...inventory.values()].filter(m => m.agent === current.agent && m.host !== current.host);
+          destinations.forEach((m, i) => console.log(`${i + 1}. ${m.host} | ${JSON.stringify(m.body.selectedNext)} | locally provisioned key is NOT Start authority`));
+          const target = destinations[Number(await ui.question('Destination number: ')) - 1];
+          if (!target || Date.now()-Number(target.body.observedAt) > 6000) { console.log('Destination unknown/stale; repair local key/setup/auth and host connection. No Move sent.'); continue; }
+          if (await ui.question(`Move agent ${current.agent} from ${current.host} to ${target.host}, fresh execution, no workspace/session/credentials transferred; source cannot resume after grant. Confirm [yes/no]: `) !== 'yes') continue;
+          body = { target: target.host, targetRevision: target.revision, selection: target.body.selectedNext };
+        }
+        const request = message(line as 'save' | 'start' | 'stop' | 'move',current.host,current.agent,current.revision,body);
         try { client.submit(request); } catch (error) { console.log(error instanceof Error ? error.message : 'Operation not submitted'); continue; }
-        console.log(`Durably pending ${line} (${request.id}); publication is NOT host acceptance.`);
+        console.log(`Durably pending ${line}: ${operationLabel(request)}; publication is NOT host acceptance.`);
       }
     } finally { ui.close(); client.close(); console.log('UI closed; host lifetime is independent.'); }
   } else console.log(help);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdtempSync, realpathSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,6 +22,8 @@ test('fixed Buzz CLI MCP rejects caller authority and owns CLI descendants on su
       fs.writeFileSync('identity', process.env.BUZZ_PRIVATE_KEY);
       const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>{},15000)"], {stdio:'ignore'});
       fs.writeFileSync('descendant', String(child.pid));
+      child.once('error', error => fs.writeFileSync('descendant-spawn-error', String(error.code)));
+      child.once('spawn', () => fs.writeFileSync('descendant-spawned', JSON.stringify({ pid: child.pid, parent: process.pid })));
       process.stdin.resume();
       process.stdin.on('end', () => { ${mode === 'success' ? 'setTimeout(()=>process.exit(0),100)' : mode === 'failure' ? 'process.exit(2)' : "process.on('SIGTERM',()=>{});setTimeout(()=>process.exit(0),15000)"} });
     `);
@@ -65,7 +67,20 @@ test('fixed Buzz CLI MCP rejects caller authority and owns CLI descendants on su
       }
       await tool.stop();
       assert.ok(absent(shim.pid!));
-      if (existsSync(join(dir, 'descendant'))) assert.ok(absent(Number(readFileSync(join(dir, 'descendant'), 'utf8'))));
+      if (existsSync(join(dir, 'descendant'))) {
+        const raw = readFileSync(join(dir, 'descendant'), 'utf8'), pid = Number(raw);
+        // Preserve the original assertion. A recurrence must distinguish an invalid
+        // fixture PID from a visible PID; numeric identity alone is not ownership.
+        let errno = 'visible';
+        try { process.kill(pid, 0); } catch (error) { errno = String((error as NodeJS.ErrnoException).code); }
+        if (errno !== 'ESRCH') {
+          const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null;
+          const processState = Number.isSafeInteger(pid) && pid > 0
+            ? spawnSync('/bin/ps', ['-o','state=,pgid=,ppid=,comm=','-p',String(pid)], { encoding:'utf8' }).stdout : null;
+          console.error('Descendant exit observation', JSON.stringify({ mode, raw, pid, errno, spawned: read('descendant-spawned'), spawnError: read('descendant-spawn-error'), processState }));
+        }
+        assert.equal(errno, 'ESRCH', 'owned descendant must be absent after Stop (see failure capture)');
+      }
     } finally { await tool.stop(); rmSync(dir, { recursive: true, force: true }); }
   }
 });

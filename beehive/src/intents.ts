@@ -33,7 +33,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     const value = object(readPrivate(path)); fields(value, ['scope', 'envelope']);
     if (value.scope !== scope) throw Error('Wrong journal scope');
     const request = open(value.envelope, secret);
-    if (!['save','start','stop'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
+    if (!['save','start','stop','move'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
     const intent: Intent = { envelope: value.envelope as Envelope, request, published: false };
     const receiptPath = join(dir, `${request.id}.receipt`);
     if (existsSync(receiptPath)) {
@@ -97,7 +97,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     get socket() { return transport.socket; },
     submit(request: Message) {
       if (closed) throw Error('UI closed');
-      if (!['save','start','stop'].includes(request.type)) throw Error('Invalid operation');
+      if (!['save','start','stop','move'].includes(request.type)) throw Error('Invalid operation');
       if (intents.size >= 1000) throw Error('Management journal full; no operation submitted');
       if (intents.has(request.id) || existsSync(join(dir, `${request.id}.intent`))) throw Error('Operation ID already prepared');
       const envelope = seal(request, secret);
