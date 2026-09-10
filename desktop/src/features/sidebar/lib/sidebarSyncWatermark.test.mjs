@@ -30,118 +30,54 @@ const { readWatermark, advanceWatermark, runBootstrap } = await import(
 const RELAY = "wss://relay.example.com";
 const RELAY_ENCODED = encodeURIComponent("wss://relay.example.com");
 
-// ── readWatermark ────────────────────────────────────────────────────────────
+// ── readWatermark + advanceWatermark ─────────────────────────────────────────
 
-test("readWatermark: returns 0 when no key exists", () => {
-  withFreshStorage(() => {
-    assert.equal(readWatermark("pk", "sections", RELAY), 0);
-  });
-});
-
-test("readWatermark: returns 0 when stored value is 0", () => {
+test("readWatermark: returns 0 for missing/zero; reads stored value; scopes by blobType and relay", () =>
   withFreshStorage((ls) => {
+    assert.equal(readWatermark("pk", "sections", RELAY), 0);
     ls.setItem(`buzz-sync-watermark.v1:sections:pk:${RELAY_ENCODED}`, "0");
     assert.equal(readWatermark("pk", "sections", RELAY), 0);
-  });
-});
-
-test("readWatermark: returns stored positive integer", () => {
-  withFreshStorage((ls) => {
     ls.setItem(
       `buzz-sync-watermark.v1:sections:pk:${RELAY_ENCODED}`,
       "1700000000",
     );
     assert.equal(readWatermark("pk", "sections", RELAY), 1700000000);
-  });
-});
-
-test("readWatermark: scopes by blobType", () => {
-  withFreshStorage((ls) => {
-    ls.setItem(`buzz-sync-watermark.v1:sections:pk:${RELAY_ENCODED}`, "100");
+    // Scoped by blobType.
     ls.setItem(`buzz-sync-watermark.v1:sort:pk:${RELAY_ENCODED}`, "200");
-    assert.equal(readWatermark("pk", "sections", RELAY), 100);
-    assert.equal(readWatermark("pk", "sort", RELAY), 200);
-  });
-});
-
-test("readWatermark: normalises relay URL (trailing slash, case)", () => {
-  withFreshStorage(() => {
-    // Write with one form, read with another — must produce the same value.
-    advanceWatermark("pk", "sections", "WSS://Relay.Example.Com/", 999);
-    assert.equal(
-      readWatermark("pk", "sections", "wss://relay.example.com"),
-      999,
-    );
-    assert.equal(
-      readWatermark("pk", "sections", "WSS://Relay.Example.Com/"),
-      999,
-    );
-  });
-});
-
-// ── advanceWatermark ─────────────────────────────────────────────────────────
-
-test("advanceWatermark: writes when no prior value exists", () => {
-  withFreshStorage(() => {
-    advanceWatermark("pk", "sections", RELAY, 1700000000);
     assert.equal(readWatermark("pk", "sections", RELAY), 1700000000);
-  });
-});
+    assert.equal(readWatermark("pk", "sort", RELAY), 200);
+  }));
 
-test("advanceWatermark: advances when next > current", () => {
+test("advanceWatermark: monotonic write/advance/no-regress; relay isolation; URL normalization", () =>
   withFreshStorage(() => {
+    // Write, read back.
     advanceWatermark("pk", "sections", RELAY, 100);
+    assert.equal(readWatermark("pk", "sections", RELAY), 100);
+    // Advances on higher value; does not regress on lower or equal.
     advanceWatermark("pk", "sections", RELAY, 200);
     assert.equal(readWatermark("pk", "sections", RELAY), 200);
-  });
-});
-
-test("advanceWatermark: does not regress when next <= current (monotonic)", () => {
-  withFreshStorage(() => {
-    advanceWatermark("pk", "sections", RELAY, 500);
-    advanceWatermark("pk", "sections", RELAY, 400); // older — must not overwrite
-    advanceWatermark("pk", "sections", RELAY, 500); // equal — must not overwrite
-    assert.equal(readWatermark("pk", "sections", RELAY), 500);
-  });
-});
-
-test("advanceWatermark: round-trips across separate reads (simulated restart)", () => {
-  withFreshStorage(() => {
-    // Session A writes watermark.
-    advanceWatermark("pk", "sections", RELAY, 1700000042);
-    // Session B reads it back.
-    assert.equal(readWatermark("pk", "sections", RELAY), 1700000042);
-  });
-});
-
-// ── Relay-A / Relay-B isolation ──────────────────────────────────────────────
-
-test("relay-A watermark does not suppress first-sync on relay-B", () => {
-  withFreshStorage(() => {
-    const relayA = "wss://a.relay.test";
-    const relayB = "wss://b.relay.test";
-    advanceWatermark("pk", "sections", relayA, 1700000100);
+    advanceWatermark("pk", "sections", RELAY, 150);
+    advanceWatermark("pk", "sections", RELAY, 200);
+    assert.equal(readWatermark("pk", "sections", RELAY), 200);
+    // Relay isolation: relay-B starts at 0 despite relay-A.
+    advanceWatermark("pk", "sections", "wss://a.relay.test", 1700000100);
+    assert.equal(readWatermark("pk", "sections", "wss://b.relay.test"), 0);
+    advanceWatermark("pk", "sections", "wss://b.relay.test", 1700000200);
     assert.equal(
-      readWatermark("pk", "sections", relayB),
-      0,
-      "relay B watermark must be independent of relay A",
-    );
-  });
-});
-
-test("relay-A watermark is preserved after relay-B session", () => {
-  withFreshStorage(() => {
-    const relayA = "wss://a.relay.test";
-    const relayB = "wss://b.relay.test";
-    advanceWatermark("pk", "sections", relayA, 1700000100);
-    advanceWatermark("pk", "sections", relayB, 1700000200);
-    assert.equal(
-      readWatermark("pk", "sections", relayA),
+      readWatermark("pk", "sections", "wss://a.relay.test"),
       1700000100,
-      "relay A head must not be clobbered by relay B activity",
     );
-  });
-});
+    // URL normalization: trailing slash and case are normalized.
+    advanceWatermark("pk2", "sections", "WSS://Relay.Example.Com/", 999);
+    assert.equal(
+      readWatermark("pk2", "sections", "wss://relay.example.com"),
+      999,
+    );
+    assert.equal(
+      readWatermark("pk2", "sections", "WSS://Relay.Example.Com/"),
+      999,
+    );
+  }));
 
 // ── runBootstrap policy — tested once; mutations to any branch fail here ─────
 
@@ -161,72 +97,60 @@ function makeBootstrapArgs({ fetchResult, lastHead, localNonEmpty }) {
   };
 }
 
-// Guard: fetch failed → hold, zero publishes.
-// Mutation: removing the failed branch causes a seed on first-sync case.
-test("runBootstrap: fetch failed returns hold and never calls publishFn", () => {
-  const { args, publishCount } = makeBootstrapArgs({
+for (const {
+  title,
+  fetchResult,
+  lastHead,
+  localNonEmpty,
+  action,
+  wantPublish,
+} of [
+  {
+    title: "fetch failed → hold, no publish",
     fetchResult: { status: "failed" },
     lastHead: 0,
     localNonEmpty: true,
-  });
-  const result = runBootstrap(args);
-  assert.equal(result.action, "hold");
-  assert.equal(
-    publishCount(),
-    0,
-    "publishFn must not be called on failed fetch",
-  );
-});
-
-// Guard: fetch absent + prior head > 0 → hold, zero publishes (stale-dev-build case).
-// Mutation: setting lastHead to 0 causes a seed.
-test("runBootstrap: fetch absent with prior head returns hold and never calls publishFn", () => {
-  const { args, publishCount } = makeBootstrapArgs({
+    action: "hold",
+    wantPublish: 0,
+  },
+  {
+    title: "absent + prior head → hold, no publish (stale-dev-build)",
     fetchResult: { status: "absent" },
     lastHead: 1700000000,
     localNonEmpty: true,
-  });
-  const result = runBootstrap(args);
-  assert.equal(result.action, "hold");
-  assert.equal(
-    publishCount(),
-    0,
-    "publishFn must not be called when prior head exists",
-  );
-});
-
-// Guard: fetch absent + head 0 + local non-empty → publishFn called exactly once, hold returned.
-// Mutation: removing the absent+head-0 seed call leaves publishCount at 0.
-test("runBootstrap: first-sync (absent + zero head + non-empty local) calls publishFn and returns hold", () => {
-  const { args, publishCount } = makeBootstrapArgs({
+    action: "hold",
+    wantPublish: 0,
+  },
+  {
+    title: "absent + head=0 + non-empty → seed once, hold",
     fetchResult: { status: "absent" },
     lastHead: 0,
     localNonEmpty: true,
-  });
-  const result = runBootstrap(args);
-  assert.equal(result.action, "hold");
-  assert.equal(
-    publishCount(),
-    1,
-    "publishFn must be called exactly once on first-sync",
-  );
-});
-
-// Guard: fetch absent + head 0 + empty local → no publish, hold returned.
-test("runBootstrap: first-sync with empty local store does not call publishFn", () => {
-  const { args, publishCount } = makeBootstrapArgs({
+    action: "hold",
+    wantPublish: 1,
+  },
+  {
+    title: "absent + head=0 + empty → no seed, hold",
     fetchResult: { status: "absent" },
     lastHead: 0,
     localNonEmpty: false,
+    action: "hold",
+    wantPublish: 0,
+  },
+]) {
+  test(`runBootstrap: ${title}`, () => {
+    const { args, publishCount } = makeBootstrapArgs({
+      fetchResult,
+      lastHead,
+      localNonEmpty,
+    });
+    assert.equal(runBootstrap(args).action, action);
+    assert.equal(publishCount(), wantPublish);
   });
-  const result = runBootstrap(args);
-  assert.equal(result.action, "hold");
-  assert.equal(publishCount(), 0, "empty local store must not trigger seed");
-});
+}
 
-// Guard: fetch found → apply-remote returned, no publish.
-// Mutation: removing the found branch drops the remote data.
-test("runBootstrap: fetch found returns apply-remote with data and never calls publishFn", () => {
+// fetch found → apply-remote, no publish.
+test("runBootstrap: fetch found returns apply-remote with data, no publish", () => {
   const remoteData = {
     store: { version: 1, items: [] },
     createdAt: 100,
@@ -245,9 +169,5 @@ test("runBootstrap: fetch found returns apply-remote with data and never calls p
   const result = runBootstrap(args);
   assert.equal(result.action, "apply-remote");
   assert.deepEqual(result.data, remoteData);
-  assert.equal(
-    publishCount(),
-    0,
-    "publishFn must not be called when remote was found",
-  );
+  assert.equal(publishCount(), 0);
 });

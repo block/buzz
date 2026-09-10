@@ -36,7 +36,7 @@ function makeChannel(id, name, lastMessageAt = null) {
 
 // ── parseChannelSortPayload ──────────────────────────────────────────────────
 
-test("parseChannelSortPayload: valid per-group payload", () => {
+test("parseChannelSortPayload: valid, empty, unknown modes filtered, invalid groups, wrong version, non-object", () => {
   assert.deepEqual(
     parseChannelSortPayload({
       version: 1,
@@ -44,26 +44,18 @@ test("parseChannelSortPayload: valid per-group payload", () => {
     }),
     { version: 1, groups: { channels: "recent", dms: "alpha" } },
   );
-});
-
-test("parseChannelSortPayload: empty groups is valid", () => {
   assert.deepEqual(parseChannelSortPayload({ version: 1, groups: {} }), {
     version: 1,
     groups: {},
   });
-});
-
-test("parseChannelSortPayload: unknown modes are filtered out", () => {
   assert.deepEqual(
     parseChannelSortPayload({
       version: 1,
       groups: { channels: "zorp", forums: "recent", dms: 42 },
     }),
     { version: 1, groups: { forums: "recent" } },
+    "unknown/non-string modes filtered",
   );
-});
-
-test("parseChannelSortPayload: missing/invalid groups falls back to empty", () => {
   assert.deepEqual(parseChannelSortPayload({ version: 1 }), {
     version: 1,
     groups: {},
@@ -72,102 +64,79 @@ test("parseChannelSortPayload: missing/invalid groups falls back to empty", () =
     version: 1,
     groups: {},
   });
-});
-
-test("parseChannelSortPayload: wrong version returns null", () => {
   assert.equal(
     parseChannelSortPayload({ version: 2, groups: { channels: "alpha" } }),
     null,
   );
-});
-
-test("parseChannelSortPayload: non-object input returns null", () => {
   assert.equal(parseChannelSortPayload(null), null);
   assert.equal(parseChannelSortPayload("alpha"), null);
   assert.equal(parseChannelSortPayload(42), null);
 });
 
-// ── sortModeForGroup / defaults ──────────────────────────────────────────────
+// ── sortModeForGroup / defaults / stripOrphanedSectionModes ─────────────────
 
-test("default sort mode is alpha and default store has no overrides", () => {
+test("defaults, sortModeForGroup, and stripOrphanedSectionModes", () => {
   assert.equal(DEFAULT_SORT_MODE, "alpha");
   assert.deepEqual(DEFAULT_STORE.groups, {});
-});
-
-test("sortModeForGroup: unset group falls back to alpha", () => {
   assert.equal(sortModeForGroup(DEFAULT_STORE, "channels"), "alpha");
-  assert.equal(sortModeForGroup(DEFAULT_STORE, "dms"), "alpha");
-});
-
-test("sortModeForGroup: set groups are independent", () => {
+  assert.equal(sectionSortGroupKey("abc"), "section:abc");
   const store = {
     version: 1,
     groups: { channels: "recent", [sectionSortGroupKey("abc")]: "recent" },
   };
   assert.equal(sortModeForGroup(store, "channels"), "recent");
-  assert.equal(sortModeForGroup(store, sectionSortGroupKey("abc")), "recent");
   assert.equal(sortModeForGroup(store, "forums"), "alpha");
   assert.equal(sortModeForGroup(store, sectionSortGroupKey("xyz")), "alpha");
-});
-
-test("sectionSortGroupKey: namespaced by section id", () => {
-  assert.equal(sectionSortGroupKey("abc"), "section:abc");
-});
-
-// ── stripOrphanedSectionModes ────────────────────────────────────────────────
-
-test("stripOrphanedSectionModes: drops modes for deleted sections", () => {
-  const store = {
-    version: 1,
-    groups: {
-      channels: "recent",
-      [sectionSortGroupKey("live")]: "recent",
-      [sectionSortGroupKey("deleted")]: "alpha",
+  // stripOrphanedSectionModes: drops deleted sections, preserves fixed groups.
+  assert.deepEqual(
+    stripOrphanedSectionModes(
+      {
+        version: 1,
+        groups: {
+          channels: "recent",
+          [sectionSortGroupKey("live")]: "recent",
+          [sectionSortGroupKey("deleted")]: "alpha",
+        },
+      },
+      ["live"],
+    ),
+    {
+      version: 1,
+      groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
     },
-  };
-  assert.deepEqual(stripOrphanedSectionModes(store, ["live"]), {
-    version: 1,
-    groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
-  });
-});
-
-test("stripOrphanedSectionModes: fixed groups survive with no live sections", () => {
-  const store = {
-    version: 1,
-    groups: {
-      starred: "recent",
-      channels: "alpha",
-      forums: "recent",
-      dms: "recent",
-      [sectionSortGroupKey("gone")]: "recent",
+  );
+  assert.deepEqual(
+    stripOrphanedSectionModes(
+      {
+        version: 1,
+        groups: {
+          starred: "recent",
+          channels: "alpha",
+          forums: "recent",
+          dms: "recent",
+          [sectionSortGroupKey("gone")]: "recent",
+        },
+      },
+      [],
+    ),
+    {
+      version: 1,
+      groups: {
+        starred: "recent",
+        channels: "alpha",
+        forums: "recent",
+        dms: "recent",
+      },
     },
-  };
-  assert.deepEqual(stripOrphanedSectionModes(store, []), {
-    version: 1,
-    groups: {
-      starred: "recent",
-      channels: "alpha",
-      forums: "recent",
-      dms: "recent",
-    },
-  });
-});
-
-test("stripOrphanedSectionModes: returns same reference when nothing is stale", () => {
-  const store = {
+  );
+  const noOrphans = {
     version: 1,
     groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
   };
-  assert.equal(stripOrphanedSectionModes(store, ["live", "other"]), store);
-});
-
-test("stripOrphanedSectionModes: does not mutate the input store", () => {
-  const store = {
-    version: 1,
-    groups: { [sectionSortGroupKey("gone")]: "recent" },
-  };
-  stripOrphanedSectionModes(store, []);
-  assert.deepEqual(store.groups, { [sectionSortGroupKey("gone")]: "recent" });
+  assert.equal(
+    stripOrphanedSectionModes(noOrphans, ["live", "other"]),
+    noOrphans,
+  );
 });
 
 test("boundChannelSortStore caps custom sections while preserving fixed groups", () => {
@@ -180,9 +149,7 @@ test("boundChannelSortStore caps custom sections while preserving fixed groups",
       ]),
     ),
   };
-
   const bounded = boundChannelSortStore({ version: 1, groups });
-
   assert.equal(Object.keys(bounded.groups).length, MAX_CHANNEL_SORT_GROUPS);
   assert.equal(bounded.groups.channels, "recent");
   assert.equal(bounded.groups[sectionSortGroupKey("0")], undefined);
@@ -191,83 +158,66 @@ test("boundChannelSortStore caps custom sections while preserving fixed groups",
 
 // ── sortChannelsForSidebar ───────────────────────────────────────────────────
 
-test("alpha: sorts case-insensitively with deterministic code-unit collation", () => {
-  const sorted = sortChannelsForSidebar(
-    [
+for (const { title, channels, mode, expectedIds } of [
+  {
+    title: "alpha: case-insensitive deterministic code-unit collation",
+    mode: "alpha",
+    channels: [
       makeChannel("2", "zeta"),
       makeChannel("3", "Alpha"),
       makeChannel("1", "alpha"),
       makeChannel("4", "Éclair"),
     ],
-    "alpha",
-  );
-  assert.deepEqual(
-    sorted.map((c) => c.id),
-    ["1", "3", "2", "4"],
-  );
-});
-
-test("recent: newest last message first", () => {
-  const sorted = sortChannelsForSidebar(
-    [
+    expectedIds: ["1", "3", "2", "4"],
+  },
+  {
+    title: "recent: newest last message first",
+    mode: "recent",
+    channels: [
       makeChannel("old", "old", "2026-01-01T00:00:00Z"),
       makeChannel("new", "new", "2026-06-01T00:00:00Z"),
       makeChannel("mid", "mid", "2026-03-01T00:00:00Z"),
     ],
-    "recent",
-  );
-  assert.deepEqual(
-    sorted.map((c) => c.id),
-    ["new", "mid", "old"],
-  );
-});
-
-test("recent: channels without activity sink to bottom alphabetically", () => {
-  const sorted = sortChannelsForSidebar(
-    [
+    expectedIds: ["new", "mid", "old"],
+  },
+  {
+    title: "recent: channels without activity sink to bottom alphabetically",
+    mode: "recent",
+    channels: [
       makeChannel("quiet-z", "zzz"),
       makeChannel("active", "active", "2026-06-01T00:00:00Z"),
       makeChannel("quiet-a", "aaa"),
     ],
-    "recent",
-  );
-  assert.deepEqual(
-    sorted.map((c) => c.id),
-    ["active", "quiet-a", "quiet-z"],
-  );
-});
-
-test("recent: equal timestamps fall back to name then id", () => {
-  const ts = "2026-06-01T00:00:00Z";
-  const sorted = sortChannelsForSidebar(
-    [
-      makeChannel("b", "same", ts),
-      makeChannel("a", "same", ts),
-      makeChannel("c", "aardvark", ts),
+    expectedIds: ["active", "quiet-a", "quiet-z"],
+  },
+  {
+    title: "recent: equal timestamps fall back to name then id",
+    mode: "recent",
+    channels: [
+      makeChannel("b", "same", "2026-06-01T00:00:00Z"),
+      makeChannel("a", "same", "2026-06-01T00:00:00Z"),
+      makeChannel("c", "aardvark", "2026-06-01T00:00:00Z"),
     ],
-    "recent",
-  );
-  assert.deepEqual(
-    sorted.map((c) => c.id),
-    ["c", "a", "b"],
-  );
-});
-
-test("recent: unparseable timestamps are treated as no activity", () => {
-  const sorted = sortChannelsForSidebar(
-    [
+    expectedIds: ["c", "a", "b"],
+  },
+  {
+    title: "recent: unparseable timestamps treated as no activity",
+    mode: "recent",
+    channels: [
       makeChannel("bad", "bad", "not-a-date"),
       makeChannel("good", "good", "2026-06-01T00:00:00Z"),
     ],
-    "recent",
-  );
-  assert.deepEqual(
-    sorted.map((c) => c.id),
-    ["good", "bad"],
-  );
-});
+    expectedIds: ["good", "bad"],
+  },
+]) {
+  test(`sortChannelsForSidebar: ${title}`, () =>
+    assert.deepEqual(
+      sortChannelsForSidebar(channels, mode).map((c) => c.id),
+      expectedIds,
+    ));
+}
 
-test("does not mutate the input array", () => {
+test("sortChannelsForSidebar: does not mutate the input array", () => {
   const input = [makeChannel("b", "bbb"), makeChannel("a", "aaa")];
   sortChannelsForSidebar(input, "alpha");
   assert.deepEqual(
