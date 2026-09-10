@@ -28,6 +28,17 @@ pub fn is_admin_kind(kind: u32) -> bool {
     matches!(kind, 9000..=9022)
 }
 
+/// Whether an event may pass the archived-channel pre-storage gates.
+///
+/// Metadata edits (`kind:9002`) defer archive-state validation to their atomic
+/// write, under the channel row lock and after the duplicate check. Deleting
+/// the channel (`kind:9008`) and self-departure are also allowed through, still
+/// subject to their owner and last-owner checks. Ephemeral huddle backing
+/// channels are archived on hang-up and by the TTL reaper, not deleted.
+pub(crate) fn allow_event_on_archived_channel(kind: u32, event: &Event) -> bool {
+    matches!(kind, 9002 | 9008) || is_self_departure(event)
+}
+
 /// Check if a kind triggers side effects after storage.
 ///
 /// NOTE: kind:7 (reaction) is intentionally excluded — dedup and DB writes are
@@ -579,17 +590,16 @@ pub async fn validate_admin_event(
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Reject mutations on archived channels, except a member leaving by
-    // themselves (still subject to the last-owner rule). kind:9002 is not
-    // checked here: its atomic write decides the archive state under the
-    // channel row lock, after its duplicate check, so a resend that races
-    // the first commit is a duplicate and not a refusal.
+    // Reject archived-channel mutations except delete-group and self-departure
+    // (still subject to owner and last-owner checks). Metadata edits (9002)
+    // defer archive-state validation to the atomic write under the channel row
+    // lock, after its duplicate check, so a racing resend is a duplicate.
     let channel = state
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
-    if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
+    if channel.archived_at.is_some() && !allow_event_on_archived_channel(kind, event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
 
@@ -4116,5 +4126,89 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    fn signed_event(kind: u16, tags: Vec<Tag>) -> Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign")
+    }
+
+    fn h_tag(channel: &str) -> Tag {
+        Tag::parse(["h", channel]).expect("h tag")
+    }
+
+    #[test]
+    fn archived_channel_gate_allows_delete_group() {
+        let channel = Uuid::new_v4().to_string();
+        let pubkey = "a".repeat(64);
+        let event_id = "b".repeat(64);
+        let keys = nostr::Keys::generate();
+        let self_departure = EventBuilder::new(Kind::Custom(9001), "")
+            .tags([
+                h_tag(&channel),
+                Tag::parse(["p", &keys.public_key().to_hex()]).expect("self p tag"),
+            ])
+            .allow_self_tagging()
+            .sign_with_keys(&keys)
+            .expect("sign self-departure");
+
+        let allowed = [
+            signed_event(9008, vec![h_tag(&channel)]),
+            signed_event(
+                9002,
+                vec![
+                    h_tag(&channel),
+                    Tag::parse(["archived", "false"]).expect("tag"),
+                ],
+            ),
+            signed_event(
+                9002,
+                vec![
+                    h_tag(&channel),
+                    Tag::parse(["archived", "true"]).expect("tag"),
+                ],
+            ),
+            signed_event(
+                9002,
+                vec![
+                    h_tag(&channel),
+                    Tag::parse(["name", "still-locked"]).expect("tag"),
+                ],
+            ),
+            signed_event(9022, vec![h_tag(&channel)]),
+            self_departure,
+        ];
+        for event in &allowed {
+            assert!(
+                allow_event_on_archived_channel(event_kind_u32(event), event),
+                "expected kind {} to pass",
+                event_kind_u32(event)
+            );
+        }
+
+        let rejected = [
+            signed_event(
+                9000,
+                vec![h_tag(&channel), Tag::parse(["p", &pubkey]).expect("tag")],
+            ),
+            signed_event(
+                9001,
+                vec![h_tag(&channel), Tag::parse(["p", &pubkey]).expect("tag")],
+            ),
+            signed_event(
+                9005,
+                vec![h_tag(&channel), Tag::parse(["e", &event_id]).expect("tag")],
+            ),
+            signed_event(1, vec![h_tag(&channel)]),
+        ];
+        for event in &rejected {
+            assert!(
+                !allow_event_on_archived_channel(event_kind_u32(event), event),
+                "expected kind {} to stay rejected on an archived channel",
+                event_kind_u32(event)
+            );
+        }
     }
 }
