@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, mkdirSync, rmdirSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
+import { installationSlots } from './slots.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 import { connect, validateRelayURL } from './client.ts';
 import { digest, fields, message, object, publicKey, text, type Message } from './protocol.ts';
@@ -28,7 +29,8 @@ export function provision(directory: string, value: Setup, root: Genesis): void 
   writePrivate(join(directory, 'setup.json'), setup, true);
   writePrivate(join(directory, 'journal.json'), initialState(setup, genesis), true);
 }
-function initialState(setup: Setup, genesis: Genesis): State {
+/** Initial stopped authority shared by legacy provisioning and slot enrollment. */
+export function initialState(setup: Setup, genesis: Genesis): State {
   return {
     assignment: { genesis, assignedHost: genesis.initialHost },
     binding: { host: setup.host, owner: publicKey(setup.ownerSecret), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5', workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
@@ -48,22 +50,17 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
   } finally { rmdirSync(lock); }
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-export async function host(directory: string, url: string) {
-  validateRelayURL(url);
-  const setup = validateSetup(readPrivate(join(directory,'setup.json')));
+function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m: Message) => void) {
   const agent = publicKey(setup.agentSecret);
-  const lock = join(directory,'host.lock');
-  const path = join(directory,'journal.json');
   if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
   let state = readPrivate(path) as State;
   if (state.binding.host !== setup.host || state.binding.owner !== publicKey(setup.ownerSecret) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
   if (!state.assignment) throw Error('Legacy assignment requires explicit local migrate-assignment while stopped');
   const genesis = validateGenesis(state.assignment.genesis);
   if (genesis.owner !== state.binding.owner || genesis.agent !== agent || state.assignment.assignedHost !== genesis.initialHost) throw Error('Saved assignment mismatch');
-  mkdirSync(lock, { mode: 0o700 }); // No PID-only stale-lock recovery.
   if (state.phase !== 'stopped') state.phase = 'quarantined';
   const save = () => writePrivate(path,state);
-  try { save(); } catch (e) { rmdirSync(lock); throw e; }
+  save();
   let owned: OwnedProcess | ConversationSession | undefined;
   let acp: AgentSession | ConversationSession | undefined;
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
@@ -77,7 +74,6 @@ export async function host(directory: string, url: string) {
   }
   let closing = false;
   let queue = Promise.resolve();
-  let initialized = false;
   // Exact-fenced Stop retractions received ahead of their serialized handling, keyed
   // by that Stop's operation ID. One invariant covers every not-yet-committed Start
   // admission at the retracted revision, independent of callback/microtask timing:
@@ -89,9 +85,7 @@ export async function host(directory: string, url: string) {
   const queuedOperations = new Set<string>();
   const retracted = new Map<string, number>();
   const retracting = (revision: number) => { for (const target of retracted.values()) if (target === revision) return true; return false; };
-  let client: ReturnType<typeof connect>;
-  try { client = connect(url,setup.ownerSecret,m => {
-    if (!initialized) return;
+  function receive(m: Message) {
     // Cancellation is signalled outside the serialized mutation queue. Admission is
     // still exact-authority/revision and never bypasses durable receipt processing.
     const operation = m.host === setup.host && ['save','start','stop'].includes(m.type);
@@ -105,15 +99,11 @@ export async function host(directory: string, url: string) {
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
     }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
-  }, () => {
-    if (closing || !initialized) return;
-    // Replay committed receipts after transport recovery. Incoming relay history
-    // still traverses the fingerprint/revision fence; reconnect cannot repeat effects.
+  }
+  function replay() {
     for (const m of state.outbox) publish(m);
     publish(inventory());
-  }); }
-  catch (e) { rmdirSync(lock); throw e; }
-  const publish = (m: Message) => { try { client.send(m); } catch { /* Durable outbox retained for reconnect/restart. */ } };
+  }
   async function stopOwned() {
     if (!owned) throw Error('Unknown ownership; quarantined');
     await owned.stop(); owned = undefined; acp = undefined;
@@ -150,7 +140,7 @@ export async function host(directory: string, url: string) {
           if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
           // Lifecycle never restores deleted keys from the in-memory setup snapshot.
           try {
-            const current = validateSetup(readPrivate(join(directory, 'setup.json')));
+            const current = currentSetup();
             if (current.agentSecret !== setup.agentSecret || current.ownerSecret !== setup.ownerSecret || current.host !== setup.host) throw Error('changed');
           } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
           accessSync(setup.runner,constants.X_OK);
@@ -215,23 +205,65 @@ export async function host(directory: string, url: string) {
     Object.defineProperty(state.operations,m.id,{ value: { fingerprint, reply }, enumerable: true, configurable: true, writable: true });
     state.outbox.push(reply); save(); publish(reply); publish(inventory());
   }
-  try { await client.ready; } catch (e) { client.close(); rmdirSync(lock); throw e; }
-  initialized = true;
-  for (const m of state.outbox) publish(m);
-  publish(inventory());
-  const heartbeat = setInterval(() => {
+  return { agent, receive, replay, heartbeat() {
     if (owned && (owned.exited || acp?.healthy === false) && state.phase === 'running') { state.phase = 'quarantined'; save(); }
     publish(inventory());
-  },2000);
-  return { agent, async close() {
+  }, async close() {
     if (closing) return; closing = true;
-    client.close(); clearInterval(heartbeat); acp?.cancel(); await queue;
+    acp?.cancel(); await queue;
     if (owned) {
       state.phase = 'transitioning'; save();
       try { await stopOwned(); state.phase = 'stopped'; state.actual = null; }
       catch (e) { state.phase = 'quarantined'; save(); throw e; }
     }
-    save(); client.close();
-    if (state.phase === 'stopped') rmdirSync(lock); // Failed teardown retains recovery fence.
+    save();
+    if (state.phase !== 'stopped') throw Error(`Agent ${agent}: unknown execution; installation remains locked`);
+  } };
+}
+
+/** One installation owns every slot, lock and management transport. */
+export async function host(directory: string, url: string) {
+  validateRelayURL(url);
+  const lock = join(directory, 'host.lock');
+  mkdirSync(lock, { mode: 0o700 }); // Never infer ownership from a recovered PID.
+  let client: ReturnType<typeof connect> | undefined;
+  let initialized = false;
+  const slots = new Map<string, ReturnType<typeof slot>>();
+  const publish = (m: Message) => { try { client?.send(m); } catch { /* Slot outbox survives transport loss. */ } };
+  try {
+    const entries = installationSlots(directory);
+    for (const entry of entries) {
+      slots.set(publicKey(entry.setup.agentSecret), slot(entry.setup, entry.path, () => {
+        const current = installationSlots(directory).find(e => publicKey(e.setup.agentSecret) === publicKey(entry.setup.agentSecret));
+        if (!current) throw Error('Key removed');
+        return current.setup;
+      }, publish));
+    }
+    const setup = entries[0]!.setup;
+    // Every slot is hydrated before dialing. Initial WS history may arrive in the
+    // same event-loop turn as open, before the ready promise continuation.
+    initialized = true;
+    client = connect(url, setup.ownerSecret, m => {
+      if (!initialized || m.host !== setup.host) return;
+      const selected = slots.get(m.agent);
+      if (selected) selected.receive(m);
+      else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }
+      else if (['save','start','stop'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
+    }, () => { if (initialized) for (const s of slots.values()) s.replay(); });
+    await client.ready;
+  } catch (e) { client?.close(); rmdirSync(lock); throw e; }
+  initialized = true;
+  for (const s of slots.values()) s.replay();
+  const heartbeat = setInterval(() => { for (const s of slots.values()) s.heartbeat(); }, 2000);
+  let closing: Promise<void> | undefined;
+  return { agent: [...slots.keys()][0]!, agents: [...slots.keys()], close() {
+    return closing ??= (async () => {
+      initialized = false; client?.close(); clearInterval(heartbeat);
+      // allSettled starts every teardown and preserves each slot's durable truth.
+      const results = await Promise.allSettled([...slots.values()].map(s => s.close()));
+      const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason);
+      if (errors.length) throw new AggregateError(errors, 'Incomplete owned teardown; installation remains locked');
+      rmdirSync(lock);
+    })();
   } };
 }

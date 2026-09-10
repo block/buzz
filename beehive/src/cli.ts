@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup, provision, migrateAssignment } from './host.ts';
+import { migrateSlots, addSlot, installationSlots, saveDefaultHarness } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
@@ -15,6 +16,8 @@ const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
   setup <new-host-directory> <identity-file> Guided local harness + key setup
+  migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
+  add-agent <host-directory>                New identity using shared local harness
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
   migrate-assignment <host-directory>       Explicit stopped legacy enrollment
   auth-info <host-directory>                Print exact local sign-in context (no login)
@@ -22,7 +25,8 @@ const help = `Beehive — isolated development preview (loopback relay only)
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
-setup accepts optional <local-key-file> <public-genesis-file> for standby import.
+setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
+assignment-export accepts agent public key after filename when several slots exist.
 No Move, provider login RPC or production relay support yet.`;
 async function main() {
   if (command === 'identity') {
@@ -56,8 +60,30 @@ async function main() {
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
       if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
     } finally { ui.close(); }
+  } else if (command === 'migrate-slots') {
+    const dir = resolve(text(args[0]));
+    const ui = createInterface({ input: stdin, output: stdout });
+    try {
+      if (await ui.question('Upgrade this stopped installation to shared agent slots, preserving keys and journal? [yes/no]: ') !== 'yes') return;
+      migrateSlots(dir); console.log('Slots enabled; original assignment and lifecycle history retained.');
+    } finally { ui.close(); }
+  } else if (command === 'add-agent') {
+    const dir = resolve(text(args[0]));
+    const first = installationSlots(dir)[0]!.setup;
+    const importing = args.length > 1;
+    const secret = importing ? text(object(readPrivate(resolve(text(args[1])))).secret) : newKey();
+    const root = importing ? validateGenesis(readPrivate(resolve(text(args[2])))) : createGenesis(publicKey(first.ownerSecret), publicKey(secret), first.host);
+    if (importing && root.initialHost === first.host) throw Error('Import cannot recreate initial authority');
+    const ui = createInterface({ input: stdin, output: stdout });
+    try {
+      if (await ui.question(importing ? `Add standby identity assigned to ${root.initialHost}, reusing host harness default? [yes/no]: ` : 'Create independent NEW agent assigned here, reusing host harness default? [yes/no]: ') !== 'yes') return;
+      addSlot(dir, secret, root); console.log(`Agent ${publicKey(secret)} added; start/configure remotely after restarting the host.`);
+    } finally { ui.close(); }
   } else if (command === 'assignment-export') {
-    const state = object(readPrivate(join(resolve(text(args[0])), 'journal.json')));
+    const entries = installationSlots(resolve(text(args[0])));
+    const entry = args[2] ? entries.find(e => publicKey(e.setup.agentSecret) === args[2]) : entries.length === 1 ? entries[0] : undefined;
+    if (!entry) throw Error('Specify agent public key after export filename for multi-slot host');
+    const state = object(readPrivate(entry.path));
     const genesis = validateGenesis(object(state.assignment).genesis);
     writePrivate(resolve(text(args[1])), genesis, true);
     console.log('Public genesis exported; no keys or execution grant. Provision the matching key separately on the destination.');
@@ -75,8 +101,9 @@ async function main() {
     const lock = join(dir, 'host.lock');
     mkdirSync(lock, { mode: 0o700 }); // Same atomic exclusion as host startup; never remove a competing lock.
     try {
-      if (existsSync(join(dir, 'journal.json')) && object(readPrivate(join(dir, 'journal.json'))).phase !== 'stopped') throw Error('Reconcile the prior run before local setup changes');
-      const setup = validateSetup(readPrivate(join(dir, 'setup.json')));
+      const entries = installationSlots(dir);
+      if (entries.some(e => object(readPrivate(e.path)).phase !== 'stopped')) throw Error('Reconcile every prior run before local setup changes');
+      const setup = entries[0]!.setup;
       if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('Provision Buzz Agent first; this action never creates or replaces agent keys');
       const ui = createInterface({ input: stdin, output: stdout });
       try {
@@ -89,12 +116,12 @@ async function main() {
         const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: 'databricks-claude-haiku-4-5' }, setup.agentSecret, publicKey(setup.ownerSecret));
         if ((await ui.question('Save onto existing identity? Start waits for an admitted conversation and local provider sign-in. [yes/no]: ')) !== 'yes') return;
         // One atomic replacement; keys, assignment and provider auth context unchanged.
-        writePrivate(join(dir, 'setup.json'), { ...setup, conversation });
+        saveDefaultHarness(dir, { ...setup, conversation });
         console.log(`Conversation setup saved for existing agent ${plan.agentPublicKey}. No network connection, login or process started. The community operator must admit this public key and owner to the chosen relay/channels (or provision a valid owner attestation locally). Admission remains unverified. Start uses the host-owned ACP broker; the Buzz CLI tool, when enabled, uses agent membership authority across conversations without local thread configuration.`);
       } finally { ui.close(); }
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
-    const setup = validateSetup(readPrivate(join(resolve(text(args[0])), 'setup.json')));
+    const setup = installationSlots(resolve(text(args[0])))[0]!.setup;
     if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('This harness setup has no provider sign-in');
     console.log(`Sign in on host ${setup.host} as the same OS user running its host service (current uid ${process.getuid?.() ?? 'unknown'}), not your Desktop account. Use exactly this context:\nHOME=${shellQuote(text(setup.serviceHome))} BUZZ_AGENT_CONFIG_DIR=${shellQuote(text(setup.configDirectory))} DATABRICKS_HOST=${shellQuote(text(setup.databricksHost))} ${shellQuote(setup.runner)} auth databricks\nBuzz Agent owns OAuth/cache/refresh. No login was initiated; Save and Stop do not require auth.`);
   } else if (command === 'relay') {
@@ -103,7 +130,7 @@ async function main() {
     process.once('SIGINT',() => { for (const c of server.clients) c.close(); server.close(); });
   } else if (command === 'host') {
     const running = await host(resolve(text(args[0])),text(args[1]));
-    console.log(`Host online; agent ${running.agent}. Ctrl-C stops owned runner before host exits.`);
+    console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
     process.once('SIGINT',() => { void running.close(); });
     process.once('SIGTERM',() => { void running.close(); });
   } else if (command === 'tui') {

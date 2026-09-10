@@ -164,3 +164,33 @@ migration preserves revision/history and refuses replacement. This is assignment
 bootstrap evidence, NOT Move or multiple agent slots on one host evidence.
 All existing fixture setups now explicitly provision initial authority; none relies
 on host startup self-assigning from key presence.
+
+## Single-installation slot continuation
+
+`slots.test.ts` uses the production host/client/relay and real external fixtures:
+- ONE actual host subprocess exposes X and Y over exactly ONE management socket.
+  Actual TUI subprocess selects numbered rows, saves/starts both, stops X, rejects
+  ambiguous host-name selection and shows persistent identities. Y's journal stays
+  byte-identical across X Stop, including revision, actual run and receipt.
+- A reused operation ID on another slot remains independent. Wrong-agent/host
+  operations cannot affect a run. Host socket loss replays both inventories/outbox;
+  graceful process restart retains assignments and truthful stopped state. Same-key
+  standby in another process never obtains Start authority.
+- Concurrent delayed ACP Starts with the same operation ID reach transitioning
+  independently. Stop X cancels X while Y is still pending; Y completes. Replays
+  return distinct terminal receipts without mutating either journal.
+- Explicit migration after real Start/Stop preserves the complete journal byte for
+  byte. An uncertain first slot makes host close reject/retain the lock while the
+  healthy sibling is nevertheless torn down and saved stopped.
+- Actual management-client reopen/reconcile emits an inspect for EACH unresolved
+  host/agent pair. Starting the real host later consumes initial relay history and
+  resolves both retained intents. Slots are fully hydrated before dialing, so
+  history coalesced with socket open cannot be silently dropped awaiting ready.
+
+These are lifecycle/ACP fixture proofs, not simultaneous live provider/conversation
+proof or Move acceptance. First new TUI harness iteration timed out because its
+prompt parser assumed prompts ended stdout chunks; corrected to consume prompt
+positions amid coalesced async status reports. A subsequent new reconciliation test
+exposed the initial-history hydration gap above, fixed at the host connection owner.
+No containment assertion, delay or existing test was weakened. The historical
+reply-tool descendant-exit observation remains a separate open investigation.

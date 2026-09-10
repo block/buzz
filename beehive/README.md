@@ -132,8 +132,8 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
   TUI pending intents/reconnect are implemented with a local encrypted journal. Lost connection means
   unknown, not stopped or success; exhausted recovery needs operator attention.
 - Inventory has freshness, not liveness proof. Host starts no action based on peer
-  agent presence. Only its locally bound agent is manageable; one slot per installation remains a
-  limitation, not multi-agent-per-host support.
+  agent presence. Only its locally bound slots are manageable; each has independent authority,
+  revisions, receipts, admission and process ownership under one installation.
 
 ## Explicit initial assignment (Move prerequisite, not Move)
 
@@ -171,15 +171,59 @@ A partial setup remains inert and requires local investigation, not automatic re
 `agents` groups observations by persistent public key; `hosts` numbers host/agent
 rows, shows reported assignment, and `select` routes to the exact row. A unique host
 name remains a backward-compatible shortcut. Observations are not consensus; an
-unreachable source never makes its standby eligible. This candidate still has one
-agent slot per installation. Tests use three distinct installations for two agent
-identities; they do **not** disguise cloned daemons as multi-agent slots on one host.
+unreachable source never makes its standby eligible. The original assignment test uses three distinct installations. The newer
+`slots.test.ts` separately proves two identities in ONE host process/connection;
+these are independent agent slots, not cloned daemons.
 
 **Not yet implemented:** destination preflight, source reservation/whole-tree Stop
 as a transfer, irreversible grant/outbox lineage, target acceptance/fresh launch,
-and several independently managed agents in one host process. No `move` command
+and source-consumed Move lineage. No `move` command
 is exposed until these boundaries are implemented and tested together. The root
 ID is an identity binding, not a lock service or partition/rollback solution.
+
+## Several agents, one installation
+
+Upgrade an existing **stopped**, assignment-pinned installation explicitly, then
+add an independent identity using the same locally trusted harness setup:
+
+```sh
+node src/cli.ts migrate-slots /absolute/host-directory
+node src/cli.ts add-agent /absolute/host-directory
+node src/cli.ts host /absolute/host-directory ws://127.0.0.1:19481
+```
+
+Both commands ask for confirmation and refuse a live installation lock. Migration
+replaces only setup inventory atomically; the original journal stays byte-identical
+with its assignment, revision, operation receipts and outbox. It never generates or
+copies the existing key. Legacy single-slot hosts still run without silent upgrade.
+Pre-assignment installations must use `migrate-assignment` first. Missing journals
+and partial additions fail closed, not an invitation to re-enroll an identity.
+
+`add-agent` creates a NEW key, or accepts local key/root files for a standby import
+using the same optional-file convention as `setup`. Host-owned `default` harness,
+executable/auth context and conversation setup are shared; agent keys are not part
+of that reusable harness. A version-2 owner-only `setup.json` holds one installation
+identity, setup inventory and per-agent key/setup references. New authority journals
+live under `agents/<public-key>/journal.json`; these directories cannot run daemons.
+The original slot keeps its journal in place. Maximum 32 slots per installation.
+Changing local conversation setup requires every slot stopped and updates the shared
+harness; `auth-info` prints the shared service-user context without signing in.
+
+Use remote TUI `hosts` then `select <row-number>` to configure/start/stop each agent.
+A host-name shortcut is rejected when ambiguous. `agents` groups persistent public
+identities and labels reported assignment separately from the observing host. Each
+slot retains independent selected-next/actual-run, revision, operation IDs/outbox and
+admission queue. Stop X does not stop Y or change Y's receipt/revision. One host
+process holds ONE installation lock, heartbeat and management connection. Reconnect
+replays each slot's receipts; client reconciliation queries every unresolved
+host/agent pair. Host shutdown attempts every slot even if one is uncertain, reports
+failure and retains the installation lock rather than falsely declaring all stopped.
+
+Setup/key enrollment remains local and offline; ordinary selections and lifecycle
+remain remote. Multiple selectable harness inventory entries, profile CRUD, key
+revocation UX, Restart and Move are still future work. Standby X elsewhere still
+cannot Start, even while source X is stopped/unreachable. This is trusted-installation
+coordination, not physical host attestation, partition safety or exactly-once execution.
 
 ## Real target: Buzz Agent + Databricks v2
 
@@ -291,7 +335,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 | Surface | This slice | Required next work |
 |---|---|---|
 | Local owner/key setup | New owner + separately generated agent key | nsec import, saved-owner verification, revocation/key removal UX |
-| Host inventory | Real relay, fixed authority, freshness | multiple setups/agents, service install, reconnect/reconciliation |
+| Host inventory | Real relay, multiple independent slots, shared host harness, freshness | multiple selectable setups, service install, richer reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
 | Lifecycle | fixture Start/Stop, UI-independent host | strict real launch, Restart, host-owned irreversible Move |
 | Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, production protocol compatibility and catalog provenance |

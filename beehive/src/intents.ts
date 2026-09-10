@@ -57,8 +57,8 @@ export function managementClient(root: string, url: string, secret: string, rece
       try { transport.sendEnvelope(intent.envelope); } catch { break; } // Intent remains durable.
     }
     // Query host outbox too: relay history alone may lack a lost terminal receipt.
-    const hosts = new Map([...intents.values()].filter(i => !i.receipt).map(i => [i.request.host, i.request]));
-    for (const request of hosts.values()) {
+    const slots = new Map([...intents.values()].filter(i => !i.receipt).map(i => [JSON.stringify([i.request.host, i.request.agent]), i.request]));
+    for (const request of slots.values()) {
       try { transport.send(message('inspect', request.host, request.agent)); } catch { break; }
     }
     changed();

@@ -5,6 +5,96 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Slot continuation e0a5 — working single-installation slice
+
+Started from verified published `ebc8b3cb24fe0eefe5b8f239a88555786eadbf14`.
+The candidate is the commit containing this checkpoint. One installation now owns
+ONE exclusion lock, owner identity, management WS connection and heartbeat. The
+existing admission/receipt/run state is an explicit in-process slot per persistent
+agent, not N daemons. Routing happens BEFORE operation-ID reservation/cancellation;
+queues, retractions, receipts, revisions, assignment and actual-run ownership remain
+per agent. Selected-next still never mutates actual-run. No validator relaxation.
+
+`src/slots.ts` provides an explicit stopped `migrate-slots` upgrade: atomically
+replace setup.json with version-2 installation inventory (shared harness setups +
+agent keys/setup references), leaving the original journal byte-identical in place.
+No key generation, copied key, re-enrollment or wiped history. Legacy single-slot
+hosts remain supported without silent upgrade. Local `add-agent` creates a new key
+(or explicitly imports a matching public-root standby), reuses host-owned default
+harness, writes its inert per-agent journal before activating the manifest entry,
+and refuses partial leftovers. Maximum 32 slots. Shared auth/conversation setup is
+host-owned. Multiple selectable harness inventories and key/profile CRUD remain
+unfinished, not hidden remote setup APIs.
+
+`host.close` attempts every slot via allSettled, preserving successful siblings'
+stopped truth while quarantining/reporting uncertain execution and retaining the
+single host lock. Shared management client reconciliation now queries every
+unresolved host/agent pair, not merely the last agent per host. All slots hydrate
+before dialing: initial relay history coalesced with socket open is accepted before
+the ready-promise continuation, rather than discarded. Existing receipt fingerprint,
+policy-blocked unchanged retry, admission cancellation and no late revival retained.
+
+Production-bound `test/slots.test.ts` proves:
+- ONE real host subprocess + ONE management socket hosts X,Y. Actual TUI subprocess
+  selects exact numbered rows, Save/Start both, Stop X; ambiguous host-name shortcut
+  rejected. Y's journal stays byte-identical across X Stop, including receipt,
+  revision and actual run. Same operation ID on different slots is independent.
+- Both delayed external ACP Starts enter transitioning concurrently with a shared
+  operation ID. Stop X cancels X while Y remains pending and later completes. Replay
+  returns their distinct terminal results without either journal changing.
+- Wrong-agent/host operations cannot affect a run; actual host WS loss/recovery
+  replays each slot truthfully; graceful service restart retains assignment and
+  reports stopped instead of phantom live execution. Same-key standby elsewhere
+  still cannot Start. No transfer or source-unreachable takeover.
+- Explicit migration after real Start/Stop preserves revision, two operations,
+  outbox and assignment byte-for-byte. Unknown first slot makes close fail/retain
+  lock but does not skip teardown of a healthy running sibling.
+- Actual management-client reopen/reconcile queries each unresolved slot; starting
+  the real host later consumes initial relay history and resolves both intents.
+
+Final executable candidate: strict TypeScript + installed-enabled full package
+**25/25 pass, zero skips**, 17.29s. Logs in workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/SLOTS_E0A5_EVIDENCE/{check.log,full.log}`.
+Single-process proof logged public identities
+`d2c1dbd61931eed22800b45de0cf422bd3f5e70b7585ec6f789e8124f2f21a9e` and
+`ab3c21202f172cbc9d5ae1e07d5d0021ed9a34c1d56130af24124220c3df8e83`.
+Installed binaries freshly rehashed, both match retained pins below. Existing
+installed signed three-conversation seam also passed; slots themselves use external
+lifecycle/ACP fixtures, not simultaneous live-provider conversations.
+
+Iteration failures retained honestly: the new TUI test initially timed out (twice,
+one instrumented) because the test driver assumed a prompt ended a stdout chunk;
+async status coalesced after it. Fixed the driver to consume prompt positions, no
+product wait/sleep or assertion weakened. New reconciliation test then exposed
+initial-history loss (one failure plus diagnostic confirmation); fixed at host
+hydration/connection owner. These are distinct from the earlier unresolved
+`reply-tool.test.ts:68` descendant observation. No containment code/assertion changed;
+this 25/25 pass does NOT resolve that observation or prove Move-safe exit.
+
+Consumed independent `RECOVERY_VERIFICATION_8A67B967.md`: old frozen R1/U1 both
+verified fixed, original replay reproducer and conflict/later-run controls green,
+actual TUI byte-identical once-only retry/outbox recovery green, strict + installed
+19/19. This closes the old recovery review, not new slots review or descendant exit.
+The separate bounded descendant investigator has not delivered its causal report
+at this checkpoint. Trusted non-cloned/non-rollback installations and exclusive
+supervision remain assumptions; shared-owner signatures are not host attestation.
+
+**Move is NOT implemented and remains gated. ONE next executable action:** consume
+the bounded descendant-exit report and bind its causal finding (or remaining probe)
+to the actual owned-containment seam before implementing the source-consumed Move
+transaction below: target preflight, complete owned source exit, atomic one-way
+revocation/exact grant+outbox, idempotent target accept/fresh launch. No initial-host
+validator relaxation, timeout resurrection, key/workspace/session transfer or new
+controller/HTTP lifecycle service. Request independent immutable slot UX/correctness
+review alongside that continuation; do not repeat closed old R1/U1 review.
+
+Full remaining parity stays in README: Restart, profiles/keys/metadata/history,
+selectable harness/provider/preset/mesh/compute inventory, live model/admission,
+retention and recovery. No owner credential/profile/OAuth reads, production/native
+or Rust edits, full repo CI/GitHub CI, PR, merge or release. Publication uses existing
+approved GitHub branch, configured Logan Johnson author/committer + DCO, no invented
+cryptographic signer.
+
 ## Assignment foundation handoff — delegated fb23e116
 
 Governing boundary: key possession is not assignment. Provisioning must create a
