@@ -24,8 +24,8 @@ export type RawChannel = {
   member_pubkeys: string[];
   last_message_at: string | null;
   archived_at: string | null;
-  participants: string[];
-  participant_pubkeys: string[];
+  participants?: string[];
+  participant_pubkeys?: string[];
   is_member?: boolean;
   ttl_seconds: number | null;
   ttl_deadline: string | null;
@@ -86,8 +86,8 @@ export function fromRawChannel(channel: RawChannel): Channel {
     memberPubkeys: channel.member_pubkeys ?? [],
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
-    participants: channel.participants,
-    participantPubkeys: channel.participant_pubkeys,
+    participants: channel.participants ?? [],
+    participantPubkeys: channel.participant_pubkeys ?? [],
     isMember: channel.is_member ?? true,
     ttlSeconds: channel.ttl_seconds,
     ttlDeadline: channel.ttl_deadline,
