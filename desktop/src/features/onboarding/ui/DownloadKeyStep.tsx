@@ -111,8 +111,8 @@ export function DownloadKeyStep({
 
       <div
         className={cn(
-          "flex w-full flex-1 flex-col justify-center",
-          cardLayout ? "py-6" : "max-w-[1040px] py-10",
+          "flex w-full max-w-[1040px] flex-col",
+          cardLayout ? "py-8" : "flex-1 justify-center py-10",
         )}
       >
         <div className="w-full">
@@ -128,8 +128,10 @@ export function DownloadKeyStep({
           >
             <div
               className={cn(
-                "w-full max-w-140 py-5",
-                cardLayout ? "px-0" : "mx-auto px-6",
+                "flex w-full max-w-140",
+                cardLayout
+                  ? "justify-start py-6"
+                  : "mx-auto justify-center px-6 py-5",
               )}
               data-testid="backup-password-panel"
             >

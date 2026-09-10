@@ -40,10 +40,12 @@ export type OnboardingBackAction = {
 export function OnboardingFooterProvider({
   backAction,
   children,
+  contentClassName,
   placement = "viewport",
 }: {
   backAction?: OnboardingBackAction;
   children: React.ReactNode;
+  contentClassName?: string;
   placement?: OnboardingFooterPlacement;
 }) {
   const [target, setTarget] = React.useState<HTMLElement | null>(null);
@@ -54,7 +56,12 @@ export function OnboardingFooterProvider({
         value={{ element: target, placement }}
       >
         {children}
-        <div className="mt-6 flex h-[3.25rem] min-h-[3.25rem] w-full shrink-0 items-center justify-between gap-4">
+        <div
+          className={cn(
+            "mt-6 flex h-[3.25rem] min-h-[3.25rem] w-full shrink-0 items-center justify-between gap-4",
+            contentClassName,
+          )}
+        >
           <div className="flex min-w-0 flex-1 justify-start">
             {backAction ? (
               <Button

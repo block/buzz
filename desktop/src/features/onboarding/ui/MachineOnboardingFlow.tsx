@@ -62,7 +62,10 @@ export function MachineOnboardingFlow({
   initialPage,
   queryClient,
 }: {
-  complete: (pubkey?: string) => void;
+  complete: (
+    pubkey?: string,
+    options?: { continueToProfile?: boolean },
+  ) => void;
   continueWithIdentity: (pubkey: string) => void;
   continueWithRecoveredIdentity: (pubkey: string) => void;
   identityLost: boolean;
@@ -404,6 +407,7 @@ export function MachineOnboardingFlow({
     <OnboardingCard
       backAction={chromeBackAction}
       current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+      showStepIndicator={page !== "identity-key-help"}
       testId="machine-onboarding-gate"
     >
       {page === "identity-key-intro" ? (
@@ -598,7 +602,9 @@ export function MachineOnboardingFlow({
               // Harness install can fail (Windows/PATH/network). Don't soft-lock
               // onboarding — users can finish setup later in Settings → Agents.
               if (ids.length === 0) {
-                complete(selectedPubkey ?? undefined);
+                complete(selectedPubkey ?? undefined, {
+                  continueToProfile: !identityWasImported,
+                });
                 return;
               }
               setConfigBackTarget(nextConfigBackTarget);
@@ -622,7 +628,10 @@ export function MachineOnboardingFlow({
             back: () => {
               backFromConfig();
             },
-            complete: () => complete(selectedPubkey ?? undefined),
+            complete: () =>
+              complete(selectedPubkey ?? undefined, {
+                continueToProfile: !identityWasImported,
+              }),
             discardDraft: () => setDefaultConfigDraft(null),
             updateDraft: setDefaultConfigDraft,
             useDifferentHarness:

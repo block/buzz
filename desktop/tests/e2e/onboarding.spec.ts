@@ -901,6 +901,87 @@ test("imported-key users can skip out of harness setup", async ({ page }) => {
   await expect(page.getByTestId("onboarding-page-2")).toHaveCount(0);
 });
 
+test("fresh-key harness completion continues directly into profile onboarding", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const communityId = "e2e-existing-community";
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify([
+        {
+          id: communityId,
+          name: "E2E Test",
+          relayUrl: "ws://localhost:3000",
+          addedAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    window.localStorage.setItem("buzz-active-community-id", communityId);
+  });
+  await installMockBridge(
+    page,
+    {
+      profileHasEvent: false,
+      profileReadDelayMs: 1_000,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.addInitScript(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { bootSplashHoldMs?: number };
+    };
+    testWindow.__BUZZ_E2E__ = {
+      ...(testWindow.__BUZZ_E2E__ ?? {}),
+      bootSplashHoldMs: 2_000,
+    };
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create my private key" }).click();
+  await page.getByTestId("onboarding-next").click();
+  await expect(
+    page.getByRole("heading", { name: "Connect your AI provider" }),
+  ).toBeVisible();
+
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_ONBOARDING_LOADING_GATES__?: string[];
+    };
+    testWindow.__BUZZ_E2E_ONBOARDING_LOADING_GATES__ = [];
+    new MutationObserver(() => {
+      for (const testId of ["app-loading-gate", "boot-splash-overlay"]) {
+        if (document.querySelector(`[data-testid="${testId}"]`)) {
+          testWindow.__BUZZ_E2E_ONBOARDING_LOADING_GATES__?.push(testId);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+
+  await page.getByTestId("onboarding-setup-skip").click();
+
+  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-step-dots").locator("span"),
+  ).toHaveCount(7);
+  await expect(
+    page.getByTestId("onboarding-step-dots").locator("span").nth(4),
+  ).toHaveClass(/w-7/);
+  await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+  await expect(page.getByTestId("boot-splash-overlay")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_ONBOARDING_LOADING_GATES__?: string[];
+          }
+        ).__BUZZ_E2E_ONBOARDING_LOADING_GATES__ ?? [],
+    ),
+  ).toEqual([]);
+});
+
 test("first-launch encrypted backup import asks for a passphrase and continues", async ({
   page,
 }) => {

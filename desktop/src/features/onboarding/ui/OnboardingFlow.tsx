@@ -28,6 +28,7 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import { OnboardingCard } from "./OnboardingCard";
+import { TOTAL_ONBOARDING_PAGES } from "./OnboardingChrome";
 import { ProfileStep } from "./ProfileStep";
 import type {
   OnboardingActions,
@@ -380,13 +381,13 @@ export function OnboardingFlow({
   // Machine-level identity, backup, and provider setup have already completed.
   // This relay-scoped flow now owns only the community profile.
   const activeSteps: OnboardingPage[] = ["profile", "avatar"];
-  const STEP_OFFSET = 1;
+  const STEP_OFFSET = 5;
   // key-import occupies the same position as profile.
   const normalizedPage: OnboardingPage =
     currentPage === "key-import" ? "profile" : currentPage;
   const pageIndex = activeSteps.indexOf(normalizedPage);
   const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
-  const totalOnboardingSteps = activeSteps.length;
+  const totalOnboardingSteps = TOTAL_ONBOARDING_PAGES;
 
   // Swapping the identity changes the pubkey, which remounts this flow
   // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
@@ -506,11 +507,7 @@ export function OnboardingFlow({
         testId="onboarding-gate"
         total={totalOnboardingSteps}
       >
-        <div
-          className={`relative flex w-full flex-col items-stretch text-left ${
-            currentPage === "avatar" ? "max-w-none" : "max-w-[500px]"
-          }`}
-        >
+        <div className="relative flex w-full max-w-none flex-col items-stretch text-left">
           {membershipError &&
           (currentPage === "profile" || currentPage === "avatar") ? (
             <div className="mb-4 w-full max-w-[500px] rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">

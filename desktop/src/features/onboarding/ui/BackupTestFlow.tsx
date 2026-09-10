@@ -1,4 +1,14 @@
-import { Check, CircleHelp, Eye, EyeOff, FileKey2, FileUp } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  CircleHelp,
+  Download,
+  Eye,
+  EyeOff,
+  FileCheck2,
+  FileKey2,
+  FileUp,
+} from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -531,22 +541,70 @@ export function BackupTestFlow({
             tabIndex={-1}
             type="file"
           />
-          <div className="flex justify-center">
-            <Button
-              className={cn(
-                isSpotlight
-                  ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
-                  : "h-9 px-6 text-primary-foreground",
-              )}
-              data-testid="backup-test-dropzone"
-              onClick={() => fileInputRef.current?.click()}
-              type="button"
-            >
-              <span className="font-medium text-sm">
-                Select your backup file
-              </span>
-            </Button>
-          </div>
+          {cardLayout ? (
+            <div className="-mx-2 flex w-[calc(100%+1rem)] flex-col gap-2">
+              <Button
+                className="group h-auto min-h-14 w-full justify-start gap-3 rounded-xl px-2 py-2 text-left text-sm font-medium text-foreground shadow-none hover:bg-foreground/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-foreground/20"
+                data-testid="backup-test-dropzone"
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+                variant="ghost"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-start">
+                  <FileCheck2 aria-hidden className="!size-6" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  Test your backup
+                </span>
+                <span className="ml-auto flex size-10 shrink-0 items-center justify-end">
+                  <ChevronRight
+                    aria-hidden
+                    className="size-4 text-muted-foreground transition-colors duration-150 ease-out group-hover:text-foreground motion-reduce:transition-none"
+                  />
+                </span>
+              </Button>
+              {onSaveCopy ? (
+                <Button
+                  className="group h-auto min-h-14 w-full justify-start gap-3 rounded-xl px-2 py-2 text-left text-sm font-medium text-foreground shadow-none hover:bg-foreground/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-foreground/20"
+                  data-testid="encrypted-backup-save-copy"
+                  disabled={isSaving}
+                  onClick={onSaveCopy}
+                  type="button"
+                  variant="ghost"
+                >
+                  <span className="flex size-8 shrink-0 items-center justify-start">
+                    <Download aria-hidden className="!size-6" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">
+                    Download backup again
+                  </span>
+                  <span className="ml-auto flex size-10 shrink-0 items-center justify-end">
+                    <ChevronRight
+                      aria-hidden
+                      className="size-4 text-muted-foreground transition-colors duration-150 ease-out group-hover:text-foreground motion-reduce:transition-none"
+                    />
+                  </span>
+                </Button>
+              ) : null}
+            </div>
+          ) : (
+            <div className="flex justify-center">
+              <Button
+                className={cn(
+                  isSpotlight
+                    ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
+                    : "h-9 px-6 text-primary-foreground",
+                )}
+                data-testid="backup-test-dropzone"
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
+                <span className="font-medium text-sm">
+                  Select your backup file
+                </span>
+              </Button>
+            </div>
+          )}
           {isWindowDragging ? (
             /*
              * Composer-style takeover: fills the nearest positioned host
@@ -585,7 +643,7 @@ export function BackupTestFlow({
               {error}
             </p>
           ) : null}
-          {onSaveCopy ? (
+          {onSaveCopy && !cardLayout ? (
             <div className="flex justify-center">
               <Button
                 className={cn(

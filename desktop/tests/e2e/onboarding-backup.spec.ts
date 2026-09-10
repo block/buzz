@@ -7,8 +7,11 @@ import {
   startWindowFileDrag,
 } from "../helpers/fileDrag";
 
-async function enterMachineBackup(page: import("@playwright/test").Page) {
-  await installMockBridge(page, undefined, {
+async function enterMachineBackup(
+  page: import("@playwright/test").Page,
+  mock?: Parameters<typeof installMockBridge>[1],
+) {
+  await installMockBridge(page, mock, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
@@ -120,12 +123,10 @@ test("backup step appears on fresh-key path after profile submit", async ({
 });
 
 // ---------------------------------------------------------------------------
-// Key-created view: masked key with explicit Reveal and Copy actions.
+// Key-created view: visible key with a hover-to-copy action.
 // ---------------------------------------------------------------------------
 
-test("key view keeps the secret masked until Reveal and Copy stay explicit", async ({
-  page,
-}) => {
+test("key view shows the key and reveals Copy on hover", async ({ page }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterMachineBackup(page);
 
@@ -133,25 +134,9 @@ test("key view keeps the secret masked until Reveal and Copy stay explicit", asy
 
   const key = page.getByTestId("backup-key-value");
   await expect(key).toBeVisible();
-  await expect(key).not.toContainText("nsec1mock");
-  expect(await invokedCommands(page)).not.toContain("get_nsec");
-
-  // The credential enters the DOM only after an explicit reveal action.
-  await page.getByTestId("backup-reveal-key").click();
   await expect(key).toContainText("nsec1mock");
+  await expect(key).toHaveCSS("filter", "none");
   expect(await invokedCommands(page)).toContain("get_nsec");
-  await page.getByTestId("backup-reveal-key").click();
-  await expect(key).not.toContainText("nsec1mock");
-
-  // Copy remains a separate explicit action and may reuse the in-memory key.
-  await page.getByTestId("backup-copy-key").click();
-  await expect(page.getByTestId("backup-copy-key")).toContainText(
-    "Copied to clipboard",
-  );
-  await expect
-    .poll(async () => invokedCommands(page))
-    .toContain("copy_text_to_clipboard");
-  await expect(key).not.toContainText("nsec1mock");
 
   // The backup action gains a subtle surface on hover without shifting its
   // content or changing the resting state.
@@ -176,6 +161,28 @@ test("key view keeps the secret masked until Reveal and Copy stay explicit", asy
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
+
+  // Hovering the clean key well obscures its contents and reveals Copy
+  // without another keychain read.
+  const keyWell = page.getByTestId("backup-key-well");
+  const copyButton = page.getByTestId("backup-copy-key");
+  const readsBeforeHover = (await invokedCommands(page)).filter(
+    (command) => command === "get_nsec",
+  ).length;
+  await expect(copyButton).toHaveCSS("opacity", "0");
+  await keyWell.hover();
+  await expect(key).toHaveCSS("filter", /blur\(4px\)/);
+  await expect(copyButton).toHaveCSS("opacity", "1");
+  expect(
+    (await invokedCommands(page)).filter((command) => command === "get_nsec"),
+  ).toHaveLength(readsBeforeHover);
+
+  await copyButton.click();
+  await expect(copyButton).toContainText("Copied to clipboard");
+  await expect
+    .poll(async () => invokedCommands(page))
+    .toContain("copy_text_to_clipboard");
+  await expect(key).toContainText("nsec1mock");
 
   // The primary action continues directly to setup.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
@@ -208,6 +215,27 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await expect(passwordPanel).toBeVisible();
   await expect(passwordPanel).not.toHaveClass(/buzz-card-textured/);
   await expect(passwordPanel).toHaveCSS("padding-left", "0px");
+  await expect(page.getByTestId("backup-password-timeline")).toHaveCount(0);
+  await expect(
+    passwordPanel.getByText("Password", { exact: true }),
+  ).toBeVisible();
+  const subtitle = page.getByText(
+    "This creates a password-protected file with your private key. Remember, Buzz can’t recover your key if you lose it.",
+  );
+  const passwordLabel = passwordPanel.getByText("Password", { exact: true });
+  const [subtitleBox, passwordLabelBox] = await Promise.all([
+    subtitle.boundingBox(),
+    passwordLabel.boundingBox(),
+  ]);
+  expect(subtitleBox).not.toBeNull();
+  expect(passwordLabelBox).not.toBeNull();
+  expect(
+    (passwordLabelBox?.y ?? 0) -
+      ((subtitleBox?.y ?? 0) + (subtitleBox?.height ?? 0)),
+  ).toBeLessThanOrEqual(96);
+  await expect(input).toHaveCSS("height", "48px");
+  await expect(input).toHaveCSS("text-align", "left");
+  await expect(input).toHaveCSS("background-color", "rgb(249, 249, 249)");
 
   // The inset refresh icon opens the generator popover and immediately
   // fills the field (mock default: 3 words, spaces).
@@ -250,9 +278,23 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   ).toBeVisible();
   const dropzone = page.getByTestId("backup-test-dropzone");
   await expect(dropzone).toBeVisible();
+  await expect(dropzone).toHaveText("Test your backup");
+  await expect(dropzone).toHaveClass(/w-full/);
+  const [dropzoneBox, backupPanelBox] = await Promise.all([
+    dropzone.boundingBox(),
+    passwordPanel.boundingBox(),
+  ]);
+  expect(dropzoneBox).not.toBeNull();
+  expect(backupPanelBox).not.toBeNull();
+  expect(dropzoneBox?.width ?? 0).toBeGreaterThanOrEqual(
+    (backupPanelBox?.width ?? 0) * 0.95,
+  );
   await expect(
-    page.getByRole("button", { name: "Re-download backup" }),
+    page.getByRole("button", { name: "Download backup again" }),
   ).toBeVisible();
+  await expect(page.getByTestId("encrypted-backup-save-copy")).toHaveClass(
+    /w-full/,
+  );
 
   // The optional security subview has no onboarding Next action. Returning to
   // the key-created view is the single exit throughout the ceremony.
@@ -309,9 +351,10 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/06-backup-test-success.png` });
 
-  // The encrypted backup path does not need to read the raw key into the DOM.
+  // The generated-key view reads the key once for its default display; the
+  // encrypted backup path still uses its dedicated native command.
   const commands = await invokedCommands(page);
-  expect(commands).not.toContain("get_nsec");
+  expect(commands).toContain("get_nsec");
   expect(commands).toContain("create_ncryptsec_backup");
 
   // Completion remains inside the optional security subview. Return to the
@@ -322,6 +365,38 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+});
+
+test("pending backup action collapses to an in-button loader", async ({
+  page,
+}) => {
+  await enterMachineBackup(page, { backupEncryptionDelayMs: 3_000 });
+  await openPasswordBackup(page);
+
+  await page
+    .getByTestId("backup-passphrase-input")
+    .fill("mock-horse-battery-staple");
+  const create = page.getByTestId("encrypted-backup-create");
+  const readyButtonBox = await create.boundingBox();
+  await create.click();
+
+  await expect(create).toHaveAttribute("aria-busy", "true");
+  await expect(create).toHaveAccessibleName("Encrypting your key");
+  await expect(create.getByTestId("encrypted-backup-encrypting")).toBeVisible();
+  const pendingButtonBox = await create.boundingBox();
+  if (!readyButtonBox || !pendingButtonBox) {
+    throw new Error("Could not measure the encrypted-backup action button");
+  }
+  expect(pendingButtonBox.height).toBeCloseTo(readyButtonBox.height, 0);
+  expect(pendingButtonBox.width).toBeCloseTo(pendingButtonBox.height, 0);
+  expect(pendingButtonBox.width).toBeLessThan(readyButtonBox.width);
+  await expect(
+    page.getByText("Encrypting your password", { exact: true }),
+  ).toHaveCount(0);
+
+  await expect(
+    page.getByRole("heading", { name: "Your backup is ready" }),
+  ).toBeVisible();
 });
 
 test("security view returns to the identity-key onboarding view", async ({
@@ -436,7 +511,7 @@ test("copy shows inline error when get_nsec fails and Next still advances", asyn
 
 test("Copy retries after an initial key read fails", async ({ page }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  // Explicit reveal fails first; explicit copy retries and succeeds.
+  // The default key read fails first; explicit copy retries and succeeds.
   await installMockBridge(
     page,
     { nsecErrors: ["Keychain locked", null] },
@@ -446,20 +521,18 @@ test("Copy retries after an initial key read fails", async ({ page }) => {
   await page.getByRole("button", { name: "Create a new identity key" }).click();
   await page.getByRole("button", { name: "Create my private key" }).click();
 
-  // Reveal consumes the first failure without exposing a secret.
-  await page.getByTestId("backup-reveal-key").click();
   await expect(page.getByTestId("backup-copy-error")).toBeVisible();
   await expect(page.getByTestId("backup-key-value")).not.toContainText(
     "nsec1mock",
   );
 
-  // Copy retries the read and clears the error without revealing the DOM value.
+  // Copy retries the read, clears the error, and restores the default visible
+  // key treatment.
+  await page.getByTestId("backup-key-well").hover();
   await page.getByTestId("backup-copy-key").click();
   await expect(page.getByTestId("backup-copy-key")).toContainText(
     "Copied to clipboard",
   );
-  await expect(page.getByTestId("backup-key-value")).not.toContainText(
-    "nsec1mock",
-  );
+  await expect(page.getByTestId("backup-key-value")).toContainText("nsec1mock");
   await expect(page.getByTestId("backup-copy-error")).not.toBeVisible();
 });

@@ -62,6 +62,32 @@ async function expectUsesFullCardWidth(element: Locator) {
   expect(geometry.elementWidth).toBeCloseTo(geometry.availableWidth, 0);
 }
 
+async function expectProfileFooterMatchesContentGutters(page: Page) {
+  const geometry = await page.evaluate(() => {
+    const input = document
+      .querySelector<HTMLElement>("#onboarding-display-name")
+      ?.getBoundingClientRect();
+    const back = document
+      .querySelector<HTMLElement>('[data-testid="onboarding-back"]')
+      ?.getBoundingClientRect();
+    const next = document
+      .querySelector<HTMLElement>('[data-testid="onboarding-next"]')
+      ?.getBoundingClientRect();
+    if (!input || !back || !next) {
+      throw new Error("Profile controls are missing");
+    }
+    return {
+      backLeft: back.left,
+      inputLeft: input.left,
+      inputRight: input.right,
+      nextRight: next.right,
+    };
+  });
+
+  expect(geometry.backLeft).toBeCloseTo(geometry.inputLeft, 0);
+  expect(geometry.nextRight).toBeCloseTo(geometry.inputRight, 0);
+}
+
 async function expectHorizontalCardTransition(
   page: Page,
   pageTestId: string,
@@ -330,21 +356,21 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02a-backup-option-hover.png` });
 
-  // Private-key text is masked by default; explicit reveal fetches it, and the
-  // existing hover/copy treatment remains operable afterward.
+  // The private key is visible by default. Hovering the key well blurs the
+  // value and reveals the copy action without changing the layout.
   const keyValue = page.getByTestId("backup-key-value");
+  const keyWell = page.getByTestId("backup-key-well");
   const copyButton = page.getByTestId("backup-copy-key");
-  const revealButton = page.getByTestId("backup-reveal-key");
   await expect(keyValue).toBeVisible();
-  await expect(keyValue).not.toContainText("nsec1mock");
-  await revealButton.click();
   await expect(keyValue).toContainText("nsec1mock");
-  await expect(revealButton).toHaveAttribute("aria-label", "Hide private key");
-  await expect(copyButton).toBeVisible();
+  await expect(keyValue).toHaveCSS("filter", "none");
+  await expect(copyButton).toHaveCSS("opacity", "0");
+  await keyWell.hover();
+  await expect(keyValue).toHaveCSS("filter", /blur\(4px\)/);
+  await expect(copyButton).toHaveCSS("opacity", "1");
   await expect(copyButton).toBeEnabled();
   await copyButton.click();
   await expect(copyButton).toContainText("Copied to clipboard");
-  await expect(keyValue).toHaveCSS("filter", "none");
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-hover.png` });
 
@@ -387,12 +413,8 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
     "onboarding-harness-method-subscription",
   );
   const apiMethod = page.getByTestId("onboarding-harness-method-api");
-  await expect(subscriptionMethod).toContainText(
-    "Simpler setup — use the harness and models included with your AI subscription",
-  );
-  await expect(apiMethod).toContainText(
-    "More flexibility — choose a compatible harness, provider, and model",
-  );
+  await expect(subscriptionMethod).toContainText("Log in with a subscription");
+  await expect(apiMethod).toContainText("Use an API key");
   await expect(subscriptionMethod).not.toHaveCSS(
     "background-color",
     "rgba(0, 0, 0, 0)",
@@ -607,6 +629,7 @@ test("identity-key help stays inside the onboarding card", async ({ page }) => {
 
   const help = page.getByTestId("identity-key-help-dialog");
   await expect(help).toBeVisible();
+  await expect(page.getByTestId("onboarding-step-dots")).toHaveCount(0);
   await expect(
     help.getByRole("heading", { name: "What’s an identity key?" }),
   ).toBeVisible();
@@ -630,10 +653,11 @@ test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
-  await expectSharedCardGeometry(page);
+  await expectSharedCardGeometry(page, 610);
   await expect(page.getByTestId("onboarding-back")).toBeVisible();
   await page.getByTestId("onboarding-display-name").fill("Ada Lovelace");
   await waitForAnimations(page);
+  await expectProfileFooterMatchesContentGutters(page);
   await page.screenshot({ path: `${SHOT_DIR}/04-profile.png` });
 
   await page.getByTestId("onboarding-next").click();

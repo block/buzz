@@ -26,6 +26,7 @@ export function OnboardingCard({
   backAction,
   children,
   current,
+  showStepIndicator = true,
   stableWideWidth = false,
   systemColorScheme,
   testId,
@@ -35,6 +36,7 @@ export function OnboardingCard({
   backAction?: OnboardingBackAction;
   children: React.ReactNode;
   current: number;
+  showStepIndicator?: boolean;
   /** Holds wide, mode-switching steps at the card's full width. */
   stableWideWidth?: boolean;
   systemColorScheme?: "dark" | "light";
@@ -51,7 +53,9 @@ export function OnboardingCard({
       data-testid={testId}
     >
       <StartupWindowDragRegion />
-      <OnboardingChrome current={current} total={total} />
+      {showStepIndicator ? (
+        <OnboardingChrome current={current} total={total} />
+      ) : null}
       <Card
         className={cn(
           "flex h-[min(41.5rem,calc(100dvh-3rem))] min-w-0 flex-col overflow-hidden rounded-[2rem] border-0 bg-white p-6 text-left shadow-lg min-[44rem]:p-12",
@@ -70,7 +74,11 @@ export function OnboardingCard({
         ref={cardRef}
       >
         <OnboardingCardLayoutContext.Provider value>
-          <OnboardingFooterProvider backAction={backAction} placement="card">
+          <OnboardingFooterProvider
+            backAction={backAction}
+            contentClassName={allowWideContent ? "max-w-full" : "max-w-[32rem]"}
+            placement="card"
+          >
             <div className="buzz-onboarding-step-frame relative -mx-6 flex min-h-0! w-[calc(100%+3rem)] flex-1 flex-col items-stretch overflow-x-hidden overflow-y-auto overscroll-contain px-6 text-left min-[44rem]:-mx-12 min-[44rem]:w-[calc(100%+6rem)] min-[44rem]:px-12">
               {children}
             </div>

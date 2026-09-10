@@ -360,32 +360,34 @@ export function ProfileStep({
           </Button>
         ) : null}
 
-        <div className="flex min-h-8 items-center gap-2">
-          <div className="flex-1" />
-          {saveRecovery.canSkipForNow ? (
-            <Button
-              className="text-muted-foreground hover:text-accent-foreground"
-              data-testid="onboarding-skip"
-              onClick={skipForNow}
-              type="button"
-              variant="ghost"
-            >
-              Skip for now
-            </Button>
-          ) : null}
-          {saveRecovery.canAdvanceWithoutSaving ? (
-            <Button
-              className="text-muted-foreground hover:text-accent-foreground"
-              data-testid="onboarding-next-without-saving"
-              onClick={advanceWithoutSaving}
-              type="button"
-              variant="ghost"
-            >
-              Continue without saving
-            </Button>
-          ) : null}
-          <div className="flex-1" />
-        </div>
+        {saveRecovery.canSkipForNow || saveRecovery.canAdvanceWithoutSaving ? (
+          <div className="flex min-h-8 items-center gap-2">
+            <div className="flex-1" />
+            {saveRecovery.canSkipForNow ? (
+              <Button
+                className="text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-skip"
+                onClick={skipForNow}
+                type="button"
+                variant="ghost"
+              >
+                Skip for now
+              </Button>
+            ) : null}
+            {saveRecovery.canAdvanceWithoutSaving ? (
+              <Button
+                className="text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-next-without-saving"
+                onClick={advanceWithoutSaving}
+                type="button"
+                variant="ghost"
+              >
+                Continue without saving
+              </Button>
+            ) : null}
+            <div className="flex-1" />
+          </div>
+        ) : null}
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );
