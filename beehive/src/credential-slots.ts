@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { initialState, loadSlotState, setupOwner, validateSetup, type Setup } from './host.ts';
+import { initialState, loadSlotState, setupOwner, validateSetup, bindingFingerprint, setupModels, type Setup } from './host.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 import { object, publicKey } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
@@ -46,6 +46,28 @@ export function credentialSlots(directory: string, backend: CredentialBackend = 
     const bindings = Object.fromEntries(Object.entries(manifest.setups).map(([id, harness]) => [id, validateSetup({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic, ...(secret ? { agentSecret: secret } : {}) })]));
     return { agent, path: journalPath(directory, agent), setupId: entry.setup, setup: bindings[entry.setup]!, bindings, keyPresent: present };
   });
+}
+
+/** Cancellation-fenced live hydration. Public input is rechecked after each read;
+ * no secret result can hydrate a changed manifest or bypass a removed key. */
+export async function credentialSlotsAsync(directory: string, backend: CredentialBackend, signal?: AbortSignal): Promise<SlotEntry[]> {
+  signal?.throwIfAborted();
+  const manifest = readManifest(directory);
+  const snapshot = JSON.stringify(manifest);
+  const secrets = new Map<string, string | null>();
+  for (const entry of Object.values(manifest.agents)) {
+    signal?.throwIfAborted();
+    const secret = backend.readAsync ? await backend.readAsync(entry.key, signal) : backend.read(entry.key);
+    signal?.throwIfAborted();
+    if (JSON.stringify(readManifest(directory)) !== snapshot) throw Error('Credential manifest changed during read');
+    if (secret !== null && publicKey(secret) !== entry.key.publicKey) throw Error('Credential identity mismatch');
+    secrets.set(entry.key.publicKey, secret);
+  }
+  // Reuse the normal validation/materialization without another native read.
+  return credentialSlots(directory, { read: ref => {
+    if (!secrets.has(ref.publicKey)) throw Error('Credential snapshot changed');
+    return secrets.get(ref.publicKey)!;
+  }, create() { throw Error('Read only'); }, remove() { throw Error('Read only'); } });
 }
 
 function locked<T>(directory: string, action: () => T): T {
@@ -95,5 +117,49 @@ export function importCredentialSlotKey(directory: string, agent: string, secret
     const state = loadSlotState({ ...manifest.setups[entry.setup]!, host: manifest.host, ownerPublic: manifest.ownerPublic }, journalPath(directory, agent), agent);
     if (state.phase !== 'stopped' || state.actual !== null) throw Error('Key import requires a stopped slot with no actual run');
     createCredential('agent', secret, backend);
+  });
+}
+
+/** Explicit same-identity recovery of an interrupted FIRST provision only. The
+ * complete inert genesis must match; active/public-only slots never enter here.
+ * No auto-adoption, key generation, overwriting or historical journal reset. */
+export function reconcileCredentialProvision(directory: string, setup: Setup, secret: string, root: Genesis, backend: CredentialBackend = systemCredentials): void {
+  if (setup.ownerSecret !== undefined || setup.agentSecret !== undefined) throw Error('Public provisioning setup required');
+  validateSetup(setup);
+  const agent = publicKey(secret), genesis = validateGenesis(root), ownerPublic = setupOwner(setup);
+  if (genesis.owner !== ownerPublic || genesis.agent !== agent) throw Error('Genesis ownership mismatch');
+  locked(directory, () => {
+    if (existsSync(manifestPath(directory))) throw Error('Active installation exists; use explicit retained-key import, never provision recovery');
+    const expected = initialState({ ...setup, agentSecret: secret }, genesis);
+    const actual = readPrivate(journalPath(directory, agent));
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) throw Error('Partial journal differs from exact inert genesis; refusing reset');
+    const key = credentialReference('agent', agent);
+    const existing = backend.read(key);
+    if (existing === null) createCredential('agent', secret, backend);
+    else if (readCredential(key, backend) !== secret) throw Error('Existing credential differs; refusing adoption');
+    // Recheck both stores before public activation. The journal is never rewritten.
+    if (readCredential(key, backend) !== secret || JSON.stringify(readPrivate(journalPath(directory, agent))) !== JSON.stringify(expected)) throw Error('Partial provision changed during reconciliation');
+    const { host, ownerSecret: _owner, ownerPublic: _public, agentSecret: _agent, ...harness } = setup;
+    writePrivate(manifestPath(directory), { version: 3, host, ownerPublic, setups: { default: harness }, agents: { [agent]: { key, setup: 'default' } } }, true);
+  });
+}
+
+/** Add an independent v3 identity to an existing immutable local binding. Failed
+ * prefixes retain an inert journal for explicit reconciliation, never overwrite. */
+export function addCredentialSlot(directory: string, secret: string, root: Genesis, setupId = 'default', expectedFingerprint: string | undefined, backend: CredentialBackend = systemCredentials): void {
+  locked(directory, () => {
+    const manifest = readManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
+    if (manifest.agents[agent] || Object.keys(manifest.agents).length >= 32) throw Error('Slot exists or installation full; retained keys require explicit import');
+    const harness = manifest.setups[setupId];
+    if (!harness) throw Error('Unknown host harness setup');
+    if (expectedFingerprint !== undefined && bindingFingerprint({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');
+    if (genesis.agent !== agent || genesis.owner !== manifest.ownerPublic) throw Error('Genesis ownership mismatch');
+    const setup = validateSetup({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic, agentSecret: secret });
+    if (!setupModels(setup).length) throw Error('Diagnostic-only binding cannot enroll an executable agent');
+    if (existsSync(journalPath(directory, agent))) throw Error('Partial slot requires explicit reconciliation; refusing reset');
+    writePrivate(journalPath(directory, agent), initialState(setup, genesis), true);
+    const key = createCredential('agent', secret, backend);
+    manifest.agents[agent] = { key, setup: setupId };
+    writePrivate(manifestPath(directory), manifest);
   });
 }

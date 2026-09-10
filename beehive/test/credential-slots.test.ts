@@ -71,3 +71,31 @@ test('public owner validation rejects absent and conflicting identity', () => {
   assert.throws(() => setupOwner({ ownerPublic: 'bad' }), /Invalid/);
   assert.throws(() => setupOwner({ ownerPublic: publicKey(newKey()), ownerSecret: owner }), /Conflicting/);
 });
+
+test('explicit exact first-provision recovery verifies orphan key; v3 additions preserve siblings and standby genesis', async () => {
+  const { reconcileCredentialProvision } = await import('../src/credential-slots.ts');
+  const { addSlot } = await import('../src/slots.ts');
+  for (const failure of ['before-store', 'after-store'] as const) {
+    const f = fixture();
+    try {
+      assert.throws(() => provisionCredentialSlot(f.directory, f.setup, f.secret, f.genesis, {
+        ...f.backend, create(ref, secret) { if (failure === 'after-store') f.backend.create(ref, secret); throw Error('injected store boundary'); },
+      }), /injected/);
+      const path = join(f.directory, 'agents', f.agent, 'journal.json'), journal = readFileSync(path, 'utf8');
+      assert.throws(() => reconcileCredentialProvision(f.directory, f.setup, newKey(), f.genesis, f.backend), /mismatch/);
+      reconcileCredentialProvision(f.directory, f.setup, f.secret, f.genesis, f.backend);
+      assert.equal(readFileSync(path, 'utf8'), journal);
+      const second = newKey(), key = publicKey(second), root = createGenesis(publicKey(f.owner), key, 'another-host');
+      addSlot(f.directory, second, root, 'default', undefined, f.backend);
+      assert.equal(installationSlots(f.directory, f.backend).length, 2);
+      assert.equal((readPrivate(join(f.directory, 'agents', key, 'journal.json')) as any).assignment.assignedHost, 'another-host');
+      assert.equal(readFileSync(path, 'utf8'), journal);
+      const manifest = readFileSync(join(f.directory, 'setup.json'), 'utf8');
+      for (const secret of [f.secret, f.owner, second]) assert.ok(!manifest.includes(secret));
+      removeSlotKey(f.directory, f.agent, f.backend);
+      assert.throws(() => reconcileCredentialProvision(f.directory, f.setup, f.secret, f.genesis, f.backend), /Active installation/);
+      assert.throws(() => addSlot(f.directory, f.secret, f.genesis, 'default', undefined, f.backend), /Slot exists/);
+      assert.equal(installationSlots(f.directory, f.backend).find(s => s.agent === f.agent)!.keyPresent, false);
+    } finally { rmSync(f.directory, { recursive: true, force: true }); }
+  }
+});

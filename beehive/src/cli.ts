@@ -1,4 +1,4 @@
-import { provisionCredentialSlot } from './credential-slots.ts';
+import { provisionCredentialSlot, reconcileCredentialProvision } from './credential-slots.ts';
 import { readHostIdentity } from './host-identity.ts';
 import { verifyHostRegistration } from './host-registration.ts';
 import { setupOwner } from './host.ts';
@@ -35,6 +35,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   setup <host-directory>                     Offline host pairing/owner approval/import
   setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
   provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
+  reconcile-provision <host-directory> <binding-file> <genesis-file> Explicit exact first-provision recovery
   catalog <new-file> <registration-files...> Retain verified public host registrations
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
@@ -55,7 +56,7 @@ Move is fixture-only experimental; containment acceptance remains gated. No prov
 async function main() {
   if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
-  } else if (command === 'provision-agent') {
+  } else if (command === 'provision-agent' || command === 'reconcile-provision') {
     const directory = resolve(text(args[0]));
     const identity = readHostIdentity(directory);
     verifyHostRegistration(identity.registration, identity.pairing);
@@ -64,7 +65,8 @@ async function main() {
     const setup = validateSetup({ ...binding, host: identity.pairing.host, ownerPublic: identity.pairing.owner });
     const genesis = validateGenesis(readPrivate(resolve(text(args[2]))));
     const secret = await readAgentSecret();
-    provisionCredentialSlot(directory, setup, secret, genesis);
+    if (command === 'reconcile-provision') reconcileCredentialProvision(directory, setup, secret, genesis);
+    else provisionCredentialSlot(directory, setup, secret, genesis);
     console.log(`Provisioned STOPPED public slot ${publicKey(secret)}; owner ${identity.pairing.owner}. Key stored and read-back verified in Beehive OS credential namespace. No Start or relay admission performed.`);
   } else if (command === 'presets') {
     showPresets();
@@ -155,6 +157,23 @@ async function main() {
     } finally { ui.close(); }
   } else if (command === 'add-agent') {
     const dir = resolve(text(args[0]));
+    if (object(readPrivate(join(dir, 'setup.json'))).version === 3) {
+      if (args.length > 2) throw Error('V3 add-agent accepts only an optional public genesis file; never a private key file');
+      // Public-only overview: adding an independent identity does not read sibling keys.
+      const first = installationSlots(dir, { read: () => null, create() { throw Error('Read only'); }, remove() { throw Error('Read only'); } })[0]!.setup;
+      const importedRoot = args[1] ? validateGenesis(readPrivate(resolve(text(args[1])))) : undefined;
+      if (importedRoot && (importedRoot.owner !== setupOwner(first) || importedRoot.initialHost === first.host)) throw Error('Standby requires matching owner and another initial host');
+      const ui = createInterface({ input: stdin, output: stdout });
+      let confirmed: boolean;
+      try { confirmed = await ui.question(importedRoot ? `Import exact standby ${importedRoot.agent}, still assigned to ${importedRoot.initialHost}? [yes/no]: ` : 'Create an independent NEW v3 agent using OS credentials and default binding? [yes/no]: ') === 'yes'; }
+      finally { ui.close(); }
+      if (!confirmed) return;
+      const secret = importedRoot ? await readAgentSecret() : newKey();
+      const root = importedRoot ?? createGenesis(setupOwner(first), publicKey(secret), first.host);
+      addSlot(dir, secret, root);
+      console.log(`Added STOPPED public slot ${publicKey(secret)}; credential read-back verified; no relay admission or Start.`);
+      return;
+    }
     const first = installationSlots(dir)[0]!.setup;
     const importing = args.length > 1;
     const secret = importing ? text(object(readPrivate(resolve(text(args[1])))).secret) : newKey();

@@ -10,6 +10,8 @@ export type CredentialReference = { service: 'beehive'; role: 'host' | 'agent' |
  */
 export interface CredentialBackend {
   read(reference: CredentialReference): string | null;
+  /** Live-host reads must honor cancellation and await owned cleanup. */
+  readAsync?(reference: CredentialReference, signal?: AbortSignal): Promise<string | null>;
   create(reference: CredentialReference, secret: string): void;
   remove(reference: CredentialReference): void;
 }

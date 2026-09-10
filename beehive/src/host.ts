@@ -10,7 +10,7 @@ import { accessSync, constants, existsSync, mkdirSync, rmdirSync, realpathSync, 
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { hash, semanticHash, selection, sameSelection, sameLaunchSelection, moveSelection, validateAssignment, extendsAssignment, type Assignment, type Grant } from './handoff.ts';
-import { installationSlots } from './slots.ts';
+import { installationSlotsAsync } from './slots.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 import { connect, validateRelayURL } from './client.ts';
 import { digest, fields, message, object, publicKey, text, type Message } from './protocol.ts';
@@ -115,7 +115,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string) => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -151,6 +151,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     });
   }
   let closing = false;
+  let credentialRead: AbortController | undefined;
   let queue = Promise.resolve();
   // Exact-fenced Stop retractions received ahead of their serialized handling, keyed
   // by that Stop's operation ID. One invariant covers every not-yet-committed Start
@@ -172,6 +173,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     // Reserve receive order too: a conflicting queued ID is not a Stop authority.
     if (first && !closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && state.assignment.assignedHost === setup.host && m.revision === state.revision && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) {
       retracted.set(m.id,m.revision);
+      credentialRead?.abort();
       restartProbe?.cancel();
       // Only an executing admission has a session to interrupt; queued admissions
       // and the pre-commit recheck consume the retraction inside handle().
@@ -208,7 +210,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     const { id } = resolveBinding(selected);
     if (!['rename', 'remove'].includes(String(body.configurationAction)) && retiredBindings[id]) throw Error('Binding retired; explicitly select an available binding');
   }
-  function prepareLocal(selected: Selection) {
+  async function prepareLocal(selected: Selection) {
     selected = selection(selected);
     const { setup, id } = resolveBinding(selected);
     if (retiredBindings[id]) throw Error('Binding retired; Start/Restart unavailable');
@@ -216,9 +218,15 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     // The optional execution credential is absent for a public-only slot: reject before
     // any spawn or source effect. The secret is never regenerated or inferred.
     if (executionSecret === undefined) throw Error('Local agent key removed; this public slot cannot launch; repair locally without resetting assignment');
+    const revision = state.revision, assignment = hash(state.assignment), selectionBefore = hash(state.selected);
+    if (closing || retracting(revision)) throw Error('Credential admission cancelled');
+    const controller = new AbortController(); credentialRead = controller;
     try {
-      if (semanticHash(currentSetup(id)) !== semanticHash(setup)) throw Error('changed');
-    } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
+      const fresh = await currentSetup(id, controller.signal);
+      controller.signal.throwIfAborted();
+      if (closing || retracting(revision) || state.revision !== revision || hash(state.assignment) !== assignment || hash(state.selected) !== selectionBefore) throw Error('Credential admission invalidated');
+      if (semanticHash(fresh) !== semanticHash(setup)) throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment');
+    } finally { if (credentialRead === controller) credentialRead = undefined; }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
     const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
@@ -284,14 +292,15 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           // Grant-acceptance evidence is immutable, even after restart. Replayed
           // prepare cannot replace the token already consumed by the source.
           if (!livePreparations.has(op.id)) throw Error('Preparation lifetime ended; use a new Move operation');
-          if (prepareLocal(g.selection).token !== prior.token) throw Error('Prepared inputs changed');
+          if ((await prepareLocal(g.selection)).token !== prior.token || closing || retracting(state.revision)) throw Error('Prepared inputs changed');
           publish(prior.reply); return;
         }
         if (!prior && !sameLaunchSelection(op.body.selection, state.selected)) throw Error('Destination candidate changed');
         if (!prior && Object.keys(state.preparations ?? {}).length >= 1000) throw Error('Preparation journal full; local reconciliation needed');
         preparationStage = 'checking-local-prerequisites; not conversation readiness'; publish(inventory());
         materializeMove(state.configurations, state.selected, g.selection); // Bound inventory before source can consume.
-        const prepared = prepareLocal(g.selection);
+        const prepared = await prepareLocal(g.selection);
+        if (closing || retracting(state.revision)) throw Error('Credential admission cancelled');
         // Independent, identity-free prerequisite probe. It receives neither agent
         // signer nor conversation relay/tool configuration. A successful probe is
         // NOT readiness for the future conversation, which must be verified afresh.
@@ -310,7 +319,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           }
           if (!probe.healthy) throw Error('ACP prerequisite invalidated during teardown');
         }
-        if (closing || prepareLocal(g.selection).token !== prepared.token) throw Error('Preparation changed or host closing');
+        if ((await prepareLocal(g.selection)).token !== prepared.token || closing || retracting(state.revision)) throw Error('Preparation changed or host closing');
         const token = prepared.token;
         const reply = message('prepared', op.host, agent, op.revision, { prepare: m, token, materialization: g.materialization });
         state.preparations ??= {}; state.preparations[op.id] = { request: m, token, reply, candidate: structuredClone(state.selected), ...(g.selection.configuration ? { reservedRevision: g.selection.configuration.revision } : {}) };
@@ -371,7 +380,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
         let outcome: unknown;
         try {
           if (candidateChanged) throw Error('Destination candidate changed after preparation; assigned here, stopped; selected-next preserved');
-          if (!livePreparations.has(g.operation.id) || prepareLocal(g.selection).token !== g.prepared) throw Error('Destination preparation invalidated; assigned here, stopped; repair local setup/key/auth then explicit Start');
+          if (!livePreparations.has(g.operation.id) || (await prepareLocal(g.selection)).token !== g.prepared || closing || retracting(state.revision)) throw Error('Destination preparation invalidated; assigned here, stopped; repair local setup/key/auth then explicit Start');
           const start = message('start', setup.host, agent, state.revision); start.id = g.operation.id;
           await handle(start);
           outcome = state.operations[start.id]?.reply.body.result;
@@ -445,7 +454,8 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
           const phaseBeforePreparation = state.phase;
           const selected = structuredClone(state.selected);
-          const prepared = prepareLocal(selected);
+          const prepared = await prepareLocal(selected);
+          if (closing || retracting(m.revision)) throw Error('Start cancelled by concurrent Stop or close');
           const { launch, setup } = prepared;
           if (m.type === 'restart') {
             // Prerequisites are checked without replacing the old ownership handle
@@ -461,13 +471,13 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
             }
             if (closing || retracting(m.revision)) throw Error('Restart cancelled by Stop or host close');
             if (state.phase !== phaseBeforePreparation) throw Error('Restart ownership changed during preflight; reconcile before launch');
-            if (prepareLocal(selected).token !== prepared.token) throw Error('Restart prepared inputs changed; existing run preserved');
+            if ((await prepareLocal(selected)).token !== prepared.token || closing || retracting(m.revision)) throw Error('Restart prepared inputs changed; existing run preserved');
             if (state.phase === 'running') {
               state.phase = 'transitioning'; save(); await stopOwned();
               state.phase = 'stopped'; state.actual = null; save();
             }
             if (closing || retracting(m.revision)) throw Error('Restart cancelled after Stop');
-            if (prepareLocal(selected).token !== prepared.token) throw Error('Restart prepared inputs changed after Stop; assigned stopped');
+            if ((await prepareLocal(selected)).token !== prepared.token || closing || retracting(m.revision)) throw Error('Restart prepared inputs changed after Stop; assigned stopped');
           }
           state.actual = { selection: selected, harnessSetup: prepared.harnessSetup, preparedInputHash: prepared.token, appliedInstructions: { source: selected.behavior ? 'profile' : 'upstream-default', revision: selected.behavior?.revision ?? null, hash: selected.behavior ? digest(selected.behavior.instructions).toString('hex') : null }, executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
           state.phase = 'transitioning'; save();
@@ -530,7 +540,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     publish(inventory());
   }, async close() {
     if (closing) return; closing = true;
-    restartProbe?.cancel(); acp?.cancel(); await queue;
+    credentialRead?.abort(); restartProbe?.cancel(); acp?.cancel(); await queue;
     if (restartProbe) { await restartProbe.owned.stop(); restartProbe = undefined; }
     if (owned) {
       state.phase = 'transitioning'; save();
@@ -564,13 +574,15 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
   })();
   // Abort uses the same owner as ready shutdown, including quarantine fences.
   const abort = () => { void close().catch(() => {}); };
-  signal?.addEventListener('abort', abort, { once: true });
   try {
-    const entries = installationSlots(directory, credentials);
+    const entries = await installationSlotsAsync(directory, credentials, signal);
+    signal?.throwIfAborted();
+    signal?.addEventListener('abort', abort, { once: true });
     for (const entry of entries) {
       if (transport && (entry.setup.host !== transport.binding.host || setupOwner(entry.setup) !== transport.binding.owner)) throw Error('Private transport differs from retained host/agent authority');
-      slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, (id) => {
-        const current = installationSlots(directory, credentials).find(e => e.agent === entry.agent);
+      slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, async (id, readSignal) => {
+        const current = (await installationSlotsAsync(directory, credentials, readSignal)).find(e => e.agent === entry.agent);
+        readSignal.throwIfAborted();
         if (!current) throw Error('Key removed');
         const value = current.bindings[id];
         if (!value) throw Error('Binding removed');

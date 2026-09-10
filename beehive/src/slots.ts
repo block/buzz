@@ -1,4 +1,4 @@
-import { credentialSlots, removeCredentialSlotKey, importCredentialSlotKey } from './credential-slots.ts';
+import { credentialSlots, credentialSlotsAsync, addCredentialSlot, removeCredentialSlotKey, importCredentialSlotKey } from './credential-slots.ts';
 import { systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { setupOwner } from './host.ts';
 import { prepareAgent } from './acp.ts';
@@ -58,6 +58,13 @@ function readInstallation(directory: string): Installation {
   }
   return i;
 }
+/** Live-host loading never performs synchronous native credential reads. */
+export async function installationSlotsAsync(directory: string, backend: CredentialBackend, signal?: AbortSignal): Promise<SlotEntry[]> {
+  signal?.throwIfAborted();
+  const raw = object(readPrivate(join(directory, 'setup.json')));
+  if (raw.version === 3) return credentialSlotsAsync(directory, backend, signal);
+  return installationSlots(directory, backend);
+}
 /** Resolve shared local harness inventory without copying agent keys into setups. */
 export function installationSlots(directory: string, backend: CredentialBackend = systemCredentials): SlotEntry[] {
   const raw = object(readPrivate(join(directory, 'setup.json')));
@@ -96,7 +103,8 @@ export function migrateSlots(directory: string): void {
   } finally { rmdirSync(lock); }
 }
 /** Local key enrollment reuses a host-owned harness, never another agent's key. */
-export function addSlot(directory: string, secret: string, genesis: Genesis, setupName = 'default', expectedFingerprint?: string): void {
+export function addSlot(directory: string, secret: string, genesis: Genesis, setupName = 'default', expectedFingerprint?: string, backend: CredentialBackend = systemCredentials): void {
+  if (object(readPrivate(join(directory, 'setup.json'))).version === 3) return addCredentialSlot(directory, secret, genesis, setupName, expectedFingerprint, backend);
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
     const i = readInstallation(directory); const key = publicKey(secret);

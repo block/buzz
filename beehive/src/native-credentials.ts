@@ -29,6 +29,7 @@ export function nativeCredentials(load: () => EntryConstructor = loadNativeEntry
     }
   }
   return {
+    async readAsync() { throw Error('OS live-host credential access requires explicit owner-present approval and cancellation review; no automatic OS access'); },
     read: reference => operation(() => entry(reference).getPassword()),
     create: (reference, secret) => operation(() => {
       const item = entry(reference);
