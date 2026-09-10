@@ -1,4 +1,4 @@
-import { buzzProviderInput } from './buzz-provider.ts';
+import { buzzProviderInput, databricksOAuthGuidance } from './buzz-provider.ts';
 import { customBindingInput } from './custom-input.ts';
 import { showPresets } from './presets.ts';
 import { codexGuidance } from './codex.ts';
@@ -110,6 +110,7 @@ export async function localSetup(directory: string): Promise<void> {
       const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
       const serviceHome = realpathSync(text(await ui.question('Existing dedicated Buzz Agent service HOME: ')));
       const configDirectory = realpathSync(text(await ui.question('Existing dedicated Buzz Agent config directory: ')));
+      if (buzzProvider.auth === 'external-oauth') console.log(databricksOAuthGuidance(runner, serviceHome, configDirectory, buzzProvider.baseUrl));
       if (await ui.question('Save NEW Buzz Agent binding only (no identity/selection/restart)? [yes/no]: ') !== 'yes') return;
       addHarnessBinding(directory, nextId, { mode: 'buzz-agent-api-key', runner, args: [], workspace, allowedWorkspaces: [workspace], serviceHome, configDirectory, buzzProvider, ...(setup.conversation ? { conversation: setup.conversation } : {}) }, { id, fingerprint });
       console.log(`Buzz Agent binding ${nextId} saved; identity/key/history unchanged. Select remotely then explicit Start/Restart. Authentication unverified.`);

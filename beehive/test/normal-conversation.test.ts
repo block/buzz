@@ -20,10 +20,13 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-compat', 'openrouter']) for (const converting of (['custom', 'anthropic', 'openai-compat', 'openrouter'].includes(kind) ? [false] : [false, true])) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async t => {
+for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-compat', 'openrouter', 'databricks_v2', 'databricks-oauth']) for (const converting of (['custom', 'anthropic', 'openai-compat', 'databricks_v2', 'databricks-oauth'].includes(kind) ? [false] : [false, true])) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async t => {
   const custom = kind === 'custom', goose = kind === 'goose' || custom, claude = kind === 'claude', codex = kind === 'codex';
-  const buzz = ['anthropic', 'openai-compat', 'openrouter'].includes(kind);
-  const keyName = kind === 'anthropic' ? 'ANTHROPIC_API_KEY' : kind === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
+  const databricks = kind.startsWith('databricks'), oauth = kind === 'databricks-oauth';
+  const buzz = databricks || ['anthropic', 'openai-compat', 'openrouter'].includes(kind);
+  const provider = databricks ? 'databricks_v2' : kind;
+  const endpoint = databricks ? 'https://databricks.fixture.invalid' : `https://${kind}.fixture.invalid/v1`;
+  const keyName = databricks ? 'DATABRICKS_TOKEN' : kind === 'anthropic' ? 'ANTHROPIC_API_KEY' : kind === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
   const title = codex ? 'Codex' : 'Claude';
   const model = goose ? 'goose-model-a' : `${kind}-model-a`;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
@@ -33,6 +36,8 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
   writePrivate(identity, { secret: ownerSecret });
   const keyFile = join(dir, 'claude-key');
   writeFileSync(keyFile, `fixture-${buzz ? kind : codex ? 'codex' : 'claude'}-private-key`, { mode: 0o600 });
+  const initialKey = join(dir, 'initial-anthropic-key');
+  if (buzz && converting) writeFileSync(initialKey, 'fixture-anthropic-private-key', { mode: 0o600 });
   const runner = join(dir, codex ? 'codex-acp' : claude ? 'claude-agent-acp' : 'goose');
   writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (${!goose ? 'process.argv.length !== 2' : "process.argv[2] !== 'acp'"}) throw Error('adapter argv mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
   const customFile = join(dir, 'custom.json');
@@ -55,9 +60,10 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       { prompt: `Operator-approved compatible exact ${title} model IDs`, answer: model },
     ] : []),
     ...(buzz ? [
-      { prompt: 'Buzz Agent provider [', answer: kind },
-      { prompt: `Absolute owner-only local ${keyName} file`, answer: keyFile },
-      { prompt: 'Provider HTTPS base URL', answer: `https://${kind}.fixture.invalid/v1` },
+      { prompt: 'Buzz Agent provider [', answer: converting ? 'anthropic' : provider },
+      ...(databricks ? [{ prompt: 'Databricks authentication [', answer: oauth ? 'external-oauth' : 'token' }] : []),
+      ...(!oauth ? [{ prompt: `Absolute owner-only local ${converting ? 'ANTHROPIC_API_KEY' : keyName} file`, answer: converting ? initialKey : keyFile }] : []),
+      { prompt: 'Provider HTTPS base URL', answer: converting ? 'https://anthropic.fixture.invalid/v1' : endpoint },
       ...(kind === 'openai-compat' ? [{ prompt: 'OpenAI-compatible wire [', answer: 'responses' }] : []),
       { prompt: 'Operator-approved compatible exact Buzz Agent model IDs', answer: model },
     ] : []),
@@ -75,6 +81,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     { prompt: 'Add another independent NEW agent', answer: 'yes' },
     { prompt: 'Add another independent NEW agent', answer: 'no' },
   ]);
+  if (oauth) { assert.match(setupOutput, /credentials UNCHECKED, readiness UNVERIFIED/); assert.match(setupOutput, /auth databricks_v2/); }
   const entry = installationSlots(installation)[0]!;
   const agent = entry.agent;
   if (!converting) assert.ok(entry.setup.conversation?.replyTool, 'normal wizard provisions conversation and tool without manual conversion');
@@ -83,21 +90,28 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
   const originalY = readFileSync(sibling.path);
   const originalA = structuredClone(entry.bindings.default);
   if (converting) await terminal(['local-setup', installation], [
-    { prompt: 'Local action [', answer: codex ? 'add-codex' : claude ? 'add-claude' : 'add-goose' },
+    { prompt: 'Local action [', answer: buzz ? 'add-buzz-provider' : codex ? 'add-codex' : claude ? 'add-claude' : 'add-goose' },
     { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
-    { prompt: !goose ? `NEW immutable ${title} binding ID: ` : 'NEW immutable Goose binding ID: ', answer: 'B' },
+    { prompt: buzz ? 'NEW immutable Buzz Agent binding ID: ' : !goose ? `NEW immutable ${title} binding ID: ` : 'NEW immutable Goose binding ID: ', answer: 'B' },
     { prompt: buzz ? 'Absolute installed buzz-agent executable: ' : codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
     ...(!goose && !buzz ? [
       { prompt: `Absolute installed ${kind} CLI: `, answer: realpathSync(process.execPath) },
       { prompt: `Absolute owner-only local ${codex ? 'OPENAI' : 'ANTHROPIC'}_API_KEY file`, answer: keyFile },
       { prompt: `Operator-approved compatible exact ${title} model IDs`, answer: model },
     ] : []),
+    ...(buzz ? [
+      { prompt: 'Buzz Agent provider [', answer: provider },
+      { prompt: `Absolute owner-only local ${keyName} file`, answer: keyFile },
+      { prompt: 'Provider HTTPS base URL', answer: endpoint },
+      { prompt: 'Operator-approved compatible exact Buzz Agent model IDs', answer: model },
+    ] : []),
     { prompt: 'Allowed workspace (absolute directory): ', answer: dir },
-    { prompt: !goose ? `Existing dedicated ${title} service HOME` : 'Existing dedicated service HOME', answer: entry.setup.serviceHome! },
+    { prompt: buzz ? 'Existing dedicated Buzz Agent service HOME' : !goose ? `Existing dedicated ${title} service HOME` : 'Existing dedicated service HOME', answer: entry.setup.serviceHome! },
     ...(goose ? [{ prompt: 'Locally configured Goose provider ID: ', answer: 'fixture-provider' },
     { prompt: 'Operator-approved compatible exact model IDs', answer: 'goose-model-a' }] : []),
     ...(codex ? [{ prompt: 'Existing dedicated CODEX_HOME', answer: entry.setup.configDirectory! }] : []),
-    { prompt: !goose ? `Save NEW ${title} binding only` : 'Save NEW Goose binding only', answer: 'yes' },
+    ...(buzz ? [{ prompt: 'Existing dedicated Buzz Agent config directory', answer: entry.setup.configDirectory! }] : []),
+    { prompt: buzz ? 'Save NEW Buzz Agent binding only' : !goose ? `Save NEW ${title} binding only` : 'Save NEW Goose binding only', answer: 'yes' },
   ]);
   assert.ok(!setupOutput.includes(ownerSecret));
   if (custom) { assert.ok(!setupOutput.includes('owner-only-custom-value')); assert.ok(!setupOutput.includes(literal)); }
@@ -285,7 +299,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     }
     if (buzz) {
       assert.ok(existsSync(join(dir, `${kind}-env-checked`)), 'distinct Buzz provider env contract');
-      for (const value of [`fixture-${kind}-private-key`, keyFile, entry.setup.serviceHome!, `https://${kind}.fixture.invalid/v1`]) assert.ok(!JSON.stringify(inventory).includes(value), 'Buzz provider private input never advertised');
+      for (const value of [`fixture-${kind}-private-key`, keyFile, entry.setup.serviceHome!, endpoint]) assert.ok(!JSON.stringify(inventory).includes(value), 'Buzz provider private input never advertised');
       assert.ok(!setupOutput.includes(`fixture-${kind}-private-key`));
     }
     if (!goose && !buzz) {
@@ -355,19 +369,19 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       assert.notEqual((await request(rejected)).body.result, 'accepted');
       assert.deepEqual(state().actual, actual, 'wrong model preflight preserves actual');
       if (!goose || custom) {
-        for (const failure of ['missing-native', ...(!custom ? ['auth-rejected'] : ['missing-profile']), ...(codex ? ['wrong-protocol', 'missing-model'] : [])]) {
+        for (const failure of ['missing-native', ...(!custom ? ['auth-rejected'] : ['missing-profile']), ...(oauth ? ['missing-refresh'] : []), ...(codex ? ['wrong-protocol', 'missing-model'] : [])]) {
           writeFileSync(join(dir, 'mode'), failure);
           assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
           assert.deepEqual(state().actual, actual);
         }
       }
-      if (buzz) {
+      if (buzz && !oauth) {
         writeFileSync(join(dir, 'mode'), 'ok');
         writeFileSync(keyFile, 'wrong-fixture-credential');
         assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
         assert.deepEqual(state().actual, actual, 'wrong private credential preserves actual');
       }
-      if (!goose) {
+      if (!goose && !oauth) {
         rmSync(keyFile);
         const failedAuth = await request(message('restart', 'journey', agent, state().revision, {}));
         assert.match(String(failedAuth.body.result), new RegExp(`${buzz ? 'Buzz Agent' : title} API key prerequisite`));

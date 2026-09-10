@@ -34,3 +34,20 @@ for (const provider of ['anthropic', 'openai-compat', 'openrouter'] as const) te
   rmSync(apiKeyFile); assert.throws(() => prepareAgent(launch), /API key prerequisite/);
   assert.doesNotThrow(() => validateBuzzProvider(binding), 'offline setup never reads credentials');
 });
+
+for (const auth of ['token', 'external-oauth'] as const) test(`Databricks v2 ${auth}: local config is not native authentication`, t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-databricks-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const apiKeyFile = join(dir, 'token'); writeFileSync(apiKeyFile, 'fixture-only-token', { mode: 0o600 });
+  const binding: BuzzProvider = { provider: 'databricks_v2', auth, baseUrl: 'https://workspace.fixture.invalid/', models: ['databricks-claude-haiku-4-5'], ...(auth === 'token' ? { apiKeyFile } : {}) };
+  const launch = { executable: realpathSync(process.execPath), args: [], workspace: dir, home: dir, configDirectory: dir, databricksHost: '', buzzProvider: binding, model: binding.models[0]! };
+  assert.deepEqual(prepareAgent(launch).env, { PATH: '/usr/bin:/bin', HOME: dir, BUZZ_AGENT_CONFIG_DIR: dir, BUZZ_AGENT_PROVIDER: 'databricks_v2', BUZZ_AGENT_MODEL: binding.models[0], DATABRICKS_HOST: 'https://workspace.fixture.invalid', ...(auth === 'token' ? { DATABRICKS_TOKEN: 'fixture-only-token' } : {}) });
+  for (const baseUrl of ['http://workspace.invalid', 'https://workspace.invalid/serving-endpoints/model', 'https://workspace.invalid:444', 'https://user:pass@workspace.invalid', 'https://workspace.invalid/?o=123', 'https://workspace.invalid/#model']) assert.throws(() => validateBuzzProvider({ ...binding, baseUrl }));
+  assert.throws(() => validateBuzzProvider({ ...binding, auth: undefined }));
+  assert.throws(() => validateBuzzProvider({ ...binding, wire: 'chat' }));
+  assert.throws(() => validateBuzzProvider({ ...binding, auth: 'external-oauth', apiKeyFile }));
+  assert.throws(() => prepareAgent({ ...launch, model: 'not-approved' }));
+  rmSync(apiKeyFile);
+  if (auth === 'token') assert.throws(() => prepareAgent(launch), /API key prerequisite/);
+  else assert.doesNotThrow(() => prepareAgent(launch), 'external OAuth does not inspect credential/cache files, including absent refresh stores');
+});

@@ -2094,3 +2094,33 @@ UNRESOLVED independently. Next step: consume captured failure at actual owners,
 not retry-to-green. Three API-key providers delivered, Databricks token/richer OAuth
 and executed new local-add/conversion journeys remain incomplete. Mesh/compute,
 live admission and real vendor inference separate. This follow-up is docs-only.
+
+## Databricks bfce — executable checkpoint before final gate
+
+Shared normal option 8 and immutable local add-buzz-provider now accept
+Databricks v2 static owner-only token file or explicit external native OAuth.
+Pinned 051c3a2 config.rs:675–680 maps DATABRICKS_TOKEN/DATABRICKS_HOST with
+BUZZ_AGENT_PROVIDER=databricks_v2 and BUZZ_AGENT_MODEL override. External OAuth
+sets no token, inspects no cache, and prints exact service HOME/config-dir native
+`auth databricks_v2` instructions (lib.rs:151–200/auth.rs:1287–1392). Local
+configuration, credential presence and genuinely verified readiness remain distinct.
+Serialized historical mode name buzz-agent-api-key is retained for compatibility;
+it now contains explicit provider-specific auth, not a universal auth registry.
+Legacy option 2 remains compatible; new explicit auth selection uses option 8.
+
+Focused installed helper passes 3/3: token normal, external-OAuth-config fixture
+normal, and diagnostic Anthropic initial -> local-add OpenRouter B -> public
+selection -> stopped diagnostic-to-normal immutable conversion/replacement ->
+public selection/Start/Restart. Each verifies real installed buzz-acp/Buzz CLI
+four signed same-key replies across channels/later turn, exact fresh model/profile,
+unchanged history/sibling, failed prerequisites preserving actual and neutral Stop.
+OAuth success is TS fixture behavior only, with denied and missing-refresh fixture
+controls: NOT a native login/refresh/provider-access claim. Custom conversion and
+Databricks local-add/conversion remain source-only. Strict + provider units 5/5.
+
+Before final default full gate, fixture-activated existing trace gains post-operation
+JSON/UTF8/write/open/close/rename/mkdir spans and process CPU; existing fsync trace
+preserved. Trace row emission measured separately. CPU/wall gaps cannot establish
+kernel service or fully measure all instrumentation/descheduling overhead. No
+payloads, async durability redesign, policy/deadline/assertion changes or blind run.
+Evidence: WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/DATABRICKS_BFCE. Final full not yet run.

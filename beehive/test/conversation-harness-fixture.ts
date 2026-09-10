@@ -14,6 +14,12 @@ if (['anthropic', 'openai-compat', 'openrouter'].includes(buzzProvider ?? '')) {
   for (const other of ['ANTHROPIC_API_KEY', 'OPENAI_COMPAT_API_KEY', 'OPENROUTER_API_KEY']) if (other !== key && process.env[other]) throw Error('Mixed provider credentials');
   writeFileSync(`${p}-env-checked`, 'closed provider-specific contract');
 }
+const databricksFixture = buzzProvider === 'databricks_v2' && process.env.DATABRICKS_HOST === 'https://databricks.fixture.invalid';
+const databricksKind = process.env.DATABRICKS_TOKEN ? 'databricks_v2' : 'databricks-oauth';
+if (databricksFixture) {
+  if ((process.env.DATABRICKS_TOKEN && process.env.DATABRICKS_TOKEN !== 'fixture-databricks_v2-private-key') || !process.env.HOME?.endsWith('service-home') || !process.env.BUZZ_AGENT_CONFIG_DIR?.endsWith('agent-config') || ['ANTHROPIC_API_KEY', 'OPENAI_COMPAT_API_KEY', 'OPENROUTER_API_KEY', 'GOOSE_PROVIDER'].some(k => process.env[k])) throw Error('Incorrect Databricks fixture env');
+  writeFileSync(`${databricksKind}-env-checked`, 'source-shaped token/external OAuth configuration ONLY; no native cache or endpoint access');
+}
 const codex = process.env.CODEX_CONFIG !== undefined;
 if (codex) {
   const config = JSON.parse(process.env.CODEX_CONFIG!);
@@ -60,7 +66,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     result = { protocolVersion: mode === 'wrong-protocol' ? 1 : 2, agentInfo: { name: mode === 'missing-native' ? 'unknown' : 'codex-acp' } };
   }
   else if (codex && m.method === 'session/new') {
-    if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; }
+    if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; }
     if (m.params._meta?.systemPrompt !== undefined) throw Error('Codex never accepts Claude append');
     if (m.params.systemPrompt !== undefined) writeFileSync('received-system-instructions', m.params.systemPrompt);
     sessionId = `codex-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
@@ -69,14 +75,14 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : (mode === 'missing-native' ? 'unknown' : 'buzz-agent') } };
   else if (m.method === 'session/new' && claude) {
-    if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; }
+    if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; }
     sessionId = `claude-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
     tool = m.params.mcpServers[0]; selected = model!;
     if (m.params.systemPrompt !== undefined) throw Error('Claude must use native meta append');
     if (m.params._meta?.systemPrompt) writeFileSync('received-system-instructions', m.params._meta.systemPrompt.append);
     result = { sessionId, models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } };
   }
-  else if (m.method === 'session/new') { if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; } if (buzzProvider && buzzProvider !== 'databricks_v2') sessionId = `${buzzProvider}-${process.pid}-${++sessionNumber}`; if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose || buzzProvider) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  else if (m.method === 'session/new') { if (mode === 'auth-rejected' || mode === 'missing-refresh') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: mode === 'missing-refresh' ? 'fixture missing refresh credential' : 'fixture auth denied' } }); continue; } if (databricksFixture) sessionId = `${databricksKind}-${process.pid}-${++sessionNumber}`; if (buzzProvider && buzzProvider !== 'databricks_v2') sessionId = `${buzzProvider}-${process.pid}-${++sessionNumber}`; if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose || buzzProvider) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
     if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported' } }); continue; }
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');

@@ -1,4 +1,4 @@
-import { buzzProviderInput, buzzProviderGuidance } from './buzz-provider.ts';
+import { buzzProviderInput, buzzProviderGuidance, databricksOAuthGuidance } from './buzz-provider.ts';
 import { customInput } from './custom-input.ts';
 import { showPresets } from './presets.ts';
 import { prepareAgent } from './acp.ts';
@@ -62,7 +62,7 @@ async function main() {
     let ui = createInterface({ input: stdin, output: stdout });
     try {
       const name = text(await ui.question('Host name: '));
-      let mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose / 4 Claude Code / 5 Codex / 6 custom ACP / 7 preset discovery / 8 Buzz Agent API-key provider]: ');
+      let mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose / 4 Claude Code / 5 Codex / 6 custom ACP / 7 preset discovery / 8 Buzz Agent provider (API key / Databricks token or OAuth)]: ');
       if (mode === '7') { showPresets(); console.log('Use existing local-setup add-preset for immutable diagnostic registration. No conversation identity created.'); return; }
       const custom = mode === '6' ? await customInput(ui) : undefined;
       if (custom) {
@@ -86,6 +86,7 @@ async function main() {
       const gooseProvider = mode === '3' ? text(await ui.question('Locally configured Goose provider ID: ')) : undefined;
       const gooseModels = mode === '3' ? text(await ui.question('Operator-approved compatible exact model IDs (comma-separated): ')).split(',').map(m => m.trim()) : undefined;
       if (mode === '3') console.log(`Goose owns provider credentials and ~/.config/goose/config.yaml under dedicated HOME=${join(dir, 'service-home')}. Configure locally as the host service OS user; not Desktop HOME or Buzz Agent OAuth. No login, authentication or catalog verified. GOOSE_MODE=auto; exact model fixed on fresh launch.`);
+      if (buzzProvider?.auth === 'external-oauth') console.log(databricksOAuthGuidance(runner, join(dir, 'service-home'), join(dir, 'agent-config'), buzzProvider.baseUrl));
       const purpose = mode === '1' ? 'diagnostic' : (await ui.question('Purpose [normal (default) / diagnostic ACP probe / cancel]: ')) || 'normal';
       if (purpose === 'cancel') return;
       if (!['normal', 'diagnostic'].includes(purpose)) throw Error('Choose normal, diagnostic or cancel');
@@ -221,7 +222,7 @@ async function main() {
       console.log(`Goose on host ${setup.host}: run/configure the installed Goose CLI ${shellQuote(setup.runner)} as the host service OS user (current uid ${process.getuid?.() ?? 'unknown'}) with HOME=${shellQuote(text(setup.serviceHome))}. Goose owns ~/.config/goose/config.yaml and provider credentials; GOOSE_PROVIDER=${shellQuote(text(setup.gooseProvider))}, GOOSE_MODE=auto; exact GOOSE_MODEL is selected remotely from approved models. Do not reuse Desktop HOME or Buzz Agent OAuth caches. No login/status command or authentication was inferred; executable found is not authenticated. Save/Stop need no provider login.`);
       return;
     }
-    if (setup.mode === 'buzz-agent-api-key') { console.log(buzzProviderGuidance); return; }
+    if (setup.mode === 'buzz-agent-api-key') { console.log(setup.buzzProvider?.auth === 'external-oauth' ? databricksOAuthGuidance(setup.runner, text(setup.serviceHome), text(setup.configDirectory), setup.buzzProvider.baseUrl) : buzzProviderGuidance); return; }
     if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('This harness setup has no provider sign-in');
     console.log(`Sign in on host ${setup.host} as the same OS user running its host service (current uid ${process.getuid?.() ?? 'unknown'}), not your Desktop account. Use exactly this context:\nHOME=${shellQuote(text(setup.serviceHome))} BUZZ_AGENT_CONFIG_DIR=${shellQuote(text(setup.configDirectory))} DATABRICKS_HOST=${shellQuote(text(setup.databricksHost))} ${shellQuote(setup.runner)} auth databricks\nBuzz Agent owns OAuth/cache/refresh. No login was initiated; Save and Stop do not require auth.`);
   } else if (command === 'relay') {
