@@ -127,22 +127,45 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+# --locked: resolve against the committed Cargo.lock as-is, and fail rather
+# than silently rewriting it if it's stale -- the same lock `cargo build`
+# will actually use, not a freshly-recomputed one this check happens to like.
 CARGO_METADATA_STDERR_FILE="$(mktemp)"
-if ! CARGO_METADATA_JSON="$(cargo metadata --format-version=1 --manifest-path "${CARGO_TOML}" 2>"${CARGO_METADATA_STDERR_FILE}")"; then
-  echo "mike49-pin-nip-am-verify: cargo metadata failed to resolve ${CARGO_TOML}:" >&2
+if ! CARGO_METADATA_JSON="$(cargo metadata --format-version=1 --locked --manifest-path "${CARGO_TOML}" 2>"${CARGO_METADATA_STDERR_FILE}")"; then
+  echo "mike49-pin-nip-am-verify: cargo metadata --locked failed to resolve ${CARGO_TOML}:" >&2
   cat "${CARGO_METADATA_STDERR_FILE}" >&2
   rm -f "${CARGO_METADATA_STDERR_FILE}"
   exit 1
 fi
 rm -f "${CARGO_METADATA_STDERR_FILE}"
-RESOLVED_MANIFEST_PATH="$(printf '%s' "${CARGO_METADATA_JSON}" | jq -r '[.packages[] | select(.name == "nip-am-verify")] | .[0].manifest_path // empty')"
+
+# Walk the actual dependency EDGE from buzz-desktop (metadata.resolve.root)
+# to its "nip_am_verify" dep, then resolve that edge's package id in
+# `packages`. Filtering `packages` by name alone would match the first
+# package called "nip-am-verify" anywhere in the resolved graph -- not
+# necessarily the one buzz-desktop's own [dependencies] entry actually
+# depends on (a same-named package could reach the graph transitively, or
+# from a registry, even while the direct edge points somewhere else).
+ROOT_PKG_ID="$(printf '%s' "${CARGO_METADATA_JSON}" | jq -r '.resolve.root // empty')"
+if [ -z "${ROOT_PKG_ID}" ]; then
+  echo "mike49-pin-nip-am-verify: cargo metadata reported no resolve.root for ${CARGO_TOML} (virtual workspace manifest?) -- this script assumes a single-crate manifest" >&2
+  exit 1
+fi
+DEP_PKG_ID="$(printf '%s' "${CARGO_METADATA_JSON}" | jq -r --arg root "${ROOT_PKG_ID}" '
+  [.resolve.nodes[] | select(.id == $root) | .deps[] | select(.name == "nip_am_verify") | .pkg] | .[0] // empty
+')"
+if [ -z "${DEP_PKG_ID}" ]; then
+  echo "mike49-pin-nip-am-verify: buzz-desktop's own dependency edge has no 'nip_am_verify' entry in cargo metadata for ${CARGO_TOML}" >&2
+  exit 1
+fi
+RESOLVED_MANIFEST_PATH="$(printf '%s' "${CARGO_METADATA_JSON}" | jq -r --arg id "${DEP_PKG_ID}" '[.packages[] | select(.id == $id) | .manifest_path] | .[0] // empty')"
 if [ -z "${RESOLVED_MANIFEST_PATH}" ]; then
-  echo "mike49-pin-nip-am-verify: cargo metadata did not resolve a 'nip-am-verify' package from ${CARGO_TOML}" >&2
+  echo "mike49-pin-nip-am-verify: cargo metadata's packages list has no entry for resolved id ${DEP_PKG_ID}" >&2
   exit 1
 fi
 CARGO_RESOLVED_ABS="$(realpath_dir "$(dirname "${RESOLVED_MANIFEST_PATH}")")"
 if [ "${CARGO_RESOLVED_ABS}" != "${PINNED_NIP_AM_VERIFY_ABS}" ]; then
-  echo "mike49-pin-nip-am-verify: Cargo resolves nip-am-verify to ${CARGO_RESOLVED_ABS}, not the pinned worktree at ${PINNED_NIP_AM_VERIFY_ABS}" >&2
+  echo "mike49-pin-nip-am-verify: buzz-desktop's nip_am_verify dependency edge resolves to ${CARGO_RESOLVED_ABS}, not the pinned worktree at ${PINNED_NIP_AM_VERIFY_ABS}" >&2
   exit 1
 fi
 

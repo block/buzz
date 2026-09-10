@@ -44,8 +44,12 @@ EOF
 }
 
 # A fake block/buzz checkout pinning to $2 via NIP_AM_VERIFY_PINNED_REV.
+# $3 is a real nip-am-verify checkout (any repo with matching package
+# name/version -- content only, never committed as this checkout's own
+# history) used solely to materialize a real, `--locked`-satisfying
+# Cargo.lock before the pin script's own worktree exists at that path.
 make_buzz_repo() {
-  local dir="$1" rev="$2"
+  local dir="$1" rev="$2" lock_source_dir="$3"
   mkdir -p "${dir}/desktop/src-tauri/src"
   git init -q "${dir}"
   git_id "${dir}"
@@ -63,6 +67,20 @@ path = "src/lib.rs"
 nip-am-verify = { path = "../../.mike49-nip-am-verify-pinned/tools/nip-am-verify" }
 EOF
   echo "pub fn noop() {}" > "${dir}/desktop/src-tauri/src/lib.rs"
+
+  # scripts/mike49-pin-nip-am-verify.sh runs `cargo metadata --locked`, which
+  # requires an up-to-date Cargo.lock to already exist. That lock can only be
+  # generated once the path dependency's target exists on disk -- but the
+  # real pinned worktree is what the pin script itself creates. Bridge the
+  # chicken-and-egg by materializing the target as a plain (non-worktree)
+  # directory just long enough to run `cargo generate-lockfile`, then remove
+  # it so the pin script creates the real worktree there itself.
+  local pinned_dir="${dir}/.mike49-nip-am-verify-pinned"
+  mkdir -p "${pinned_dir}/tools"
+  cp -R "${lock_source_dir}/tools/nip-am-verify" "${pinned_dir}/tools/nip-am-verify"
+  ( cd "${dir}/desktop/src-tauri" && cargo generate-lockfile ) >/dev/null
+  rm -rf "${pinned_dir}"
+
   git -C "${dir}" add -A
   git -C "${dir}" commit -q -m "initial"
 }
@@ -78,7 +96,7 @@ auditor1="${case1}/buzz-auditor"
 buzz1="${case1}/buzz"
 make_auditor_repo "${auditor1}"
 rev1="$(git -C "${auditor1}" rev-parse HEAD)"
-make_buzz_repo "${buzz1}" "${rev1}"
+make_buzz_repo "${buzz1}" "${rev1}" "${auditor1}"
 pinned1="${buzz1}/.mike49-nip-am-verify-pinned"
 
 if ! ( cd "${buzz1}" && BUZZ_AUDITOR_SRC="${auditor1}" "${PIN_SCRIPT}" ); then
@@ -97,7 +115,7 @@ auditor2="${case2}/buzz-auditor"
 buzz2="${case2}/buzz"
 make_auditor_repo "${auditor2}"
 rev2="$(git -C "${auditor2}" rev-parse HEAD)"
-make_buzz_repo "${buzz2}" "${rev2}"
+make_buzz_repo "${buzz2}" "${rev2}" "${auditor2}"
 pinned2="${buzz2}/.mike49-nip-am-verify-pinned"
 ( cd "${buzz2}" && BUZZ_AUDITOR_SRC="${auditor2}" "${PIN_SCRIPT}" ) >/dev/null
 
@@ -114,7 +132,7 @@ auditor3="${case3}/buzz-auditor"
 buzz3="${case3}/buzz"
 make_auditor_repo "${auditor3}"
 rev3="$(git -C "${auditor3}" rev-parse HEAD)"
-make_buzz_repo "${buzz3}" "${rev3}"
+make_buzz_repo "${buzz3}" "${rev3}" "${auditor3}"
 pinned3="${buzz3}/.mike49-nip-am-verify-pinned"
 ( cd "${buzz3}" && BUZZ_AUDITOR_SRC="${auditor3}" "${PIN_SCRIPT}" ) >/dev/null
 
@@ -135,7 +153,7 @@ echo "fn two() {}" >> "${auditor4}/tools/nip-am-verify/lib.rs"
 git -C "${auditor4}" add -A
 git -C "${auditor4}" commit -q -m "second"
 rev4b="$(git -C "${auditor4}" rev-parse HEAD)"
-make_buzz_repo "${buzz4}" "${rev4a}"
+make_buzz_repo "${buzz4}" "${rev4a}" "${auditor4}"
 pinned4="${buzz4}/.mike49-nip-am-verify-pinned"
 ( cd "${buzz4}" && BUZZ_AUDITOR_SRC="${auditor4}" "${PIN_SCRIPT}" ) >/dev/null
 
@@ -152,7 +170,7 @@ auditor5="${case5}/buzz-auditor"
 buzz5="${case5}/buzz"
 make_auditor_repo "${auditor5}"
 rev5="$(git -C "${auditor5}" rev-parse HEAD)"
-make_buzz_repo "${buzz5}" "${rev5}"
+make_buzz_repo "${buzz5}" "${rev5}" "${auditor5}"
 pinned5="${buzz5}/.mike49-nip-am-verify-pinned"
 mkdir -p "${pinned5}"
 echo "not ours" > "${pinned5}/keep-me.txt"
@@ -206,7 +224,7 @@ rev6="$(git -C "${auditor6_work}" rev-parse HEAD)"
 [ "$(git -C "${wrong6_work}" rev-parse HEAD)" = "${rev6}" ] || fail "case 6 setup: expected identical commit hash across independent repos"
 
 buzz6="${case6}/buzz"
-make_buzz_repo "${buzz6}" "${rev6}"
+make_buzz_repo "${buzz6}" "${rev6}" "${auditor6_work}"
 pinned6="${buzz6}/.mike49-nip-am-verify-pinned"
 
 # Materialize PINNED_DIR as a worktree of the WRONG repo: same rev, and its
