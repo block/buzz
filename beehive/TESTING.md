@@ -356,3 +356,19 @@ journal gate means the separate TUI has consumed inventory. Gate failures close 
 owned UI and propagate; existing assertions and observation/test deadlines are unchanged.
 Retained direct diagnostic captured a stale-observation Restart revision-conflict;
 other older timeout observations lacking that trace remain unclassified.
+
+## K1 and explicit local key import continuation
+
+`remove-key.test.ts` adds actual removal CLI missing-assignment/mismatched-genesis
+and malformed owner/holder/root/predecessor/grant/operation negatives, retaining
+manifest and journal bytes. Stopped, standby and consumed-source positive controls
+use the same read-only host admission loader. Existing real Move tests remain.
+
+The import test exercises actual CLI confirmation, wrong key and malformed hidden
+input, lock and corrupt-authority refusal, exact secret-only manifest change,
+0600/0700 permissions and unchanged sibling/history. On macOS it also runs the
+actual wizard inside `/usr/bin/script`'s PTY and asserts no key echo. The fixed
+`cat | script` test adapter gives macOS a real pipe instead of Node socketpair
+stdin; it does not inject key argv. Other platforms exercise the subprocess but
+not that macOS PTY. A real host and loopback relay then deny imported standby Start
+without spawning or remotely mutating the manifest. No provider calls are involved.

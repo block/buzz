@@ -1,3 +1,4 @@
+import { readAgentSecret } from './key-input.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -5,7 +6,7 @@ import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup, provision, migrateAssignment } from './host.ts';
-import { migrateSlots, addSlot, installationSlots, saveDefaultHarness, removeSlotKey } from './slots.ts';
+import { migrateSlots, addSlot, installationSlots, saveDefaultHarness, removeSlotKey, importSlotKey } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
@@ -21,6 +22,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
   remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
+  import-agent-key <host-directory> <agent-public-key> Restore retained identity via hidden local entry
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
   migrate-assignment <host-directory>       Explicit stopped legacy enrollment
   auth-info <host-directory>                Print exact local sign-in context (no login)
@@ -104,6 +106,22 @@ async function main() {
       removeSlotKey(dir, entry.agent);
       console.log(`Local key copy removed for agent ${entry.agent}; public-only slot retained on ${entry.setup.host}. Assignment, journal history, configurations and receipts are unchanged; Stop/Save/history stay available. Start/Restart now reject before spawn; remote operations never recreate the secret. Sibling slots and the owner identity are unaffected. Re-provision requires explicit local reconciliation.`);
     } finally { ui.close(); }
+  } else if (command === 'import-agent-key') {
+    if (args.length !== 2) throw Error('Use host directory and public key only; private keys are never arguments');
+    const dir = resolve(text(args[0])), agent = text(args[1]);
+    if (!/^[0-9a-f]{64}$/.test(agent)) throw Error('Invalid agent public key');
+    const entry = installationSlots(dir).find(e => e.agent === agent);
+    if (!entry) throw Error('Unknown retained public slot; import cannot invent authority');
+    if (entry.keyPresent) throw Error('Local key already present; reuse the existing identity without import');
+    const ui = createInterface({ input: stdin, output: stdout });
+    let confirmed = false;
+    try {
+      confirmed = await ui.question(`Restore ONLY the local key for ${agent}? Retained assignment/history remain unchanged; standby import never grants Start. [yes/no]: `) === 'yes';
+    } finally { ui.close(); }
+    if (!confirmed) return;
+    const secret = await readAgentSecret();
+    importSlotKey(dir, agent, secret);
+    console.log(`Local key restored for ${agent}; retained assignment and history unchanged. Start still requires this host's assignment. No keys or sessions transferred.`);
   } else if (command === 'assignment-export') {
     const entries = installationSlots(resolve(text(args[0])));
     const entry = args[2] ? entries.find(e => e.agent === args[2]) : entries.length === 1 ? entries[0] : undefined;

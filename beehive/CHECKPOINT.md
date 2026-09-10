@@ -5,6 +5,29 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Secure local key reuse increment — intentionally partial second phase
+
+Published K1 separately as 08be5d6eb4c1a367363e16b36bb4e2824c138b0e.
+This continuation adds an executable `import-agent-key` local wizard, hidden
+terminal input (protected stdin supported), exact public-key match, installation
+lock and shared retained-authority validation before a secret-only atomic manifest
+write. It cannot mint authority, recreate unknown slots or replace existing keys.
+Retained standby/source-consumed assignment is not changed by importing its key.
+Actual CLI/PTY import test + real host/relay standby denial passes (1.41s); strict
+passes. Initial PTY attempts failed because macOS script refuses Node socketpair
+stdin; retained import-focused logs 1–4 capture this adapter failure, then fixed
+adapter uses a real shell pipe. No product assertions or timeouts were weakened.
+Evidence: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/K1_928F/`.
+
+Grounding read: HARNESS_PROVIDER_UX_GROUNDING.md. No provider abstraction or
+executable/auth claim added. **Second-phase partial:** multiple reusable local
+bindings CRUD, remote exact A/B selection/fingerprints, integrated initial
+new/import/reuse wizard, and second Goose executable/provider/service-env path
+remain unimplemented. Next executable step is local binding management + advertised
+selection at the governing host preflight/configuration boundary, followed by
+source-pinned Goose ACP fixture acceptance; not a design-only task or parity claim.
+Final strict/default concurrent installed-enabled results will be recorded below.
+
 ## K1 retained-authority removal — explicit closure
 
 Inspected immutable 2151ea3a: K1 was NOT fixed by the named Move commit.
@@ -1107,3 +1130,31 @@ Selected-next != actual-run; stopped identity remains assigned. No remote secret
 credential/workspace/session transfer or unreachable-host takeover. Hash/spawn
 TOCTOU, hostile journals, rollback/clones, outbox pruning and stronger OS containment
 remain outside evidence.
+
+## 928F final validation/publication record
+
+Final executable tree: strict passes (`K1_928F/final-strict.log`). Exactly one final
+FULL DEFAULT concurrent installed-enabled package run naturally completed: **50/51,
+1 failure, no skips/cancellations, 35.322s** (`full-installed-default.log`). All six
+key-removal/import tests passed, including actual CLI K1 negatives, real Move and
+hidden-input macOS PTY. Failure: `slots.test.ts:131` waiting for standby host
+`Host online` via launch:50; stderr is discarded by that existing test driver.
+Cause remains **unclassified**. No serial masking, rerun-to-green, timeout inflation,
+assertion weakening or claim of full-suite acceptance. Prior four 110s timeouts and
+other historical failures above remain independently scoped and unclassified except
+for the specifically traced private-journal/TUI observation revision race.
+
+Self-review checked common retained-state loader extraction, exact key matching,
+no import authority synthesis, key input/output boundaries, atomic manifest-only
+writes and stopped/lock gates. macOS PTY adapter failures and strict extraction
+failure are retained alongside successful focused runs. Installed binaries were
+read-only and hashed separately: buzz-acp
+`10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`, buzz CLI
+`147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5`.
+These are installed runtime + deterministic ACP/loopback fixtures, NOT live provider,
+OAuth, production kind-40002 or full-product parity evidence. No dependency changes.
+Source hashes and publication verification live beside the logs; the final source
+commit is the commit containing this section. Required author/committer Logan
+Johnson <loganj@squareup.com>, DCO, no cryptographic signing claim. No repo-wide CI,
+merge or release. Remaining second-phase work and full-suite failure investigation
+are explicit handoff items, not closed by this partial key-import tracer.

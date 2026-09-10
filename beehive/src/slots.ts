@@ -127,6 +127,25 @@ export function removeSlotKey(directory: string, agentKey: string): void {
   } finally { rmdirSync(lock); }
 }
 
+/** Explicit local restoration of a retained public identity, never enrollment or
+ * assignment repair. Importing on standby/consumed source grants no execution. */
+export function importSlotKey(directory: string, agentKey: string, secret: string): void {
+  if (!/^[0-9a-f]{64}$/.test(agentKey) || publicKey(secret) !== agentKey) throw Error('Imported key does not match the selected public identity');
+  const lock = join(directory, 'host.lock');
+  mkdirSync(lock, { mode: 0o700 });
+  try {
+    const i = readInstallation(directory);
+    const entry = i.agents[agentKey];
+    if (!entry) throw Error('Unknown retained public slot; import cannot invent authority');
+    if (entry.secret !== null) throw Error('Local key already present; reuse the existing identity without import');
+    const setup = validateSetup({ ...i.setups[entry.setup], host: i.host, ownerSecret: i.ownerSecret });
+    const state = loadSlotState(setup, slotPath(directory, agentKey, entry.legacy), agentKey);
+    if (state.phase !== 'stopped' || state.actual !== null) throw Error('Key import requires a stopped slot with no actual run');
+    entry.secret = secret;
+    writePrivate(join(directory, 'setup.json'), i);
+  } finally { rmdirSync(lock); }
+}
+
 /** Caller holds the installation lock; update shared harness inventory without key copies. */
 export function saveDefaultHarness(directory: string, setup: Setup): void {
   const raw = object(readPrivate(join(directory, 'setup.json')));

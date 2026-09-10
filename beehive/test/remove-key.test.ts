@@ -2,13 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, statSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createGenesis, validateGenesis } from '../src/assignment.ts';
 import { provision, host, type Setup } from '../src/host.ts';
-import { migrateSlots, addSlot, removeSlotKey } from '../src/slots.ts';
+import { migrateSlots, addSlot, removeSlotKey, importSlotKey } from '../src/slots.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 import { readPrivate, writePrivate } from '../src/storage.ts';
 import { relay } from '../src/relay.ts';
@@ -23,20 +23,25 @@ async function closeChild(child: ChildProcess) {
   const done = once(child, 'exit'); child.kill('SIGTERM'); await done;
 }
 /** Actual CLI subprocess path; answers are matched against real prompts. */
-async function cli(args: string[], answers: { prompt: string; answer: string }[] = [], timeoutMs = 20000): Promise<{ code: number | null; out: string; err: string }> {
-  const child = spawn(process.execPath, ['src/cli.ts', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+async function cli(args: string[], answers: { prompt: string; answer: string }[] = [], timeoutMs = 20000, pty = false): Promise<{ code: number | null; out: string; err: string }> {
+  // macOS script needs a real pipe rather than Node's socketpair stdin.
+  // The fixed adapter changes no user command or input; secrets only traverse stdin.
+  const child = spawn(pty ? '/bin/sh' : process.execPath, pty
+    ? ['-c', 'cat | /usr/bin/script -q /dev/null "$@"', 'beehive-pty', process.execPath, 'src/cli.ts', ...args]
+    : ['src/cli.ts', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '', err = '', cursor = 0, index = 0, pending = false;
-  child.stderr.on('data', c => { err += c.toString(); });
-  child.stdout.on('data', c => {
-    out += c.toString(); const step = answers[index];
+  child.stderr?.on('data', c => { err += c.toString(); });
+  const receive = (c: Buffer) => {
+    out += c.toString(); if (pty && out.includes('Local key restored')) child.stdin.end(); const step = answers[index];
     if (!step || pending) return;
     const position = out.indexOf(step.prompt, cursor); if (position < 0) return;
     pending = true;
-    void (async () => { await delay(60); cursor = position + step.prompt.length; index++; pending = false; child.stdin.write(`${step.answer}\n`); })();
-  });
+    void (async () => { await delay(60); cursor = position + step.prompt.length; index++; pending = false; child.stdin!.write(`${step.answer}\n`); })();
+  };
+  child.stdout?.on('data', receive);
   const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
   try { const [code] = await once(child, 'exit'); return { code, out, err }; }
-  finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); }
+  finally { clearTimeout(timer); child.stdin.end(); if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); }
 }
 
 test('deliberate local key removal keeps the public slot: CLI confirmation, retained sibling/history, reopen, denied Start/Restart before spawn, neutral Stop/Save, reconnect', { timeout: 40000 }, async () => {
@@ -341,4 +346,57 @@ test('K1 actual removal CLI validates retained host authority before destructive
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('explicit hidden local key import reuses retained identity without resetting standby authority (CLI and PTY)', { timeout: 30000 }, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-import-'))), d = join(dir, 'standby');
+  const ownerSecret = newKey(), x = newKey(), y = newKey(), X = publicKey(x), Y = publicKey(y);
+  provision(d, { host: 'standby', ownerSecret, agentSecret: x, runner: process.execPath, args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' }, createGenesis(publicKey(ownerSecret), X, 'source'));
+  migrateSlots(d); addSlot(d, y, createGenesis(publicKey(ownerSecret), Y, 'standby')); removeSlotKey(d, X);
+  const jp = join(d, 'journal.json'), mp = join(d, 'setup.json'), yp = join(d, 'agents', Y, 'journal.json');
+  const journalBefore = readFileSync(jp), siblingBefore = readFileSync(yp), removedManifest = readFileSync(mp);
+  let h: Awaited<ReturnType<typeof host>> | undefined;
+  const server = await relay(0, publicKey(ownerSecret), join(dir, 'relay.json'));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const url = `ws://127.0.0.1:${address.port}`, seen: Message[] = [];
+  const ui = connect(url, ownerSecret, m => seen.push(m)); await ui.ready;
+  try {
+    const declined = await cli(['import-agent-key', d, X], [{ prompt: 'Restore ONLY', answer: 'no' }]);
+    assert.equal(declined.code, 0); assert.deepEqual(readFileSync(mp), removedManifest);
+    for (const value of [y, 'invalid-private-value']) {
+      const rejected = await cli(['import-agent-key', d, X], [{ prompt: 'Restore ONLY', answer: 'yes' }, { prompt: 'Agent private key (', answer: value }]);
+      assert.equal(rejected.code, 1, rejected.out); assert.doesNotMatch(rejected.out, /Local key restored/);
+      assert.ok(!rejected.out.includes(value) && !rejected.err.includes(value));
+      assert.deepEqual(readFileSync(mp), removedManifest);
+    }
+    mkdirSync(join(d, 'host.lock'));
+    assert.throws(() => importSlotKey(d, X, x)); assert.ok(existsSync(join(d, 'host.lock')));
+    rmdirSync(join(d, 'host.lock'));
+    const bad = JSON.parse(journalBefore.toString()); delete bad.assignment;
+    writePrivate(jp, bad); assert.throws(() => importSlotKey(d, X, x), /assignment/);
+    assert.deepEqual(readFileSync(mp), removedManifest); writePrivate(jp, JSON.parse(journalBefore.toString()));
+    const imported = await cli(['import-agent-key', d, X], [{ prompt: 'Restore ONLY', answer: 'yes' }, { prompt: 'Agent private key (', answer: x }], 20000, process.platform === 'darwin');
+    assert.equal(imported.code, 0, (imported.err + imported.out).replaceAll(x, '[redacted]')); assert.match(imported.out, /Local key restored/);
+    for (const secret of [x, y, ownerSecret]) assert.ok(!imported.out.includes(secret) && !imported.err.includes(secret), 'including real PTY echo');
+    assert.deepEqual(readFileSync(jp), journalBefore); assert.deepEqual(readFileSync(yp), siblingBefore);
+    const restored = JSON.parse(readFileSync(mp, 'utf8')); const expected = JSON.parse(removedManifest.toString()); expected.agents[X].secret = x;
+    assert.deepEqual(restored, expected, 'only the selected local secret changes');
+    assert.equal(statSync(mp).mode & 0o777, 0o600); assert.equal(statSync(d).mode & 0o777, 0o700);
+    assert.throws(() => importSlotKey(d, X, x), /already present/);
+    const restoredManifest = readFileSync(mp);
+    h = await host(d, url);
+    await until(() => seen.some(m => m.type === 'inventory' && m.agent === X));
+    const start = message('start', 'standby', X, 0); ui.send(start);
+    await until(() => seen.some(m => m.type === 'receipt' && m.body.operation === start.id));
+    assert.notEqual(seen.find(m => m.type === 'receipt' && m.body.operation === start.id)!.body.result, 'accepted');
+    assert.equal(JSON.parse(readFileSync(jp, 'utf8')).assignment.assignedHost, 'source');
+    assert.equal(existsSync(join(dir, 'received-instructions.jsonl')), false, 'imported standby cannot spawn');
+    assert.deepEqual(readFileSync(mp), restoredManifest, 'remote Start cannot mutate local keys');
+    assert.deepEqual(readFileSync(yp), siblingBefore, 'sibling remains untouched');
+    await h.close(); h = undefined;
+    removeSlotKey(d, X); assert.equal(JSON.parse(readFileSync(mp, 'utf8')).agents[X].secret, null);
+  } finally {
+    await h?.close(); ui.close(); for (const c of server.clients) c.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });
+  }
 });

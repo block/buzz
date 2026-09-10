@@ -585,3 +585,24 @@ selected-next, and actual/history retain full snapshots. A later Save gets a lat
 revision, is never overwritten, and forces consumed-grant acceptance to remain stopped.
 Reservations alone never confer Start authority. Legacy saved grant/event identity hashes
 are not changed or re-signed; new materialization requires compatible host versions.
+
+### Explicit local key reuse for a retained public-only slot
+
+`node src/cli.ts import-agent-key <host-directory> <agent-public-key>` is a small
+local repair wizard: confirm the public identity, then paste the exact 64-hex
+private key at a **hidden** prompt. Never put the private key in argv, environment,
+a remote message or terminal transcript. Protected piped stdin is supported;
+the key is never printed. It restores only a previously removed local copy, not
+an unknown identity or an assignment. The host must be stopped and its lock free.
+A valid retained journal is mandatory; wrong keys, missing/malformed authority,
+non-stopped slots and already-present keys refuse without modifying state.
+Standby or consumed-source import does **not** grant Start. All retained history,
+public configuration, sibling keys and journals remain unchanged. Ordinary remote
+Save/Start/Restart still never recreate removed keys. This is deliberate local
+provisioning, not global revocation/rotation or restoration of compromised authority.
+
+This increment does not yet integrate import/new/reuse into the initial setup
+wizard, manage multiple local harness bindings, or add Goose. Those, remote A/B
+selection with immutable applied inputs, and remaining Claude/Codex/preset/custom/
+mesh/compute parity remain unfinished. Existing file-based standby enrollment is
+unchanged; no provider login/cache access or live-provider acceptance is claimed.
