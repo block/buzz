@@ -95,6 +95,7 @@ mod tests {
         reader.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, b"{}\n{\"cancel\":true}\n");
     }
+    #[cfg(unix)]
     async fn wait_for(path: &std::path::Path) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while !path.exists() {
