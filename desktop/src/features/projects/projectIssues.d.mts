@@ -72,6 +72,7 @@ export type ProjectIssueReviewAuthority = {
 };
 
 export type ProjectIssue = {
+  bw?: import("./bwProjection").BwIssueView;
   id: string;
   title: string;
   content: string;

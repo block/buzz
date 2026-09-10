@@ -167,6 +167,9 @@ function IssueRow({
           </span>
           <span>·</span>
           <span>{issue.status}</span>
+          {issue.bw?.notices.length ? (
+            <span role="status">BW: pending / conflict</span>
+          ) : null}
           {issue.labels.map((label) => (
             <span
               className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs"
@@ -225,7 +228,8 @@ function IssueActivity({ issue }: { issue: ProjectIssue }) {
   return (
     <section className="space-y-3 p-4" data-testid="project-issue-activity">
       <p className="text-sm text-muted-foreground">
-        Assignment, lifecycle, and technical evidence are recorded here as facts.
+        Assignment, lifecycle, and technical evidence are recorded here as
+        facts.
       </p>
       <ol className="space-y-2 border-l border-border/60 pl-3 text-sm">
         {issue.activity.map((entry) => (
@@ -577,9 +581,11 @@ function IssueMetaRail({
   // everyone else who is signed in may still self-assign.
   const canAssignOthers =
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
-  const canChangeStatus = canWriteMyBuzzWorkflowStatus(viewer);
+  const canChangeStatus = !issue.bw && canWriteMyBuzzWorkflowStatus(viewer);
   const canManageLifecycle =
-    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
+    !issue.bw &&
+    Boolean(viewer) &&
+    (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
     <aside
@@ -604,6 +610,19 @@ function IssueMetaRail({
           <IssueLifecycleActions issue={issue} project={project} />
         ) : null}
       </OverviewRailSection>
+      {issue.bw ? (
+        <OverviewRailSection title="Workflow">
+          <p className="text-sm">{issue.bw.nextActor}</p>
+          {!issue.bw.enrolled ? (
+            <p className="text-sm">Enrollment pending</p>
+          ) : null}
+          {issue.bw.notices.map((notice) => (
+            <p className="text-xs" role="status" key={notice.event_id}>
+              {notice.outcome}: {notice.stage} / {notice.code}
+            </p>
+          ))}
+        </OverviewRailSection>
+      ) : null}
       {issue.currentReview ? (
         <IssueReviewSection
           issue={issue}
@@ -612,7 +631,7 @@ function IssueMetaRail({
           viewer={viewer}
         />
       ) : null}
-      {issue.assignees.length > 0 || viewer ? (
+      {!issue.bw && (issue.assignees.length > 0 || viewer) ? (
         <OverviewRailSection title="Assignees">
           <IssueAssigneesRow
             canAssignOthers={canAssignOthers}

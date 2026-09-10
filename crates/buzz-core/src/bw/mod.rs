@@ -312,6 +312,41 @@ impl Consumer {
     pub fn archived_inputs(&self) -> &[Vec<u8>] {
         &self.archive
     }
+    /// Reassess all original inputs against the complete current history without
+    /// inserting events or reporting replays. A shared historical evaluation and
+    /// projection keep snapshot reads from refolding the entire graph per row.
+    /// Invalid copies still undergo their own ID/signature/shape checks.
+    pub fn inspect_all(&self) -> Vec<Decision> {
+        let history = history::History::new(
+            &self.records,
+            &self.invalid,
+            &self.trust,
+            &self.evidence,
+            self.now,
+        );
+        let projection = history.project(None);
+        self.archive
+            .iter()
+            .map(|bytes| {
+                let wire = match parse_json(bytes) {
+                    Ok(wire) => wire,
+                    Err(_) => {
+                        return self.decision(
+                            None,
+                            Err(fail("envelope", "json")),
+                            Some(projection.clone()),
+                        )
+                    }
+                };
+                let id = wire["id"].as_str().map(str::to_owned);
+                let result = match shape::decode(wire) {
+                    Ok(record) => history.validate(record.id()),
+                    Err(error) => Err(error),
+                };
+                self.decision(id, result, Some(projection.clone()))
+            })
+            .collect()
+    }
     /// Resolve producer activation from the supplied trust and signed history.
     ///
     /// Fails when the owner-signed repository genesis is absent or does not match

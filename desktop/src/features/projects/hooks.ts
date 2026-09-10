@@ -1,3 +1,8 @@
+import {
+  fetchBwSnapshot,
+  fetchBwWorkItems,
+  mergeBwIssues,
+} from "./bwProjection";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
@@ -60,7 +65,6 @@ import {
   PR_INLINE_COMMENT_LABEL,
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
-import { fetchProjectsWorkItems } from "./projectWorkItems";
 import {
   eventToRepository,
   type Project,
@@ -275,7 +279,7 @@ async function fetchProjectIssues(
     ),
   ]);
 
-  return projectIssueEventsToIssues(
+  const legacy = projectIssueEventsToIssues(
     issueEvents,
     statusEvents,
     mergeEventsById(commentEvents, assignmentEvents),
@@ -283,6 +287,7 @@ async function fetchProjectIssues(
     project.reviewAuthority,
     deletionEvents,
   );
+  return mergeBwIssues(legacy, await fetchBwSnapshot(project.repoAddress));
 }
 
 async function fetchProjectPullRequests(
@@ -851,7 +856,7 @@ export function useProjectsWorkItemsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
     queryKey: ["projects", "work-items", projects.map((project) => project.id)],
-    queryFn: () => fetchProjectsWorkItems(projects),
+    queryFn: () => fetchBwWorkItems(projects),
     staleTime: 30_000,
   });
 }

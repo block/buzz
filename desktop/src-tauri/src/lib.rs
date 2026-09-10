@@ -3,6 +3,7 @@ mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
+mod bw_projection;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -659,6 +660,7 @@ pub fn run() {
             publish_project_owner_announcement,
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
+            get_project_bw,
             sign_project_issue_status,
             sign_project_issue_assignment,
             sign_project_issue_unassignment,

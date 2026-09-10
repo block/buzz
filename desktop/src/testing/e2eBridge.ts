@@ -11534,6 +11534,22 @@ export function maybeInstallE2eTauriMocks() {
         // Matches the "Thomas P" author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.
         return { name: "Thomas P", email: "thomasp@example.com" };
+      case "get_project_bw":
+        return {
+          repo: (payload as { repo: string }).repo,
+          activation: null,
+          records: {},
+          decisions: {},
+          notices: {},
+          projection: {
+            issues: {},
+            issue_fields: {},
+            conflicts: [],
+            children: {},
+            relations: [],
+            artifact_verdicts: {},
+          },
+        };
       case "get_project_repo_snapshot":
         return {
           latest_commit: {

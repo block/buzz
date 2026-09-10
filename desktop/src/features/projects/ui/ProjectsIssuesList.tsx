@@ -160,7 +160,7 @@ function IssueGridCard({
             type="button"
             variant="outline"
           >
-            {nextStepLabel(issue.status)}
+            {issue.bw?.nextActor ?? nextStepLabel(issue.status)}
           </Button>
         </div>
 
@@ -172,7 +172,10 @@ function IssueGridCard({
 
         <div className="mt-auto border border-border/60 bg-muted/30 px-2.5 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
-            <span className="font-medium text-foreground">{issue.status}</span>
+            <span className="font-medium text-foreground">
+              {issue.status}
+              {issue.bw?.notices.length ? " · pending / conflict" : ""}
+            </span>
             <span>created {relativeTime(issue.createdAt)}</span>
             {issue.comments.length > 0 ? (
               <span className="flex items-center gap-1">
@@ -229,7 +232,10 @@ function IssueListRow({
             assignees={issue.assignees}
             profiles={profiles}
           />
-          <span className={PROJECT_LIST_ROW_STATUS_CLASS}>{issue.status}</span>
+          <span className={PROJECT_LIST_ROW_STATUS_CLASS}>
+            {issue.status}
+            {issue.bw?.notices.length ? " · pending / conflict" : ""}
+          </span>
           <div className="hidden w-14 shrink-0 justify-end md:flex">
             {issue.comments.length > 0 ? (
               <span className="flex items-center gap-1 text-2xs leading-3 text-muted-foreground">
@@ -248,7 +254,7 @@ function IssueListRow({
           <ProjectListRowMenu label={`More options for ${issue.title}`}>
             <DropdownMenuItem onSelect={() => onOpen(project, issue)}>
               <Eye className="h-4 w-4" />
-              {nextStepLabel(issue.status)}
+              {issue.bw?.nextActor ?? nextStepLabel(issue.status)}
             </DropdownMenuItem>
             <CopyShareLinkMenuItem
               link={issueShareLink(issue)}
