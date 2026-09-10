@@ -96,11 +96,11 @@ test('real websocket relay, external runner, durable retry, UI close/reopen, hos
 });
 
 test('quarantined leader exit retains Stop and close teardown for owned descendants', async () => {
-  for (const action of ['stop', 'close']) {
+  for (const action of ['stop', 'close']) for (const behavior of ['cooperate', 'resist']) {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-orphan-')));
     const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
     const hd = join(dir, 'host'); mkdirSync(hd);
-    writePrivate(join(hd, 'setup.json'), { host: 'orphan-host', ownerSecret: secret, agentSecret, runner: process.execPath, args: [resolve('test/orphan-fixture.ts')], workspace: dir, mode: 'fixture' });
+    writePrivate(join(hd, 'setup.json'), { host: 'orphan-host', ownerSecret: secret, agentSecret, runner: process.execPath, args: [resolve('test/orphan-fixture.ts'), behavior], workspace: dir, mode: 'fixture' });
     const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;
@@ -122,6 +122,7 @@ test('quarantined leader exit retains Stop and close teardown for owned descenda
         const receipt = await wait(m => m.type === 'receipt' && m.body.operation === stop.id);
         assert.equal(receipt.body.result, 'accepted');
       } else await h.close();
+      if (behavior === 'resist') assert.equal(readFileSync(join(dir, 'term-seen'), 'utf8'), '1');
       assert.throws(() => process.kill(pid, 0), (e: unknown) => (e as NodeJS.ErrnoException).code === 'ESRCH');
     } finally {
       await h.close(); ui.close(); for (const c of server.clients) c.terminate();

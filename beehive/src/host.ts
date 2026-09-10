@@ -6,8 +6,9 @@ import { digest, fields, message, object, publicKey, text, type Message } from '
 import { readPrivate, writePrivate } from './storage.ts';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
+import { prepareConversation, requireConversationContainment, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret: string; agentSecret: string; runner: string; args: string[]; workspace: string; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string };
+export type Setup = { host: string; ownerSecret: string; agentSecret: string; runner: string; args: string[]; workspace: string; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 type Selection = { model: string; workspace: string; profile: string };
 type State = { binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | { selection: Selection; executableHash: string; run: string; evidence?: Evidence }; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 export function validateSetup(value: unknown): Setup {
@@ -38,15 +39,22 @@ export async function host(directory: string, url: string) {
   function inventory() {
     return message('inventory',setup.host,agent,state.revision, {
       assignedHost: setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
+      ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
       catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
-      workspaces: [setup.workspace], profiles: ['default'], readiness: setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      workspaces: [setup.workspace], profiles: ['default'], readiness: setup.conversation ? 'Conversation Start blocked: host-owned ACP subtree containment required; relay/auth/model unverified' : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
   let queue = Promise.resolve();
   let initialized = false;
   let client: ReturnType<typeof connect>;
-  try { client = connect(url,setup.ownerSecret,m => { if (initialized) queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); }); }); }
+  try { client = connect(url,setup.ownerSecret,m => {
+    if (!initialized) return;
+    // Cancellation is signalled outside the serialized mutation queue. Admission is
+    // still exact-authority/revision and never bypasses durable receipt processing.
+    if (!closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && m.revision === state.revision && state.phase === 'transitioning' && state.actual && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) acp?.cancel();
+    queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
+  }); }
   catch (e) { rmdirSync(lock); throw e; }
   const publish = (m: Message) => { try { client.send(m); } catch { /* Durable outbox retained for reconnect/restart. */ } };
   async function stopOwned() {
@@ -82,6 +90,11 @@ export async function host(directory: string, url: string) {
           if (realpathSync(setup.workspace) !== setup.workspace || !statSync(setup.workspace).isDirectory()) throw Error('Workspace changed');
           const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: state.selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: state.selected.model };
           if (launch) prepareAgent(launch); // Prerequisite failure preserves stopped state.
+          if (setup.conversation) {
+            if (!launch) throw Error('Conversation requires a Buzz Agent harness setup');
+            prepareConversation(setup.conversation, launch, setup.agentSecret, state.binding.owner);
+            requireConversationContainment(); // Fail before journaling a run or spawning anything.
+          }
           state.actual = { selection: structuredClone(state.selected), executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
           state.phase = 'transitioning'; save();
           if (setup.mode === 'fixture') {
@@ -94,6 +107,7 @@ export async function host(directory: string, url: string) {
             try {
               catalog = await session.catalog();
               state.actual.evidence = await session.verify();
+              if (!session.healthy) throw Error('ACP session failed before running commit');
             } catch (e) {
               catalog = { state: 'failed', authentication: 'unverified' };
               await stopOwned(); state.phase = 'stopped'; state.actual = null;
@@ -127,7 +141,7 @@ export async function host(directory: string, url: string) {
   },2000);
   return { agent, async close() {
     if (closing) return; closing = true;
-    client.close(); clearInterval(heartbeat); await queue;
+    client.close(); clearInterval(heartbeat); acp?.cancel(); await queue;
     if (owned) {
       state.phase = 'transitioning'; save();
       try { await stopOwned(); state.phase = 'stopped'; state.actual = null; }

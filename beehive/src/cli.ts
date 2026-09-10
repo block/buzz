@@ -1,12 +1,13 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup } from './host.ts';
 import { connect } from './client.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
+import { prepareConversation } from './conversation.ts';
 
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
@@ -14,6 +15,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
   setup <new-host-directory> <identity-file> Guided local harness + key setup
   auth-info <host-directory>                Print exact local sign-in context (no login)
+  conversation-setup <host-directory>       Attach external buzz-acp to EXISTING identity (Start gated)
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
@@ -46,6 +48,26 @@ async function main() {
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
       if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
     } finally { ui.close(); }
+  } else if (command === 'conversation-setup') {
+    const dir = resolve(text(args[0]));
+    const lock = join(dir, 'host.lock');
+    mkdirSync(lock, { mode: 0o700 }); // Same atomic exclusion as host startup; never remove a competing lock.
+    try {
+      if (existsSync(join(dir, 'journal.json')) && object(readPrivate(join(dir, 'journal.json'))).phase !== 'stopped') throw Error('Reconcile the prior run before local setup changes');
+      const setup = validateSetup(readPrivate(join(dir, 'setup.json')));
+      if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('Provision Buzz Agent first; this action never creates or replaces agent keys');
+      const ui = createInterface({ input: stdin, output: stdout });
+      try {
+        const executable = realpathSync(text(await ui.question('Absolute installed buzz-acp executable: ')));
+        const relay = text(await ui.question('Buzz CONVERSATION relay URL (not the Beehive management relay): '));
+        const conversation = { executable, relay };
+        const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: 'databricks-claude-haiku-4-5' }, setup.agentSecret, publicKey(setup.ownerSecret));
+        if ((await ui.question('Save onto existing identity? Start remains BLOCKED pending safe ACP subtree containment. [yes/no]: ')) !== 'yes') return;
+        // One atomic replacement; keys, assignment and provider auth context unchanged.
+        writePrivate(join(dir, 'setup.json'), { ...setup, conversation });
+        console.log(`Conversation setup saved for existing agent ${plan.agentPublicKey}. No network connection, login or process started. The community operator must admit this public key and owner to the chosen relay/channels (or provision a valid owner attestation locally). Admission remains unverified. Start is blocked until host-owned ACP bridge containment is implemented.`);
+      } finally { ui.close(); }
+    } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
     const setup = validateSetup(readPrivate(join(resolve(text(args[0])), 'setup.json')));
     if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('This harness setup has no provider sign-in');

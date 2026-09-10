@@ -36,7 +36,13 @@ export function spawnOwned(executable: string, args: readonly string[], cwd: str
       await new Promise<void>((resolve, reject) => child.send({ type: 'stop' }, error => error ? reject(Error('Owned Stop channel failed')) : resolve()));
       for (let i = 0; i < 100; i++) {
         try { process.kill(-pid, 0); }
-        catch (e) { if ((e as NodeJS.ErrnoException).code === 'ESRCH') return; throw e; }
+        catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === 'ESRCH') return;
+          // macOS may transiently deny probing a group while SIGKILL reaps it.
+          // EPERM is NOT absence: keep polling, then quarantine if never ESRCH.
+          if (code !== 'EPERM') throw e;
+        }
         await delay(25);
       }
       throw Error('Owned process group did not exit; quarantined');

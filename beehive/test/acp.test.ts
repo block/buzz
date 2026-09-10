@@ -26,7 +26,7 @@ test('external ACP boundary: snapshot, catalog provenance, exact-model same-sess
     assert.equal(Object.hasOwn(prepared.env, 'DATABRICKS_TOKEN'), false);
     assert.equal(Object.hasOwn(prepared.env, 'BUZZ_PRIVATE_KEY'), false);
     assert.throws(() => prepareAgent({ ...plan(dir), databricksHost: 'https://user:secret@example.com' }));
-    for (const mode of ['ok', 'empty', 'filtered', 'wrong-model', 'wrong-session', 'cancelled', 'reject', 'malformed', 'timeout', 'flood']) {
+    for (const mode of ['ok', 'empty', 'filtered', 'wrong-model', 'wrong-session', 'cancelled', 'reject', 'malformed', 'timeout', 'flood', 'bad-tail']) {
       const s = new AgentSession(plan(dir, mode), 1500);
       try {
         if (['malformed', 'timeout', 'flood'].includes(mode)) { await assert.rejects(s.catalog()); continue; }
@@ -34,7 +34,7 @@ test('external ACP boundary: snapshot, catalog provenance, exact-model same-sess
         assert.equal(catalog.authentication, 'unverified');
         assert.equal(catalog.state, mode === 'empty' ? 'empty' : mode === 'filtered' ? 'filtered' : 'reported');
         assert.ok(!JSON.stringify(catalog).includes('DO-NOT-RELAY'));
-        if (['wrong-model', 'wrong-session', 'cancelled', 'reject'].includes(mode)) {
+        if (['wrong-model', 'wrong-session', 'cancelled', 'reject', 'bad-tail'].includes(mode)) {
           await assert.rejects(s.verify(), e => e instanceof Error && !e.message.includes('DO-NOT-RELAY'));
         } else {
           const evidence = await s.verify();

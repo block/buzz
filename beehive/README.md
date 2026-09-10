@@ -12,11 +12,12 @@ native clients: it is a separately authorized product experiment.
 
 ## Run an isolated fixture
 
-Requires Node >=22.18 (tested with 26.8.1), POSIX process groups, npm dependencies.
+Requires Node >=22.18 (tested with Hermit 24.15.0), POSIX process groups and
+pnpm 11.4.0 for the standalone lockfile. Activate Hermit from the repository root.
 
 ```sh
 cd beehive
-npm install
+pnpm install --ignore-workspace --frozen-lockfile --ignore-scripts
 npm test
 npm run check
 node src/cli.ts identity /tmp/my-beehive-owner
@@ -30,6 +31,11 @@ node src/cli.ts host /tmp/my-beehive-host ws://127.0.0.1:19481
 # Separate terminal:
 node src/cli.ts tui /tmp/my-beehive-owner/identity.json ws://127.0.0.1:19481
 ```
+
+On Block-managed machines, the public npm registry is policy-blocked. Append
+`--registry https://global.block-artifacts.com/artifactory/api/npm/square-npm/`
+to the install command to use the approved mirror. No credentials or persistent
+registry config are needed. The committed lockfile is registry-agnostic.
 
 TUI: `hosts`, `select <host-name>`, `show`, `start`, `save`, `stop`, `quit`.
 Save asks for advertised model, workspace and independent behavior profile.
@@ -78,7 +84,8 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
   launch must pin all setup/credential/script generations and close that gap.
 - Stop uses a live TypeScript group anchor and private in-lifetime IPC channel.
   The anchor outlives the external runner, preserving group identity if its leader
-  exits. Stop asks that anchor to signal its own group, then confirms group absence;
+  exits. Stop asks that anchor to signal its own group, retaining the living anchor
+  through a 500 ms TERM grace period before ownership-safe KILL escalation, then confirms group absence;
   it never sends a kill to a recovered or possibly reused numeric ID. Quarantine
   preserves this teardown route. A lost anchor fails closed and retains the lock.
   This is POSIX in-group supervision, not containment of escaping descendants.
@@ -150,6 +157,28 @@ availability or distinguish refresh-expired/denied/no-credential. That diagnosti
 seam remains missing in the external protocol; do not relabel it authenticated.
 An empty/filtered catalog does not prevent trying an explicitly saved exact model;
 only same-session acknowledgement plus completed response establishes probe evidence.
+
+## External conversation setup (launch blocked)
+
+`node src/cli.ts conversation-setup /absolute/existing-host-directory` attaches
+an installed **buzz-acp** executable and separate Buzz conversation relay URL to
+an existing Buzz Agent setup. It never generates/replaces the provisioned agent
+identity, reads OAuth or initiates a connection. Close the host first; setup uses
+the same atomic exclusion lock and leaves the key/auth context unchanged.
+
+**This does not enable a conversation yet.** A configured conversation Start is
+rejected before spawn; inventory explains why. Upstream `AcpClient::spawn` calls
+`process_group(0)`, so putting buzz-acp inside the existing outer supervisor would
+let its ACP adapter escape owned Stop. `apply_model_switch` can also proceed on
+a default model after rejection. A host-owned TS ACP stdio broker must retain
+adapter ownership and observe exact-model/session completions in actual Buzz
+conversations before this gate can be removed. Buzz-acp—not Beehive—will continue
+to own Nostr auth, membership, author gates, mentions, replies and delivery.
+
+The launch plan supplies the existing agent key, explicit owner, optional local
+NIP-OA attestation and authoritative relay/model env. None has been exercised
+against a real conversation relay. Community admission and host-service-user OAuth
+remain explicit operator actions; this package has not performed them.
 
 ## Supported / remaining parity
 

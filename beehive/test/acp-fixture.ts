@@ -1,5 +1,7 @@
 /** Deterministic EXTERNAL ACP fixture: never calls a provider or reads credentials. */
 import { createInterface } from 'node:readline';
+import { writeFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 const mode = process.argv[2] ?? 'ok';
 let selected = '';
 const send = (v: unknown) => process.stdout.write(JSON.stringify(v) + '\n');
@@ -18,8 +20,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     result = { sessionId, modelId: mode === 'wrong-model' ? 'other-model' : selected };
   } else if (m.method === 'session/prompt') {
     if (selected !== process.env.BUZZ_AGENT_MODEL || m.params.sessionId !== sessionId || process.env.DATABRICKS_TOKEN || process.env.BUZZ_PRIVATE_KEY || process.env.BUZZ_AGENT_PROVIDER !== 'databricks_v2') process.exit(8);
-    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: mode === 'wrong-session' ? 'other-session' : sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture greeting, not live model proof.' } } } });
+    if (mode === 'delayed') { writeFileSync('prompt-started', '1'); await delay(4000); }
+    const update = { jsonrpc: '2.0', method: 'session/update', params: { sessionId: mode === 'wrong-session' ? 'other-session' : sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture greeting, not live model proof.' } } } };
     result = { stopReason: mode === 'cancelled' ? 'cancelled' : 'end_turn' };
+    if (mode === 'bad-tail') {
+      process.stdout.write(JSON.stringify(update) + '\n' + JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\nnot-json\n');
+      continue;
+    }
+    send(update);
   } else process.exit(9);
   send({ jsonrpc: '2.0', id: m.id, result });
 }

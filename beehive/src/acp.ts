@@ -85,6 +85,12 @@ export class AgentSession {
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error(reason)); }
     this.pending.clear();
   }
+  /** Interrupt outstanding startup work; late completions cannot commit readiness. */
+  cancel() {
+    if (this.failed) return;
+    if (this.session && this.prompting) this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: this.session } }) + '\n');
+    this.fail('ACP Start cancelled');
+  }
   /** Protocol failures invalidate readiness even if the OS process has not exited yet. */
   get healthy() { return !this.failed; }
 
@@ -118,10 +124,14 @@ export class AgentSession {
     if (this.failed) return Promise.reject(Error('ACP session unavailable'));
     if (this.pending.size) return Promise.reject(Error('ACP operation already in progress'));
     const id = ++this.sequence;
-    return new Promise((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => this.fail('ACP operation timed out'), this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    }).then(value => {
+      // The same stdout batch may resolve RPC then fail parsing its trailing line.
+      if (this.failed) throw Error('ACP session failed before operation commit');
+      return value;
     });
   }
   /** Discover a session catalog, explicitly retaining its ambiguous authentication provenance. */
@@ -147,6 +157,7 @@ export class AgentSession {
     this.response = '';
     try {
       const reply = record(await this.request('session/prompt', { sessionId: this.session, prompt: [{ type: 'text', text: 'Reply with a short greeting only. Do not use tools or access files.' }] }));
+      if (this.failed) throw Error('ACP session failed before evidence commit');
       if (reply.stopReason !== 'end_turn' || !this.response.trim()) throw Error('No completed same-session text response');
       return { session: this.session, model, responseHash: hash(this.response), stopReason: 'end_turn', source: 'external-acp-session', executableHash: this.prepared.executableHash };
     } finally { this.prompting = false; this.response = ''; }
