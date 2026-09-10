@@ -13,6 +13,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../auth/auth.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
+import 'relay_evidence_clock.dart';
 import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
@@ -110,6 +111,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _retryTimerFactory = retryTimerFactory,
        _replayDelay = replayDelay;
 
+  /// Immediate evidence ordering shared by all reads on this session.
+  final evidenceClock = RelayEvidenceClock();
+
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
   final DateTime Function() _now;
@@ -156,6 +160,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
     _disposed = false;
+    evidenceClock.clear();
 
     ref.onDispose(_dispose);
 
@@ -194,6 +199,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     final config = ref.read(relayConfigProvider);
+    final generation = _connectionGeneration;
     final url = Uri.parse(config.baseUrl).resolve('/query').toString();
     final bodyBytes = utf8.encode(
       jsonEncode(filters.map((filter) => filter.toJson()).toList()),
@@ -223,13 +229,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       throw const FormatException('relay returned malformed query response');
     }
     try {
-      return [
+      final events = [
         for (final eventJson in decoded)
           if (eventJson is Map<String, dynamic>)
             NostrEvent.fromJson(eventJson)
           else
             throw const FormatException('relay returned malformed query event'),
       ];
+      if (_isActiveConnection(generation)) {
+        for (final event in events) {
+          evidenceClock.observe(event);
+        }
+      }
+      return events;
     } catch (error) {
       if (error is FormatException) rethrow;
       throw FormatException('relay returned malformed query event: $error');
@@ -409,6 +421,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugSupersedeConnection() => _supersedeConnection();
 
   int _supersedeConnection() {
+    evidenceClock.clear();
     return ++_connectionGeneration;
   }
 
@@ -700,6 +713,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final subId = data[1] as String;
     final eventJson = data[2] as Map<String, dynamic>;
     final event = NostrEvent.fromJson(eventJson);
+    evidenceClock.observe(event);
 
     // History subscriptions accumulate immediately.
     final historySub = _historySubscriptions[subId];
@@ -1016,6 +1030,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   }
 
   void _dispose() {
+    evidenceClock.clear();
     _disposed = true;
     _beforePauseCallbacks.clear();
     _connectionGeneration++;

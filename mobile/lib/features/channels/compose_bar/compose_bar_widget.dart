@@ -485,12 +485,7 @@ class ComposeBar extends HookConsumerWidget {
         var authorizationRevision = submittedDraftRevision;
         final visit = authorizationVisit.value;
         final config = ref.read(relayConfigProvider);
-        // Equivalent refreshes retain scope; destination/credentials do not.
-        bool isConfigScopeCurrent() {
-          final current = ref.read(relayConfigProvider);
-          return current.baseUrl == config.baseUrl &&
-              current.nsec == config.nsec;
-        }
+        bool isConfigScopeCurrent() => _isComposeConfigCurrent(ref, config);
 
         final readSelected = ref.read(
           selectedMentionAuthorizationReaderProvider,
@@ -498,29 +493,20 @@ class ComposeBar extends HookConsumerWidget {
         final session = ref.read(relaySessionProvider.notifier);
         final observedProfiles = <String, NostrEvent>{};
         final observedKeys = <String>{};
-        bool profilesCurrent() => observedProfiles.entries.every((entry) {
-          final order = ref
-              .read(userCacheProvider.notifier)
-              .profileEventOrder(entry.key);
-          final event = entry.value;
-          return order == null ||
-              order.createdAt < event.createdAt ||
-              (order.createdAt == event.createdAt &&
-                  order.eventId.compareTo(event.id) >= 0);
-        });
+        final evidenceChecks = <bool Function()>{};
+        bool profilesCurrent() => evidenceChecks.every((check) => check());
         bool ownsSource() =>
             context.mounted &&
             visit == authorizationVisit.value &&
             isConfigScopeCurrent();
-        bool isAuthorizationCurrent() =>
+        bool isAuthorizationScopeCurrent() =>
             ownsSource() &&
             identical(session, ref.read(relaySessionProvider.notifier)) &&
             currentPubkey == ref.read(currentPubkeyProvider) &&
-            profilesCurrent() &&
             submittedUploadGeneration == uploadGeneration.value &&
             authorizationRevision == draftRevision.value &&
             isConfigScopeCurrent();
-        void ensureAuthorizationCurrent() {
+        void ensureAuthorizationScopeCurrent() {
           if (!context.mounted) throw const _ComposeAuthorizationCancelled();
           if (!isConfigScopeCurrent()) {
             throw const _ComposeCommunityChanged();
@@ -531,12 +517,26 @@ class ComposeBar extends HookConsumerWidget {
             throw const _ComposeAuthorizationCancelled();
           }
           if (!identical(session, ref.read(relaySessionProvider.notifier)) ||
-              currentPubkey != ref.read(currentPubkeyProvider) ||
-              !profilesCurrent()) {
+              currentPubkey != ref.read(currentPubkeyProvider)) {
             throw Exception('Mention evidence changed; retry the draft');
           }
         }
 
+        void ensureAuthorizationCurrent() {
+          ensureAuthorizationScopeCurrent();
+          if (!profilesCurrent()) {
+            throw Exception('Mention evidence changed; retry the draft');
+          }
+        }
+
+        Future<void> guardedDelivery(
+          String content,
+          List<String> keys, {
+          List<List<String>> mediaTags = const [],
+        }) => withRelayPublicationGuard(
+          ensureAuthorizationCurrent,
+          () => onSend(content, keys, mediaTags: mediaTags),
+        );
         checkPreparationCurrent = ensureAuthorizationCurrent;
 
         // Resolved before any await: see
@@ -566,10 +566,12 @@ class ComposeBar extends HookConsumerWidget {
           priorAgentKeys: priorAgentKeys,
           observedKeys: observedKeys,
           observedProfiles: observedProfiles,
+          evidenceChecks: evidenceChecks,
           currentPubkey: currentPubkey,
           channelId: channelId,
           ensureAuthorizationCurrent: ensureAuthorizationCurrent,
-          isAuthorizationCurrent: isAuthorizationCurrent,
+          isAuthorizationCurrent: isAuthorizationScopeCurrent,
+          ensureScopeCurrent: ensureAuthorizationScopeCurrent,
           prepare: prepare,
         );
 
@@ -610,44 +612,21 @@ class ComposeBar extends HookConsumerWidget {
         );
         final channelActions = ref.read(channelActionsProvider);
 
-        // Agent failures stop publication; the original draft keeps its keys.
-        Future<void> addMentionedNonMembers() async {
-          final keys = outgoing.pubkeys.toSet();
-          Future<bool> authorizeWrite(String key, String role) async {
-            final evidence = await authorize(keys, prepare: true);
-            final fresh = evidence[key]!;
-            if (fresh.invitationRole != role) {
-              throw Exception(
-                'Mention classification changed; retry invitation consent',
-              );
-            }
-            return !fresh.isMember;
-          }
-
-          await authorize(keys, prepare: true);
-          ensureAuthorizationCurrent();
-          invitationStarted.value = true;
-          await outgoing.addNonMembers(
-            channelActions,
-            scan: scan,
-            messenger: messenger,
-            ensureCurrent: ensureAuthorizationCurrent,
-            authorizeWrite: authorizeWrite,
-          );
-          if (!outgoing.pubkeys.toSet().containsAll(keys)) {
-            throw Exception(
-              'Mention invitation failed. Draft kept; retry or remove the mention.',
-            );
-          }
-          await authorize(keys);
-          if (queuedAttachments.isEmpty ||
-              (selectedKeys.isNotEmpty ||
-                  scan.humans.isNotEmpty ||
-                  scan.agentPubkeys.isNotEmpty)) {
-            ensureAuthorizationCurrent();
-          }
-        }
-
+        Future<void> addMentionedNonMembers() => _prepareMentionInvitations(
+          outgoing: outgoing,
+          scan: scan,
+          channelActions: channelActions,
+          messenger: messenger,
+          authorize: authorize,
+          ensureCurrent: ensureAuthorizationCurrent,
+          ensureScopeCurrent: ensureAuthorizationScopeCurrent,
+          onStarted: () => invitationStarted.value = true,
+          fenceAfterPreparation:
+              queuedAttachments.isEmpty ||
+              selectedKeys.isNotEmpty ||
+              scan.humans.isNotEmpty ||
+              scan.agentPubkeys.isNotEmpty,
+        );
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;
           await _sendTextOnlyDraft(
@@ -658,7 +637,10 @@ class ComposeBar extends HookConsumerWidget {
             submittedDraftRevision: submittedDraftRevision,
             ownsSource: ownsSource,
             focusNode: focusNode,
-            clearComposer: clearComposer,
+            clearComposer: () {
+              clearComposer();
+              authorizationRevision = draftRevision.value;
+            },
             addMentionedNonMembers: addMentionedNonMembers,
             payload: _ComposeDraftPayload.fromDraft(
               text: text,
@@ -666,7 +648,7 @@ class ComposeBar extends HookConsumerWidget {
               customEmoji: customEmoji,
             ),
             outgoing: outgoing,
-            onSend: onSend,
+            onSend: guardedDelivery,
             messenger: messenger,
           );
           return;
@@ -691,7 +673,7 @@ class ComposeBar extends HookConsumerWidget {
         final cancellation = UploadCancellationToken();
         final uploadService = ref.read(mediaUploadServiceProvider);
         activeUploadCancellation.value = cancellation;
-        final delivery = onSend;
+        final delivery = guardedDelivery;
         unawaited(() async {
           var retainedForRetry = false;
           var delivered = false;
