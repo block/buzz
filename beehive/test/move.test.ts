@@ -86,7 +86,7 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
     ui.send(move); ui.send(grant); await delay(100); assert.equal(readFileSync(join(dir,'target','journal.json'),'utf8'),before);
     assert.equal((await request('start','source',3)).body.result,'not-authority');
     // Move back is a NEW successor; historical forward grant cannot seize it.
-    assert.equal((await request('move','target',1,{ target: 'source', targetRevision: 3, selection: selected })).body.result,'accepted');
+    assert.equal((await request('move','target',1,{ target: 'source', targetRevision: 3, selection: journal('source').selected })).body.result,'accepted');
     await wait(m => m.type === 'inventory' && m.host === 'source' && m.revision === 4 && m.body.phase === 'running');
     ui.send(grant); await delay(100);
     assert.equal(journal('target').assignment.assignedHost,'source'); assert.equal(journal('target').phase,'stopped');
@@ -100,7 +100,7 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
 });
 
 
-for (const failure of ['missing-key', 'changed-prepared-input', 'changed-across-target-restart'] as const) test(`dropped grant/receipt recovery; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
+for (const failure of ['missing-key', 'changed-prepared-input', 'changed-across-target-restart', 'remote-candidate-save'] as const) test(`dropped grant/receipt recovery; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-move-loss-')));
   const ownerSecret = newKey(), agentSecret = newKey(), agent = publicKey(agentSecret);
   const genesis = createGenesis(publicKey(ownerSecret), agent, 'source');
@@ -134,15 +134,20 @@ for (const failure of ['missing-key', 'changed-prepared-input', 'changed-across-
     const originalPreparation = journal('target').preparations[move.id];
     if (failure === 'changed-across-target-restart') await target.close();
     const targetSetup = join(dir,'target','setup.json');
-    if (failure === 'missing-key') unlinkSync(targetSetup);
+    if (failure === 'remote-candidate-save') {
+      const edit = message('save', 'target', agent, 0, { configurationAction: 'create', name: 'Later candidate' }); ui.send(edit);
+      await until(() => journal('target').revision === 1);
+      assert.equal(journal('target').selected.configuration.name, 'Later candidate');
+    } else if (failure === 'missing-key') unlinkSync(targetSetup);
     else writePrivate(targetSetup, { ...JSON.parse(readFileSync(targetSetup,'utf8')), args: [resolve('test/runner.ts'), 'changed-after-preparation'] });
     if (failure === 'changed-across-target-restart') target = await host(join(dir,'target'),url);
     drop = false; loseReceipt = false;
     ui.send(message('inspect','source',agent));
     await until(() => seen.some(m => m.type === 'receipt' && m.body.operation === move.id && m.body.result === 'accepted'));
     await until(() => journal('target').assignment.assignedHost === 'target');
-    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes(failure === 'changed-across-target-restart' ? 'Destination preparation invalidated' : 'Local agent key/setup missing')));
+    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes(failure === 'remote-candidate-save' ? 'Destination candidate changed after preparation' : failure === 'changed-across-target-restart' ? 'Destination preparation invalidated' : 'Local agent key/setup missing')));
     assert.equal(journal('target').phase,'stopped'); assert.equal(journal('target').actual,null);
+    if (failure === 'remote-candidate-save') assert.equal(journal('target').selected.configuration.name, 'Later candidate');
     const denied = message('start','source',agent,2); ui.send(denied);
     await until(() => seen.some(m => m.body.operation === denied.id && m.body.result === 'not-authority'));
     assert.deepEqual(journal('target').preparations[move.id], originalPreparation, 'replayed prepare never replaces consumed grant evidence');

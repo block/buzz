@@ -290,3 +290,27 @@ publication while the reader gated on existence. That marker now uses atomic
 write/rename; broker logic, timeout and assertions unchanged. Targeted broker 1/1;
 final exact executable strict + default installed-enabled full 38/38 (29.50s), natural
 exit. This captured failure does not classify the older unrecorded broker failure.
+
+## Named launch configuration continuation
+
+`configurations.test.ts` drives the actual local setup CLI subprocess (not a helper)
+through fixture setup and two deliberate key creations sharing one harness. It checks
+0600 files/0700 installation directory and that stdout contains none of the fixture
+owner/agent secrets. Then actual TUI subprocesses create Alternative, Save a different
+locally allowed workspace, select default/Alternative while X runs, and Restart X.
+The old actual run and Y's complete journal stay unchanged; the new actual snapshot
+is Alternative@3/exact workspace under the same X identity. Target Destination@2 is
+created/saved remotely while standby Start stays denied; stale candidate Move preserves
+source, exact candidate Move starts the destination. The setup manifest is byte-identical
+through all remote configuration/lifecycle operations: no key/setup copy or regeneration.
+The helper-level test covers rename/removal/name bounds and revision non-reuse.
+
+`move.test.ts` additionally drops a consumed grant, accepts a remote target candidate
+Save, then delivers the retained grant. Assignment must advance but target stays stopped
+with its newer selected-next, source remains revoked, and duplicate/restarted-source
+replays cannot resurrect it. A changed target revision cannot silently strand a consumed
+grant. Reverse-Move acceptance now uses the exact observed source selected-next rather
+than a hand-authored selection omitting its newly materialized configuration revision.
+Existing profile/async-Restart Save races and independent per-slot cancellation tests
+continue exercising the same serialized Save/CAS path. No timeout/containment assertion
+or production broker was weakened. Exact final suite result is in CHECKPOINT.

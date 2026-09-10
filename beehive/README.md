@@ -482,3 +482,60 @@ The TUI currently uses a one-line instruction form; protocol supports line break
 Named launch configurations, local key/setup CRUD and a small harness-specific wizard,
 Desktop harness/provider/preset/custom/mesh/compute parity, final real-TUI UX/live
 acceptance and independent review remain broader work, not completed by profiles.
+
+## Named launch configurations and shorter first setup
+
+`setup <new-host-directory> <identity-file>` now directly produces the shared-slot
+installation. Choose the fixture or Buzz Agent Databricks v2 harness, provision its
+local executable and one or two allowed workspaces, then create independent agent
+identities reusing **one harness setup**. The wizard shows the intended service uid,
+HOME/config directory and provider login mechanism before confirmation (no login is
+performed). Each extra identity is a deliberate yes/no choice, not another provider
+setup. Optional owner-only key/root file import remains standby-only. Existing hosts
+still use explicit stopped `migrate-slots`/`add-agent`; this does not reset them.
+No extra migration command is needed for a newly created host.
+
+In the remote TUI, select the exact host/agent row, then:
+
+- `config-new`: name a copy of selected-next, using the **same key and harness setup**.
+  The new configuration becomes selected-next after host acceptance.
+- `save`: edit the selected configuration's advertised model/workspace and profile.
+- `configurations`: list the bounded, host-owned named candidates and their revisions.
+- `config-select <name>`: select an existing candidate without editing it.
+- `config-rename`: rename a candidate; old actual snapshots keep their old names.
+- `config-remove <name>`: remove an inactive candidate. Select another first if it
+  is selected. Removal never removes run history, assignment or keys.
+- `show`: inspect selected-next, immutable actual run and recent historical
+  configuration/model/workspace/instruction/prepared-input fingerprints.
+- Explicit `restart` applies the captured selected candidate; Save/select never
+  restarts. Creating/selecting a configuration never creates/imports a key.
+
+All mutations are existing durable Save operations with agent/host/revision CAS,
+receipts and unchanged-envelope retries. Configuration revisions come from the
+agent journal revision, so removing/recreating a name cannot reuse an applied
+revision. Maximum 32 candidates / 8 KiB combined public candidate data. Unsupported
+model/workspace/profile is rejected by the owning host. One local harness setup per
+slot is selectable in this increment; multiple configurations may differ in allowed
+workspace or behavior. Multiple selectable harness setups and richer models/settings
+remain work, not generic-provider parity.
+
+Legacy selected-next is projected as `default` without rewriting its actual run or
+inventing historical names/revisions. First accepted Save materializes the registry
+in the same atomic journal persist as selected-next and the receipt. Historical
+runs without a configuration tag remain explicitly legacy/unversioned data.
+
+Standby public configuration is now remotely editable, **not execution permission**.
+Start/Restart/Stop/Move remain assignment-fenced. Move requires the exact target
+candidate revision and local settings while retaining source-selected public behavior.
+If a target Save is accepted after preparation but before the consumed grant arrives,
+the target accepts the assignment **stopped**, keeps that later selected-next, and
+requires a fresh explicit Start. It never launches mixed inputs, discards the accepted
+Save, strands the grant, or resurrects the source. Old prepared/grant evidence remains
+immutable. Normal successful Move still captures the exact prepared candidate.
+
+**Still unfinished:** local key removal/revocation and full import/reuse wizard UX,
+local setup CRUD/multiple selectable setup bindings, Goose/Claude Code/Codex/vendor
+login/ACP adapters, other Buzz Agent providers, ten presets/custom ACP, mesh/compute,
+production admission and normal service-user OAuth/live exact-model proof. The wizard
+has working fixture and existing Buzz Agent Databricks paths; the fixture is **not**
+a second Desktop harness. No new provider path or live login has been verified here.

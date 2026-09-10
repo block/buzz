@@ -3,17 +3,23 @@ import { digest, fields, object, text, type Message, parseMessage } from './prot
 import { validateGenesis, type Genesis } from './assignment.ts';
 
 /** Public exact launch selection; credentials and executable choices remain local. */
-export type Selection = { model: string; workspace: string; profile: string; behavior?: Profile };
+export type Selection = { model: string; workspace: string; profile: string; behavior?: Profile; configuration?: { name: string; revision: number } };
 /** A source-consumed successor. Outer management authentication assumes trusted hosts. */
 export type Grant = { root: string; predecessor: string; source: string; target: string; agent: string; operation: Message; prepared: string; selection: Selection; targetRevision: number; sourceRun: string | null };
 export type Assignment = { genesis: Genesis; assignedHost: string; chain?: Grant[] };
 export function hash(value: unknown): string { return digest(JSON.stringify(value)).toString('hex'); }
 export function selection(value: unknown): Selection {
-  const s = object(value); fields(s, ['model','workspace','profile', ...(s.behavior === undefined ? [] : ['behavior'])]);
+  const s = object(value); fields(s, ['model','workspace','profile', ...(s.behavior === undefined ? [] : ['behavior']), ...(s.configuration === undefined ? [] : ['configuration'])]);
+  let configuration: Selection['configuration'];
+  if (s.configuration !== undefined) {
+    const c = object(s.configuration); fields(c, ['name', 'revision']);
+    if (!Number.isSafeInteger(c.revision) || Number(c.revision) < 1) throw Error('Invalid configuration revision');
+    configuration = { name: text(c.name, 64), revision: Number(c.revision) };
+  }
   const behavior = s.behavior === undefined ? undefined : profile(s.behavior);
   if (s.profile !== 'default' && (!behavior || s.profile !== behavior.revision)) throw Error('Invalid profile reference');
   if (s.profile === 'default' && behavior) throw Error('Default cannot override instructions');
-  return { model: text(s.model), workspace: text(s.workspace), profile: text(s.profile), ...(behavior ? { behavior } : {}) };
+  return { model: text(s.model), workspace: text(s.workspace), profile: text(s.profile), ...(behavior ? { behavior } : {}), ...(configuration ? { configuration } : {}) };
 }
 /** Validate every predecessor, routing and immutable operation binding, not timestamps. */
 export function validateAssignment(a: Assignment): void {

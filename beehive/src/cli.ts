@@ -48,9 +48,12 @@ async function main() {
       if (!['1','2'].includes(mode)) throw Error('Choose 1 or 2');
       const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : 'Absolute installed buzz-agent executable: ')));
       const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
+      const additionalWorkspace = await ui.question('Additional allowed workspace (blank for none): ');
+      const allowedWorkspaces = additionalWorkspace ? [workspace, realpathSync(text(additionalWorkspace))] : [workspace];
       const extra = mode === '1' ? text(await ui.question('Absolute fixture TypeScript script: ')) : '';
       const databricksHost = mode === '2' ? text(await ui.question('Databricks workspace HTTPS URL: ')) : undefined;
-      if (databricksHost && new URL(databricksHost).protocol !== 'https:') throw Error('HTTPS workspace required');
+      if (databricksHost) { const url = new URL(databricksHost); if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin without credentials'); }
+      console.log(mode === '1' ? 'Fixture setup: no provider/login; trusted local executable, no agent credentials passed.' : `Buzz Agent Databricks v2 owns browser OAuth and refresh. Intended host/service credential context: uid ${process.getuid?.() ?? 'unknown'}, HOME=${shellQuote(join(dir, 'service-home'))}, BUZZ_AGENT_CONFIG_DIR=${shellQuote(join(dir, 'agent-config'))}, DATABRICKS_HOST=${shellQuote(databricksHost!)}. Run ${shellQuote(runner)} auth databricks in exactly that context as the service user; no login initiated. Missing executable: install buzz-agent locally. Missing auth: use auth-info after setup.`);
       const importing = args.length > 2;
       const agentSecret = importing ? text(object(readPrivate(resolve(text(args[2])))).secret) : newKey();
       const genesis = importing ? validateGenesis(readPrivate(resolve(text(args[3])))) : createGenesis(publicKey(secret), publicKey(agentSecret), name);
@@ -58,7 +61,14 @@ async function main() {
       if ((await ui.question(importing ? `Provision matching key as standby only; assignment remains ${genesis.initialHost}? [yes/no]: ` : 'Create a NEW agent identity assigned exclusively to this host? [yes/no]: ')) !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
       if (mode === '2') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : [], workspace, mode: mode === '1' ? 'fixture' : 'buzz-agent-databricks-v2', ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
+      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : 'buzz-agent-databricks-v2', ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
+      migrateSlots(dir);
+      console.log(`Harness setup default is reusable; agent ${publicKey(agentSecret)} is independent. Host must remain stopped for local structural changes.`);
+      while ((await ui.question('Add another independent NEW agent using this same harness setup? [yes/no]: ')) === 'yes') {
+        const additional = newKey();
+        addSlot(dir, additional, createGenesis(publicKey(secret), publicKey(additional), name));
+        console.log(`Added agent ${publicKey(additional)} using harness setup default; no provider setup or key copy.`);
+      }
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
       if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
     } finally { ui.close(); }
@@ -152,7 +162,7 @@ async function main() {
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     let profileRows: Profile[] = [];
     try {
@@ -212,8 +222,30 @@ async function main() {
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') {
           const next = current.body.selectedNext as any, actual = current.body.actualRun as any;
-          const label = (s: any) => s?.behavior ? `${s.behavior.name} @ ${s.behavior.revision.slice(0, 12)}` : 'upstream default';
+          const label = (s: any) => `${s?.configuration ? `${s.configuration.name} @ ${s.configuration.revision}` : 'default (legacy/unversioned)'} | behavior ${s?.behavior ? `${s.behavior.name} @ ${s.behavior.revision.slice(0, 12)}` : 'upstream default'}`;
           console.log(`Agent ${current.agent} | host ${current.host} | assigned ${current.body.assignedHost}\nCurrent: ${actual ? label(actual.selection) : 'no actual run'}\nSelected next: ${label(next)} (explicit Restart to apply)\n${JSON.stringify(current,null,2)}`); continue; }
+        if (line === 'configurations') {
+          console.log(`Host ${current.host} | agent ${current.agent} | named launch candidates (configuration is not execution permission)`);
+          for (const [name, value] of Object.entries(object(current.body.configurations))) {
+            const candidate = object(value), revision = object(candidate.configuration).revision;
+            const active = name === ((current.body.selectedNext as any).configuration?.name ?? 'default');
+            console.log(`${active ? '* selected-next' : '  saved'} ${name} @ ${revision} | ${candidate.model} | ${candidate.workspace} | behavior ${candidate.behavior ? object(candidate.behavior).name : 'upstream default'}`);
+          }
+          console.log('config-select <name> selects next; save edits it; explicit restart applies it.'); continue;
+        }
+        if (line === 'config-new' || line === 'config-rename' || line.startsWith('config-select ') || line.startsWith('config-remove ')) {
+          if (Date.now() - Number(current.body.observedAt) > 6000) { console.log('Host stale; no action sent.'); continue; }
+          try {
+            let body: Record<string, unknown>;
+            if (line === 'config-new') body = { configurationAction: 'create', name: await ui.question('New configuration name (copies selected-next, same identity/setup): ') };
+            else if (line === 'config-rename') body = { configurationAction: 'rename', name: await ui.question('Existing configuration name: '), newName: await ui.question('New configuration name: ') };
+            else { const [command, ...name] = line.split(' '); body = { configurationAction: command === 'config-select' ? 'select' : 'remove', name: name.join(' ') }; }
+            if (await ui.question(`Update configuration on ${current.host} agent ${current.agent}, actual run unchanged? [yes/no]: `) !== 'yes') continue;
+            client.submit(message('save', current.host, current.agent, current.revision, body));
+            console.log('Named configuration pending host CAS acceptance. Save edits selected configuration; Start/Restart is separate.');
+          } catch (error) { console.log(error instanceof Error ? error.message : 'Configuration not submitted'); }
+          continue;
+        }
         if (!line.startsWith('apply ') && !['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};

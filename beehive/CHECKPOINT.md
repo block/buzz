@@ -5,6 +5,89 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Named configurations 6bf9 — usable increment, local parity still partial
+
+Started published `e70f90f9aec26248022aa1081339548e1ade9ea4`. Candidate is this
+commit (`git rev-parse HEAD`); exact published head is in terminal result.
+
+**Implemented:** existing per-agent journal/Save/CAS now owns bounded named launch
+candidates (create, Save, list, select, rename, inactive removal). Names and revision
+numbers are captured in immutable actual selections and survive removal/rename in
+run history. Revision numbers use the host/agent journal generation, never reset on
+name reuse. Existing default selection is projected without lossy history migration;
+old actuals remain legacy/unversioned. One atomic persist contains registry,
+selected-next and receipt. No second profile/provider/credential authority. One
+harness setup per slot is exposed with nonsecret ID/kind/allowed model/workspace;
+actual-run includes the shared setup definition fingerprint (excluding agent/owner
+keys), executable digest and complete prepared-input fingerprint. Setup fingerprints
+do not claim credential-cache generation or pin executable replacement across spawn.
+
+**Local wizard:** `setup` directly creates shared slots; no migrate-slots paperwork
+for a new host. Choose fixture or existing Buzz Agent Databricks v2, local executable,
+allowed workspaces, see harness-specific sign-in/service uid/HOME/config context,
+then deliberately create independent keys using that same harness setup. Optional
+owner-only key/root file import still attaches standby to existing genesis. Subsequent
+named configuration changes never recreate/import/copy keys. Local structural changes
+require the host stopped/exclusion lock; no management HTTP, implicit lifecycle or login.
+This is a smaller first-setup flow, not complete key/setup CRUD or Desktop parity.
+
+**Standby and Move:** public Save is now allowed on an exact standby agent/host;
+Start/Restart/Stop/Move remain assignment-fenced. Preparation validates the exact
+observed destination candidate, with source-selected behavior authoritative. Self-review
+caught the newly reachable target-Save-after-prepare race: accepting a later Save must
+not strand an already consumed grant. Grant acceptance preserves that later candidate,
+advances authority/revision, stays stopped and requires explicit Start. No mixed-input
+launch, discarded accepted Save or source resurrection. Prepared/grant records stay
+immutable and duplicate replay stays inert. Normal successful Move applies exact target
+name/revision/workspace and source behavior, not a floating current candidate.
+
+**Actual acceptance:** `configurations.test.ts` drives real local wizard and real TUI
+subprocesses through two identities sharing one setup; checks 0600 files/0700 directory
+and no fixture secrets in wizard stdout. X starts, creates Alternative, saves another
+allowed workspace, selects default/Alternative while actual stays identical, then
+Restart applies Alternative@3/exact workspace/same setup fingerprint and identity.
+Y's complete journal stays byte-identical. Target Destination@2 is prepared remotely,
+Start denied; stale candidate Move preserves source, exact candidate Move succeeds.
+Remote rename/removal leave actual/history unchanged; unsupported selection rejects at
+owner. Manifest remains byte-identical throughout remote work: no key/setup rewrite.
+New dropped-grant/remote-target-Save regression proves assigned/stopped acceptance,
+later selection preserved, immutable preparation and no source resurrection on reopen.
+Existing actual profile/Restart/Move instruction tests retain behavior evidence.
+
+**Validation:** final executable strict + installed-enabled DEFAULT concurrent package
+**41/41**, zero skips/failures, natural exit **29.285s**. Previous complete candidate
+41/41 30.746s; final only improves concise named list/current-next labels. Earlier
+focused 10/11 exposed reverse-Move test constructing a stale selection without the new
+configuration tag; fixture now supplies exact observed selected-next, matching the
+new target-candidate contract (no weakened production checks). Prior full 38/38 and
+new focused 8/8 also passed. No serial/force-exit or timeout/containment assertion
+changes. Logs/source hashes/binary hashes in workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/NAMED_CONFIGURATIONS_6BF9/`.
+
+**Independent review consumed:** `PROFILE_RESTART_REVIEW_E70F90F9.md`, no supported
+blocking finding, independent strict/default installed-enabled 38/38 at pinned
+predecessor. Additional independent installed Restart probe establishes same signer,
+new actual run/session and B instructions on replacement/next turn; actual TUI branch/
+default and relay trust-boundary probes passed. Reviewer corrected an overstrict
+later-turn-prompt repetition oracle, with initial failure retained. This new named
+configuration/standby-Save delta is self-reviewed, NOT independently approved by that
+predecessor report. No repository-wide CI or live provider approval claimed.
+
+**Remaining:** key removal/revocation with retained public assignment/history and
+public-only missing-key slot inventory; complete import/reuse wizard; local harness
+setup CRUD/multiple remotely selectable setup bindings; a materially different
+Goose/Claude Code/Codex path and vendor/adaptor auth, remaining Buzz Agent providers,
+ten presets/custom ACP/mesh/compute; final independent simple UX review and production
+kind-40002/admission/normal service-user Databricks OAuth/live exact model. Current
+wizard has fixture + existing Buzz Agent path only: fixture is not Desktop harness
+parity. Historical unrecorded broker failure remains unclassified. Trusted exclusive
+non-cloned/non-rollback POSIX installations/shared-owner physical-host limits remain.
+
+**One next executable step:** implement local deliberate key removal as a retained
+public-only slot (not deleting the slot/journal), with stopped installation exclusion;
+exercise remove → service reopen → advertised missing-key state → rejected Start/
+Restart/Move without reconstruction, while Stop/history and a sibling stay truthful.
+
 ## Behavior profiles 0aa71 — implemented application and durable actual evidence
 
 Started clean published `e6717541d4580541cd24816e062d893a49260bbc`. Candidate is

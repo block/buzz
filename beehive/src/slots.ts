@@ -21,11 +21,12 @@ function readInstallation(directory: string): Installation {
   return i;
 }
 /** Resolve shared local harness inventory without copying agent keys into setups. */
-export function installationSlots(directory: string): { setup: Setup; path: string }[] {
+export function installationSlots(directory: string): { setup: Setup; path: string; setupId: string }[] {
   const raw = object(readPrivate(join(directory, 'setup.json')));
-  if (raw.version !== 2) return [{ setup: validateSetup(raw), path: join(directory, 'journal.json') }];
+  if (raw.version !== 2) return [{ setupId: 'default', setup: validateSetup(raw), path: join(directory, 'journal.json') }];
   const i = readInstallation(directory);
   return Object.entries(i.agents).map(([key, a]) => ({
+    setupId: a.setup,
     setup: validateSetup({ ...i.setups[a.setup], host: i.host, ownerSecret: i.ownerSecret, agentSecret: a.secret }),
     path: a.legacy ? join(directory, 'journal.json') : join(directory, 'agents', key, 'journal.json'),
   }));
