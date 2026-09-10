@@ -676,4 +676,122 @@ mod tests {
             "reconciliation_failed"
         );
     }
+
+    // ---- sanitizer parity against the pinned Python reference -------------
+    //
+    // `RECORD_ALLOWED` above is a Rust port of buzz-auditor@83db37a's
+    // `nip_am_pipeline_bridge.RECORD_ALLOWED_FIELDS` (see this crate's own
+    // module doc comment on `sanitize.rs`) -- the same nested `tokens`/
+    // `cost` groups, the same credential-scan-before-format-check ordering,
+    // the same three-case discipline (drop+count / downgrade-to-unknown /
+    // block-whole-line). `pagination`/`empty_source_probe` are NOT ported
+    // from any Python module -- they are new kinds this checkpoint invented
+    // because this command runs one capped in-process call, not
+    // `pipeline_demo`'s multi-call `query_trace`/`run_summary`/
+    // `session_coverage` sequence -- so parity is asserted for `record`
+    // only, the schema actually reused.
+    //
+    // `testdata/sanitizer_parity_examples.json` is fed to BOTH sides:
+    // `sanitizer_parity_expected_python_output.json` is the frozen,
+    // captured-verbatim result of running the real
+    // `collector.nip_am_pipeline_bridge.sanitize_pipeline_line` from a git
+    // worktree of cccareers/buzz-auditor pinned to the exact commit in
+    // `../../NIP_AM_VERIFY_PINNED_REV` (83db37a6f8fec5663227ceeb439b21c30d5d19ac) --
+    // not hand-written, not "similarly named" assertions.
+    //
+    // One scenario, `related_event_id_present`, is a KNOWN, documented
+    // divergence rather than a parity failure: the Python allowlist
+    // validates a `related_event_id` field that this command's own fixture
+    // producer (`build_record_raw_value`) never emits, so `RECORD_ALLOWED`
+    // omits it -- Rust drops+counts it as unrecognized where Python
+    // validates and keeps it. This is the strictly safer direction (a
+    // narrower allowlist can only under-accept, never over-trust), so it is
+    // asserted explicitly here, not silently excluded from the comparison.
+    #[test]
+    fn record_sanitizer_matches_the_pinned_python_reference_on_shared_examples() {
+        let examples: Vec<Value> =
+            serde_json::from_str(include_str!("testdata/sanitizer_parity_examples.json"))
+                .expect("fixture examples are valid JSON");
+        let expected: Vec<Value> = serde_json::from_str(include_str!(
+            "testdata/sanitizer_parity_expected_python_output.json"
+        ))
+        .expect("frozen python output is valid JSON");
+        assert_eq!(
+            examples.len(),
+            expected.len(),
+            "one frozen Python result per shared example"
+        );
+
+        for (example, expected) in examples.iter().zip(expected.iter()) {
+            let scenario = example
+                .get("scenario")
+                .and_then(Value::as_str)
+                .expect("every example is labeled");
+            let obj = example.as_object().expect("every example is a JSON object");
+
+            let result = super::super::sanitize::sanitize_fields(obj, RECORD_ALLOWED);
+            let expected_status = expected["status"].as_str().unwrap();
+            let expected_blocked_field = expected["blocked_field"].as_str();
+            let expected_invalid_fields: Vec<&str> = expected["invalid_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+
+            assert_eq!(
+                result.blocked_field.is_some(),
+                expected_status == "blocked",
+                "scenario {scenario}: emitted/blocked status must match Python"
+            );
+            assert_eq!(
+                result.blocked_field.as_deref(),
+                expected_blocked_field,
+                "scenario {scenario}: blocked_field must match Python (same dotted-path convention)"
+            );
+
+            let mut actual_invalid: Vec<&str> =
+                result.invalid_fields.iter().map(String::as_str).collect();
+            actual_invalid.sort_unstable();
+            let mut expected_invalid = expected_invalid_fields.clone();
+            expected_invalid.sort_unstable();
+
+            if scenario == "related_event_id_present" {
+                // Documented divergence (see test doc comment): Rust drops
+                // the field Python validates, so dropped_field_count and
+                // the emitted line's key set differ by exactly that one
+                // field -- everything else about the line must still match.
+                assert_eq!(result.dropped_field_count, 1);
+                assert_eq!(expected["dropped_field_count"].as_u64(), Some(0));
+                assert!(!result.output.contains_key("related_event_id"));
+                assert_eq!(actual_invalid, expected_invalid);
+                continue;
+            }
+
+            assert_eq!(
+                result.dropped_field_count as u64,
+                expected["dropped_field_count"].as_u64().unwrap(),
+                "scenario {scenario}: dropped_field_count must match Python"
+            );
+            assert_eq!(
+                actual_invalid, expected_invalid,
+                "scenario {scenario}: invalid_fields must match Python"
+            );
+
+            if expected_status == "emitted" {
+                let expected_line = expected["line"]
+                    .as_object()
+                    .expect("emitted scenarios carry a line object");
+                assert_eq!(
+                    &result.output, expected_line,
+                    "scenario {scenario}: emitted line must match Python field-for-field"
+                );
+            } else {
+                assert!(
+                    result.output.is_empty(),
+                    "scenario {scenario}: a blocked line's output must be empty"
+                );
+            }
+        }
+    }
 }

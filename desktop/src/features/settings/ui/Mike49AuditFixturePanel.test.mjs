@@ -69,9 +69,7 @@ before(async () => {
     "@testing-library/react"
   ));
   ({ createElement } = await import("react"));
-  ({ Mike49AuditFixturePanel } = await import(
-    "./Mike49AuditFixturePanel.tsx"
-  ));
+  ({ Mike49AuditFixturePanel } = await import("./Mike49AuditFixturePanel.tsx"));
 });
 
 afterEach(() => {
@@ -159,7 +157,11 @@ test("idle: renders the run button and never auto-invokes on mount", async () =>
   invokeHandler = () => Promise.resolve(CAPPED_REPORT);
   render(createElement(Mike49AuditFixturePanel));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(invokeCallCount, 0, "must not invoke until the button is clicked");
+  assert.equal(
+    invokeCallCount,
+    0,
+    "must not invoke until the button is clicked",
+  );
   assert.ok(screen.getByTestId("mike49-run-button"));
   assert.equal(screen.queryByTestId("mike49-report"), null);
 });
@@ -197,7 +199,10 @@ test("success: renders records, the capped/incomplete pagination state, and the 
   assert.ok(screen.getByTestId("mike49-report"));
   const rows = screen.getAllByTestId("mike49-record-row");
   assert.equal(rows.length, 2, "both fetched records must render");
-  assert.match(screen.getByTestId("mike49-pagination-state").textContent, /Incomplete/);
+  assert.match(
+    screen.getByTestId("mike49-pagination-state").textContent,
+    /Incomplete/,
+  );
   assert.ok(
     screen.getByTestId("mike49-empty-probe").textContent.includes("0 events"),
     "the empty-source probe must be visibly distinct from the capped/incomplete records list",
@@ -209,7 +214,12 @@ test("empty records: renders the empty state instead of an empty list with no ex
     Promise.resolve({
       ...CAPPED_REPORT,
       records: [],
-      pagination: { ...CAPPED_REPORT.pagination, eventsExamined: 0, stopReason: "exhausted", localTraversalComplete: true },
+      pagination: {
+        ...CAPPED_REPORT.pagination,
+        eventsExamined: 0,
+        stopReason: "exhausted",
+        localTraversalComplete: true,
+      },
     });
   render(createElement(Mike49AuditFixturePanel));
 

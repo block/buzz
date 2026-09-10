@@ -94,48 +94,23 @@ serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44", "nip49"] }
-# MIKE-49 checkpoint 1 (desktop fixture-only audit command): a git dependency
-# (`nip-am-verify = { git = "ssh://git@github.com/cccareers/buzz-auditor.git",
-# rev = "83db37a" }`) was tried first and failed — `cargo tree` could not
-# authenticate to the private repo via Cargo's built-in (libgit2) git
-# transport, even though the system `git`/`ssh` CLI in this same environment
-# authenticates fine (verified separately with `ssh -T git@github.com`):
+# MIKE-49 checkpoint 1 (desktop fixture-only audit command): path dependency
+# on the private cccareers/buzz-auditor repo's nip-am-verify crate. A git
+# dependency (`rev = "83db37a"`) fails Cargo's built-in libgit2 transport
+# (no ssh-agent auth, even though the system git/ssh CLI authenticates fine)
+# and net.git-fetch-with-cli, vendoring, and registry publishing are all
+# unresolved follow-ups — see docs/superhero/plans/mike-49-owner-interface-
+# decision-brief.md and the checkpoint-1 evidence in MIKE-49 for the
+# licensing/access review those options still need before adoption.
 #
-#   error: failed to get `nip-am-verify` as a dependency of package `buzz-desktop`
-#   Caused by: failed to load source for dependency `nip-am-verify`
-#   Caused by: unable to update ssh://git@github.com/cccareers/buzz-auditor.git?rev=83db37a
-#   Caused by: failed to authenticate when downloading repository
-#     * attempted ssh-agent authentication, but no usernames succeeded: `git`
-#     if the git CLI succeeds then `net.git-fetch-with-cli` may help here
-#   Caused by: no authentication methods succeeded
-#
-# `net.git-fetch-with-cli = true` in a `.cargo/config.toml` would likely fix
-# this (it shells out to the system git binary instead of libgit2), but that
-# is a repo-wide Cargo config change beyond this checkpoint's scope, so this
-# falls back to a path dependency instead, per the checkpoint-1 plan.
-#
-# CAVEAT (explicit, not hidden): this path dependency assumes buzz-auditor is
-# checked out as a SIBLING directory of this repo (`REPOS/buzz` and
-# `REPOS/buzz-auditor` under the same parent) — it is NOT CI-portable and NOT
-# merge-ready as-is. It is a checkpoint-1-only provisional choice pending a
-# proper resolution (vendoring the crate into this repo, fixing the git
-# transport via `net.git-fetch-with-cli`, or publishing to a real
-# registry) before this could ever ship to `main`.
-#
-# Verification note: this exact relative path was built and tested from a
-# nested git-worktree copy of this repo (`.claude/worktrees/<id>/desktop/
-# src-tauri`), where the same relative offset does NOT reach the sibling
-# buzz-auditor checkout. `cargo check`/`clippy`/`test` in that environment
-# were run with this line temporarily pointed at buzz-auditor's real
-# absolute path on that machine — proving the crate itself (this exact
-# git rev's content) compiles and passes as a path dependency of
-# `buzz-desktop` — then reverted to this relative form before commit. The
-# relative arithmetic itself (`../../../` = src-tauri -> desktop -> repo
-# root -> parent dir, then into `buzz-auditor/tools/nip-am-verify`) was
-# hand-verified by directory-segment count against a normal, non-worktree
-# sibling checkout, but was not independently re-run end-to-end from such a
-# checkout in this session.
-nip-am-verify = { path = "../../../buzz-auditor/tools/nip-am-verify" }
+# `../../.mike49-nip-am-verify-pinned/tools/nip-am-verify` is NOT a checked-in
+# path: run `scripts/mike49-pin-nip-am-verify.sh` first. It materializes the
+# exact commit recorded in `NIP_AM_VERIFY_PINNED_REV` (not "whatever is
+# currently checked out") as a detached-HEAD git worktree at this checkout's
+# own toplevel, so the relative path resolves correctly from both the main
+# checkout and any `.claude/worktrees/<id>/` nested worktree without a manual
+# edit here. NOT CI-portable: still requires a local buzz-auditor clone.
+nip-am-verify = { path = "../../.mike49-nip-am-verify-pinned/tools/nip-am-verify" }
 # OS-entropy source for backup passphrase generation (already in the tree as a
 # transitive dependency; pinned here for direct use).
 getrandom = "0.2"
