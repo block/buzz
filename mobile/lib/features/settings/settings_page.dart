@@ -18,6 +18,7 @@ import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/centered_utility_page.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
@@ -142,90 +143,97 @@ class SettingsPage extends HookConsumerWidget {
       }
     }
 
-    return FrostedScaffold(
-      useUtilitySurfaceTheme: true,
-      appBar: FrostedAppBar(
-        automaticallyImplyLeading: false,
-        horizontalInset: Grid.gutter,
-        showBottomDivider: false,
-        leading: Theme.of(context).platform == TargetPlatform.iOS
-            ? IosGlassNavigationButton(
-                key: const ValueKey('settings-ios-glass-close'),
-                icon: IosGlassNavigationIcon.close,
-                semanticLabel: 'Close settings',
-                onPressed: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).pop();
-                },
-                foregroundColor: navigationPrimaryForeground(context),
-              )
-            : SizedBox(
-                width: Grid.xl,
-                height: Grid.xl,
-                child: IconButton(
-                  tooltip: 'Close settings',
+    return CenteredUtilityPage(
+      contentKey: const ValueKey('settings-page-content-frame'),
+      child: FrostedScaffold(
+        useUtilitySurfaceTheme: true,
+        backgroundColor: Colors.transparent,
+        appBar: FrostedAppBar(
+          automaticallyImplyLeading: false,
+          horizontalInset: Grid.gutter,
+          showBottomDivider: false,
+          leading: Theme.of(context).platform == TargetPlatform.iOS
+              ? IosGlassNavigationButton(
+                  key: const ValueKey('settings-ios-glass-close'),
+                  icon: IosGlassNavigationIcon.close,
+                  semanticLabel: 'Close settings',
                   onPressed: () {
                     unawaited(HapticFeedback.lightImpact());
                     Navigator.of(context).pop();
                   },
-                  color: navigationPrimaryForeground(context),
-                  icon: const Icon(LucideIcons.x),
-                ),
-              ),
-        actions: [
-          if (Theme.of(context).platform == TargetPlatform.iOS)
-            IosGlassNavigationAction(
-              key: const ValueKey('settings-edit-profile'),
-              label: 'Edit',
-              foregroundColor: navigationPrimaryForeground(context),
-              onPressed: () => unawaited(showEditProfileSheet()),
-            )
-          else
-            Material(
-              key: const ValueKey('settings-edit-profile'),
-              color: context.colors.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(Radii.full),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: () => unawaited(showEditProfileSheet()),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.xs,
-                    vertical: Grid.xxs,
+                  foregroundColor: navigationPrimaryForeground(context),
+                )
+              : SizedBox(
+                  width: Grid.xl,
+                  height: Grid.xl,
+                  child: IconButton(
+                    tooltip: 'Close settings',
+                    onPressed: () {
+                      unawaited(HapticFeedback.lightImpact());
+                      Navigator.of(context).pop();
+                    },
+                    color: navigationPrimaryForeground(context),
+                    icon: const Icon(LucideIcons.x),
                   ),
-                  child: Text(
-                    'Edit',
-                    style: context.textTheme.labelLarge?.copyWith(
-                      color: context.colors.onSurface,
-                      fontWeight: FontWeight.w600,
+                ),
+          actions: [
+            if (Theme.of(context).platform == TargetPlatform.iOS)
+              IosGlassNavigationAction(
+                key: const ValueKey('settings-edit-profile'),
+                label: 'Edit',
+                foregroundColor: navigationPrimaryForeground(context),
+                onPressed: () => unawaited(showEditProfileSheet()),
+              )
+            else
+              Material(
+                key: const ValueKey('settings-edit-profile'),
+                color: context.colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(Radii.full),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () => unawaited(showEditProfileSheet()),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.xs,
+                      vertical: Grid.xxs,
+                    ),
+                    child: Text(
+                      'Edit',
+                      style: context.textTheme.labelLarge?.copyWith(
+                        color: context.colors.onSurface,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-        ],
-        bottomHeight: Grid.xxs,
-        bottom: const SizedBox.expand(),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
-              children: [
-                profileHeader,
-                _CommunitySection(invitePageBuilder: invitePageBuilder),
-                const _NotificationsSection(),
-                _ConnectionSection(
-                  identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+          ],
+          bottomHeight: Grid.xxs,
+          bottom: const SizedBox.expand(),
+        ),
+        body: Column(
+          children: [
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.only(
+                  top: topSectionHeight,
+                  bottom: Grid.xs,
                 ),
-                const _RemoveCommunitySection(),
-              ],
+                children: [
+                  profileHeader,
+                  _CommunitySection(invitePageBuilder: invitePageBuilder),
+                  const _NotificationsSection(),
+                  _ConnectionSection(
+                    identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+                  ),
+                  const _RemoveCommunitySection(),
+                ],
+              ),
             ),
-          ),
-          if (packageInfo.hasData)
-            _VersionFooter(version: packageInfo.data!.version),
-        ],
+            if (packageInfo.hasData)
+              _VersionFooter(version: packageInfo.data!.version),
+          ],
+        ),
       ),
     );
   }

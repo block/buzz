@@ -7,6 +7,7 @@ import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
+import 'package:buzz/shared/widgets/centered_utility_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +15,39 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets('centers Settings on wide windows', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final frame = find.byKey(const ValueKey('settings-page-content-frame'));
+    final background = find.byKey(
+      const ValueKey('centered-utility-page-background'),
+    );
+    expect(tester.getSize(background).width, 1200);
+    expect(tester.getSize(frame).width, centeredUtilityPageMaxWidth);
+    expect(tester.getRect(frame).center.dx, 600);
+    expect(tester.getSize(frame).height, 800);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('shows the persisted per-community push opt-in on iOS', (
     tester,
   ) async {

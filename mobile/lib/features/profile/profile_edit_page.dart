@@ -13,6 +13,7 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/centered_utility_page.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -282,65 +283,51 @@ class ProfileEditPage extends HookConsumerWidget {
           unawaited(closeAvatarEditor());
         }
       },
-      child: FrostedScaffold(
-        useUtilitySurfaceTheme: true,
-        resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
-        appBar: FrostedAppBar(
-          centerTitle: true,
-          title: AnimatedSwitcher(
-            duration: reduceMotion
-                ? const Duration(milliseconds: 120)
-                : const Duration(milliseconds: 220),
-            child: Text(
-              isEditingAvatar.value ? 'Edit Photo' : 'Profile',
-              key: ValueKey(isEditingAvatar.value),
+      child: _ProfilePageFrame(
+        constrained: !isEditingAvatar.value,
+        child: FrostedScaffold(
+          useUtilitySurfaceTheme: true,
+          backgroundColor: isEditingAvatar.value ? null : Colors.transparent,
+          resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
+          appBar: FrostedAppBar(
+            centerTitle: true,
+            title: AnimatedSwitcher(
+              duration: reduceMotion
+                  ? const Duration(milliseconds: 120)
+                  : const Duration(milliseconds: 220),
+              child: Text(
+                isEditingAvatar.value ? 'Edit Photo' : 'Profile',
+                key: ValueKey(isEditingAvatar.value),
+              ),
             ),
-          ),
-          leading: isEditingAvatar.value
-              ? defaultTargetPlatform == TargetPlatform.iOS
-                    ? IosGlassNavigationButton(
-                        key: const ValueKey('avatar-editor-back'),
-                        icon: IosGlassNavigationIcon.back,
-                        semanticLabel: 'Back to profile',
-                        onPressed: isClosingAvatar.value
-                            ? null
-                            : () => unawaited(closeAvatarEditor()),
-                      )
-                    : IconButton(
-                        key: const ValueKey('avatar-editor-back'),
-                        tooltip: 'Back to profile',
-                        onPressed: isClosingAvatar.value
-                            ? null
-                            : () => unawaited(closeAvatarEditor()),
-                        icon: const Icon(LucideIcons.arrowLeft),
-                      )
-              : null,
-          actions: isEditingAvatar.value
-              ? [
-                  if (defaultTargetPlatform == TargetPlatform.iOS)
-                    IosGlassNavigationAction(
-                      key: const ValueKey('avatar-save'),
-                      label: 'Save',
-                      width: 72,
-                      isBusy: isSavingAvatar.value,
-                      onPressed:
-                          canSaveAvatar &&
-                              !isSavingAvatar.value &&
-                              !isClosingAvatar.value
-                          ? () {
-                              unawaited(HapticFeedback.lightImpact());
-                              unawaited(saveAvatar());
-                            }
-                          : null,
-                    )
-                  else
-                    Padding(
-                      padding: const EdgeInsets.only(right: Grid.xs),
-                      child: _ProfileActionPill(
+            leading: isEditingAvatar.value
+                ? defaultTargetPlatform == TargetPlatform.iOS
+                      ? IosGlassNavigationButton(
+                          key: const ValueKey('avatar-editor-back'),
+                          icon: IosGlassNavigationIcon.back,
+                          semanticLabel: 'Back to profile',
+                          onPressed: isClosingAvatar.value
+                              ? null
+                              : () => unawaited(closeAvatarEditor()),
+                        )
+                      : IconButton(
+                          key: const ValueKey('avatar-editor-back'),
+                          tooltip: 'Back to profile',
+                          onPressed: isClosingAvatar.value
+                              ? null
+                              : () => unawaited(closeAvatarEditor()),
+                          icon: const Icon(LucideIcons.arrowLeft),
+                        )
+                : null,
+            actions: isEditingAvatar.value
+                ? [
+                    if (defaultTargetPlatform == TargetPlatform.iOS)
+                      IosGlassNavigationAction(
                         key: const ValueKey('avatar-save'),
                         label: 'Save',
+                        width: 72,
                         isBusy: isSavingAvatar.value,
-                        onTap:
+                        onPressed:
                             canSaveAvatar &&
                                 !isSavingAvatar.value &&
                                 !isClosingAvatar.value
@@ -349,165 +336,204 @@ class ProfileEditPage extends HookConsumerWidget {
                                 unawaited(saveAvatar());
                               }
                             : null,
+                      )
+                    else
+                      Padding(
+                        padding: const EdgeInsets.only(right: Grid.xs),
+                        child: _ProfileActionPill(
+                          key: const ValueKey('avatar-save'),
+                          label: 'Save',
+                          isBusy: isSavingAvatar.value,
+                          onTap:
+                              canSaveAvatar &&
+                                  !isSavingAvatar.value &&
+                                  !isClosingAvatar.value
+                              ? () {
+                                  unawaited(HapticFeedback.lightImpact());
+                                  unawaited(saveAvatar());
+                                }
+                              : null,
+                        ),
+                      ),
+                  ]
+                : const [],
+          ),
+          body: isEditingAvatar.value
+              ? Stack(
+                  children: [
+                    IgnorePointer(
+                      ignoring: !profileHydrated || isSavingAvatar.value,
+                      child: LayoutBuilder(
+                        builder: (context, constraints) =>
+                            SingleChildScrollView(
+                              key: const ValueKey('avatar-editor-scroll-view'),
+                              physics: constraints.maxHeight < 600
+                                  ? const ClampingScrollPhysics()
+                                  : const NeverScrollableScrollPhysics(),
+                              child: SizedBox(
+                                height: constraints.maxHeight < 600
+                                    ? 700
+                                    : constraints.maxHeight,
+                                child: ProfileAvatarEditor(
+                                  key: const ValueKey(
+                                    'profile-avatar-editor-page',
+                                  ),
+                                  currentAvatarUrl: profile?.avatarUrl,
+                                  fallbackInitial: profile?.initial ?? '?',
+                                  draft: activeDraft,
+                                  mode: avatarMode.value,
+                                  transition: avatarTransition,
+                                  onModeChanged: (nextMode) =>
+                                      avatarMode.value = nextMode,
+                                  onDraftChanged: (draft) {
+                                    avatarDraft.value = draft;
+                                    avatarDraftMode.value = draft == null
+                                        ? null
+                                        : avatarMode.value;
+                                  },
+                                  onAnimatedPrepareChanged: (prepare) {
+                                    prepareAnimatedAvatar.value = prepare;
+                                    canPrepareAnimatedAvatar.value =
+                                        prepare != null;
+                                    if (avatarMode.value ==
+                                        ProfileAvatarMode.animated) {
+                                      avatarDraft.value = null;
+                                      avatarDraftMode.value = null;
+                                    }
+                                  },
+                                  onImageCameraActiveChanged: (active) {
+                                    isImageCameraActive.value = active;
+                                  },
+                                  animatedCaptureBuilder:
+                                      animatedAvatarCaptureBuilder,
+                                  imageCaptureBuilder:
+                                      imageAvatarCaptureBuilder,
+                                ),
+                              ),
+                            ),
                       ),
                     ),
-                ]
-              : const [],
-        ),
-        body: isEditingAvatar.value
-            ? Stack(
-                children: [
-                  IgnorePointer(
-                    ignoring: !profileHydrated || isSavingAvatar.value,
-                    child: LayoutBuilder(
-                      builder: (context, constraints) => SingleChildScrollView(
-                        key: const ValueKey('avatar-editor-scroll-view'),
-                        physics: constraints.maxHeight < 600
-                            ? const ClampingScrollPhysics()
-                            : const NeverScrollableScrollPhysics(),
-                        child: SizedBox(
-                          height: constraints.maxHeight < 600
-                              ? 700
-                              : constraints.maxHeight,
-                          child: ProfileAvatarEditor(
-                            key: const ValueKey('profile-avatar-editor-page'),
-                            currentAvatarUrl: profile?.avatarUrl,
-                            fallbackInitial: profile?.initial ?? '?',
-                            draft: activeDraft,
-                            mode: avatarMode.value,
-                            transition: avatarTransition,
-                            onModeChanged: (nextMode) =>
-                                avatarMode.value = nextMode,
-                            onDraftChanged: (draft) {
-                              avatarDraft.value = draft;
-                              avatarDraftMode.value = draft == null
-                                  ? null
-                                  : avatarMode.value;
-                            },
-                            onAnimatedPrepareChanged: (prepare) {
-                              prepareAnimatedAvatar.value = prepare;
-                              canPrepareAnimatedAvatar.value = prepare != null;
-                              if (avatarMode.value ==
-                                  ProfileAvatarMode.animated) {
-                                avatarDraft.value = null;
-                                avatarDraftMode.value = null;
-                              }
-                            },
-                            onImageCameraActiveChanged: (active) {
-                              isImageCameraActive.value = active;
-                            },
-                            animatedCaptureBuilder:
-                                animatedAvatarCaptureBuilder,
-                            imageCaptureBuilder: imageAvatarCaptureBuilder,
+                    if (!profileHydrated || avatarSaveError.value != null)
+                      Positioned(
+                        left: Grid.gutter,
+                        right: Grid.gutter,
+                        bottom: Grid.xl,
+                        child: Semantics(
+                          liveRegion: true,
+                          child: Text(
+                            avatarSaveError.value ??
+                                (profileAsync.hasError
+                                    ? "We couldn't load your profile. Go back and try again."
+                                    : 'Loading your profile…'),
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodyMedium?.copyWith(
+                              color:
+                                  avatarSaveError.value != null ||
+                                      profileAsync.hasError
+                                  ? context.colors.error
+                                  : context.colors.onSurfaceVariant,
+                            ),
                           ),
                         ),
                       ),
-                    ),
+                  ],
+                )
+              : ListView(
+                  key: const ValueKey('profile-information-page'),
+                  padding: EdgeInsets.only(
+                    top: frostedAppBarHeight(context) + Grid.sm,
+                    bottom: Grid.sm,
                   ),
-                  if (!profileHydrated || avatarSaveError.value != null)
-                    Positioned(
-                      left: Grid.gutter,
-                      right: Grid.gutter,
-                      bottom: Grid.xl,
-                      child: Semantics(
-                        liveRegion: true,
-                        child: Text(
-                          avatarSaveError.value ??
-                              (profileAsync.hasError
-                                  ? "We couldn't load your profile. Go back and try again."
-                                  : 'Loading your profile…'),
-                          textAlign: TextAlign.center,
-                          style: context.textTheme.bodyMedium?.copyWith(
-                            color:
-                                avatarSaveError.value != null ||
-                                    profileAsync.hasError
-                                ? context.colors.error
-                                : context.colors.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
+                  children: [
+                    _ProfilePhotoEditor(
+                      profile: profile,
+                      handoff: avatarHandoff,
+                      onEditPhoto: profileHydrated ? openAvatarEditor : null,
                     ),
-                ],
-              )
-            : ListView(
-                key: const ValueKey('profile-information-page'),
-                padding: EdgeInsets.only(
-                  top: frostedAppBarHeight(context) + Grid.sm,
-                  bottom: Grid.sm,
+                    AppListCard(
+                      key: const ValueKey('profile-info-card'),
+                      dividerIndent: Grid.xs,
+                      verticalPadding: Grid.sm,
+                      children: [
+                        AppListRow(
+                          key: const ValueKey('profile-display-name-row'),
+                          title: 'Display name',
+                          subtitle: _fieldValue(profile?.displayName),
+                          subtitleMaxLines: 1,
+                          trailing: const _EditChevron(),
+                          onTap: !profileHydrated
+                              ? null
+                              : () {
+                                  final container = ProviderScope.containerOf(
+                                    context,
+                                    listen: false,
+                                  );
+                                  unawaited(
+                                    editField(
+                                      title: 'Display name',
+                                      initialValue: profile?.displayName ?? '',
+                                      hintText: 'Display name',
+                                      onSave: bindProfileSaveToOpeningContext(
+                                        container,
+                                        container
+                                            .read(profileProvider.notifier)
+                                            .updateDisplayName,
+                                      ),
+                                    ),
+                                  );
+                                },
+                        ),
+                        AppListRow(
+                          key: const ValueKey('profile-description-row'),
+                          title: 'Profile description',
+                          subtitle: _fieldValue(profile?.about),
+                          subtitleMaxLines: 3,
+                          trailing: const _EditChevron(),
+                          onTap: !profileHydrated
+                              ? null
+                              : () {
+                                  final container = ProviderScope.containerOf(
+                                    context,
+                                    listen: false,
+                                  );
+                                  unawaited(
+                                    editField(
+                                      title: 'Profile description',
+                                      initialValue: profile?.about ?? '',
+                                      hintText: 'Profile description',
+                                      multiline: true,
+                                      onSave: bindProfileSaveToOpeningContext(
+                                        container,
+                                        container
+                                            .read(profileProvider.notifier)
+                                            .updateAbout,
+                                      ),
+                                    ),
+                                  );
+                                },
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-                children: [
-                  _ProfilePhotoEditor(
-                    profile: profile,
-                    handoff: avatarHandoff,
-                    onEditPhoto: profileHydrated ? openAvatarEditor : null,
-                  ),
-                  AppListCard(
-                    key: const ValueKey('profile-info-card'),
-                    dividerIndent: Grid.xs,
-                    verticalPadding: Grid.sm,
-                    children: [
-                      AppListRow(
-                        key: const ValueKey('profile-display-name-row'),
-                        title: 'Display name',
-                        subtitle: _fieldValue(profile?.displayName),
-                        subtitleMaxLines: 1,
-                        trailing: const _EditChevron(),
-                        onTap: !profileHydrated
-                            ? null
-                            : () {
-                                final container = ProviderScope.containerOf(
-                                  context,
-                                  listen: false,
-                                );
-                                unawaited(
-                                  editField(
-                                    title: 'Display name',
-                                    initialValue: profile?.displayName ?? '',
-                                    hintText: 'Display name',
-                                    onSave: bindProfileSaveToOpeningContext(
-                                      container,
-                                      container
-                                          .read(profileProvider.notifier)
-                                          .updateDisplayName,
-                                    ),
-                                  ),
-                                );
-                              },
-                      ),
-                      AppListRow(
-                        key: const ValueKey('profile-description-row'),
-                        title: 'Profile description',
-                        subtitle: _fieldValue(profile?.about),
-                        subtitleMaxLines: 3,
-                        trailing: const _EditChevron(),
-                        onTap: !profileHydrated
-                            ? null
-                            : () {
-                                final container = ProviderScope.containerOf(
-                                  context,
-                                  listen: false,
-                                );
-                                unawaited(
-                                  editField(
-                                    title: 'Profile description',
-                                    initialValue: profile?.about ?? '',
-                                    hintText: 'Profile description',
-                                    multiline: true,
-                                    onSave: bindProfileSaveToOpeningContext(
-                                      container,
-                                      container
-                                          .read(profileProvider.notifier)
-                                          .updateAbout,
-                                    ),
-                                  ),
-                                );
-                              },
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+        ),
       ),
+    );
+  }
+}
+
+class _ProfilePageFrame extends StatelessWidget {
+  const _ProfilePageFrame({required this.constrained, required this.child});
+
+  final bool constrained;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!constrained) return child;
+    return CenteredUtilityPage(
+      contentKey: const ValueKey('profile-page-content-frame'),
+      child: child,
     );
   }
 }

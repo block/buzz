@@ -12,6 +12,7 @@ class _ChannelsBody extends StatelessWidget {
   final ScrollController scrollController;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
+  final VoidCallback onOpenCommunitySwitcher;
 
   const _ChannelsBody({
     required this.channels,
@@ -25,6 +26,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.scrollController,
     required this.onRefresh,
     required this.onSelectChannel,
+    required this.onOpenCommunitySwitcher,
   });
 
   @override
@@ -56,6 +58,7 @@ class _ChannelsBody extends StatelessWidget {
                     channels: loadedChannels,
                     currentPubkey: currentPubkey,
                     onSelectChannel: onSelectChannel,
+                    onOpenCommunitySwitcher: onOpenCommunitySwitcher,
                   )
                 else
                   DecoratedSliver(
@@ -69,6 +72,7 @@ class _ChannelsBody extends StatelessWidget {
                       channels: loadedChannels,
                       currentPubkey: currentPubkey,
                       onSelectChannel: onSelectChannel,
+                      onOpenCommunitySwitcher: onOpenCommunitySwitcher,
                     ),
                   ),
               ],
@@ -92,11 +96,13 @@ class _SliverChannelsList extends HookConsumerWidget {
   final List<Channel> channels;
   final String? currentPubkey;
   final Future<void> Function(Channel channel) onSelectChannel;
+  final VoidCallback onOpenCommunitySwitcher;
 
   const _SliverChannelsList({
     required this.channels,
     required this.currentPubkey,
     required this.onSelectChannel,
+    required this.onOpenCommunitySwitcher,
   });
 
   @override
@@ -234,6 +240,7 @@ class _SliverChannelsList extends HookConsumerWidget {
       ),
       sliver: SliverList.list(
         children: [
+          _CommunityListHeading(onTap: onOpenCommunitySwitcher),
           if (visibleChannels.isEmpty)
             const _EmptyState()
           else ...[

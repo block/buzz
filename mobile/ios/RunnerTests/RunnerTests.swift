@@ -467,6 +467,27 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testAttachmentPopoverUsesItsContainerWidth() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.availableWidth(
+        containerWidth: 300
+      ),
+      276
+    )
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.availableWidth(
+        containerWidth: 390
+      ),
+      366
+    )
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.availableWidth(
+        containerWidth: 1_024
+      ),
+      430
+    )
+  }
+
   func testDynamicIslandQrScannerRejectsStandardSafeAreas() {
     for safeAreaTopInset in [0, 44, 47, 50] {
       XCTAssertFalse(

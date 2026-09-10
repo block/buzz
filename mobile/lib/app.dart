@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
@@ -292,6 +293,12 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    const simulatorPairingCode = String.fromEnvironment(
+      'BUZZ_SIMULATOR_PAIRING_CODE',
+    );
+    final isSimulatorAutoPairing =
+        simulatorPairingCode.isNotEmpty ||
+        Platform.executableArguments.contains('--buzz-simulator-pairing-code');
     final communityTheme = ref.watch(communityThemeProvider);
     final themeMode = communityTheme.mode;
     final accentIndex = effectiveAccentIndex(
@@ -362,6 +369,7 @@ class App extends HookConsumerWidget {
       navigatorKey: _mobileRootNavigatorKey,
       navigatorObservers: [voiceNoteRouteObserver],
       title: 'Buzz',
+      debugShowCheckedModeBanner: false,
       theme: AppTheme.light(
         colorScheme: lightScheme,
         topSectionGradient: buzzLightGradient,
@@ -378,22 +386,24 @@ class App extends HookConsumerWidget {
         navigatorKey: _mobileRootNavigatorKey,
         child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
       ),
-      home: authState.when(
-        loading: () => const _SplashScreen(),
-        error: (_, _) => const PairingPage(),
-        data: (state) => switch (state.status) {
-          AuthStatus.authenticated => DeepLinkDispatcher(
-            child: HomePage(
-              settingsPageBuilder: _buildSettingsPage,
-              hasUnreadInbox: hasUnreadInbox,
+      home: isSimulatorAutoPairing
+          ? const PairingPage()
+          : authState.when(
+              loading: () => const _SplashScreen(),
+              error: (_, _) => const PairingPage(),
+              data: (state) => switch (state.status) {
+                AuthStatus.authenticated => DeepLinkDispatcher(
+                  child: HomePage(
+                    settingsPageBuilder: _buildSettingsPage,
+                    hasUnreadInbox: hasUnreadInbox,
+                  ),
+                ),
+                _ => const DeepLinkDispatcher(
+                  dispatchMessageLinks: false,
+                  child: PairingPage(),
+                ),
+              },
             ),
-          ),
-          _ => const DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            child: PairingPage(),
-          ),
-        },
-      ),
     );
   }
 }

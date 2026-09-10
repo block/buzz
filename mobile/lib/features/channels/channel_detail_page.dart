@@ -252,6 +252,7 @@ class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final VoidCallback? onClose;
 
   /// How the automatically opened initial thread affects the route stack.
   final InitialThreadRouteBehavior initialThreadRouteBehavior;
@@ -261,6 +262,7 @@ class ChannelDetailPage extends HookConsumerWidget {
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.onClose,
     this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
   });
 
@@ -518,9 +520,18 @@ class ChannelDetailPage extends HookConsumerWidget {
       context,
       isDm: resolvedChannel.isDm,
     );
+    final hasCloseAction = onClose != null || Navigator.canPop(context);
     final usesNativeIosGlassBackButton =
-        Navigator.canPop(context) &&
-        Theme.of(context).platform == TargetPlatform.iOS;
+        hasCloseAction && Theme.of(context).platform == TargetPlatform.iOS;
+    void closeChannel() {
+      final adaptiveClose = onClose;
+      if (adaptiveClose != null) {
+        adaptiveClose();
+      } else {
+        Navigator.of(context).pop();
+      }
+    }
+
     final readTimestamp = _channelReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
@@ -577,10 +588,16 @@ class ChannelDetailPage extends HookConsumerWidget {
                 key: const ValueKey('channel-ios-glass-back'),
                 icon: IosGlassNavigationIcon.back,
                 semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
+                onPressed: closeChannel,
                 width: iosGlassChannelHeaderLeadingWidth,
                 buttonCenterX: iosGlassChannelHeaderButtonCenterX,
                 nativeViewSuppressed: messageActionBackdropActive,
+              )
+            : onClose != null
+            ? IconButton(
+                tooltip: 'Back',
+                onPressed: closeChannel,
+                icon: const Icon(Icons.arrow_back),
               )
             : null,
         iconColor: context.colors.primary,
@@ -611,7 +628,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                           .assignments[resolvedChannel.id],
                     );
                     if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
+                      closeChannel();
                     }
                   },
                 ),
@@ -645,7 +662,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                           .assignments[resolvedChannel.id],
                     );
                     if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
+                      closeChannel();
                     }
                   },
                   tooltip: 'Channel actions',

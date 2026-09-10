@@ -6,14 +6,14 @@ import 'directional_transition_scope.dart';
 import 'frosted_app_bar.dart';
 import 'frosted_scroll_under_scope.dart';
 
-/// A convenience [Scaffold] that overlays a [FrostedAppBar] on top of its body.
+/// A convenience [Scaffold] that can overlay a [FrostedAppBar] on its body.
 ///
 /// The body is rendered full-bleed inside a [Stack] with the frosted app bar
 /// floating above it. The body is responsible for adding its own top spacing
 /// using [frostedAppBarHeight] so content starts below the bar.
 class FrostedScaffold extends HookWidget {
-  /// The frosted app bar displayed at the top of the screen.
-  final FrostedAppBar appBar;
+  /// The frosted app bar displayed at the top of the screen, when present.
+  final FrostedAppBar? appBar;
 
   /// The primary content of the scaffold. Must handle its own top spacing
   /// using [frostedAppBarHeight] — the scaffold does NOT add automatic padding.
@@ -119,11 +119,11 @@ class FrostedScaffold extends HookWidget {
       opacityKey: const ValueKey('frosted-scaffold-body-transition-opacity'),
       child: observedBody,
     );
-    // The bar must be painted after the scrollable sheet: [BackdropFilter]
-    // only samples pixels that were already painted behind it. This is the
-    // same composition as channel navigation, so top-level headers blur their
-    // content rather than only the fixed gradient.
-    return [...backdrop, bodyMotion, appBar];
+    // A bar must be painted after the scrollable sheet: [BackdropFilter] only
+    // samples pixels that were already painted behind it. This is the same
+    // composition as channel navigation, so headers blur their content rather
+    // than only the fixed gradient.
+    return [...backdrop, bodyMotion, ?appBar];
   }
 }
 

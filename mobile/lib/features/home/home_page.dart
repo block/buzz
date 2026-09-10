@@ -11,8 +11,16 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/directional_transition_scope.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
+import '../channels/channel.dart';
+import '../channels/channel_detail_page.dart';
 import '../channels/channels_page.dart';
+import '../profile/profile_avatar.dart';
 import '../search/search_page.dart';
+
+/// Minimum available width at which Buzz moves primary navigation to a rail.
+const double homeNavigationRailBreakpoint = 900;
+const double _kExpandedRailControlSize = 56;
+const double _kExpandedRailAvatarSize = 48;
 
 class HomePage extends HookConsumerWidget {
   const HomePage({
@@ -76,8 +84,11 @@ class HomePage extends HookConsumerWidget {
     final homeReselection = useValueNotifier(0);
     final activityReselection = useValueNotifier(0);
     final searchReselection = useValueNotifier(0);
+    final selectedWideChannel = useState<Channel?>(null);
     final settingsTransitionProgress = useValueNotifier(0.0);
     final reducedMotion = MediaQuery.of(context).disableAnimations;
+    final usesNavigationRail =
+        MediaQuery.sizeOf(context).width >= homeNavigationRailBreakpoint;
     final tabContentTransitionProgress = reducedMotion
         ? 1.0
         : _tabContentTransitionCurve.transform(tabContentTransitionValue);
@@ -87,15 +98,70 @@ class HomePage extends HookConsumerWidget {
       _destinations.length,
     );
 
+    Future<void> openChannel(Channel channel) async {
+      if (usesNavigationRail) {
+        selectedWideChannel.value = channel;
+        return;
+      }
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ChannelDetailPage(channel: channel),
+        ),
+      );
+    }
+
+    void reportSettingsTransitionProgress(double progress) {
+      if (settingsTransitionProgress.value != progress) {
+        settingsTransitionProgress.value = progress;
+      }
+    }
+
+    void openSettings() => openSettingsPage(
+      context: context,
+      builder: settingsPageBuilder,
+      onTransitionProgress: reportSettingsTransitionProgress,
+    );
+
+    void openCommunitySwitcher() =>
+        showCommunitySwitcher(context: context, ref: ref);
+
+    void selectDestination(int index) {
+      if (index == tabIndex.value) {
+        if (index == 0 && selectedWideChannel.value != null) {
+          selectedWideChannel.value = null;
+          return;
+        }
+        switch (index) {
+          case 0:
+            homeReselection.value++;
+          case 1:
+            activityReselection.value++;
+          case 2:
+            searchReselection.value++;
+        }
+        return;
+      }
+      selectedWideChannel.value = null;
+      tabContentTransitionDirection.value = index > tabIndex.value ? 1 : -1;
+      unawaited(HapticFeedback.selectionClick());
+      visitedTabs.value.add(index);
+      tabIndex.value = index;
+      if (reducedMotion) {
+        tabContentTransitionController.value = 1;
+      } else {
+        unawaited(tabContentTransitionController.forward(from: 0));
+      }
+    }
+
     final pages = [
       ChannelsPage(
         settingsPageBuilder: settingsPageBuilder,
+        onOpenChannel: openChannel,
+        showCommunityAction: !usesNavigationRail,
+        showProfileAction: !usesNavigationRail,
+        showTopBar: !usesNavigationRail,
         tabReselection: homeReselection,
-        onSettingsTransitionProgress: (progress) {
-          if (settingsTransitionProgress.value != progress) {
-            settingsTransitionProgress.value = progress;
-          }
-        },
+        onSettingsTransitionProgress: reportSettingsTransitionProgress,
       ),
       if (visitedTabs.value.contains(1))
         ActivityPage(tabReselection: activityReselection)
@@ -110,6 +176,56 @@ class HomePage extends HookConsumerWidget {
     final settingsTransitionGradient = tabIndex.value == 0
         ? context.appColors.topSectionGradient
         : null;
+    final visibleWideChannel = usesNavigationRail && tabIndex.value == 0
+        ? selectedWideChannel.value
+        : null;
+    final homeContent = _HomeContent(
+      tabIndex: tabIndex.value,
+      pages: pages,
+      tabContentTransitionDirection: tabContentTransitionDirection.value,
+      tabContentTransitionProgress: tabContentTransitionProgress,
+      usesNavigationRail: usesNavigationRail,
+      navigationBarWidth: navigationBarWidth,
+      systemBottomInset: systemBottomInset,
+      onOpenChannel: openChannel,
+    );
+    final homeBody = Row(
+      children: [
+        if (usesNavigationRail)
+          _ExpandedHomeNavigation(
+            selectedIndex: tabIndex.value,
+            hasUnreadInbox: hasUnreadInbox,
+            onDestinationSelected: selectDestination,
+            onOpenCommunity: openCommunitySwitcher,
+            onOpenProfile: openSettings,
+            destinations: _destinations,
+          ),
+        Expanded(
+          child: visibleWideChannel == null
+              ? homeContent
+              : Row(
+                  key: const ValueKey('wide-channel-split-view'),
+                  children: [
+                    Expanded(flex: 1, child: homeContent),
+                    VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: context.colors.outlineVariant,
+                    ),
+                    Expanded(
+                      flex: 2,
+                      child: ChannelDetailPage(
+                        key: ValueKey(
+                          'wide-channel-detail-${visibleWideChannel.id}',
+                        ),
+                        channel: visibleWideChannel,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ],
+    );
 
     return Stack(
       fit: StackFit.expand,
@@ -137,85 +253,15 @@ class HomePage extends HookConsumerWidget {
             // keyboard is visible on any tab.
             resizeToAvoidBottomInset: false,
             extendBody: true,
-            body: SizedBox.expand(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Positioned.fill(
-                    child: ColoredBox(color: context.colors.surface),
+            body: homeBody,
+            bottomNavigationBar: usesNavigationRail
+                ? null
+                : _FloatingTabBar(
+                    selectedIndex: tabIndex.value,
+                    hasUnreadInbox: hasUnreadInbox,
+                    onDestinationSelected: selectDestination,
+                    destinations: _destinations,
                   ),
-                  Positioned.fill(
-                    child: MediaQuery(
-                      data: _mediaQueryWithFloatingTabBarClearance(
-                        context,
-                        HomePage._fabClearance,
-                      ),
-                      child: DirectionalTransitionScope(
-                        horizontalOffset:
-                            tabContentTransitionDirection.value *
-                            _tabContentTransitionDistance *
-                            (1 - tabContentTransitionProgress),
-                        opacity: tabContentTransitionProgress,
-                        child: ClipRect(
-                          child: IndexedStack(
-                            index: tabIndex.value,
-                            children: pages,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Align(
-                    alignment: Alignment.bottomCenter,
-                    child: IgnorePointer(
-                      child: MobileTabFooterBackdrop(
-                        height: mobileTabFooterBackdropHeight(context),
-                        tint: context.colors.primaryContainer,
-                      ),
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: ChannelQuickActionsLauncher(
-                      visible: tabIndex.value == 0,
-                      navigationBarHeight: HomePage._tabBarHeight,
-                      navigationBarBottomGap: HomePage._tabBarBottomGap,
-                      navigationBarWidth: navigationBarWidth,
-                      systemBottomInset: systemBottomInset,
-                      rightInset: Grid.sm,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            bottomNavigationBar: _FloatingTabBar(
-              selectedIndex: tabIndex.value,
-              hasUnreadInbox: hasUnreadInbox,
-              onDestinationSelected: (i) {
-                if (i == tabIndex.value) {
-                  switch (i) {
-                    case 0:
-                      homeReselection.value++;
-                    case 1:
-                      activityReselection.value++;
-                    case 2:
-                      searchReselection.value++;
-                  }
-                  return;
-                }
-                tabContentTransitionDirection.value = i > tabIndex.value
-                    ? 1
-                    : -1;
-                unawaited(HapticFeedback.selectionClick());
-                visitedTabs.value.add(i);
-                tabIndex.value = i;
-                if (reducedMotion) {
-                  tabContentTransitionController.value = 1;
-                } else {
-                  unawaited(tabContentTransitionController.forward(from: 0));
-                }
-              },
-              destinations: _destinations,
-            ),
           ),
           builder: (context, progress, child) {
             final curvedProgress = reducedMotion
@@ -236,6 +282,256 @@ class HomePage extends HookConsumerWidget {
             );
           },
         ),
+      ],
+    );
+  }
+}
+
+class _HomeContent extends StatelessWidget {
+  final int tabIndex;
+  final List<Widget> pages;
+  final double tabContentTransitionDirection;
+  final double tabContentTransitionProgress;
+  final bool usesNavigationRail;
+  final double navigationBarWidth;
+  final double systemBottomInset;
+  final Future<void> Function(Channel channel) onOpenChannel;
+
+  const _HomeContent({
+    required this.tabIndex,
+    required this.pages,
+    required this.tabContentTransitionDirection,
+    required this.tabContentTransitionProgress,
+    required this.usesNavigationRail,
+    required this.navigationBarWidth,
+    required this.systemBottomInset,
+    required this.onOpenChannel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final contentSize = constraints.biggest;
+        return SizedBox.expand(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(child: ColoredBox(color: context.colors.surface)),
+              Positioned.fill(
+                child: MediaQuery(
+                  data: _mediaQueryForHomeContent(
+                    context,
+                    contentSize: contentSize,
+                    bottomClearance: usesNavigationRail
+                        ? 0
+                        : HomePage._fabClearance,
+                    removeLeadingInset: usesNavigationRail,
+                  ),
+                  child: DirectionalTransitionScope(
+                    horizontalOffset:
+                        tabContentTransitionDirection *
+                        HomePage._tabContentTransitionDistance *
+                        (1 - tabContentTransitionProgress),
+                    opacity: tabContentTransitionProgress,
+                    child: ClipRect(
+                      child: IndexedStack(
+                        key: const ValueKey('home-destination-pages'),
+                        index: tabIndex,
+                        children: pages,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (!usesNavigationRail)
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: IgnorePointer(
+                    child: MobileTabFooterBackdrop(
+                      height: mobileTabFooterBackdropHeight(context),
+                      tint: context.colors.primaryContainer,
+                    ),
+                  ),
+                ),
+              Positioned.fill(
+                child: MediaQuery(
+                  data: MediaQuery.of(context).copyWith(size: contentSize),
+                  child: ChannelQuickActionsLauncher(
+                    visible: tabIndex == 0,
+                    navigationBarHeight: HomePage._tabBarHeight,
+                    navigationBarBottomGap: HomePage._tabBarBottomGap,
+                    navigationBarWidth: usesNavigationRail
+                        ? 0
+                        : navigationBarWidth,
+                    systemBottomInset: systemBottomInset,
+                    rightInset: Grid.sm,
+                    maxOpenWidth: usesNavigationRail ? 430 : double.infinity,
+                    onOpenChannel: onOpenChannel,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ExpandedHomeNavigation extends StatelessWidget {
+  final int selectedIndex;
+  final bool hasUnreadInbox;
+  final ValueChanged<int> onDestinationSelected;
+  final VoidCallback onOpenCommunity;
+  final VoidCallback onOpenProfile;
+  final List<_HomeDestination> destinations;
+
+  const _ExpandedHomeNavigation({
+    required this.selectedIndex,
+    required this.hasUnreadInbox,
+    required this.onDestinationSelected,
+    required this.onOpenCommunity,
+    required this.onOpenProfile,
+    required this.destinations,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      key: const ValueKey('expanded-home-navigation'),
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        border: Border(right: BorderSide(color: context.colors.outlineVariant)),
+      ),
+      child: SafeArea(
+        right: false,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+              child: SizedBox.square(
+                key: const ValueKey('expanded-home-community'),
+                dimension: _kExpandedRailControlSize,
+                child: Center(
+                  child: CommunityNavigationAvatar(
+                    size: _kExpandedRailAvatarSize,
+                    onTap: onOpenCommunity,
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: NavigationRail(
+                backgroundColor: Colors.transparent,
+                selectedIndex: selectedIndex,
+                onDestinationSelected: onDestinationSelected,
+                labelType: NavigationRailLabelType.all,
+                groupAlignment: -1,
+                useIndicator: true,
+                indicatorColor: context.colors.primaryContainer,
+                selectedIconTheme: IconThemeData(color: context.colors.primary),
+                unselectedIconTheme: IconThemeData(
+                  color: context.colors.onSurfaceVariant,
+                ),
+                selectedLabelTextStyle: context.textTheme.labelMedium?.copyWith(
+                  color: context.colors.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+                unselectedLabelTextStyle: context.textTheme.labelMedium
+                    ?.copyWith(color: context.colors.onSurfaceVariant),
+                destinations: [
+                  for (var index = 0; index < destinations.length; index++)
+                    NavigationRailDestination(
+                      icon: _NavigationRailIcon(
+                        icon: destinations[index].icon,
+                        showUnreadBadge: index == 1 && hasUnreadInbox,
+                      ),
+                      selectedIcon: _NavigationRailIcon(
+                        icon: destinations[index].selectedIcon,
+                        showUnreadBadge: index == 1 && hasUnreadInbox,
+                      ),
+                      label: Text(
+                        destinations[index].label,
+                        semanticsLabel: index == 1 && hasUnreadInbox
+                            ? '${destinations[index].label}, unread'
+                            : destinations[index].label,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: EdgeInsets.only(
+                bottom: _expandedRailProfileBottomPadding(context),
+              ),
+              child: Semantics(
+                button: true,
+                label: 'Profile and settings',
+                child: Tooltip(
+                  message: 'Profile and settings',
+                  child: SizedBox.square(
+                    key: const ValueKey('expanded-home-profile'),
+                    dimension: _kExpandedRailControlSize,
+                    child: Center(
+                      child: ProfileAvatar(
+                        size: _kExpandedRailAvatarSize,
+                        showPresence: false,
+                        onTap: onOpenProfile,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+double _expandedRailProfileBottomPadding(BuildContext context) {
+  final systemBottomInset = MediaQuery.paddingOf(context).bottom;
+  final navigationBottomInset = systemBottomInset > HomePage._tabBarBottomGap
+      ? systemBottomInset
+      : HomePage._tabBarBottomGap;
+  final createButtonBottomInset =
+      navigationBottomInset +
+      ((HomePage._tabBarHeight - _kExpandedRailControlSize) / 2);
+  return createButtonBottomInset - systemBottomInset;
+}
+
+class _NavigationRailIcon extends StatelessWidget {
+  final IconData icon;
+  final bool showUnreadBadge;
+
+  const _NavigationRailIcon({
+    required this.icon,
+    required this.showUnreadBadge,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Icon(icon, size: HomePage._tabIconSize),
+        if (showUnreadBadge)
+          Positioned(
+            top: -4,
+            right: -5,
+            child: Container(
+              key: const ValueKey('activity-rail-unread-dot'),
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                color: context.colors.error,
+                shape: BoxShape.circle,
+                border: Border.all(color: context.colors.surface, width: 1.5),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -272,6 +568,26 @@ MediaQueryData _mediaQueryWithFloatingTabBarClearance(
     viewPadding: mediaQuery.viewPadding.copyWith(
       bottom: mediaQuery.viewPadding.bottom + clearance,
     ),
+  );
+}
+
+MediaQueryData _mediaQueryForHomeContent(
+  BuildContext context, {
+  required Size contentSize,
+  required double bottomClearance,
+  required bool removeLeadingInset,
+}) {
+  final mediaQuery = _mediaQueryWithFloatingTabBarClearance(
+    context,
+    bottomClearance,
+  );
+  if (!removeLeadingInset) {
+    return mediaQuery.copyWith(size: contentSize);
+  }
+  return mediaQuery.copyWith(
+    size: contentSize,
+    padding: mediaQuery.padding.copyWith(left: 0),
+    viewPadding: mediaQuery.viewPadding.copyWith(left: 0),
   );
 }
 
@@ -322,6 +638,7 @@ class _FloatingTabBar extends StatelessWidget {
     );
 
     return SafeArea(
+      key: const ValueKey('compact-home-navigation'),
       minimum: const EdgeInsets.fromLTRB(
         HomePage._tabBarHorizontalMargin,
         0,

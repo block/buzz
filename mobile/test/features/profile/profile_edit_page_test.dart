@@ -19,6 +19,7 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/centered_utility_page.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_native_segmented_control.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
@@ -40,6 +41,30 @@ part 'profile_edit_page_test/image_selection_tests.dart';
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
+  testWidgets('centers Profile on wide windows', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pump();
+
+    final frame = find.byKey(const ValueKey('profile-page-content-frame'));
+    final background = find.byKey(
+      const ValueKey('centered-utility-page-background'),
+    );
+    expect(tester.getSize(background).width, 1200);
+    expect(tester.getSize(frame).width, centeredUtilityPageMaxWidth);
+    expect(tester.getRect(frame).center.dx, 600);
+    expect(tester.getSize(frame).height, 800);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('keeps crop Save disabled while dimensions decode', (
     tester,
   ) async {

@@ -231,10 +231,9 @@ import os.log
     switch call.method {
     case "usesDynamicIslandQrScannerPortal":
       result(
-        UIDevice.current.userInterfaceIdiom == .phone
-          && usesDynamicIslandQrScannerPortal(
-            safeAreaTopInset: activeWindowSafeAreaTopInset()
-          )
+        usesDynamicIslandQrScannerPortal(
+          safeAreaTopInset: activeWindowSafeAreaTopInset()
+        )
       )
     case "setDynamicIslandScannerStatusBarHidden":
       guard let hidden = call.arguments as? Bool else {

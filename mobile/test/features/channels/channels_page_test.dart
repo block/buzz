@@ -193,6 +193,15 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+    final appBar = find.byType(FrostedAppBar).last;
+    expect(
+      find.descendant(of: appBar, matching: find.text('Community')),
+      findsNothing,
+    );
+    expect(
+      tester.getTopLeft(find.text('Community')).dy,
+      lessThan(tester.getTopLeft(find.text('Channels')).dy),
+    );
   });
 
   testWidgets('sizes the community header for accessible text', (tester) async {
@@ -577,12 +586,12 @@ void main() {
     relaySession.connect();
     await tester.pumpAndSettle();
 
-    final topLabelX = tester.getTopLeft(find.text('Community')).dx;
+    final communityHeadingX = tester.getTopLeft(find.text('Community')).dx;
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    // The community title shares the leading row with its avatar. Channel
-    // labels stay aligned below it.
-    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
+    // The community name starts the scrollable content independently from the
+    // avatar in the navigation bar. Channel labels remain aligned below it.
+    expect(communityHeadingX, Grid.gutter);
     expect(sectionLabelX, rowLabelX);
 
     relaySession.setReconnecting();

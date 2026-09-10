@@ -162,6 +162,10 @@ class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
     required this.onSettingsTransitionProgress,
+    this.onOpenChannel,
+    this.showCommunityAction = true,
+    this.showProfileAction = true,
+    this.showTopBar = true,
     this.tabReselection,
     super.key,
   });
@@ -171,6 +175,26 @@ class ChannelsPage extends HookConsumerWidget {
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
   final ValueChanged<double> onSettingsTransitionProgress;
+
+  /// Opens a channel in an adaptive parent workspace when supplied.
+  ///
+  /// Compact callers omit this and keep the existing full-page route.
+  final Future<void> Function(Channel channel)? onOpenChannel;
+
+  /// Whether the community switcher avatar is shown in the page header.
+  ///
+  /// Wide Home moves this action to the top of its persistent navigation rail.
+  final bool showCommunityAction;
+
+  /// Whether the profile/settings entry is shown in the page header.
+  ///
+  /// Wide Home moves this action to its persistent navigation rail.
+  final bool showProfileAction;
+
+  /// Whether the frosted navigation row is shown above the channel list.
+  ///
+  /// Wide Home omits it because its actions live in the persistent rail.
+  final bool showTopBar;
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
@@ -188,11 +212,13 @@ class ChannelsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
-    final topSectionHeight = frostedAppBarHeight(
-      context,
-      titleStyle: headerTitleStyle,
-      bottomHeight: _kTopSectionBottomPadding,
-    );
+    final topSectionHeight = showTopBar
+        ? frostedAppBarHeight(
+            context,
+            titleStyle: headerTitleStyle,
+            bottomHeight: _kTopSectionBottomPadding,
+          )
+        : MediaQuery.paddingOf(context).top;
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
@@ -256,6 +282,11 @@ class ChannelsPage extends HookConsumerWidget {
     }
     final channels = cachedChannels.value;
     Future<void> openChannel(Channel channel) async {
+      final adaptiveOpenChannel = onOpenChannel;
+      if (adaptiveOpenChannel != null) {
+        await adaptiveOpenChannel(channel);
+        return;
+      }
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -303,14 +334,7 @@ class ChannelsPage extends HookConsumerWidget {
     }, [isReconnectingWithContent]);
 
     void openCommunitySwitcher() {
-      unawaited(HapticFeedback.selectionClick());
-      ref.invalidate(communityIconProvider);
-      showBuzzModalBottomSheet<void>(
-        context: context,
-        showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
-      );
+      showCommunitySwitcher(context: context, ref: ref);
     }
 
     final topSectionGradient = context.appColors.topSectionGradient;
@@ -321,49 +345,50 @@ class ChannelsPage extends HookConsumerWidget {
           ? Colors.transparent
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
-      appBar: FrostedAppBar(
-        horizontalInset: _kTopSectionInset,
-        // Let the full Buzz gradient show at rest. Once the list begins to
-        // move beneath this row, build up blur over the first 64dp of scroll
-        // without adding the usual white frosted wash. The Buzz list is
-        // transparent, so the blurred pixels remain a continuation of the
-        // pinned gradient instead of turning into a white header.
-        frosted: !usesPinnedGradient || headerFrostProgress.value > 0,
-        frostedSurfaceOpacity: usesPinnedGradient ? 0 : 0.5,
-        frostedBlurSigma: usesPinnedGradient
-            ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
-            : 20,
-        showBottomDivider: false,
-        leading: _CommunityIndicator(onTap: openCommunitySwitcher),
-        centerTitle: false,
-        titleStyle: headerTitleStyle,
-        title: _CommunityHeaderTitle(
-          style: headerTitleStyle,
-          onTap: openCommunitySwitcher,
-        ),
-        actions: [
-          SizedBox(
-            width: Grid.xl,
-            height: Grid.xl,
-            child: Center(
-              child: ProfileAvatar(
-                size: _kTopSectionProfileAvatarSize,
-                showPresence: false,
-                onTap: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  final route = _SettingsPageRoute(
-                    builder: settingsPageBuilder,
-                    onTransitionProgress: onSettingsTransitionProgress,
-                  );
-                  Navigator.of(context).push(route);
-                },
-              ),
-            ),
-          ),
-        ],
-        bottomHeight: _kTopSectionBottomPadding,
-        bottom: const SizedBox.expand(),
-      ),
+      appBar: showTopBar
+          ? FrostedAppBar(
+              horizontalInset: _kTopSectionInset,
+              // Let the full Buzz gradient show at rest. Once the list begins
+              // to move beneath this row, build up blur over the first 64dp of
+              // scroll without adding the usual white frosted wash. The Buzz
+              // list is transparent, so the blurred pixels remain a
+              // continuation of the pinned gradient instead of turning into
+              // a white header.
+              frosted: !usesPinnedGradient || headerFrostProgress.value > 0,
+              frostedSurfaceOpacity: usesPinnedGradient ? 0 : 0.5,
+              frostedBlurSigma: usesPinnedGradient
+                  ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
+                  : 20,
+              showBottomDivider: false,
+              leading: showCommunityAction
+                  ? CommunityNavigationAvatar(onTap: openCommunitySwitcher)
+                  : null,
+              centerTitle: false,
+              titleStyle: headerTitleStyle,
+              actions: showProfileAction
+                  ? [
+                      SizedBox(
+                        width: Grid.xl,
+                        height: Grid.xl,
+                        child: Center(
+                          child: ProfileAvatar(
+                            size: _kTopSectionProfileAvatarSize,
+                            showPresence: false,
+                            onTap: () => openSettingsPage(
+                              context: context,
+                              builder: settingsPageBuilder,
+                              onTransitionProgress:
+                                  onSettingsTransitionProgress,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ]
+                  : const [],
+              bottomHeight: _kTopSectionBottomPadding,
+              bottom: const SizedBox.expand(),
+            )
+          : null,
       body: _ChannelsBody(
         channels: channels,
         channelsAsync: channelsAsync,
@@ -376,9 +401,41 @@ class ChannelsPage extends HookConsumerWidget {
         scrollController: channelsScrollController,
         onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
         onSelectChannel: openChannel,
+        onOpenCommunitySwitcher: openCommunitySwitcher,
       ),
     );
   }
+}
+
+/// Opens the community switcher shared by compact Home and the wide rail.
+void showCommunitySwitcher({
+  required BuildContext context,
+  required WidgetRef ref,
+}) {
+  unawaited(HapticFeedback.selectionClick());
+  ref.invalidate(communityIconProvider);
+  showBuzzModalBottomSheet<void>(
+    context: context,
+    showCloseButton: false,
+    showDragHandle: false,
+    builder: (_) => const _CommunitySwitcherSheet(),
+  );
+}
+
+/// Opens Settings with the transition shared by compact Home and the wide
+/// navigation rail.
+void openSettingsPage({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  required ValueChanged<double> onTransitionProgress,
+}) {
+  unawaited(HapticFeedback.lightImpact());
+  Navigator.of(context).push(
+    _SettingsPageRoute(
+      builder: builder,
+      onTransitionProgress: onTransitionProgress,
+    ),
+  );
 }
 
 /// A custom route deliberately avoids [MaterialPageRoute]'s platform exit

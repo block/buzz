@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -41,13 +42,45 @@ class PairingPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
     final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
-    final codeController = useTextEditingController();
+    const buildPairingCode = String.fromEnvironment(
+      'BUZZ_SIMULATOR_PAIRING_CODE',
+    );
+    final pairingCodeArgumentIndex = Platform.executableArguments.indexOf(
+      '--buzz-simulator-pairing-code',
+    );
+    final argumentPairingCode =
+        pairingCodeArgumentIndex >= 0 &&
+            pairingCodeArgumentIndex + 1 < Platform.executableArguments.length
+        ? Platform.executableArguments[pairingCodeArgumentIndex + 1].trim()
+        : '';
+    final injectedPairingCode = kDebugMode
+        ? (buildPairingCode.isNotEmpty
+              ? buildPairingCode.trim()
+              : argumentPairingCode.isNotEmpty
+              ? argumentPairingCode
+              : null)
+        : null;
+    final codeController = useTextEditingController(text: injectedPairingCode);
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
     final isBusy =
         pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
         pairingState.status == PairingStatus.storing;
+
+    useEffect(() {
+      if (injectedPairingCode == null || injectedPairingCode.isEmpty) {
+        return null;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) {
+          unawaited(
+            ref.read(pairingProvider.notifier).pair(injectedPairingCode),
+          );
+        }
+      });
+      return null;
+    }, [injectedPairingCode]);
 
     // When adding a community and pairing succeeds, pop back.
     if (addingCommunity && pairingState.status == PairingStatus.success) {

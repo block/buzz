@@ -421,10 +421,16 @@ Future<void> _confirmRemoveCommunity(
   }
 }
 
-class _CommunityIndicator extends ConsumerWidget {
+/// The active community avatar used by compact headers and expanded rails.
+class CommunityNavigationAvatar extends ConsumerWidget {
   final VoidCallback onTap;
+  final double size;
 
-  const _CommunityIndicator({required this.onTap});
+  const CommunityNavigationAvatar({
+    required this.onTap,
+    this.size = _kTopSectionCommunityAvatarSize,
+    super.key,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -432,41 +438,50 @@ class _CommunityIndicator extends ConsumerWidget {
 
     final activeCommunity = activeAsync.value;
 
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: _CommunityAvatar(
-        name: activeCommunity?.name,
-        relayUrl: activeCommunity?.relayUrl,
+    return Semantics(
+      button: true,
+      label: 'Switch community',
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: _CommunityAvatar(
+          name: activeCommunity?.name,
+          relayUrl: activeCommunity?.relayUrl,
+          size: size,
+        ),
       ),
     );
   }
 }
 
-class _CommunityHeaderTitle extends ConsumerWidget {
-  final TextStyle? style;
+class _CommunityListHeading extends ConsumerWidget {
   final VoidCallback onTap;
 
-  const _CommunityHeaderTitle({required this.onTap, this.style});
+  const _CommunityListHeading({required this.onTap});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final name = ref.watch(activeCommunityProvider).value?.name;
     final title = name?.trim();
     return GestureDetector(
+      key: const ValueKey('community-list-heading'),
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: SizedBox.expand(
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.only(left: Grid.xxs),
-            child: Text(
-              title == null || title.isEmpty ? 'Community' : title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: style,
-            ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          _kChannelSectionInset,
+          Grid.xs,
+          _kChannelSectionInset,
+          Grid.xxs,
+        ),
+        child: Text(
+          title == null || title.isEmpty ? 'Community' : title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: context.textTheme.titleMedium?.copyWith(
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+            color: navigationPrimaryForeground(context),
           ),
         ),
       ),

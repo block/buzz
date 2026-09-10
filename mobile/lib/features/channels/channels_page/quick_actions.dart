@@ -18,12 +18,14 @@ const double _kQuickActionCardRadius = _kMorphOpenRadius - Grid.xxs;
 class _MorphingQuickActionsButton extends HookWidget {
   final bool open;
   final double openEdgeOffset;
+  final double maxOpenWidth;
   final VoidCallback onToggle;
   final ValueChanged<_QuickAction> onSelected;
 
   const _MorphingQuickActionsButton({
     required this.open,
     required this.openEdgeOffset,
+    required this.maxOpenWidth,
     required this.onToggle,
     required this.onSelected,
   });
@@ -33,7 +35,7 @@ class _MorphingQuickActionsButton extends HookWidget {
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final mediaQuery = MediaQuery.of(context);
     final openWidth = (mediaQuery.size.width - (Grid.gutter * 2))
-        .clamp(_kMorphClosedSize, double.infinity)
+        .clamp(_kMorphClosedSize, maxOpenWidth)
         .toDouble();
     final surfaceController = useAnimationController(
       initialValue: open ? 1 : 0,

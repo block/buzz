@@ -1,7 +1,12 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,11 +18,16 @@ void main() {
     int unreadInboxCount = 0,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
+    List<Channel>? channels,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
-      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        if (channels != null)
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
@@ -46,6 +56,10 @@ void main() {
     expect(find.bySemanticsLabel('Home'), findsOneWidget);
     expect(find.bySemanticsLabel('Activity'), findsOneWidget);
     expect(find.bySemanticsLabel('Search'), findsOneWidget);
+    expect(find.byKey(const ValueKey('expanded-home-profile')), findsNothing);
+    expect(find.byKey(const ValueKey('expanded-home-community')), findsNothing);
+    expect(find.byType(ProfileAvatar), findsOneWidget);
+    expect(find.byType(CommunityNavigationAvatar), findsOneWidget);
 
     final quickAction = find.byTooltip('Create or start conversation');
     expect(quickAction, findsOneWidget);
@@ -71,6 +85,238 @@ void main() {
       closeTo(homeDestinationRect.center.dy, 0.01),
     );
   });
+
+  testWidgets('uses labeled rail navigation when the window is wide', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1100, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(await buildHome(unreadInboxCount: 1));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('expanded-home-navigation')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('expanded-home-profile')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('expanded-home-community')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('expanded-home-profile'))),
+      const Size.square(56),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('expanded-home-community'))),
+      const Size.square(56),
+    );
+    expect(
+      tester
+          .widget<ProfileAvatar>(
+            find.descendant(
+              of: find.byKey(const ValueKey('expanded-home-profile')),
+              matching: find.byType(ProfileAvatar),
+            ),
+          )
+          .size,
+      48,
+    );
+    expect(
+      tester
+          .widget<CommunityNavigationAvatar>(
+            find.descendant(
+              of: find.byKey(const ValueKey('expanded-home-community')),
+              matching: find.byType(CommunityNavigationAvatar),
+            ),
+          )
+          .size,
+      48,
+    );
+    final communityRect = tester.getRect(
+      find.byKey(const ValueKey('expanded-home-community')),
+    );
+    expect(communityRect.top, Grid.xxs);
+    expect(
+      find.descendant(
+        of: find.byType(ChannelsPage),
+        matching: find.byType(ProfileAvatar),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(ChannelsPage),
+        matching: find.byType(CommunityNavigationAvatar),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(ChannelsPage),
+        matching: find.byType(FrostedAppBar),
+      ),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('compact-home-navigation')), findsNothing);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Activity'), findsOneWidget);
+    expect(find.text('Search'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('activity-rail-unread-dot')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSize(find.byType(ChannelQuickActionsLauncher)).width,
+      greaterThan(800),
+    );
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('expanded-home-profile'))).dy,
+      closeTo(
+        tester.getCenter(find.byTooltip('Create or start conversation')).dy,
+        0.01,
+      ),
+    );
+    expect(find.bySemanticsLabel(RegExp(r'Activity, unread')), findsOneWidget);
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(find.byKey(const Key('quick-actions-surface'))).width,
+      closeTo(430, 0.01),
+    );
+    await tester.tap(find.bySemanticsLabel('Close quick actions'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('expanded-home-profile')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('injected-settings-page')),
+      findsOneWidget,
+    );
+    Navigator.of(
+      tester.element(find.byKey(const ValueKey('injected-settings-page'))),
+    ).pop();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Activity'));
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<IndexedStack>(
+            find.byKey(const ValueKey('home-destination-pages')),
+          )
+          .index,
+      1,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('opens a selected channel beside Home on wide windows', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final channel = _testChannel();
+    final otherChannel = _testChannel(id: 'random-id', name: 'random');
+
+    await tester.pumpWidget(await buildHome(channels: [channel, otherChannel]));
+    await tester.pump();
+    await tester.tap(find.text('general'));
+    await tester.pump();
+
+    final split = find.byKey(const ValueKey('wide-channel-split-view'));
+    final list = find.byType(ChannelsPage);
+    final detail = find.byType(ChannelDetailPage);
+    expect(split, findsOneWidget);
+    expect(list, findsOneWidget);
+    expect(detail, findsOneWidget);
+    expect(
+      find.descendant(of: list, matching: find.byType(FrostedAppBar)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: detail, matching: find.byType(FrostedAppBar)),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSize(detail).width,
+      closeTo(tester.getSize(list).width * 2, 1),
+    );
+    expect(find.byTooltip('Back'), findsNothing);
+
+    await tester.tap(find.text('random'));
+    await tester.pump();
+
+    expect(split, findsOneWidget);
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+    expect(
+      tester
+          .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+          .channel
+          .id,
+      otherChannel.id,
+    );
+    expect(find.byTooltip('Back'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('keeps compact channel navigation as a full-page route', (
+    tester,
+  ) async {
+    final channel = _testChannel();
+
+    await tester.pumpWidget(await buildHome(channels: [channel]));
+    await tester.pump();
+    await tester.tap(find.text('general'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('wide-channel-split-view')), findsNothing);
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+    expect(
+      Navigator.canPop(tester.element(find.byType(ChannelDetailPage))),
+      true,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'preserves the destination while resizing across the breakpoint',
+    (tester) async {
+      tester.view.physicalSize = const Size(1100, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(await buildHome(disableAnimations: true));
+      await tester.pump();
+      await tester.tap(find.text('Activity'));
+      await tester.pump();
+
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('expanded-home-navigation')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('compact-home-navigation')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<IndexedStack>(
+              find.byKey(const ValueKey('home-destination-pages')),
+            )
+            .index,
+        1,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (
     tester,
@@ -435,4 +681,27 @@ void main() {
   });
 }
 
-Widget _buildSettingsPage(BuildContext context) => const SizedBox.shrink();
+Widget _buildSettingsPage(BuildContext context) =>
+    const SizedBox(key: ValueKey('injected-settings-page'));
+
+Channel _testChannel({String id = 'general-id', String name = 'general'}) =>
+    Channel(
+      id: id,
+      name: name,
+      channelType: 'stream',
+      visibility: 'open',
+      description: 'General discussion',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 10,
+      isMember: true,
+    );
+
+class _FakeChannelsNotifier extends ChannelsNotifier {
+  _FakeChannelsNotifier(this.channels);
+
+  final List<Channel> channels;
+
+  @override
+  Future<List<Channel>> build() => SynchronousFuture(channels);
+}

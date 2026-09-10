@@ -40,6 +40,10 @@ enum NativeAttachmentPopoverAnchorLayout {
 }
 
 enum NativeAttachmentPopoverPresentationLayout {
+  static func availableWidth(containerWidth: CGFloat) -> CGFloat {
+    min(max(containerWidth - 24, 0), 430)
+  }
+
   static func keyboardDismissalOffset(
     sourceRect: CGRect,
     containerBounds: CGRect,
@@ -155,48 +159,48 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
       return false
     }
 
-    let sourceView = presenter.view
+    presenter.loadViewIfNeeded()
+    guard let sourceView = presenter.view else { return false }
     var convertedRect: CGRect
-    if let window = sourceView?.window {
-      convertedRect = sourceView?.convert(sourceRect, from: window) ?? sourceRect
+    if let window = sourceView.window {
+      convertedRect = sourceView.convert(sourceRect, from: window)
     } else {
       convertedRect = sourceRect
     }
 
-    if let sourceView {
-      let keyboardDismissalOffset =
-        NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
-          sourceRect: convertedRect,
-          containerBounds: sourceView.bounds,
-          safeAreaInsets: sourceView.safeAreaInsets,
-          keyboardLayoutFrame: sourceView.keyboardLayoutGuide.layoutFrame,
-          menuHeight: NativeAttachmentMenuLayout.size(
-            compatibleWith: sourceView.traitCollection
-          ).height
+    let keyboardDismissalOffset =
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: convertedRect,
+        containerBounds: sourceView.bounds,
+        safeAreaInsets: sourceView.safeAreaInsets,
+        keyboardLayoutFrame: sourceView.keyboardLayoutGuide.layoutFrame,
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: sourceView.traitCollection
+        ).height
+      )
+    if keyboardDismissalOffset > 0 {
+      NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(
+        in: sourceView.window
+      )
+      convertedRect =
+        NativeAttachmentPopoverPresentationLayout.sourceRect(
+          convertedRect,
+          keyboardDismissalOffset: keyboardDismissalOffset
         )
-      if keyboardDismissalOffset > 0 {
-        NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(
-          in: sourceView.window
-        )
-        convertedRect =
-          NativeAttachmentPopoverPresentationLayout.sourceRect(
-            convertedRect,
-            keyboardDismissalOffset: keyboardDismissalOffset
-          )
-      }
     }
 
     let anchorView = makeSourceAnchor(frame: convertedRect)
-    sourceView?.addSubview(anchorView)
+    sourceView.addSubview(anchorView)
     sourceAnchorView = anchorView
 
-    let availableWidth = max(
-      320,
-      min(
-        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 24,
-        430
+    let availableWidth =
+      NativeAttachmentPopoverPresentationLayout.availableWidth(
+        containerWidth: sourceView.bounds.width
       )
-    )
+    guard availableWidth > 0 else {
+      anchorView.removeFromSuperview()
+      return false
+    }
     let controller = NativeAttachmentPopoverViewController(
       channel: channel,
       expandedWidth: availableWidth

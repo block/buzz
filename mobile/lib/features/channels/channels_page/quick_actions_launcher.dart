@@ -28,6 +28,15 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
   /// Distance between the launcher and the right edge of the screen.
   final double rightInset;
 
+  /// Maximum width of the expanded menu in spacious layouts.
+  final double maxOpenWidth;
+
+  /// Opens channels created or selected from the quick-actions menu.
+  ///
+  /// Wide Home supplies its split-view handler. When omitted, channels keep
+  /// using the existing full-page route.
+  final Future<void> Function(Channel channel)? onOpenChannel;
+
   /// Creates a launcher aligned with the supplied navigation geometry.
   const ChannelQuickActionsLauncher({
     super.key,
@@ -37,6 +46,8 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
     required this.navigationBarWidth,
     required this.systemBottomInset,
     required this.rightInset,
+    this.maxOpenWidth = double.infinity,
+    this.onOpenChannel,
   });
 
   @override
@@ -68,6 +79,11 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
     }, [visible]);
 
     Future<void> openChannel(Channel channel) async {
+      final adaptiveOpenChannel = onOpenChannel;
+      if (adaptiveOpenChannel != null) {
+        await adaptiveOpenChannel(channel);
+        return;
+      }
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -172,6 +188,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
                   openEdgeOffset: rightInset - Grid.gutter,
+                  maxOpenWidth: maxOpenWidth,
                   onToggle: () {
                     unawaited(HapticFeedback.lightImpact());
                     quickActionsOpen.value = !quickActionsOpen.value;
