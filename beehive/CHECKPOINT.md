@@ -5,6 +5,96 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Goose / integrated local entry 768f — published partial checkpoint
+
+Final strict passes. Exactly one final **FULL DEFAULT concurrent installed-enabled
+package run completed 63/65, two failures, zero skips/cancellations, natural 35.904s**.
+All four added Goose tests pass in the full run. The two failures are unchanged
+owners: slots.test.ts:131 standby host PID 96255 exits 1 with `Opening handshake has
+timed out`; admission-cancel.test.ts:126 controls exceed the unchanged <2500ms bound.
+No rerun, serial mode, assertion/deadline relaxation, or transport patch. The slots
+symptom recurs; this uninstrumented candidate run does not independently establish
+timing cause. Investigator's separate measured baseline finding is retained below;
+admission cause remains unclassified. **Full-suite/engineering acceptance OPEN.**
+
+Self-review covered native model/no-fallback and subsequent update checks, provider
+env isolation, selected-binding inventory, hidden-reader handoff, exact public key/
+owner/genesis checks, lock/fingerprint ownership and unchanged manifest/history.
+No dependency, old native/client, owner credential, provider login or production
+changes. Node24.15.0/pnpm11.4.0, installed hashes freshly match retained pins:
+buzz-acp `10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`,
+buzz `147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5`.
+Exact executable source hashes are in `GOOSE_768F/final-source.sha256`, full result
+in `full-installed-default.log`, prior failures and focused logs retained beside it.
+Candidate is the commit containing this checkpoint; terminal publication records
+exact remote head/clean-tree and Logan Johnson author/committer+DCO verification.
+Next: review/repair the measured relay persistence owner without weakening durability
+or timing gates, then final concurrent validation; close the explicitly separate
+wizard-to-installed conversation integration gap before claiming that full journey.
+
+
+Continuation from clean published `3b3ba27aa1436a46a5777f700af15bc4d90fb621`.
+Actual implementation, not transport instrumentation. Source boundary remains
+pinned Buzz `051c3a270be9c73da9ab06700bcab7d5552fceaa` (git-show, not checkout HEAD):
+Desktop discovery/catalog.rs Goose entry disables unstable ACP model switching,
+uses `GOOSE_PROVIDER`, `GOOSE_MODEL`, `GOOSE_MODE=auto` and Goose-owned config under
+`~/.config/goose/config.yaml`; buzz-acp config.rs:792 supplies `acp`; acp.rs:707–719
+supplies `_goose/unstable/session/system-prompt/set`, and :2150–2185 describes
+native category=model configOptions. Goose itself is NOT installed/executed by
+this work, and no upstream Goose-release compatibility or provider login is claimed.
+
+Implemented a narrow spawn-fixed Goose local binding at existing host preparation,
+AgentSession and conversation broker owners. Separate service HOME/provider context,
+no Buzz Agent env/cache inheritance, no remote executable/env/credentials. Native
+session model currentValue plus advertised options must match the selected exact
+model. Missing/mismatched/ambiguous evidence rejects, never fallback to invented
+session/set_model support. Stable model-setting replies must re-establish native
+evidence; later model drift rejects. Profile uses the source-shaped Goose system
+prompt method in direct probes and the installed runtime's own implementation in
+conversation mode. Settings require selected-next Save and explicit fresh Restart.
+Inventory models/workspaces now follow selected binding, not original slot default.
+
+`setup <existing-host>` enters the local wizard without allowing owner replacement;
+new setup offers Goose, independent NEW identity or hidden exact standby import
+against a public genesis. Existing wizard adds immutable Goose binding (source
+fingerprint rechecked under host.lock), existing-key reuse, new identities, hidden
+unknown standby import on a selected binding, and separately explicit retained
+public-only restoration. Common host/control/relay authority stays fixed. Import
+never grants Start, including initial hidden import. No key/session/workspace transfer.
+Initial host startup signal ownership is unchanged: handlers still start after ready;
+signal-during-startup cleanup remains unestablished, not silently claimed fixed.
+
+Focused evidence: strict passes; UX/ACP/bindings **8/8**, including actual CLI initial
+Goose new/reuse/hidden standby (macOS PTY, no key echo, 0600/0700), real host/relay
+profile/model/fresh-session Restart, wrong-model preflight preserving actual, neutral
+Stop without service HOME, stable identity/Y/manifest/history. Actual CLI add-Goose
+binding -> actual remote TUI model selection -> explicit Restart executes the native
+ACP consumer, preserving old fixture run/history and Y. Broker/key/installed **9/9**:
+real installed buzz-acp + installed Buzz CLI, Goose-shaped TypeScript ACP fixture,
+3 canonical signed same-agent replies, 2 channels, native model config and received
+profile, owner/member/thread fences, verified owned Stop/descendant absence. This
+installed proof enters ConversationSession directly, not the entire wizard-to-installed
+conversation path; the selected-setup journey separately exercises direct ACP.
+Do not combine those into a claim of an uninterrupted installed provider journey.
+
+Retained iteration failures: initial strict env-union typing (fixed), installed
+Goose-shaped fixture omitted the native system-prompt method and exited; source
+inspection + bounded fixture method trace identified it, fixture corrected. New
+profile test initially did not publish its immutable revision; fixed test input.
+No deadline or assertions weakened. Logs in
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/GOOSE_768F/` (workspace absolute prefix
+`/Users/loganj/.buzz/`). Source and installed-binary attribution remain separate.
+
+Consumed investigator 521307cf terminal a7fb3981: one immutable full capture 60/61;
+slots standby handshake recurred with synchronous relay persistence starving accept;
+admission controls passed, prior failure still unclassified. No investigator edits
+copied; no transport change or further diagnostic/full rerun-to-green here. Final
+strict/default concurrent installed-enabled gate follows this checkpoint after capture
+completion. Engineering acceptance remains open until its exact result is recorded.
+Full Claude/Codex/provider/preset/custom/mesh/compute parity, live Goose/provider auth,
+production kind-40002 admission, destructive binding editing/deletion and one continuous
+wizard -> installed conversation journey remain. Previous K1/F1/F2 reviews stay closed.
+
 ## Startup / local wizard 7b70 checkpoint
 
 Continuation from clean published `6a28b390db2caca6d45699f91709a2d9a277b053`.

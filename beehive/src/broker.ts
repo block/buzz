@@ -1,3 +1,4 @@
+import { gooseModels } from './acp.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createServer, type Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -188,6 +189,7 @@ export class ConversationSession {
           if (pending.size >= 128 || pending.has(msg.id) || String(msg.id).startsWith('beehive-model-')) throw Error();
           pending.set(msg.id, { method: msg.method, params: p });
         }
+        if (this.prepared.plan.harness === 'goose' && msg.method === 'session/set_model') throw Error('Goose settings require a fresh launch');
         if (msg.method === 'session/set_model' && (!sessions.has(p?.sessionId) || p.modelId !== this.prepared.plan.model)) throw Error();
         if (msg.method === 'session/set_config_option' && modelConfigs.has(p?.configId) && p.value !== this.prepared.plan.model) throw Error();
         if (['session/set_model', 'session/set_config_option'].includes(msg.method)) sessions.delete(p?.sessionId);
@@ -225,6 +227,10 @@ export class ConversationSession {
           }
           if (modelConfigs.size > 128) throw Error();
           sessions.delete(session);
+          if (this.prepared.plan.harness === 'goose') {
+            gooseModels(msg.result, this.prepared.plan.model);
+            sessions.add(session); send(socket, msg); return;
+          }
           const id = `beehive-model-${++sequence}`;
           injected.set(id, { original: msg, session });
           send(harness.child.stdin, { jsonrpc: '2.0', id, method: 'session/set_model', params: { sessionId: session, modelId: this.prepared.plan.model } }); return;

@@ -422,3 +422,32 @@ These probes explain the failure path, not the cause of the historical slots tim
 remote A/B journey. Additional actual CLI new/reuse/hidden-restore acceptance
 asserts unchanged journals, independent keys, chosen binding and no secret output.
 API stale fingerprint checks run under the same atomic lock as host start.
+
+## Goose native ACP and local entry (768f)
+
+`goose.test.ts` drives actual CLI initial Goose NEW/reuse and hidden standby import;
+on macOS the initial import runs in a real script PTY. It verifies public-genesis
+matching, no key echo, modes, standby Start denial, actual native session/profile/
+model Restart through real host/relay, unchanged identity/Y/manifest/history,
+unknown/incompatible/stale selection refusal and wrong-model preflight preserving
+actual. Removing the dedicated service HOME still permits valid Stop. Native model
+codec negatives bind production `gooseModels`, not a test-only adapter helper.
+
+`goose-binding.test.ts` uses the actual local wizard to add an immutable Goose
+binding to a fixture installation, then actual remote TUI chooses that binding and
+compatible second model while the fixture actual remains unchanged. Explicit Restart
+executes a source-shaped native ACP session (not the fixture lifecycle runner), old
+actual survives in history, Y and manifest remain byte-identical. Advertised models
+must track the selected binding. Generated executable is an owner-only TypeScript
+fixture with exact `acp` argv, never an installed Goose executable.
+
+`installed-conversation.test.ts` now covers both Buzz Agent and Goose-shaped
+protocols under actual installed buzz-acp + Buzz CLI. Goose fixture rejects unstable
+set_model, reports native configOptions and implements the pinned Goose system-prompt
+extension. Three real CLI signed replies, same signer, two channels/later turn,
+profile/native-model evidence, admission/tool recipient fences and complete owned
+Stop are asserted. It enters the broker directly; wizard-to-installed-conversation
+continuity and live Goose/provider authentication are NOT established. All source
+shape assertions and installed evidence remain separately attributed. Full default
+concurrent package results/failures are recorded in CHECKPOINT, not replaced by these
+focused passes. No transport deadline, test default, or assertion was weakened.

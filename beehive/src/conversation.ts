@@ -37,7 +37,7 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
     relay: url.href,
     agentExecutableHash: prepared.executableHash,
     // Authoritative identity/transport applied after provider env; no arbitrary env input.
-    env: Object.freeze({ ...prepared.env,
+    env: Object.freeze<Record<string, string>>({ ...prepared.env,
       BUZZ_PRIVATE_KEY: agentSecret,
       BUZZ_RELAY_URL: url.href,
       BUZZ_ACP_AGENT_OWNER: owner,

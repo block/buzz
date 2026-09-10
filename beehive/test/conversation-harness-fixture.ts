@@ -5,9 +5,13 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
 if (process.env.BUZZ_AGENT_SYSTEM_PROMPT) writeFileSync('received-system-instructions', process.env.BUZZ_AGENT_SYSTEM_PROMPT);
+const goose = process.env.GOOSE_PROVIDER !== undefined;
+if (goose && (process.env.BUZZ_AGENT_MODEL || process.env.BUZZ_AGENT_CONFIG_DIR || process.env.GOOSE_MODE !== 'auto')) throw Error('Mixed harness environment');
+const model = goose ? process.env.GOOSE_MODEL : process.env.BUZZ_AGENT_MODEL;
 const mode = readFileSync('mode', 'utf8');
+const nativeModel = () => ({ configOptions: [{ configId: 'goose-model', category: 'model', currentValue: mode === 'wrong-model' ? 'other' : model, options: [{ value: model }] }] });
 let tool: any; let configRejected = false;
-const sessionId = 'conversation-session'; let selected = ''; let prompt: number | undefined;
+const gooseSessions = new Set<string>(); let sessionNumber = 0; let sessionId = 'conversation-session'; let selected = ''; let prompt: number | undefined;
 if (process.env.BUZZ_PRIVATE_KEY) writeFileSync('harness-identity', publicKey(process.env.BUZZ_PRIVATE_KEY));
 else writeFileSync('preflight-no-identity', 'yes');
 writeFileSync('harness-pid', String(process.pid));
@@ -20,6 +24,7 @@ setTimeout(() => process.exit(0), 60000).unref();
 const send = (m: any) => process.stdout.write(JSON.stringify(m) + '\n');
 for await (const line of createInterface({ input: process.stdin })) {
   const m = JSON.parse(line); let result: any;
+  if (goose) appendFileSync('goose-rpc-methods', JSON.stringify({method:m.method, configId:m.params?.configId, value:m.params?.value}) + '\n');
   if (!m.method) {
     if (m.result?.ok) {
       // Readers wait for existence: publish complete bytes, not open/truncate before write.
@@ -28,24 +33,31 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     continue;
   }
-  if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: 'buzz-agent' } };
-  else if (m.method === 'session/new') { tool = m.params.mcpServers[0]; result = { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: goose ? 'goose' : 'buzz-agent' } };
+  else if (m.method === 'session/new') { if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
+    if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
+    writeFileSync('received-system-instructions', m.params.text); result = {};
+  }
   else if (m.method === 'session/load') { selected = ''; result = {}; }
   else if (m.method === 'session/set_model') {
+    if (goose) throw Error('Goose must never receive unstable set_model');
     if (mode === 'reject' || (mode === 'optional-reack-fails' && configRejected)) { send({ jsonrpc: '2.0', id: m.id, error: { code: -1, message: 'secret-diagnostic' } }); continue; }
     selected = m.params.modelId; result = { sessionId, modelId: mode === 'wrong-model' ? 'other' : selected };
   } else if (m.method === 'session/set_config_option') {
-    if (mode !== 'optional-ok') {
+    if (goose) { if (m.params.configId !== 'goose-model' || m.params.value !== model) throw Error('Unsupported Goose config'); result = nativeModel(); }
+    else if (mode !== 'optional-ok') {
       configRejected = true;
       send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported optional setting' } }); continue;
     }
-    result = {};
+    else result = {};
   } else if (m.method === 'session/cancel') {
     writeFileSync('cancel-observed', 'yes');
     if (prompt) send({ jsonrpc: '2.0', id: prompt, result: { stopReason: 'cancelled' } }); continue;
   } else if (m.method === 'session/prompt') {
+    if (goose && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
     appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
-    if (selected !== process.env.BUZZ_AGENT_MODEL || m.params.sessionId !== sessionId) process.exit(8);
+    if (selected !== model || m.params.sessionId !== sessionId) process.exit(8);
     writeFileSync('prompt-started', selected); prompt = m.id;
     send({ jsonrpc: '2.0', id: 'reverse', method: 'client/fixture', params: {} });
     if (mode === 'delayed' || mode === 'cancel') continue;

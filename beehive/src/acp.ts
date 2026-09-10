@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
 /** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; model: string; instructions?: string }>;
+export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose'; provider?: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -27,10 +27,30 @@ export function prepareAgent(input: AgentLaunch) {
   }
   accessSync(plan.executable, constants.X_OK);
   for (const p of [plan.workspace, plan.home, plan.configDirectory]) if (!statSync(p).isDirectory()) throw Error('Harness setup directory unavailable');
+  if (plan.harness === 'goose') {
+    identifier(plan.provider);
+    identifier(plan.model);
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ PATH: '/usr/bin:/bin', HOME: plan.home, GOOSE_PROVIDER: plan.provider!, GOOSE_MODEL: plan.model, GOOSE_MODE: 'auto' }) });
+  }
   const url = new URL(plan.databricksHost);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin');
   identifier(plan.model);
-  return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze({ PATH: '/usr/bin:/bin', HOME: plan.home, BUZZ_AGENT_CONFIG_DIR: plan.configDirectory, BUZZ_AGENT_PROVIDER: 'databricks_v2', DATABRICKS_HOST: url.origin, BUZZ_AGENT_MODEL: plan.model, ...(plan.instructions === undefined ? {} : { BUZZ_AGENT_SYSTEM_PROMPT: plan.instructions }) }) });
+  return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ PATH: '/usr/bin:/bin', HOME: plan.home, BUZZ_AGENT_CONFIG_DIR: plan.configDirectory, BUZZ_AGENT_PROVIDER: 'databricks_v2', DATABRICKS_HOST: url.origin, BUZZ_AGENT_MODEL: plan.model, ...(plan.instructions === undefined ? {} : { BUZZ_AGENT_SYSTEM_PROMPT: plan.instructions }) }) });
+}
+
+/** Spawn-fixed Goose model evidence from native ACP configOptions, not set_model.
+ * Pinned Buzz 051c3a2 catalog disables Goose unstable model switching. No fallback.
+ */
+export function gooseModels(value: unknown, model: string): string[] {
+  const options = record(value).configOptions;
+  if (!Array.isArray(options) || options.length > 128) throw Error('Missing Goose native model evidence');
+  const models = options.filter(o => record(o).category === 'model');
+  if (models.length !== 1) throw Error('Ambiguous Goose model evidence');
+  const option = record(models[0]);
+  if (option.currentValue !== model || !Array.isArray(option.options) || option.options.length > 1000) throw Error('Goose exact-model mismatch');
+  const ids = option.options.map(o => identifier(record(o).value));
+  if (!ids.includes(model)) throw Error('Goose model not advertised');
+  return ids;
 }
 
 /** Bounded newline JSON-RPC boundary to an external Buzz Agent ACP executable. */
@@ -104,8 +124,12 @@ export class AgentSession {
       }
       if (msg.method === 'session/update') {
         const p = record(msg.params);
-        if (p.sessionId !== this.session || !this.prompting) return;
         const update = record(p.update);
+        if (this.prepared.plan.harness === 'goose') {
+          if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('Goose model changed');
+          if (update.sessionUpdate === 'config_option_update') gooseModels(update, this.prepared.plan.model);
+        }
+        if (p.sessionId !== this.session || !this.prompting) return;
         if (update.sessionUpdate === 'agent_message_chunk') {
           const content = record(update.content);
           if (content.type === 'text' && typeof content.text === 'string') this.response += content.text;
@@ -138,9 +162,10 @@ export class AgentSession {
   async catalog(): Promise<Catalog> {
     await this.owned.ready;
     const init = record(await this.request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'beehive', version: '0.0.1' } }));
-    if (init.protocolVersion !== 1 || record(init.agentInfo).name !== 'buzz-agent') throw Error('Unsupported harness capabilities');
+    if (init.protocolVersion !== 1 || record(init.agentInfo).name !== (this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
     const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [] }));
     this.session = identifier(created.sessionId);
+    if (this.prepared.plan.harness === 'goose') return { state: 'reported', models: gooseModels(created, this.prepared.plan.model), authentication: 'unverified' };
     const models = record(created.models);
     if (!Array.isArray(models.availableModels) || models.availableModels.length > 1000) throw Error('Invalid ACP catalog');
     // Never publish names/descriptions/raw errors supplied by an external executable.
@@ -151,8 +176,11 @@ export class AgentSession {
   async verify(): Promise<Evidence> {
     if (!this.session) throw Error('Create ACP session first');
     const model = this.prepared.plan.model;
+    if (this.prepared.plan.harness !== 'goose') {
     const ack = record(await this.request('session/set_model', { sessionId: this.session, modelId: model }));
     if (ack.sessionId !== this.session || ack.modelId !== model) throw Error('Exact-model acknowledgement mismatch');
+    }
+    if (this.prepared.plan.harness === 'goose' && this.prepared.plan.instructions !== undefined) await this.request('_goose/unstable/session/system-prompt/set', { sessionId: this.session, mode: 'set', key: 'buzz', text: this.prepared.plan.instructions });
     this.prompting = true;
     this.response = '';
     try {

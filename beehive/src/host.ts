@@ -14,7 +14,7 @@ import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2' | 'goose'; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 /** Definition-only fingerprint: common host authority and agent key are excluded. */
 export function bindingFingerprint(setup: Setup): string {
   const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
@@ -23,13 +23,17 @@ export function bindingFingerprint(setup: Setup): string {
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
 type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
+/** Operator-approved compatible models, not an authenticated provider catalog. */
+export function setupModels(s: Setup): string[] { return s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
   for (const key of ['host','ownerSecret','runner','workspace']) text(s[key]);
   if (s.allowedWorkspaces !== undefined && (!Array.isArray(s.allowedWorkspaces) || s.allowedWorkspaces.length > 32 || s.allowedWorkspaces.some(w => typeof w !== 'string' || !isAbsolute(w)))) throw Error('Invalid allowed workspaces');
   publicKey(String(s.ownerSecret));
   if (s.agentSecret !== undefined) publicKey(String(s.agentSecret));
-  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['fixture','buzz-agent-databricks-v2'].includes(String(s.mode))) throw Error('Invalid local setup');
+  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['fixture','buzz-agent-databricks-v2','goose'].includes(String(s.mode))) throw Error('Invalid local setup');
+  if (s.mode === 'goose' && (typeof s.gooseProvider !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(s.gooseProvider) || !Array.isArray(s.gooseModels) || !s.gooseModels.length || s.gooseModels.length > 100 || s.gooseModels.some(m => typeof m !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(m)))) throw Error('Invalid local Goose provider/models');
+  if (s.mode === 'goose' && (JSON.stringify(s.args) !== '["acp"]' || typeof s.serviceHome !== 'string' || !isAbsolute(s.serviceHome) || s.configDirectory !== s.serviceHome || s.databricksHost !== undefined)) throw Error('Goose requires acp args and its own service HOME, not Buzz Agent auth fields');
   return s as Setup;
 }
 /** Provision once locally. A partial setup is inert; host startup never invents authority. */
@@ -46,7 +50,7 @@ export function initialState(setup: Setup, genesis: Genesis): State {
   if (setup.agentSecret === undefined) throw Error('Initial state requires the provisioned agent key');
   return {
     assignment: { genesis, assignedHost: genesis.initialHost },
-    binding: { host: setup.host, owner: publicKey(setup.ownerSecret), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5', workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
+    binding: { host: setup.host, owner: publicKey(setup.ownerSecret), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setupModels(setup)[0]!, workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
   };
 }
 /** Explicit offline legacy enrollment; never repairs missing journals or lost keys. */
@@ -98,15 +102,17 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
   let acp: AgentSession | ConversationSession | undefined;
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
   function inventory() {
+    const candidate = bindings[state.selected.harnessSetup?.id ?? setupId];
+    const nextSetup = candidate && (!state.selected.harnessSetup || state.selected.harnessSetup.fingerprint === bindingFingerprint(candidate)) ? candidate : undefined;
     return message('inventory',setup.host,agent,state.revision, {
-      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, fingerprint: bindingFingerprint(value), kind: value.mode, models: [value.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'], workspaces: value.allowedWorkspaces ?? [value.workspace] })),
+      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
       ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
-      movePreflight: preparationStage, catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
+      movePreflight: preparationStage, catalog, setup: nextSetup?.mode ?? 'unavailable', models: nextSetup ? setupModels(nextSetup) : [],
       localKey: keyPresent ? 'present' : 'removed locally; public slot retained',
-      workspaces: setup.allowedWorkspaces ?? [setup.workspace], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: !keyPresent ? 'agent key removed locally: public-only slot; Start/Restart rejected before spawn until explicit local key repair' : setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      workspaces: nextSetup ? nextSetup.allowedWorkspaces ?? [nextSetup.workspace] : [], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: !keyPresent ? 'agent key removed locally: public-only slot; Start/Restart rejected before spawn until explicit local key repair' : setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : !nextSetup ? 'selected binding unavailable; repair locally or select an advertised binding' : nextSetup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
@@ -159,13 +165,13 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     const value = bindings[id]!;
     if (semanticHash(value.conversation ?? null) !== semanticHash(setup.conversation ?? null)) throw Error('Binding cannot switch conversation authority');
     if (selected.harnessSetup && selected.harnessSetup.fingerprint !== bindingFingerprint(value)) throw Error('Binding definition changed');
-    if (selected.model !== (value.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(value.allowedWorkspaces ?? [value.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
+    if (!setupModels(value).includes(selected.model) || !(value.allowedWorkspaces ?? [value.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
     return { setup: value, id };
   }
   function prepareLocal(selected: Selection) {
     selected = selection(selected);
     const { setup, id } = resolveBinding(selected);
-    if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
+    if (!setupModels(setup).includes(selected.model) || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
     // The optional execution credential is absent for a public-only slot: reject before
     // any spawn or source effect. The secret is never regenerated or inferred.
     if (executionSecret === undefined) throw Error('Local agent key removed; this public slot cannot launch; repair locally without resetting assignment');
@@ -174,7 +180,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
-    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
+    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' ? '' : text(setup.databricksHost), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
     const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, executionSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing

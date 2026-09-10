@@ -644,3 +644,43 @@ history and unchanged sibling journal. A separate CLI journey covers new/reuse a
 hidden exact-key restoration. This is a small existing-installation wizard, not a
 universal provider form or complete initial-setup/import unification. Goose, Claude,
 Codex, other providers, presets/custom/mesh/compute and live auth remain unfinished.
+
+## Goose and one local entry (768f increment)
+
+`setup <new-directory> <owner-identity-file>` now offers **3 Goose**. Configure the
+installed Goose executable locally (launched as `goose acp`), its provider ID and
+operator-approved compatible exact model IDs. The wizard creates a dedicated
+0700 `service-home`; Goose owns its provider configuration and credentials under
+that HOME, independently of Buzz Agent OAuth. `auth-info <host> [binding-id]`
+prints the corresponding service-user context without login or credential reads.
+No executable-found/authenticated equivalence or provider-catalog claim is made.
+
+At initial identity confirmation choose `yes` for a NEW independent identity,
+`no` to cancel, or `import-standby` for a local public genesis + hidden exact key.
+Standby possession never grants Start. An existing retained public-only identity
+must instead use explicit `restore-key`, not ordinary Save or re-enrollment.
+`setup <existing-host>` is the same entry as `local-setup <existing-host>` and
+rejects replacement owner arguments. It lists identities and immutable bindings;
+choose reuse/new-agent/import-standby/restore-key/add-binding/add-goose/cancel.
+Every mutation is a separate explicit confirmation. Add a compatible Goose binding
+with a dedicated pre-existing service HOME; new binding IDs replace old definitions
+without destructive edits or rewriting actual/history. Then remotely `binding <id>`,
+choose an advertised compatible model, Save and explicitly Restart. No remote
+credential/env/executable fields or new provider registry have been added.
+
+This narrow Goose path is grounded in pinned Buzz 051c3a2's Desktop catalog and ACP
+client, not a promise about every Goose version. It does **not** send Goose the Buzz
+Agent-only `session/set_model` acknowledgement contract. Fresh session native model
+configOptions must report the exact selected model and advertise it. Stable model
+configuration responses must confirm it again; unknown/mismatch/missing evidence
+fails closed. Goose profile delivery uses `_goose/unstable/session/system-prompt/set`.
+Compatible models are locally approved, not discovered/authenticated automatically.
+Preflight response is not a guarantee of future provider or conversation readiness.
+
+Validation uses a **Goose-shaped TypeScript ACP fixture**, not live Goose. Actual
+CLI/wizard -> remote TUI -> selected-setup ACP Restart is exercised. Separately,
+actual installed buzz-acp and Buzz CLI execute through the same conversation broker
+against that fixture, producing three signed replies with native model/profile
+mechanics. The uninterrupted wizard-to-installed-conversation journey remains a
+validation gap. Kind-9 isolated relay acceptance is not current production kind-40002.
+Full Claude Code/Codex/provider/preset/custom/mesh/compute parity remains incomplete.

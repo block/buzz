@@ -6,7 +6,7 @@ import { stdin, stdout } from 'node:process';
 import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
-import { host, validateSetup, provision, migrateAssignment } from './host.ts';
+import { host, validateSetup, provision, migrateAssignment, setupModels } from './host.ts';
 import { migrateSlots, addSlot, installationSlots, saveDefaultHarness, removeSlotKey, importSlotKey } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
@@ -19,15 +19,15 @@ const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
-  setup <new-host-directory> <identity-file> Guided local harness + key setup
-  local-setup <host-directory>              List/reuse/add binding; new/reuse/restore identity
+  setup <host-directory> [identity-file]     New host or existing local wizard
+  local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
   remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
   import-agent-key <host-directory> <agent-public-key> Restore retained identity via hidden local entry
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
   migrate-assignment <host-directory>       Explicit stopped legacy enrollment
-  auth-info <host-directory>                Print exact local sign-in context (no login)
+  auth-info <host-directory> [binding-id]   Print local harness service context (no login)
   conversation-setup <host-directory>       Attach external buzz-acp to EXISTING identity (Start gated)
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
@@ -44,29 +44,43 @@ async function main() {
     console.log(`Owner public key: ${publicKey(secret)}\nIdentity file: ${join(dir,'identity.json')}`);
   } else if (command === 'setup') {
     const dir = resolve(text(args[0]));
-    if (existsSync(dir)) throw Error('Use a new host directory; setup cannot reset authority');
+    if (existsSync(dir)) {
+      if (args.length !== 1) throw Error('Existing setup: supply host directory only; retained owner cannot be replaced');
+      await localSetup(dir); return;
+    }
     const secret = text(object(readPrivate(resolve(text(args[1])))).secret);
-    const ui = createInterface({ input: stdin, output: stdout });
+    let ui = createInterface({ input: stdin, output: stdout });
     try {
       const name = text(await ui.question('Host name: '));
-      const mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2]: ');
-      if (!['1','2'].includes(mode)) throw Error('Choose 1 or 2');
-      const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : 'Absolute installed buzz-agent executable: ')));
+      const mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose]: ');
+      if (!['1','2','3'].includes(mode)) throw Error('Choose 1, 2 or 3');
+      const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : mode === '3' ? 'Absolute installed Goose executable (runs acp): ' : 'Absolute installed buzz-agent executable: ')));
       const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
       const additionalWorkspace = await ui.question('Additional allowed workspace (blank for none): ');
       const allowedWorkspaces = additionalWorkspace ? [workspace, realpathSync(text(additionalWorkspace))] : [workspace];
       const extra = mode === '1' ? text(await ui.question('Absolute fixture TypeScript script: ')) : '';
       const databricksHost = mode === '2' ? text(await ui.question('Databricks workspace HTTPS URL: ')) : undefined;
       if (databricksHost) { const url = new URL(databricksHost); if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin without credentials'); }
-      console.log(mode === '1' ? 'Fixture setup: no provider/login; trusted local executable, no agent credentials passed.' : `Buzz Agent Databricks v2 owns browser OAuth and refresh. Intended host/service credential context: uid ${process.getuid?.() ?? 'unknown'}, HOME=${shellQuote(join(dir, 'service-home'))}, BUZZ_AGENT_CONFIG_DIR=${shellQuote(join(dir, 'agent-config'))}, DATABRICKS_HOST=${shellQuote(databricksHost!)}. Run ${shellQuote(runner)} auth databricks in exactly that context as the service user; no login initiated. Missing executable: install buzz-agent locally. Missing auth: use auth-info after setup.`);
+      console.log(mode === '1' ? 'Fixture setup: no provider/login; trusted local executable, no agent credentials passed.' : mode === '3' ? 'Goose setup: own provider configuration, not Buzz Agent OAuth.' : `Buzz Agent Databricks v2 owns browser OAuth and refresh. Intended host/service credential context: uid ${process.getuid?.() ?? 'unknown'}, HOME=${shellQuote(join(dir, 'service-home'))}, BUZZ_AGENT_CONFIG_DIR=${shellQuote(join(dir, 'agent-config'))}, DATABRICKS_HOST=${shellQuote(databricksHost!)}. Run ${shellQuote(runner)} auth databricks in exactly that context as the service user; no login initiated. Missing executable: install buzz-agent locally. Missing auth: use auth-info after setup.`);
+      const gooseProvider = mode === '3' ? text(await ui.question('Locally configured Goose provider ID: ')) : undefined;
+      const gooseModels = mode === '3' ? text(await ui.question('Operator-approved compatible exact model IDs (comma-separated): ')).split(',').map(m => m.trim()) : undefined;
+      if (mode === '3') console.log(`Goose owns provider credentials and ~/.config/goose/config.yaml under dedicated HOME=${join(dir, 'service-home')}. Configure locally as the host service OS user; not Desktop HOME or Buzz Agent OAuth. No login, authentication or catalog verified. GOOSE_MODE=auto; exact model fixed on fresh launch.`);
       const importing = args.length > 2;
-      const agentSecret = importing ? text(object(readPrivate(resolve(text(args[2])))).secret) : newKey();
-      const genesis = importing ? validateGenesis(readPrivate(resolve(text(args[3])))) : createGenesis(publicKey(secret), publicKey(agentSecret), name);
+      let agentSecret = importing ? text(object(readPrivate(resolve(text(args[2])))).secret) : newKey();
+      let genesis = importing ? validateGenesis(readPrivate(resolve(text(args[3])))) : createGenesis(publicKey(secret), publicKey(agentSecret), name);
       if (importing && genesis.initialHost === name) throw Error('Import cannot create a second initial authority installation');
-      if ((await ui.question(importing ? `Provision matching key as standby only; assignment remains ${genesis.initialHost}? [yes/no]: ` : 'Create a NEW agent identity assigned exclusively to this host? [yes/no]: ')) !== 'yes') return;
+      const identityAction = await ui.question(importing ? `Provision matching key as standby only; assignment remains ${genesis.initialHost}? [yes/no]: ` : 'Create a NEW agent identity assigned exclusively to this host? [yes/no]: (or enter import-standby)  ');
+      if (!importing && identityAction === 'import-standby') {
+        genesis = validateGenesis(readPrivate(realpathSync(text(await ui.question('Local public genesis file (no key): ')))));
+        if (genesis.owner !== publicKey(secret) || genesis.initialHost === name) throw Error('Standby requires matching owner and another initial host');
+        if (await ui.question(`Import exact ${genesis.agent}; Start remains assigned to ${genesis.initialHost}? [yes/no]: `) !== 'yes') return;
+        ui.close(); agentSecret = await readAgentSecret();
+        if (publicKey(agentSecret) !== genesis.agent) throw Error('Imported key does not match public genesis');
+        ui = createInterface({ input: stdin, output: stdout });
+      } else if (identityAction !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
-      if (mode === '2') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : 'buzz-agent-databricks-v2', ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
+      if (mode !== '1') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
+      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
       migrateSlots(dir);
       console.log(`Harness setup default is reusable; agent ${publicKey(agentSecret)} is independent. Host must remain stopped for local structural changes.`);
       while ((await ui.question('Add another independent NEW agent using this same harness setup? [yes/no]: ')) === 'yes') {
@@ -153,7 +167,7 @@ async function main() {
       const entries = installationSlots(dir);
       if (entries.some(e => object(readPrivate(e.path)).phase !== 'stopped')) throw Error('Reconcile every prior run before local setup changes');
       const setup = entries[0]!.setup;
-      if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('Provision Buzz Agent first; this action never creates or replaces agent keys');
+      if (setup.mode === 'fixture') throw Error('Provision an ACP harness first; this action never creates or replaces agent keys');
       if (setup.agentSecret === undefined) throw Error('First slot key removed locally; conversation setup requires its agent key');
       const ui = createInterface({ input: stdin, output: stdout });
       try {
@@ -164,7 +178,7 @@ async function main() {
         } : undefined;
         const conversation = { executable, relay, ...(replyTool ? { replyTool } : {}) };
         if (setup.agentSecret === undefined) throw Error('Slot key missing; cannot prepare conversation');
-        const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: 'databricks-claude-haiku-4-5' }, setup.agentSecret, publicKey(setup.ownerSecret));
+        const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' ? '' : text(setup.databricksHost), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, setup.agentSecret, publicKey(setup.ownerSecret));
         if ((await ui.question('Save onto existing identity? Start waits for an admitted conversation and local provider sign-in. [yes/no]: ')) !== 'yes') return;
         // One atomic replacement; keys, assignment and provider auth context unchanged.
         saveDefaultHarness(dir, { ...setup, conversation });
@@ -172,7 +186,13 @@ async function main() {
       } finally { ui.close(); }
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
-    const setup = installationSlots(resolve(text(args[0])))[0]!.setup;
+    const entries = installationSlots(resolve(text(args[0])));
+    const setup = args[1] ? entries[0]!.bindings[text(args[1])] : entries[0]!.setup;
+    if (!setup) throw Error('Unknown local binding');
+    if (setup.mode === 'goose') {
+      console.log(`Goose on host ${setup.host}: run/configure the installed Goose CLI ${shellQuote(setup.runner)} as the host service OS user (current uid ${process.getuid?.() ?? 'unknown'}) with HOME=${shellQuote(text(setup.serviceHome))}. Goose owns ~/.config/goose/config.yaml and provider credentials; GOOSE_PROVIDER=${shellQuote(text(setup.gooseProvider))}, GOOSE_MODE=auto; exact GOOSE_MODEL is selected remotely from approved models. Do not reuse Desktop HOME or Buzz Agent OAuth caches. No login/status command or authentication was inferred; executable found is not authenticated. Save/Stop need no provider login.`);
+      return;
+    }
     if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('This harness setup has no provider sign-in');
     console.log(`Sign in on host ${setup.host} as the same OS user running its host service (current uid ${process.getuid?.() ?? 'unknown'}), not your Desktop account. Use exactly this context:\nHOME=${shellQuote(text(setup.serviceHome))} BUZZ_AGENT_CONFIG_DIR=${shellQuote(text(setup.configDirectory))} DATABRICKS_HOST=${shellQuote(text(setup.databricksHost))} ${shellQuote(setup.runner)} auth databricks\nBuzz Agent owns OAuth/cache/refresh. No login was initiated; Save and Stop do not require auth.`);
   } else if (command === 'relay') {

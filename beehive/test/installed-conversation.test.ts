@@ -12,7 +12,7 @@ import { ConversationSession } from '../src/broker.ts';
 import { newKey, publicKey } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-test('installed buzz-acp completes multi-conversation signed replies and normal CLI tools through the actual Buzz CLI', { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+for (const goose of [false, true]) test(`installed buzz-acp completes multi-conversation signed replies and normal CLI tools through the actual Buzz CLI (${goose ? 'Goose-shaped native ACP fixture' : 'Buzz Agent fixture'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
   writeFileSync(join(dir, 'mode'), 'ok');
   const secret = newKey(); const ownerSecret = newKey(); const agent = publicKey(secret); const owner = publicKey(ownerSecret);
@@ -87,7 +87,7 @@ test('installed buzz-acp completes multi-conversation signed replies and normal 
   const session = new ConversationSession({ executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: `ws://127.0.0.1:${address.port}`, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } }, {
     executable: realpathSync(process.execPath), args: [resolve('test/conversation-harness-fixture.ts')], workspace: dir, home: dir, configDirectory: dir,
     instructions: 'BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting.',
-    databricksHost: 'https://fixture.invalid', model: 'databricks-claude-haiku-4-5',
+    databricksHost: 'https://fixture.invalid', model: goose ? 'goose-model-a' : 'databricks-claude-haiku-4-5', ...(goose ? { harness: 'goose' as const, provider: 'fixture-provider' } : {}),
   }, secret, owner, 20_000);
   try {
     await session.ready;
@@ -95,10 +95,11 @@ test('installed buzz-acp completes multi-conversation signed replies and normal 
     assert.ok(authenticated, 'installed executable must authenticate with the provisioned key');
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
-    assert.equal(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), 'BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting.');
-    assert.match(readFileSync(join(dir, 'received-prompts.jsonl'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY/);
-    assert.equal(evidence.session, 'conversation-session');
+    assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting\./);
+    if (!goose) assert.match(readFileSync(join(dir, 'received-prompts.jsonl'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY/);
+    if (goose) assert.match(evidence.session, /^goose-[0-9]+-1$/); else assert.equal(evidence.session, 'conversation-session');
     assert.equal(evidence.agentPublicKey, agent);
+    assert.equal(evidence.model, goose ? 'goose-model-a' : 'databricks-claude-haiku-4-5');
     assert.ok(delivered, 'the actual Buzz CLI must publish a signed threaded agent reply, not just return tool JSON');
     const unauthorized = event(9, [['h', channel], ['p', agent]], 'Not the configured owner.', recipientKey);
     const firstSubscription = subscriptionsBySocket.get(channel)!;
@@ -121,6 +122,7 @@ test('installed buzz-acp completes multi-conversation signed replies and normal 
     console.log(`isolated installed runtime: NIP-42 verified, subscriptions=${subscriptions}, signed replies=${replies.map(e => e.id).join(',')}, agent=${agent}, two channels/three owner prompts; explicit non-owner member recipient=${recipient}`);
 
   } finally {
+    if (goose && existsSync(join(dir, 'goose-rpc-methods'))) console.log(readFileSync(join(dir, 'goose-rpc-methods'), 'utf8'));
     await session.stop();
     for (const file of ['harness-pid', 'descendant-pid', 'tool-shim-pid']) {
       if (!existsSync(join(dir, file))) continue;
