@@ -493,3 +493,24 @@ Normal conversation wizard integration and installed selected-B Restart remain o
 Final strict passed; full default installed-enabled 69/70, natural 32.943s, with
 unchanged policy-tui revision-1 expectation versus revision-0 output failing.
 No repeat, timeout change, serial mask or repository-wide CI claim; see CHECKPOINT.
+
+## Normal wizard A661
+
+`normal-conversation.test.ts` reuses the independent D22 installed journey with no
+manual conversation attachment. Initial normal-default and selected diagnostic B
+conversion both drive actual CLI/TUI, production host(), installed buzz-acp/CLI and
+native-shaped Goose fixture. Each verifies three signed same-agent replies over two
+channels/later turn, then fresh installed Restart/session/exact model/profile and a
+fourth signed reply. Selected-B journey retains A history and immutable A/B definitions;
+Y and key manifest remain byte-identical through remote Save/Start/Restart/Stop.
+Wrong-model preflight preserves actual; completed rejected Restart and Stop replays
+cannot revive it. Goose profile is observed at its native system-prompt-extension
+output, not assumed to be duplicated in each turn prompt.
+
+`conversion.test.ts` covers source fingerprint, active-state and atomic lock refusal,
+common-authority mismatch, duplicate binding rejection, declined actual wizard,
+manifest-only activation/reopen and normal hidden standby import (macOS script PTY,
+no secret echo, retained assignment, 0600). Initial/imported executable paths here
+are deliberately metadata-only fixtures; no provider/login or runtime spawn claimed.
+Existing Goose/assignment tests retain actual standby Start denial and secure-input
+negatives. The normal installed journeys run only with the existing installed opt-in.

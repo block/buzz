@@ -1,5 +1,65 @@
 # Beehive executable checkpoint
 
+## Normal conversation wizard A661 — final gate / scoped handoff
+
+Final exact executable: strict PASS; ONE FULL DEFAULT concurrent installed-enabled
+suite **71/73**, zero skips/cancellations, natural **46.738s**. All new conversion,
+normal hidden standby PTY and both installed normal/selected-B Start+Restart journeys
+passed. Two unchanged failures: `broker.test.ts:31` (`assert.ok('value' in r)`), and
+`reply-tool.test.ts:64` (`successful descendant spawn required`). Causes remain
+unclassified. No repeat, serial mask, timeout inflation, force-exit, assertion
+weakening or containment code change. Historical policy-TUI and disconnect passed
+this run, not retrospective classification/closure of their earlier observations.
+
+Logs `final-strict.log`, `full-installed-default.log`, focused iteration logs and
+separate source/binary attribution retained in `NORMAL_A661/`. Installed hashes
+still match retained pins. Focused-1 passed 3/3; focused-2 failed 0/2 at the incorrect
+Goose turn-prompt assertion described below; corrected focused-3 passed 2/2;
+focused-4 passed conversion/bindings/Goose (see exact log). Final gate does not claim
+full engineering acceptance. Publication uses configured Logan Johnson + DCO;
+exact commit/remote verification is in the terminal/publication record.
+
+ONE next parity step: independently review this immutable common-authority/new-ref
+transition and reconcile the two bounded full-gate failures without rerun-to-green,
+then extend service-subprocess/live Goose/provider and remaining harness parity.
+Installed host function and runtime/CLI subprocess proof is not production service
+HOME/login/current-kind40002 admission proof. Claude/Codex/providers/presets/custom/
+mesh/compute/startup-signal cleanup remain explicit, no full product/release claim.
+
+### Implementation decision and focused evidence
+
+Base published 58c566bbce7e1e0152b4225e29907634f603ef6d. Normal initial setup is
+now the default for ACP harnesses; explicit diagnostic mode remains. Existing
+selected B converts to a NEW immutable normal reference under host.lock with all
+slots stopped, retained authority/key and source fingerprint revalidation. ONE
+manifest rename pins common authority and activates the new definition; no journal
+or selected-next rewrite, so remote Save retains public CAS. Old A/B/history/Y/keys
+are untouched. Normal snapshots must equal pinned common runtime/relay/tool/trust;
+diagnostic opt-out is per binding. Legacy in-place conversation-setup is refused.
+Existing normal authority is reused without new auth input or silent widening.
+
+Focused installed initial + selected-B journeys passed 2/2: real CLI/TUI, production
+host() in-process, installed buzz-acp/Buzz CLI, native-shaped Goose fixture, three
+same-agent signed cross-channel/later replies plus fresh Restart reply/session and
+exact native profile/model. Wrong-model preflight preserves actual; replay/Stop
+cannot revive it. Separate focused conversion/bindings/Goose suite passed, including
+normal hidden standby import PTY, lock/stale/active/authority/decline controls.
+Evidence: workspace WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/NORMAL_A661/.
+One test-authoring iteration failed both installed tests: profile was incorrectly
+expected inside Goose turn prompt instead of native system-prompt extension. The
+assertion now binds that actual extension output (same retained installed Goose
+owner seam); no product change, timing relaxation or historical failure closure.
+Initial discovery scan timed out; python alias absent, reran edit with python3.
+
+Self-review: common authority migration/fallback, immutable snapshots/fingerprints,
+manifest activation crash coherence, lock ownership, source revalidation, selected
+inventory vs actual evidence, no new runtime/env/remote credentials, initial key
+creation/import owner unchanged. No provider/Goose executable/OAuth/current40002
+proof. No full product, repo CI, startup-signal cleanup or historical policy-timing
+classification. ONE final strict + FULL DEFAULT concurrent installed-enabled gate
+is next; no rerun-to-green, serial mode, deadline change or assertion weakening.
+
+
 ## Continuation 0346 — bounded disconnect investigation / partial UX increment
 
 **Final validation:** strict passes; one FULL DEFAULT concurrent installed-enabled

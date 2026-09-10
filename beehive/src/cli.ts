@@ -1,4 +1,5 @@
 import { readAgentSecret } from './key-input.ts';
+import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
@@ -7,7 +8,7 @@ import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup, provision, migrateAssignment, setupModels } from './host.ts';
-import { migrateSlots, addSlot, installationSlots, saveDefaultHarness, removeSlotKey, importSlotKey } from './slots.ts';
+import { migrateSlots, addSlot, installationSlots, removeSlotKey, importSlotKey } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
@@ -28,7 +29,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
   migrate-assignment <host-directory>       Explicit stopped legacy enrollment
   auth-info <host-directory> [binding-id]   Print local harness service context (no login)
-  conversation-setup <host-directory>       Attach external buzz-acp to EXISTING identity (Start gated)
+  conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
@@ -65,6 +66,10 @@ async function main() {
       const gooseProvider = mode === '3' ? text(await ui.question('Locally configured Goose provider ID: ')) : undefined;
       const gooseModels = mode === '3' ? text(await ui.question('Operator-approved compatible exact model IDs (comma-separated): ')).split(',').map(m => m.trim()) : undefined;
       if (mode === '3') console.log(`Goose owns provider credentials and ~/.config/goose/config.yaml under dedicated HOME=${join(dir, 'service-home')}. Configure locally as the host service OS user; not Desktop HOME or Buzz Agent OAuth. No login, authentication or catalog verified. GOOSE_MODE=auto; exact model fixed on fresh launch.`);
+      const purpose = mode === '1' ? 'diagnostic' : (await ui.question('Purpose [normal (default) / diagnostic ACP probe / cancel]: ')) || 'normal';
+      if (purpose === 'cancel') return;
+      if (!['normal', 'diagnostic'].includes(purpose)) throw Error('Choose normal, diagnostic or cancel');
+      const conversation = purpose === 'normal' ? await conversationInput(ui) : undefined;
       const importing = args.length > 2;
       let agentSecret = importing ? text(object(readPrivate(resolve(text(args[2])))).secret) : newKey();
       let genesis = importing ? validateGenesis(readPrivate(resolve(text(args[3])))) : createGenesis(publicKey(secret), publicKey(agentSecret), name);
@@ -80,7 +85,12 @@ async function main() {
       } else if (identityAction !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
       if (mode !== '1') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
+      const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
+      const lock = join(dir, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
+      try {
+        if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' ? '' : text(setup.databricksHost), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
+        provision(dir, setup, genesis);
+      } finally { rmdirSync(lock); }
       migrateSlots(dir);
       console.log(`Harness setup default is reusable; agent ${publicKey(agentSecret)} is independent. Host must remain stopped for local structural changes.`);
       while ((await ui.question('Add another independent NEW agent using this same harness setup? [yes/no]: ')) === 'yes') {
@@ -89,7 +99,8 @@ async function main() {
         console.log(`Added agent ${publicKey(additional)} using harness setup default; no provider setup or key copy.`);
       }
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
-      if (mode !== '1') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user context. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent. Conversation transport still requires explicit local conversation-setup ${shellQuote(dir)} with installed buzz-acp, a trusted conversation relay and optional installed Buzz CLI tool; no provider login or community admission has been verified.`);
+      if (conversation) console.log('Normal conversation configured with installed runtime and Buzz CLI tool. No separate conversion command needed. Start remains gated on local provider setup, exact model evidence and relay admission; standby key possession still grants no Start.');
+      if (mode !== '1' && !conversation) console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user context. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent. Conversation transport still requires explicit local-setup ${shellQuote(dir)}, action normal, with installed buzz-acp, a trusted conversation relay and optional installed Buzz CLI tool; no provider login or community admission has been verified.`);
     } finally { ui.close(); }
   } else if (command === 'local-setup') {
     if (args.length !== 1) throw Error('Use host directory only; no private key arguments');
@@ -169,21 +180,7 @@ async function main() {
       const setup = entries[0]!.setup;
       if (setup.mode === 'fixture') throw Error('Provision an ACP harness first; this action never creates or replaces agent keys');
       if (setup.agentSecret === undefined) throw Error('First slot key removed locally; conversation setup requires its agent key');
-      const ui = createInterface({ input: stdin, output: stdout });
-      try {
-        const executable = realpathSync(text(await ui.question('Absolute installed buzz-acp executable: ')));
-        const relay = text(await ui.question('Buzz CONVERSATION relay URL (not the Beehive management relay): '));
-        const replyTool = (await ui.question('Enable the installed Buzz CLI tool under this agent identity? [yes/no]: ')) === 'yes' ? {
-          executable: realpathSync(text(await ui.question('Absolute installed buzz CLI executable: '))),
-        } : undefined;
-        const conversation = { executable, relay, ...(replyTool ? { replyTool } : {}) };
-        if (setup.agentSecret === undefined) throw Error('Slot key missing; cannot prepare conversation');
-        const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' ? '' : text(setup.databricksHost), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, setup.agentSecret, publicKey(setup.ownerSecret));
-        if ((await ui.question('Save onto existing identity? Start waits for an admitted conversation and local provider sign-in. [yes/no]: ')) !== 'yes') return;
-        // One atomic replacement; keys, assignment and provider auth context unchanged.
-        saveDefaultHarness(dir, { ...setup, conversation });
-        console.log(`Conversation setup saved for existing agent ${plan.agentPublicKey}. No network connection, login or process started. The community operator must admit this public key and owner to the chosen relay/channels (or provision a valid owner attestation locally). Admission remains unverified. Start uses the host-owned ACP broker; the Buzz CLI tool, when enabled, uses agent membership authority across conversations without local thread configuration.`);
-      } finally { ui.close(); }
+      throw Error('Immutable bindings cannot be rewritten: use migrate-slots first for a legacy installation, then local-setup action normal to convert the selected ACP binding to a NEW reference');
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
     const entries = installationSlots(resolve(text(args[0])));

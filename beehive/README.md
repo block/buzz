@@ -684,3 +684,41 @@ against that fixture, producing three signed replies with native model/profile
 mechanics. The uninterrupted wizard-to-installed-conversation journey remains a
 validation gap. Kind-9 isolated relay acceptance is not current production kind-40002.
 Full Claude Code/Codex/provider/preset/custom/mesh/compute parity remains incomplete.
+
+## Normal local conversation wizard (A661)
+
+Initial `setup` for Goose/Buzz Agent now asks **normal (default)** versus explicit
+**diagnostic ACP probe**. Normal collects canonical installed buzz-acp and Buzz CLI
+paths and a trusted conversation relay, validates local launch prerequisites under
+`host.lock`, and provisions conversation mode in the initial definition. There is
+no separate conversion command between initial setup and remote Start. Missing
+runtime/tools fail with local-install/cancel/diagnostic guidance; executable presence
+is not provider authentication or relay admission. Hidden standby import retains its
+original assignment and does not gain Start authority.
+
+For an existing diagnostic agent, remotely select the desired ACP binding (including
+non-default B), stop execution and shut down the host service, then run
+`local-setup <installation>` and choose `normal`. It captures that agent's selected
+binding, asks for a **new immutable binding ID**, and commits under the same atomic
+installation lock after revalidating every stopped slot, retained authority/key and
+source fingerprint. Reopen the host/TUI, select the exact host/agent and use
+`binding <new-id>` (ordinary public revision CAS), then explicit Start/Restart.
+Local conversion never changes any agent's selection, actual run or journal.
+
+One fsynced manifest replacement pins installation-owned conversation runtime,
+relay/tool/trust and activates the new binding together. Existing binding snapshots
+and fingerprints retain their meaning; diagnostic references still opt out. Normal
+binding snapshots must equal the pinned common authority, not an independently
+editable per-binding authority. Existing authority is reused, never silently retargeted
+or widened. Legacy `conversation-setup` refuses in-place definition rewriting and
+points to explicit migration and this wizard. New/import/reuse remain key-independent
+of model definitions; no key/session/credential transfer or provider login is added.
+
+Installed acceptance uses the retained TypeScript Goose-shaped harness, actual
+installed buzz-acp/Buzz CLI and isolated legacy-kind9 relay: initial normal and
+selected-B conversion, TUI Start/Restart, exact profile/model, same-agent signed
+cross-channel/later replies, old definition/history/Y preservation and wrong-model
+preflight/replay/Stop controls. Production `host()` is in-process, not a service
+subprocess deployment proof. Real Goose/provider, current-kind40002 admission,
+Claude/Codex/other providers/presets/custom/mesh/compute and startup-signal cleanup
+remain unfinished; see CHECKPOINT for the exact full gate, not a full-product claim.

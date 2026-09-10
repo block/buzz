@@ -6,6 +6,8 @@ import { bindingFingerprint } from './host.ts';
 import { newKey, publicKey, text } from './protocol.ts';
 import { readPrivate } from './storage.ts';
 import { createGenesis, validateGenesis } from './assignment.ts';
+import { conversationInput } from './conversation-input.ts';
+import { addConversationBinding } from './slots.ts';
 import { readAgentSecret } from './key-input.ts';
 
 /** Small offline wizard: one confirmed local mutation, never remote selection or login.
@@ -18,8 +20,27 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
     for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)}`);
     for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
-    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / add-binding / add-goose / cancel]: ');
+    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / add-binding / add-goose / normal / cancel]: ');
     if (action === 'cancel') return;
+    if (action === 'normal') {
+      const agent = await ui.question('Existing agent public key: ');
+      const entry = entries.find(e => e.agent === agent);
+      if (!entry?.keyPresent) throw Error('Retained local key required; use explicit restore-key');
+      const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } } };
+      const id = state.selected.harnessSetup?.id ?? entry.setupId;
+      const setup = entry.bindings[id];
+      if (!setup || setup.mode === 'fixture') throw Error('Select an ACP binding remotely first; fixture cannot become a conversation harness');
+      const fingerprint = bindingFingerprint(setup);
+      console.log(`Selected source ${id}; old references remain diagnostic/unchanged. New binding only, no automatic selection or Start.`);
+      const nextId = text(await ui.question('NEW immutable normal binding ID: '));
+      const common = Object.values(first.bindings).find(binding => binding.conversation)?.conversation;
+      if (common) console.log(`Reusing pinned installation conversation runtime/relay/trust; Buzz CLI tool ${common.replyTool ? 'enabled' : 'disabled (legacy authority; not silently widened)'}. No authority change.`);
+      const conversation = common ?? await conversationInput(ui);
+      if (await ui.question('Save NEW normal binding under installation lock; preserve every selection/key/history? [yes/no]: ') !== 'yes') return;
+      addConversationBinding(directory, agent, { id, fingerprint }, nextId, conversation);
+      console.log(`Normal binding ${nextId} saved from selected ${id}. In remote TUI select this exact host/agent, binding ${nextId}, then explicit Start/Restart. Save uses public revision CAS; other agents remain unchanged. Provider sign-in and relay admission remain unverified.`);
+      return;
+    }
     if (action === 'reuse' || action === 'restore-key') {
       const agent = await ui.question('Existing agent public key: ');
       const entry = entries.find(e => e.agent === agent);

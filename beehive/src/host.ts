@@ -109,10 +109,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
-      ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
+      ...(nextSetup?.conversation ? { conversation: conversationSummary(nextSetup.conversation) } : {}),
       movePreflight: preparationStage, catalog, setup: nextSetup?.mode ?? 'unavailable', models: nextSetup ? setupModels(nextSetup) : [],
       localKey: keyPresent ? 'present' : 'removed locally; public slot retained',
-      workspaces: nextSetup ? nextSetup.allowedWorkspaces ?? [nextSetup.workspace] : [], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: !keyPresent ? 'agent key removed locally: public-only slot; Start/Restart rejected before spawn until explicit local key repair' : setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : !nextSetup ? 'selected binding unavailable; repair locally or select an advertised binding' : nextSetup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      workspaces: nextSetup ? nextSetup.allowedWorkspaces ?? [nextSetup.workspace] : [], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: !keyPresent ? 'agent key removed locally: public-only slot; Start/Restart rejected before spawn until explicit local key repair' : nextSetup?.conversation ? (state.actual?.evidence?.source === 'external-buzz-conversation' && state.actual.harnessSetup?.fingerprint === bindingFingerprint(nextSetup) ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : !nextSetup ? 'selected binding unavailable; repair locally or select an advertised binding' : nextSetup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
@@ -163,7 +163,8 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     const id = selected.harnessSetup?.id ?? setupId;
     if (!Object.hasOwn(bindings, id)) throw Error('Unknown local harness binding');
     const value = bindings[id]!;
-    if (semanticHash(value.conversation ?? null) !== semanticHash(setup.conversation ?? null)) throw Error('Binding cannot switch conversation authority');
+    // installationSlots validates normal binding snapshots against pinned common authority.
+    // Diagnostic bindings may opt out without retargeting any conversation authority.
     if (selected.harnessSetup && selected.harnessSetup.fingerprint !== bindingFingerprint(value)) throw Error('Binding definition changed');
     if (!setupModels(value).includes(selected.model) || !(value.allowedWorkspaces ?? [value.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
     return { setup: value, id };
