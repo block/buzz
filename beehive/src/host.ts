@@ -14,21 +14,23 @@ import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret: string; agentSecret: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
 type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
-  for (const key of ['host','ownerSecret','agentSecret','runner','workspace']) text(s[key]);
+  for (const key of ['host','ownerSecret','runner','workspace']) text(s[key]);
   if (s.allowedWorkspaces !== undefined && (!Array.isArray(s.allowedWorkspaces) || s.allowedWorkspaces.length > 32 || s.allowedWorkspaces.some(w => typeof w !== 'string' || !isAbsolute(w)))) throw Error('Invalid allowed workspaces');
-  publicKey(String(s.ownerSecret)); publicKey(String(s.agentSecret));
+  publicKey(String(s.ownerSecret));
+  if (s.agentSecret !== undefined) publicKey(String(s.agentSecret));
   if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['fixture','buzz-agent-databricks-v2'].includes(String(s.mode))) throw Error('Invalid local setup');
   return s as Setup;
 }
 /** Provision once locally. A partial setup is inert; host startup never invents authority. */
 export function provision(directory: string, value: Setup, root: Genesis): void {
   const setup = validateSetup(value); const genesis = validateGenesis(root);
+  if (setup.agentSecret === undefined) throw Error('Provisioning requires a new agent key');
   if (genesis.owner !== publicKey(setup.ownerSecret) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
   if (existsSync(join(directory, 'setup.json')) || existsSync(join(directory, 'journal.json'))) throw Error('Existing installation; cannot reset authority');
   writePrivate(join(directory, 'setup.json'), setup, true);
@@ -36,6 +38,7 @@ export function provision(directory: string, value: Setup, root: Genesis): void 
 }
 /** Initial stopped authority shared by legacy provisioning and slot enrollment. */
 export function initialState(setup: Setup, genesis: Genesis): State {
+  if (setup.agentSecret === undefined) throw Error('Initial state requires the provisioned agent key');
   return {
     assignment: { genesis, assignedHost: genesis.initialHost },
     binding: { host: setup.host, owner: publicKey(setup.ownerSecret), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5', workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
@@ -46,6 +49,7 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
     const setup = validateSetup(readPrivate(join(directory, 'setup.json')));
+    if (setup.agentSecret === undefined) throw Error('Legacy setup requires its agent key; explicit migrate-slots first');
     const state = readPrivate(join(directory, 'journal.json')) as State;
     validateGenesis(genesis);
     if (state.assignment) throw Error('Assignment already pinned; cannot replace');
@@ -55,8 +59,13 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
   } finally { rmdirSync(lock); }
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string) {
-  const agent = publicKey(setup.agentSecret);
+function slot(setup: Setup, path: string, agent: string, currentSetup: () => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string) {
+  // Optional execution credential: a public-only slot (local key copy deliberately
+  // removed) has none. There is no shadow identity and no reconstruction; execution
+  // paths must load it explicitly and fail closed when absent.
+  const executionSecret: string | undefined = setup.agentSecret;
+  if (executionSecret !== undefined && publicKey(executionSecret) !== agent) throw Error('Slot key/identity mismatch');
+  const keyPresent = executionSecret !== undefined;
   if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
   let state = readPrivate(path) as State;
   if (state.binding.host !== setup.host || state.binding.owner !== publicKey(setup.ownerSecret) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
@@ -84,7 +93,8 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
       ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
       movePreflight: preparationStage, catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
-      workspaces: setup.allowedWorkspaces ?? [setup.workspace], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      localKey: keyPresent ? 'present' : 'removed locally; public slot retained',
+      workspaces: setup.allowedWorkspaces ?? [setup.workspace], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: !keyPresent ? 'agent key removed locally: public-only slot; Start/Restart rejected before spawn until explicit local key repair' : setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
@@ -134,6 +144,9 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   function prepareLocal(selected: Selection) {
     selection(selected);
     if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
+    // The optional execution credential is absent for a public-only slot: reject before
+    // any spawn or source effect. The secret is never regenerated or inferred.
+    if (executionSecret === undefined) throw Error('Local agent key removed; this public slot cannot launch; repair locally without resetting assignment');
     try {
       if (hash(currentSetup()) !== hash(setup)) throw Error('changed');
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
@@ -141,13 +154,13 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
     const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
-    const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, setup.agentSecret, state.binding.owner) : undefined;
+    const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, executionSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing
     // script inputs and directory identity so replacement invalidates preparation.
     const scripts = setup.args.filter(a => isAbsolute(a) && existsSync(a)).map(a => createHash('sha256').update(readFileSync(a)).digest('hex'));
     const workspace = statSync(selected.workspace);
     const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
-    return { launch, harnessSetup: { id: setupId, fingerprint: hash(harness) }, token: hash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
+    return { launch, credential: executionSecret, harnessSetup: { id: setupId, fingerprint: hash(harness) }, token: hash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
   }
   /** Identity-free executable contract check, never conversation admission evidence. */
   async function inspectExecutable(executable: string, args: string[], required: string[]) {
@@ -379,7 +392,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
             owned.child.stdout.resume(); owned.child.stderr.resume();
             try { await owned.ready; } catch (e) { await stopOwned(); state.phase = 'stopped'; state.actual = null; throw e; }
           } else if (setup.conversation) {
-            const session = new ConversationSession(setup.conversation, launch!, setup.agentSecret, state.binding.owner);
+            const session = new ConversationSession(setup.conversation, launch!, prepared.credential, state.binding.owner);
             acp = session; owned = session;
             try {
               state.actual.evidence = await session.verify();
@@ -458,8 +471,8 @@ export async function host(directory: string, url: string) {
   try {
     const entries = installationSlots(directory);
     for (const entry of entries) {
-      slots.set(publicKey(entry.setup.agentSecret), slot(entry.setup, entry.path, () => {
-        const current = installationSlots(directory).find(e => publicKey(e.setup.agentSecret) === publicKey(entry.setup.agentSecret));
+      slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, () => {
+        const current = installationSlots(directory).find(e => e.agent === entry.agent);
         if (!current) throw Error('Key removed');
         return current.setup;
       }, publish, profiles, entry.setupId));

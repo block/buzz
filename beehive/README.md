@@ -335,7 +335,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 
 | Surface | This slice | Required next work |
 |---|---|---|
-| Local owner/key setup | New owner + separately generated agent key | nsec import, saved-owner verification, revocation/key removal UX |
+| Local owner/key setup | New owner + separately generated agent key; deliberate local agent-key removal keeps a retained public-only slot | nsec import, saved-owner verification, remote revocation/key-removal UX |
 | Host inventory | Real relay, multiple independent slots, shared host harness, freshness | multiple selectable setups, service install, richer reconciliation |
 | Remote configuration | CAS model/workspace + reusable immutable profile publication/application; captured actual-run history | named launch configurations, metadata, setup revision pinning, retention UI |
 | Lifecycle | Start/Stop/Restart and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, installed-conversation Restart acceptance |
@@ -533,9 +533,39 @@ requires a fresh explicit Start. It never launches mixed inputs, discards the ac
 Save, strands the grant, or resurrects the source. Old prepared/grant evidence remains
 immutable. Normal successful Move still captures the exact prepared candidate.
 
-**Still unfinished:** local key removal/revocation and full import/reuse wizard UX,
+**Still unfinished:** full import/reuse wizard UX,
 local setup CRUD/multiple selectable setup bindings, Goose/Claude Code/Codex/vendor
 login/ACP adapters, other Buzz Agent providers, ten presets/custom ACP, mesh/compute,
 production admission and normal service-user OAuth/live exact-model proof. The wizard
 has working fixture and existing Buzz Agent Databricks paths; the fixture is **not**
 a second Desktop harness. No new provider path or live login has been verified here.
+
+## Deliberate local key removal (public-only slots)
+
+`remove-agent-key <host-directory> [agent-public-key]` deliberately deletes ONE
+installation's local copy of an agent key while the host is stopped (it refuses a
+present installation lock — no PID or stale-lock removal — and requires a stopped
+slot with no actual run). The public identity, genesis/assignment, configurations
+and the complete journal/receipt/run history stay in place as a **public-only
+slot**; siblings and the owner identity are untouched. Only the `agentSecret` in
+the 0600 manifest becomes `null`; shared harness inventory is validated to never
+carry key material (a migrated manifest that did would silently re-arm a removed
+key and now fails closed).
+
+After reopen, inventory advertises the missing-key slot (`localKey` removed) with
+its retained identity and history. `start`/`restart` reject **before any spawn**
+until an explicit local repair — the execution credential is an optional loader,
+never regenerated or inferred. `stop`/`save`/inspect/reconnect stay
+credential-neutral and truthful; ordinary save/lifecycle/recovery never recreate
+the key. `add-agent` refuses to recreate the public-only identity; `remove-agent-key`
+again is an explicit no-op error. `assignment-export` still exports the public
+genesis for a public-only slot. `conversation-setup` and legacy key-less
+installations fail closed.
+
+Move honors the removal on both sides: a Move **to** a missing-key destination
+fails its destination preflight before the source Stop, preserving the running
+source; a Move **from** a public-only source still consumes its retained
+management authority — the destination launches with its own local key, no
+secret transfer or recreation. This is a local copy removal, not a global
+cryptographic revocation: no nsec is transferred, and no remote key CRUD exists.
+Local re-provisioning requires explicit local reconciliation.

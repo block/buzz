@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup, provision, migrateAssignment } from './host.ts';
-import { migrateSlots, addSlot, installationSlots, saveDefaultHarness } from './slots.ts';
+import { migrateSlots, addSlot, installationSlots, saveDefaultHarness, removeSlotKey } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
@@ -20,6 +20,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   setup <new-host-directory> <identity-file> Guided local harness + key setup
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
+  remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
   migrate-assignment <host-directory>       Explicit stopped legacy enrollment
   auth-info <host-directory>                Print exact local sign-in context (no login)
@@ -91,9 +92,21 @@ async function main() {
       if (await ui.question(importing ? `Add standby identity assigned to ${root.initialHost}, reusing host harness default? [yes/no]: ` : 'Create independent NEW agent assigned here, reusing host harness default? [yes/no]: ') !== 'yes') return;
       addSlot(dir, secret, root); console.log(`Agent ${publicKey(secret)} added; start/configure remotely after restarting the host.`);
     } finally { ui.close(); }
+  } else if (command === 'remove-agent-key') {
+    const dir = resolve(text(args[0]));
+    if (args[1] !== undefined && !/^[0-9a-f]{64}$/.test(String(args[1]))) throw Error('Invalid agent public key');
+    const entries = installationSlots(dir);
+    const entry = args[1] !== undefined ? entries.find(e => e.agent === args[1]) : entries.length === 1 ? entries[0] : undefined;
+    if (!entry) throw Error(args[1] === undefined ? 'Specify the agent public key for a multi-slot host' : 'Unknown agent slot on this installation');
+    const ui = createInterface({ input: stdin, output: stdout });
+    try {
+      if ((await ui.question(`Remove this installation's local key copy for agent ${entry.agent} on host ${entry.setup.host}? The public identity, assignment, configurations and complete receipt/run history stay as a public-only slot; Start/Restart reject until an explicit local repair. Only this local secret copy is deleted - not a global cryptographic revocation, and no remote operation can restore it. [yes/no]: `)) !== 'yes') return;
+      removeSlotKey(dir, entry.agent);
+      console.log(`Local key copy removed for agent ${entry.agent}; public-only slot retained on ${entry.setup.host}. Assignment, journal history, configurations and receipts are unchanged; Stop/Save/history stay available. Start/Restart now reject before spawn; remote operations never recreate the secret. Sibling slots and the owner identity are unaffected. Re-provision requires explicit local reconciliation.`);
+    } finally { ui.close(); }
   } else if (command === 'assignment-export') {
     const entries = installationSlots(resolve(text(args[0])));
-    const entry = args[2] ? entries.find(e => publicKey(e.setup.agentSecret) === args[2]) : entries.length === 1 ? entries[0] : undefined;
+    const entry = args[2] ? entries.find(e => e.agent === args[2]) : entries.length === 1 ? entries[0] : undefined;
     if (!entry) throw Error('Specify agent public key after export filename for multi-slot host');
     const state = object(readPrivate(entry.path));
     const genesis = validateGenesis(object(state.assignment).genesis);
@@ -102,6 +115,7 @@ async function main() {
   } else if (command === 'migrate-assignment') {
     const dir = resolve(text(args[0]));
     const setup = validateSetup(readPrivate(join(dir, 'setup.json')));
+    if (setup.agentSecret === undefined) throw Error('Legacy setup requires its agent key; explicit migrate-slots first');
     const ui = createInterface({ input: stdin, output: stdout });
     try {
       if ((await ui.question('Enroll this existing stopped journal as the UNIQUE authority? Verify no clones or unmanaged execution of this identity exist. Missing journals cannot be repaired here. [yes/no]: ')) !== 'yes') return;
@@ -117,6 +131,7 @@ async function main() {
       if (entries.some(e => object(readPrivate(e.path)).phase !== 'stopped')) throw Error('Reconcile every prior run before local setup changes');
       const setup = entries[0]!.setup;
       if (setup.mode !== 'buzz-agent-databricks-v2') throw Error('Provision Buzz Agent first; this action never creates or replaces agent keys');
+      if (setup.agentSecret === undefined) throw Error('First slot key removed locally; conversation setup requires its agent key');
       const ui = createInterface({ input: stdin, output: stdout });
       try {
         const executable = realpathSync(text(await ui.question('Absolute installed buzz-acp executable: ')));
@@ -125,6 +140,7 @@ async function main() {
           executable: realpathSync(text(await ui.question('Absolute installed buzz CLI executable: '))),
         } : undefined;
         const conversation = { executable, relay, ...(replyTool ? { replyTool } : {}) };
+        if (setup.agentSecret === undefined) throw Error('Slot key missing; cannot prepare conversation');
         const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: 'databricks-claude-haiku-4-5' }, setup.agentSecret, publicKey(setup.ownerSecret));
         if ((await ui.question('Save onto existing identity? Start waits for an admitted conversation and local provider sign-in. [yes/no]: ')) !== 'yes') return;
         // One atomic replacement; keys, assignment and provider auth context unchanged.

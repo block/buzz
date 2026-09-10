@@ -113,8 +113,9 @@ The earlier pending/manual-recovery statements are historical, not a review wait
   CLI error (returned without killing the session) all clean up the shim and any TERM-resistant in-group descendants.
 
 Tests never open existing owner keys/profiles/cache, production services or native
-client resources. R1 checkpoint with installed opt-in: 18/18 pass; without: 17 pass/1 explicit
-skip. Current policy-recovery validation is recorded in CHECKPOINT. The installed fixture relay does not establish actual community admission,
+client resources. Removal-public-slots checkpoint with installed opt-in
+(`BEEHIVE_REAL_BUZZ_ACP=...`): strict TypeScript + DEFAULT concurrent full package
+**45/45 pass, zero skips**, natural exit (see CHECKPOINT for the exact run). The installed fixture relay does not establish actual community admission,
 current relay compatibility, provider/model attestation. Multi-thread delivery is isolated legacy-binary evidence only.
 
 ## Independent evidence and limits
@@ -314,3 +315,19 @@ than a hand-authored selection omitting its newly materialized configuration rev
 Existing profile/async-Restart Save races and independent per-slot cancellation tests
 continue exercising the same serialized Save/CAS path. No timeout/containment assertion
 or production broker was weakened. Exact final suite result is in CHECKPOINT.
+
+`remove-key.test.ts` covers deliberate local key removal end to end with actual CLI
+subprocesses. A declined confirmation changes nothing; `remove-agent-key` then deletes
+only the local secret copy (manifest `secret: null`, 0600/0700 preserved, secret bytes
+gone and never printed, journal/sibling byte-identical). Reopen advertises the
+missing-key public slot; Start/Restart reject before any spawn (fixture runner line
+count proves no process) and no lifecycle/recovery path recreates the key; Stop/Save
+stay credential-neutral; management-socket loss replays truthful receipts/inventory.
+Active-host removal refuses at the installation lock without deleting it, and a
+non-stopped/unknown/already-removed/malformed identity fails closed; legacy key-less
+installations reject remove/migrate/conversation-setup/host startup; public-only
+slots reject conversation setup. Two real host subprocesses prove Move semantics:
+a Move to a missing-key destination fails preflight and preserves the running source
+(manifest unchanged), and a public-only source still consumes its retained
+management authority so the destination launches with its own local key (source
+manifest byte-identical, consumed source denied Start).

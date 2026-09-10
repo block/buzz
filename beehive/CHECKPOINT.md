@@ -5,6 +5,96 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## RECOVERED removal-public-slots — recovered clean; implementation begins
+
+Recovered sole-writer worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440` branch
+`beehive/cbfd9440` at verified published pre-run `4d26c2e1921f3e20f57888f9124ae0611334464f`:
+clean tree, no stash/untracked source, remote FETCH_HEAD identical, reflog shows only the
+prior task's amend. Prior writer 4aa4e8ab cancelled with NO removal commit, push or
+surviving edit; nothing to preserve or repeat. Immutable named-config review 818c3724 is
+read-only and untouched. This section is written BEFORE implementation or long validation.
+
+Planned bounded scope (no wider wizard/harness CRUD): local deliberate agent-key removal as
+a retained public-only slot under the stopped installation lock (refuse when lock present —
+no PID/stale-lock removal), validating public key/journal identity/stopped phase, preserving
+0600/0700 and public identity/genesis/assignment/config/profile/receipt/run history plus
+sibling keys. Host reopen advertises the missing-key public slot; Start/Restart reject before
+spawn; Stop/Save/inspect/reconnect stay credential-neutral; remote operations never recreate
+the secret. Move TO a missing-key target rejects during destination preflight before source
+Stop; Move FROM a public-only source follows the existing grant contract (assignment consumed,
+no key transfer/reconstruction/takeover). No remote key CRUD, controller or privileged HTTP;
+no shadow identity — the execution credential becomes an optional loader. Planned validation:
+actual local CLI + host/client/relay tests, focused first, then strict + DEFAULT concurrent
+installed-enabled full suite on the exact final candidate (baseline 41/41).
+
+## Removal public-slots — implemented, validated, published head in terminal result
+
+Started published `4d26c2e1921f3e20f57888f9124ae0611334464f` (prior writer 14c23528 handoff:
+uncommitted patch, strict pass, NO executable tests/commit/push). This candidate is the
+commit containing this section. The prior run's drafted `remove-key.test.ts` was
+**never saved to disk**; it was written fresh here, then executed.
+
+**Implemented (validated, not re-implemented):** `removeSlotKey` refuses any
+installation lock (no PID/stale-lock removal), validates public identity + stopped
+slot/no actual, atomically nulls only the secret in the 0600 manifest, retains
+sibling/owner/history; `addSlot` refuses recreating a public-only slot; host execution
+credential is optional with missing-key Start/Restart rejection before effects, public
+inventory `localKey`/readiness, neutral Stop/Save; conversation prepared credential;
+CLI `remove-agent-key <dir> [public-key]` with confirmation; assignment-export works
+public-only; conversation-setup/migration missing key reject.
+
+**Real defect found and fixed at its owner:** the inherited patch's `migrateSlots`
+destructure had dropped `agentSecret` from the omission list, so a migrated v2
+manifest kept the legacy key inside `setups.default` — `installationSlots` silently
+re-armed a `secret: null` public-only slot from that retained key, defeating removal
+(Start would have launched and Move inventory never showed the removal). Fixed by
+restoring the omission, plus a fail-closed `readInstallation` check that shared
+harness entries never carry key material. Regression is executable, not a test workaround.
+
+**Validation:** strict TypeScript passes; fresh `test/remove-key.test.ts` focused
+**4/4** (removal journey incl. CLI confirmation/no-secret-stdout, 0600/0700,
+byte-identical journal/sibling, reopen advertising, pre-spawn Start/Restart denial with
+fixture-runner line-count proof, neutral Stop/Save, reconnect replay; active-lock refusal
+without lock deletion, non-stopped/unknown/malformed/already-removed fail-closed, legacy
+key-less remove/migrate/conversation-setup/host-startup refusal, public-only
+conversation-setup refusal; Move-to-missing-key destination preflight failure preserving
+the running source; public-only source Move consuming retained management authority with
+destination launching on its own local key, source manifest byte-identical, consumed source
+Start denied). Adjacent `slots/move/assignment/configurations` **14/14**. First strict +
+DEFAULT concurrent installed-enabled `BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp npm test`
+full run **45/45, natural exit 30.27s**. On the final tree (identical test-relevant
+source; only docs edited) one full run recorded **43/45**: two PRE-EXISTING tests
+(`cancellation.test.ts` same-batch Stop, `slots.test.ts` real TUI lifecycle) failed with
+`Missing … evidence` timeouts — the historically documented intermittent concurrent-fixture
+contention, NOT a removal regression (all four removal tests passed in that run). Targeted
+rerun of both files **5/5**, then a fresh complete DEFAULT concurrent installed-enabled run
+**45/45 pass, zero skips/failures, natural exit 30.19s** (baseline 41 + 4 new) under
+Hermit Node 24.15.0 / pnpm 11.4.0, standalone frozen lock unchanged. Installed runtime
+`10612d00…ea` and CLI `147cc2cc…5c` freshly match the retained pins. No serial mode,
+timeout weakening or containment assertion change; the intermittent observation is
+recorded, not silently classified as fixed. Evidence:
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/REMOVAL_PUBLICATION/` (focused-remove-key.log,
+focused-adjacent.log, full-installed.log, full-installed-final.log (43/45),
+intermittent-rerun-targeted.log, full-installed-final2.log (45/45), installed-binaries.sha256).
+
+**Consumed independent named-setup review**
+`NAMED_SETUP_REVIEW_4D26C2E1.md` — TWO findings remain **OPEN and deliberately NOT
+fixed here** (out of this bounded task): (F1) property-order-sensitive grant equality
+at `handoff.ts:32` reached from `host.ts:196-197` rejects an actual TUI profiled Move to
+a named default-profile destination (do not fix only `host.ts:208`); (F2) accepted Move
+updates selected-next but not the named inventory (`host.ts:266-274`), so the same
+`Destination@1` can mean different instructions. This removal delta's own Move tests
+use plain default selections and do not intersect those seams; no workaround was
+combined into that review's approval. **ONE next executable step:** fix F1/F2 at the
+natural grant/candidate owner with the review's regression combinations.
+
+**Remaining:** local key REPAIR/re-provision reconciliation UX (removal is one-way by
+design), nsec import/saved-owner verification/remote revocation UX, full import/reuse
+wizard, local setup CRUD/multiple setup bindings, other harnesses/providers/presets,
+mesh/compute, production admission/OAuth/live-model gates, final UX review. Removal is
+a local copy deletion — not global cryptographic revocation; no nsec transfer or remote
+key CRUD exists. Historical unrecorded broker failure remains unclassified.
+
 ## Named configurations 6bf9 — usable increment, local parity still partial
 
 Started published `e70f90f9aec26248022aa1081339548e1ade9ea4`. Candidate is this

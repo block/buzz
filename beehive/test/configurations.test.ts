@@ -65,8 +65,8 @@ test('real local wizard: two keys share one setup; real TUI named candidates lea
   assert.equal(Object.keys(manifest.setups).length, 1);
   assert.equal(manifest.agents[X].setup, manifest.agents[Y].setup);
   for (const key of [secret, manifest.agents[X].secret, manifest.agents[Y].secret]) assert.ok(!setupOutput.includes(key));
-  const slots = installationSlots(source), first = slots.find(s => publicKey(s.setup.agentSecret) === X)!;
-  const journal = (key: string) => JSON.parse(readFileSync(slots.find(s => publicKey(s.setup.agentSecret) === key)!.path, 'utf8'));
+  const slots = installationSlots(source), first = slots.find(s => s.agent === X)!;
+  const journal = (key: string) => JSON.parse(readFileSync(slots.find(s => s.agent === key)!.path, 'utf8'));
   for (const path of [join(source, 'setup.json'), ...slots.map(s => s.path)]) assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.equal(statSync(source).mode & 0o777, 0o700);
   const manifestBefore = readFileSync(join(source, 'setup.json'));
