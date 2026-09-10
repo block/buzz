@@ -221,7 +221,31 @@ test("creates a workflow via the form builder", async ({ page }) => {
   const workflowName = `test_workflow_${Date.now()}`;
 
   await navigateToWorkflows(page);
+  // Keep the outgoing trigger's Message text mounted during the step handoff.
+  await page.evaluate(() => {
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      const animation = animate.apply(this, args);
+      if (this.querySelector("#wf-trigger-trigger_text-value")) {
+        animation.updatePlaybackRate(0.1);
+      }
+      return animation;
+    };
+  });
   await createWorkflow(page, workflowName);
+
+  const yaml = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((candidate) => candidate.command === "create_workflow");
+    return (call?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  const saved = parseYaml(yaml ?? "");
+  expect(saved.steps[0].id).toBe("step_1");
+  expect(saved.steps[0].text).toBe("Workflow notification");
+  expect(saved.trigger.on).toBe("message_posted");
+  expect(saved.trigger.filter).toBeUndefined();
 
   // Verify workflow appears in the list
   await expect(page.getByTestId("workflows-view")).toContainText(workflowName);
