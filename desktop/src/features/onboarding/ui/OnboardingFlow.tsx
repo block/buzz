@@ -86,6 +86,7 @@ type OnboardingFlowProps = {
   actions: OnboardingActions;
   identityLost?: boolean;
   initialProfile: OnboardingProfileSeed;
+  initialProfileDecisionSettled: boolean;
 };
 
 function isFallbackDisplayName(value?: string | null) {
@@ -154,6 +155,7 @@ export function OnboardingFlow({
   actions,
   identityLost = false,
   initialProfile,
+  initialProfileDecisionSettled,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
   const { activeCommunity } = useCommunities();
@@ -229,7 +231,7 @@ export function OnboardingFlow({
 
   const saveProfileAndContinue = React.useCallback(
     async (nextPage: OnboardingPage | "complete") => {
-      if (isProfileAdvancePending) {
+      if (!initialProfileDecisionSettled || isProfileAdvancePending) {
         return;
       }
       if (profileDraft.displayName.trim().length === 0) {
@@ -314,6 +316,7 @@ export function OnboardingFlow({
     },
     [
       currentPage,
+      initialProfileDecisionSettled,
       isProfileAdvancePending,
       profileDraft,
       profileUpdateMutation,
@@ -357,6 +360,7 @@ export function OnboardingFlow({
       draftUrl: profileDraft.avatarUrl,
       savedUrl: savedProfile.avatarUrl,
     },
+    isReadyToSubmit: initialProfileDecisionSettled,
     isUploadingAvatar,
     isSaving: isSavingProfile || isProfileAdvancePending,
     name: {

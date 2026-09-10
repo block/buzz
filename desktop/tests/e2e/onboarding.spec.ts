@@ -923,7 +923,7 @@ test("fresh-key harness completion continues directly into profile onboarding", 
     page,
     {
       profileHasEvent: false,
-      profileReadDelayMs: 1_000,
+      deferProfileReads: true,
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
@@ -968,6 +968,57 @@ test("fresh-key harness completion continues directly into profile onboarding", 
   await expect(
     page.getByTestId("onboarding-step-dots").locator("span").nth(4),
   ).toHaveClass(/w-7/);
+  const profileSubmit = page.getByTestId("onboarding-next");
+  await page.getByTestId("onboarding-display-name").fill("Delayed Profile");
+  await expect(profileSubmit).toBeDisabled();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_PROFILE_READS_PENDING__?: () => number;
+            }
+          ).__BUZZ_E2E_PROFILE_READS_PENDING__?.() ?? 0,
+      ),
+    )
+    .toBeGreaterThanOrEqual(1);
+  await page.getByTestId("onboarding-display-name").press("Enter");
+  await profileSubmit.evaluate((element) => {
+    const reactPropsKey = Object.keys(element).find((key) =>
+      key.startsWith("__reactProps$"),
+    );
+    if (!reactPropsKey) {
+      throw new Error("React props were not attached to the profile button");
+    }
+    const reactProps = (
+      element as unknown as Record<
+        string,
+        { onClick?: (event: MouseEvent) => void }
+      >
+    )[reactPropsKey];
+    reactProps.onClick?.(new MouseEvent("click"));
+  });
+  await expect(page.getByTestId("onboarding-display-name")).toBeEnabled();
+  expect(await commandCount(page, "update_profile")).toBe(0);
+  await expect(page.getByTestId("onboarding-page-avatar")).toHaveCount(0);
+
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
+          }
+        ).__BUZZ_E2E_RELEASE_PROFILE_READS__?.() ?? 0,
+    ),
+  ).toBeGreaterThanOrEqual(1);
+  await expect(profileSubmit).toBeEnabled();
+  await profileSubmit.click();
+  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await page.getByTestId("onboarding-skip").click();
+  await expectWelcomeView(page);
+
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
   await expect(page.getByTestId("boot-splash-overlay")).toHaveCount(0);
   expect(
@@ -2333,7 +2384,7 @@ test("connected first-community profile keeps navigation inside the card and bal
   const nameKeyBox = await nameKey.boundingBox();
   const avatarButtonBox = await avatarButton.boundingBox();
   expect(nameKeyBox?.width).toBeGreaterThan(380);
-  expect(avatarButtonBox?.width).toBe(144);
+  expect(avatarButtonBox?.width).toBeCloseTo(144, 3);
   const nameKeyStyles = await nameKey.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -2684,6 +2735,9 @@ test("name-only community profile save preserves an existing avatar", async ({
     skipOnboardingSeed: true,
   });
   await page.goto("/");
+  await expect
+    .poll(() => commandCount(page, "get_profile"))
+    .toBeGreaterThanOrEqual(2);
 
   const existingAvatarUrl =
     "https://mock.relay/media/existing-community-avatar.png";

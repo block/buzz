@@ -42,6 +42,7 @@ export type ProfileStepAvatarState = {
 
 export type ProfileStepState = {
   avatar: ProfileStepAvatarState;
+  isReadyToSubmit: boolean;
   isUploadingAvatar: boolean;
   isSaving: boolean;
   name: ProfileStepNameState;

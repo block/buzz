@@ -206,10 +206,11 @@ export function ProfileStep({
     submit,
     updateDisplayName,
   } = actions;
-  const { isSaving, name, saveRecovery } = state;
+  const { isReadyToSubmit, isSaving, name, saveRecovery } = state;
   const displayNameDraft = name.draftValue;
   const hasDisplayNameDraft = displayNameDraft.length > 0;
-  const canSubmit = displayNameDraft.trim().length > 0 && !isSaving;
+  const canSubmit =
+    displayNameDraft.trim().length > 0 && isReadyToSubmit && !isSaving;
   const cardLayout = useOnboardingCardLayout();
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 

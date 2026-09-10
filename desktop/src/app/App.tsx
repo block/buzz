@@ -329,6 +329,9 @@ function AppReady({
         actions={onboarding.flow.actions}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
+        initialProfileDecisionSettled={
+          onboarding.flow.initialProfileDecisionSettled
+        }
         key={onboarding.currentPubkey ?? "anonymous"}
       />
     );
