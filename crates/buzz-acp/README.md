@@ -131,7 +131,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 ### Inbound Author Gate
 
-Controls which authors' events the harness forwards to the agent. Events from disallowed authors are silently dropped before reaching subscription rules.
+Controls which authors' events the harness forwards to the agent. Events from disallowed authors are dropped before reaching subscription rules and logged at info (`inbound author gate — dropping event`) with channel, author, mode, `is_dm`, and reason. An authorized event that matches no subscription rule is also logged at info (`authorized event matched no rule — dropping`).
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
@@ -156,7 +156,7 @@ the same author policy as ordinary messages. Legacy workflow messages and
 workflow output without an explicit agent mention remain attributed to the relay
 signer. `nobody` remains absolute.
 
-The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
+The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Direct messages use the same author policy as group channels: `allowlist` admits the listed pubkeys (plus owner and verified same-owner siblings), and `anyone` admits every author. DM clients auto-p-tag participants, so mention-subscription already matches the conversation; the gate is the access policy. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 
 | Command | Effect |
 |---------|--------|

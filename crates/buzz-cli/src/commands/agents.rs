@@ -3,7 +3,9 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_update, parse_respond_to_allowlist, CreateAgentDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -52,6 +54,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             provider,
             model,
             respond_to,
+            respond_to_allowlist,
         } => {
             let owner = require_owner(client)?;
             let built = build_update(
@@ -66,6 +69,10 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     provider,
                     model,
                     respond_to: respond_to.map(RespondToArg::to_wire),
+                    respond_to_allowlist: match respond_to_allowlist {
+                        Some(raw) => Some(parse_respond_to_allowlist(&raw)?),
+                        None => None,
+                    },
                 },
             )?;
             let response = client.publish_ephemeral_event(built.event).await?;
