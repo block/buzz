@@ -96,7 +96,7 @@ arbitrary Nostr kind is not an admission solution.
 One dedicated owner shares signing/decryption authority with fully trusted host
 installations. Host IDs route messages; they are NOT cryptographic host proof.
 Agent identities are generated separately and only locally. Standby key import
-attaches to an existing public genesis; only explicit experimental fixture Move can transfer assignment. Setup refuses an existing host directory; saved journal
+attaches to an existing public genesis; only explicit experimental source-consumed Move can transfer assignment. Setup refuses an existing host directory; saved journal
 bindings prevent owner/agent/host replacement from resetting admission.
 An owner can still bypass software by cloning/recreating installations: safety
 assumes non-cloned, non-rollback, exclusively supervised installations.
@@ -175,9 +175,9 @@ unreachable source never makes its standby eligible. The original assignment tes
 `slots.test.ts` separately proves two identities in ONE host process/connection;
 these are independent agent slots, not cloned daemons.
 
-**Experimental fixture path implemented below:** destination local preflight, source
+**Experimental Move path implemented below:** destination local preflight, source
 reservation/Stop, consumed grant/outbox lineage and target acceptance/fresh launch.
-Safe-exit acceptance and provider exact-ready preflight remain gated. The root ID
+Preflight prerequisites and post-grant actual conversation readiness are separate gates. The root ID
 is an identity binding, not a lock service or partition/rollback solution.
 
 ## Several agents, one installation
@@ -220,7 +220,7 @@ failure and retains the installation lock rather than falsely declaring all stop
 
 Setup/key enrollment remains local and offline; ordinary selections and lifecycle
 remain remote. Multiple selectable harness inventory entries, profile CRUD, key
-revocation UX, Restart and provider/conversation Move are still future work. Standby
+revocation UX, Restart and live-provider/production acceptance are still future work. Standby
 X elsewhere cannot Start without a grant, even while source X is stopped/unreachable. This is trusted-installation
 coordination, not physical host attestation, partition safety or exactly-once execution.
 
@@ -336,7 +336,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 | Local owner/key setup | New owner + separately generated agent key | nsec import, saved-owner verification, revocation/key removal UX |
 | Host inventory | Real relay, multiple independent slots, shared host harness, freshness | multiple selectable setups, service install, richer reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
-| Lifecycle | fixture Start/Stop and experimental source-consumed Move, UI-independent host | containment acceptance, exact-ready provider Move, Restart |
+| Lifecycle | Start/Stop and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, Restart |
 | Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, production protocol compatibility and catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
@@ -348,7 +348,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 None of the remaining rows is an owner-approved exclusion from the requested
 full parity. Review actual executable UX/security/lifecycle before expanding.
 
-## Experimental fixture Move (recovered continuation)
+## Experimental identity-bearing conversation Move
 
 On two separately provisioned, trusted installations with the SAME agent key and
 pinned public genesis, use `hosts`, select the source agent row, then `move` and
@@ -362,14 +362,36 @@ The source retains an irreversible grant chain/outbox after Stop. A destination
 accepts an exact successor once before fresh Start; missing/changed prepared inputs
 leave it assigned but stopped. Retry/inspect replays the grant without restoring the
 source. A stopped or unreachable source does not authorize a standby by itself.
-The experimental path is restricted in code to fixture harnesses: provider/catalog
-metadata is not exact-model readiness, and conversation/provider Move is refused
-before source effects. Ordinary Start retains same-session exact-model enforcement.
+Preflight validates local key/setup, allowed selection, canonical executable hashes,
+script inputs and workspace identity. Identity-free bounded `--help` runs check the
+installed runtime and CLI contracts. An independently owned ACP greeting probe checks
+usable local harness/model/auth prerequisites without any signer, relay or tools.
+It is completely stopped before publishing preparation. Catalogs can be fallback
+metadata; neither catalog nor this probe proves a **future** conversation will work.
+Inventory labels preparation separately; it never becomes actual-run evidence.
 
-**Containment acceptance remains OPEN.** The historical descendant-PID failure is
-not classified between invalid fixture PID and PID reuse. Recovered probe evidence
-supports the group teardown contract but does not close that historical gate; the
-original absence requirement now records discriminating failure diagnostics. No
-safe Move, exactly-once, partition-safe or moved-identity conversation claim.
+After irrevocable grant the fresh target conversation must independently satisfy the
+existing broker's exact requested model/session acknowledgement and completed response.
+Failure leaves target assigned/stopped (or quarantined if teardown is uncertain), never
+source resurrection. Restart/replayed preparation preserves the original immutable
+grant binding; lost live readiness forbids automatic launch but not target acceptance.
+A new Move operation is required to retry a preflight whose target lifetime ended.
+
+`installed-move.test.ts` proves two real host processes, installed buzz-acp + Buzz CLI,
+same locally provisioned signer, source exit before grant delivery/target actual spawn,
+then signed target replies with correct channel/parent/recipient and same-run model
+completion. It also injects actual model rejection only after grant: target stays
+assigned/stopped, source cannot Start. Model/provider remain deterministic fixtures;
+no actual Databricks/login/community calls or production kind-40002 proof.
+
+**Scoped exit barrier supported:** independent `MOVE_REVIEW_97A9050A.md` source review
+and grant-time runner/TERM-resistant-descendant ESRCH evidence establish the current
+exclusively supervised POSIX in-group barrier. Broker-owned harness/tool groups and
+childless shims retain their separate teardown checks. This is not arbitrary escaped
+process containment. The historical unrecorded PID failure remains unclassified; a
+new reviewer observation was empty bytes converted to PID 0, not a live descendant.
+Fixture spawn now validates a positive PID and publishes it atomically. ESRCH and
+bounded failure diagnostics remain, without added teardown delays or weaker assertions.
 Trust requires dedicated non-cloned/non-rollback installations, exclusive supervision
-and local provisioning; shared owner signatures do not attest physical hosts.
+and local provisioning; shared owner signatures do not attest physical hosts. No
+exactly-once/partition-safe transfer, workspace/session transfer or full parity claim.

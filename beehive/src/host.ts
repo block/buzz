@@ -65,6 +65,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   const save = () => { try { writePrivate(path,state); } catch (e) { persistenceFailed = true; throw e; } };
   // Preparation is tied to this process lifetime. Never launch from a recovered token.
   const livePreparations = new Set<string>();
+  let preparationStage = 'not-prepared';
   save();
   let owned: OwnedProcess | ConversationSession | undefined;
   let acp: AgentSession | ConversationSession | undefined;
@@ -73,7 +74,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     return message('inventory',setup.host,agent,state.revision, {
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
       ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
-      catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
+      movePreflight: preparationStage, catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
       workspaces: [setup.workspace], profiles: ['default'], readiness: setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
@@ -134,6 +135,35 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     const workspace = statSync(setup.workspace);
     return { launch, token: hash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
   }
+  /** Identity-free executable contract check, never conversation admission evidence. */
+  async function inspectExecutable(executable: string, args: string[], required: string[]) {
+    state.phase = 'transitioning'; save();
+    owned = spawnOwned(executable, args, setup.workspace, { PATH: '/usr/bin:/bin' });
+    const process = owned;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let output = '', bytes = 0;
+        const timer = setTimeout(() => reject(Error('Installed executable inspection timed out')), 5000);
+        const finish = (error?: Error) => { clearTimeout(timer); error ? reject(error) : resolve(); };
+        process.child.stdout.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 128 * 1024) finish(Error('Installed executable inspection output limit'));
+          else output += chunk.toString('utf8');
+        });
+        process.child.stderr.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 128 * 1024) finish(Error('Installed executable inspection output limit'));
+        });
+        process.child.on('message', (m: any) => {
+          if (m.type === 'runner-exit') finish(m.code === 0 && required.every(flag => output.includes(flag)) ? undefined : Error('Incompatible installed executable contract'));
+        });
+        void process.ready.catch(() => finish(Error('Installed executable unavailable')));
+      });
+    } finally {
+      try { await stopOwned(); state.phase = 'stopped'; save(); }
+      catch (error) { state.phase = 'quarantined'; save(); throw error; }
+    }
+  }
   function finishMove(result: string) {
     const pending = state.move;
     if (!pending) return;
@@ -146,7 +176,6 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
     try {
       if (m.type === 'prepare') {
         fields(m.body, ['assignment','operation']);
-        if (setup.mode !== 'fixture' || setup.conversation) throw Error('Move exact-model preflight is not implemented for conversation/provider harnesses');
         const assignment = m.body.assignment as Assignment; validateAssignment(assignment);
         const op = m.body.operation as Message;
         // Validate the proposed grant shape through the same chain validator.
@@ -156,12 +185,35 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
         const prior = state.preparations?.[op.id];
         if (prior) {
           if (hash(prior.request) !== hash(m)) throw Error('Preparation ID conflict');
-          if (livePreparations.has(op.id)) { publish(prior.reply); return; }
+          // Grant-acceptance evidence is immutable, even after restart. Replayed
+          // prepare cannot replace the token already consumed by the source.
+          if (!livePreparations.has(op.id)) throw Error('Preparation lifetime ended; use a new Move operation');
+          if (prepareLocal(g.selection).token !== prior.token) throw Error('Prepared inputs changed');
+          publish(prior.reply); return;
         }
         if (!prior && Object.keys(state.preparations ?? {}).length >= 1000) throw Error('Preparation journal full; local reconciliation needed');
-        const token = prepareLocal(g.selection).token;
+        preparationStage = 'checking-local-prerequisites; not conversation readiness'; publish(inventory());
+        const prepared = prepareLocal(g.selection);
+        // Independent, identity-free prerequisite probe. It receives neither agent
+        // signer nor conversation relay/tool configuration. A successful probe is
+        // NOT readiness for the future conversation, which must be verified afresh.
+        if (setup.conversation) {
+          await inspectExecutable(setup.conversation.executable, ['--help'], ['--agent-command', '--agent-args', '--agent-owner', '--respond-to', '--model']);
+          if (setup.conversation.replyTool) await inspectExecutable(setup.conversation.replyTool.executable, ['messages', 'send', '--help'], ['--channel', '--reply-to', '--mention']);
+        }
+        if (prepared.launch) {
+          state.phase = 'transitioning'; save();
+          const probe = new AgentSession(prepared.launch); acp = probe; owned = probe.owned;
+          try { await probe.catalog(); await probe.verify(); }
+          finally {
+            try { await stopOwned(); state.phase = 'stopped'; save(); }
+            catch (error) { state.phase = 'quarantined'; save(); throw error; }
+          }
+        }
+        if (closing || prepareLocal(g.selection).token !== prepared.token) throw Error('Preparation changed or host closing');
+        const token = prepared.token;
         const reply = message('prepared', op.host, agent, op.revision, { prepare: m, token });
-        state.preparations ??= {}; state.preparations[op.id] = { request: m, token, reply }; livePreparations.add(op.id); save(); publish(reply);
+        state.preparations ??= {}; state.preparations[op.id] = { request: m, token, reply }; livePreparations.add(op.id); preparationStage = 'prepared; future actual conversation still unverified'; save(); publish(reply); publish(inventory());
       } else if (m.type === 'prepared') {
         const pending = state.move;
         if (!pending || hash(m.body.prepare) !== hash(pending.prepare) || m.revision !== pending.request.revision || state.revision !== m.revision || state.assignment.assignedHost !== setup.host) return;
@@ -207,13 +259,16 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
           await handle(start);
           outcome = state.operations[start.id]?.reply.body.result;
         } catch (e) { outcome = e instanceof Error ? e.message : 'Destination launch failed'; }
-        livePreparations.delete(g.operation.id);
+        livePreparations.delete(g.operation.id); preparationStage = 'consumed; actual launch outcome recorded separately';
         const completed = message('receipt', setup.host, agent, state.revision, { operation: m.id, fingerprint: hash(m), result: outcome, assignedHost: setup.host, transfer: 'source consumed; destination assigned' });
         state.incoming[hash(g)] = completed; state.outbox.push(completed); save(); publish(completed); publish(inventory());
       }
     } catch (e) {
       if (persistenceFailed) throw e;
       if (m.type === 'prepare') {
+        preparationStage = 'failed; no source Stop authorized';
+        if (state.phase === 'transitioning') { state.phase = 'quarantined'; save(); }
+        publish(inventory());
         const op = m.body.operation as Message;
         if (op?.host) publish(message('prepared', op.host, agent, op.revision, { prepare: m, error: 'Destination preflight failed: locally provision matching key, allowed workspace and harness/auth setup; no source Stop' }));
       } else if (m.type === 'prepared') {
@@ -251,7 +306,6 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
         if (state.move && m.type === 'stop') { fields(m.body, []); finishMove('Move cancelled before grant by stop'); }
         if (m.type === 'move') {
           fields(m.body, ['target','targetRevision','selection']);
-          if (setup.mode !== 'fixture' || setup.conversation) throw Error('Move is fixture-only until exact-model preflight and containment acceptance are complete');
           const target = text(m.body.target); selection(m.body.selection);
           if (target === setup.host || !Number.isSafeInteger(m.body.targetRevision) || Number(m.body.targetRevision) < 0 || (state.assignment.chain?.length ?? 0) >= 24) throw Error('Invalid destination or chain limit');
           const prepare = message('prepare', target, agent, Number(m.body.targetRevision), { assignment: state.assignment, operation: m });

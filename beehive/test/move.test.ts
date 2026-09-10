@@ -92,14 +92,14 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
 });
 
 
-for (const failure of ['missing-key', 'changed-prepared-input'] as const) test(`dropped grant/receipt recovery; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
+for (const failure of ['missing-key', 'changed-prepared-input', 'changed-across-target-restart'] as const) test(`dropped grant/receipt recovery; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-move-loss-')));
   const ownerSecret = newKey(), agentSecret = newKey(), agent = publicKey(agentSecret);
   const genesis = createGenesis(publicKey(ownerSecret), agent, 'source');
   for (const name of ['source','target']) provision(join(dir,name), { host: name, ownerSecret, agentSecret, runner: process.execPath, args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' },genesis);
   const server = await relay(0, publicKey(ownerSecret), join(dir,'relay.json'));
   const address = server.address(); assert.ok(address && typeof address !== 'string'); const url = `ws://127.0.0.1:${address.port}`;
-  let source = await host(join(dir,'source'),url); const target = await host(join(dir,'target'),url);
+  let source = await host(join(dir,'source'),url); let target = await host(join(dir,'target'),url);
   const sourceSocket = [...server.clients][0]!;
   let lostOperation = '', loseReceipt = true;
   const handlers = sourceSocket.listeners('message'); sourceSocket.removeAllListeners('message');
@@ -123,17 +123,21 @@ for (const failure of ['missing-key', 'changed-prepared-input'] as const) test(`
     await until(() => journal('source').assignment.assignedHost === 'target');
     assert.equal(journal('source').phase,'stopped'); assert.equal(journal('target').assignment.assignedHost,'source');
     assert.equal(seen.some(m => m.type === 'receipt' && m.body.operation === move.id),false, 'source receipt lost before relay storage');
+    const originalPreparation = journal('target').preparations[move.id];
+    if (failure === 'changed-across-target-restart') await target.close();
     const targetSetup = join(dir,'target','setup.json');
     if (failure === 'missing-key') unlinkSync(targetSetup);
     else writePrivate(targetSetup, { ...JSON.parse(readFileSync(targetSetup,'utf8')), args: [resolve('test/runner.ts'), 'changed-after-preparation'] });
+    if (failure === 'changed-across-target-restart') target = await host(join(dir,'target'),url);
     drop = false; loseReceipt = false;
     ui.send(message('inspect','source',agent));
     await until(() => seen.some(m => m.type === 'receipt' && m.body.operation === move.id && m.body.result === 'accepted'));
     await until(() => journal('target').assignment.assignedHost === 'target');
-    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes('Local agent key/setup missing')));
+    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes(failure === 'changed-across-target-restart' ? 'Destination preparation invalidated' : 'Local agent key/setup missing')));
     assert.equal(journal('target').phase,'stopped'); assert.equal(journal('target').actual,null);
     const denied = message('start','source',agent,2); ui.send(denied);
     await until(() => seen.some(m => m.body.operation === denied.id && m.body.result === 'not-authority'));
+    assert.deepEqual(journal('target').preparations[move.id], originalPreparation, 'replayed prepare never replaces consumed grant evidence');
     const state = journal('target');
     for (const grant of seen.filter(m => m.type === 'grant')) ui.send(grant);
     await delay(100); assert.deepEqual(journal('target'),state);

@@ -2,13 +2,17 @@
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
 const mode = readFileSync('mode', 'utf8');
 let tool: any; let configRejected = false;
 const sessionId = 'conversation-session'; let selected = ''; let prompt: number | undefined;
-writeFileSync('harness-identity', publicKey(process.env.BUZZ_PRIVATE_KEY!));
+if (process.env.BUZZ_PRIVATE_KEY) writeFileSync('harness-identity', publicKey(process.env.BUZZ_PRIVATE_KEY));
+else writeFileSync('preflight-no-identity', 'yes');
 writeFileSync('harness-pid', String(process.pid));
 const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setTimeout(()=>{},60000)"], { stdio: 'ignore' });
+await once(child, 'spawn');
+if (!Number.isSafeInteger(child.pid) || child.pid! <= 0) throw Error('Invalid fixture child PID');
 writeFileSync('descendant-pid', String(child.pid));
 process.on('SIGTERM', () => {});
 setTimeout(() => process.exit(0), 60000).unref();

@@ -5,6 +5,100 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Identity Move ff994 — executable completion checkpoint
+
+Candidate is the commit containing this section; publication/remote head is recorded
+in the terminal result. Started clean published `97a9050adbabd09b868bdd55ce3af333c8ed0e9f`.
+The previous fixture-only/circular exact-ready gate is removed, not relabelled ready.
+
+**Two gates at the host/broker owners:** preflight checks locally provisioned same key,
+setup, selection, canonical executable/hash/script/workspace fingerprint; bounded
+identity-free installed runtime/CLI help checks and an independently owned ACP
+prerequisite greeting probe (no signer/relay/tools) complete and fully stop before
+prepared publication. Catalog fallback alone is never auth or readiness proof.
+Inventory labels prerequisite preparation separately from actual conversation readiness.
+After durable source exit/consumption/grant the target accepts once, freshly launches
+and requires the unchanged broker's exact model/session/response completion. Failure
+keeps target assignment and source revocation; no transfer of keys/workspace/session.
+
+**Observable acceptance:** `test/installed-move.test.ts` uses TWO real host subprocesses,
+SAME fresh locally provisioned signer, actual installed buzz-acp and Buzz CLI, isolated
+actual conversation relay, deterministic existing ACP harness. Source answers first
+owner event; grant interception observes source stopped/consumed and source harness,
+TERM-resistant descendant and tool shim ESRCH BEFORE forwarding grant / target actual
+spawn. Target answers a second channel then a later turn in the first thread with
+canonical Schnorr signatures, exact channel/parent/non-owner member recipient, native
+CLI read/rejected-mention behavior and post-grant actual model/session evidence.
+Missing target setup, unsupported selection and rejected independent ACP preparation
+preserve the running source. Actual model rejection injected ONLY after grant leaves
+target assigned/stopped/null actual, no target reply, source Start denied. Source-Y
+byte-identical, cancellation, lost grant/receipt, historical/duplicate grant and
+source-restart evidence is reused from the full production Move suite, not re-created
+with a second signer in the installed conversation test.
+
+**Review consumed:** `MOVE_REVIEW_97A9050A.md` M1 was blocking and is now fixed: existing
+preparation/grant-acceptance token cannot be replaced across replay/restart. Expired
+live readiness rejects preparation retry (new operation needed); exact original
+consumed grant still assigns target and leaves it stopped. Added changed-target-inputs
++ graceful target restart + retained prepare-before-grant relay-history regression;
+original preparation deep-equal, duplicates inert and source remains denied across
+restart. Targeted Move/fixture **6/6** passed after this correction. This is author
+regression evidence, not a claimed independent re-review of the new delta.
+
+**Containment judgment:** consumed reviewer source analysis and exact grant-delivery
+runner/ready TERM-resistant-child ESRCH probe. Current barrier is supported for
+exclusive live-anchor POSIX in-group execution, including separately broker-owned
+harness/tool groups and childless shim absence checks. Unknown/missing anchors remain
+fail closed; no numeric PID recovery grants kill authority. Historical old unrecorded
+PID cause remains unclassified. Reviewer separately captured empty PID bytes -> 0,
+not a live descendant. Fixture now awaits successful spawn, validates a positive PID
+and atomically publishes it before cancellation; absence assertion and bounded failure
+diagnostics unchanged. This is not arbitrary escaped-tree containment, physical-host
+proof, exactly-once/partition/clone/rollback safety. No broad historical stress campaign.
+
+**Validation:** Node24.15.0, existing standalone dependencies/lock unchanged. First
+candidate strict + installed-enabled full **32/32** passed in 24.50s. After M1 and
+expanded negative acceptance, default concurrent full run recorded a broker failure
+and did not finish within the 90s tool deadline (no final summary; slots results absent).
+Its exact failure cause is unclassified, not silently called fixed. Targeted unchanged
+broker passed 1/1. Final exact executable state: strict passes; complete installed-enabled
+package with explicit `--test-concurrency=1`, no force-exit, **33/33**, zero skips/failures,
+150.15s. Serial validation avoids concurrent fixture contention, does not classify the
+failed concurrent invocation or establish default-concurrency reliability. No product
+sleep/deadline/absence assertion was weakened. Initial rejection-fixture iterations
+failed because fault injection at AUTH was too late (target harness already spawned);
+fault moved to pre-delivery grant interception, proving actual postgrant rejection.
+
+Evidence: `/Users/loganj/.buzz/WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/IDENTITY_MOVE_FF994/`
+contains check/check-final, first full, failed concurrent final, final serial full,
+installed-targeted and M1-targeted logs; binary hashes freshly match existing runtime
+`10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`
+and CLI `147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5`.
+Installed binary identity is separate from TS source identity. No actual Databricks,
+provider/login/community operations, production kind-40002 admission, owner private
+stores, Rust/native changes, repo-wide/GitHub CI, PR/merge/release or full parity claim.
+
+**ONE next executable action:** independently review the published identity-conversation
+Move delta and its 33-test acceptance, focusing on prerequisite-probe ownership and
+fresh postgrant readiness (M1 reproduction is now a permanent regression). Then broader
+profiles/key CRUD/Restart/harness/provider/preset/mesh/compute/live UX scope remains as
+listed in README; normal service-user Databricks OAuth/model and production admission
+are separate real-user gates, not missing conversation Move engineering.
+
+## Identity Move continuation ff994 — recovered / design decision
+
+Recovered clean `97a9050adbabd09b868bdd55ce3af333c8ed0e9f`. Read current
+handoff/host/ACP/conversation/owned/supervisor and installed conversation fixture.
+The earlier “exact-ready preflight” rationale is superseded: preflight is local
+prerequisite validation, not future same-run readiness. Actual conversation readiness
+still belongs to the post-grant broker's exact model/session/completion evidence.
+No pre-grant identity-bearing conversation is permissible. Current implementation
+still blanket-refuses conversation Move; this entry does not claim acceptance.
+Production Stop uses a retained IPC group leader, self-group TERM/KILL and waits
+for group ESRCH; missing live anchor or unknown exit fails closed. Historical
+invalid fixture PID observations are not themselves a demonstrated barrier defect.
+Independent current transaction/barrier review is pending; no broad rerun campaign.
+
 ## RECOVERED 9ff7 — executable fixture transaction, partial product handoff
 
 Recovered actual HEAD and actual remote both at

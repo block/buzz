@@ -216,3 +216,27 @@ Consumed `DESCENDANT_EXIT_EBC8B3CB.md`: exact historical cause remains unproved
 provenance, and bounded per-PID process state on failure. It does not wait longer or
 weaken ESRCH, and does not kill any PID obtained from observations. Full-suite green
 results without recurrence do not classify the historical failure.
+
+## Identity-bearing conversation Move continuation
+
+`installed-move.test.ts` is installed-opt-in, using the same isolated NIP-42/NIP-29
+fixture relay and deterministic ACP harness as installed-conversation. It provisions
+ONE signer on two actual host subprocesses, source answer, remote Move, target answer
+and a later owner turn. Verifies Schnorr/canonical events, channel/parent/non-owner
+member recipient, native CLI read/rejected-mention behavior and post-grant broker
+model/session/completion evidence. At grant delivery source journal is consumed/stopped
+and source runner/descendant/shim probe ESRCH, before target can launch actual runtime.
+Missing setup/unsupported selection preserve source; postgrant actual model rejection
+cannot produce a target reply and leaves target assigned/stopped/source Start denied.
+This is not live-provider or production admission testing.
+
+`move.test.ts` additionally covers M1 from independent MOVE_REVIEW_97A9050A: target
+changes setup across graceful restart after source consumption and before grant
+receipt; replayed prepare retains immutable token, target accepts once but stays
+stopped, duplicate grant is inert, source restart cannot resurrect authority.
+
+The independent review supports the scoped exclusively supervised POSIX group barrier,
+not arbitrary escaping processes. Its pinned full run had 28 passes/two failures
+and timed out; do not relabel it green. Empty fixture PID bytes -> 0 was captured,
+separate from the still-unclassified older observation. Fixture publishes a successfully
+spawned positive PID atomically before cancellation tests; ESRCH remains mandatory.

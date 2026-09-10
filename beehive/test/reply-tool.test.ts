@@ -21,9 +21,13 @@ test('fixed Buzz CLI MCP rejects caller authority and owns CLI descendants on su
       fs.writeFileSync('argv', JSON.stringify(process.argv.slice(2)));
       fs.writeFileSync('identity', process.env.BUZZ_PRIVATE_KEY);
       const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setTimeout(()=>{},15000)"], {stdio:'ignore'});
-      fs.writeFileSync('descendant', String(child.pid));
       child.once('error', error => fs.writeFileSync('descendant-spawn-error', String(error.code)));
-      child.once('spawn', () => fs.writeFileSync('descendant-spawned', JSON.stringify({ pid: child.pid, parent: process.pid })));
+      child.once('spawn', () => {
+        if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw Error('Invalid fixture descendant PID');
+        fs.writeFileSync('descendant-spawned', JSON.stringify({ pid: child.pid, parent: process.pid }));
+        fs.writeFileSync('descendant.tmp', String(child.pid));
+        fs.renameSync('descendant.tmp', 'descendant');
+      });
       process.stdin.resume();
       process.stdin.on('end', () => { ${mode === 'success' ? 'setTimeout(()=>process.exit(0),100)' : mode === 'failure' ? 'process.exit(2)' : "process.on('SIGTERM',()=>{});setTimeout(()=>process.exit(0),15000)"} });
     `);
@@ -57,7 +61,9 @@ test('fixed Buzz CLI MCP rejects caller authority and owns CLI descendants on su
         assert.ok(failed); assert.ok(!existsSync(join(dir, 'argv')));
       } else {
         for (let i = 0; i < 100 && !existsSync(join(dir, 'descendant')); i++) await delay(10);
-        assert.ok(existsSync(join(dir, 'descendant')));
+        assert.ok(existsSync(join(dir, 'descendant')), 'successful descendant spawn required');
+        const descendant = Number(readFileSync(join(dir, 'descendant'), 'utf8'));
+        assert.ok(Number.isSafeInteger(descendant) && descendant > 0, 'positive live-provenance fixture PID required');
         if (mode === 'success') assert.ok(!(await call).isError);
         else if (mode === 'cancel') tool.setActive(false);
         else if (mode === 'disconnect') shim.stdin.end();
