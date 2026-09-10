@@ -135,27 +135,38 @@ pub(crate) fn current_instance_id<R: tauri::Runtime>(app: &AppHandle<R>) -> Stri
     app.config().identifier.clone()
 }
 
-/// Build the full `BUZZ_MANAGED_AGENT=<instance-id>` env entry we match
-/// against when scanning processes. Kept here so the spawn stamp and the sweep
-/// matcher can never drift apart.
+/// Build the full `BUZZ_MANAGED_AGENT=<instance-id>` env entry for format tests.
+#[cfg(test)]
 pub(super) fn buzz_marker_entry(instance_id: &str) -> Vec<u8> {
     format!("BUZZ_MANAGED_AGENT={instance_id}").into_bytes()
 }
 
-/// Check if a running process is one of *our* managed agents: it must carry
-/// `BUZZ_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
-/// is this desktop instance's id. A process stamped with a *different* instance
-/// id belongs to another live Buzz app and must never be reaped here.
 #[cfg(target_os = "macos")]
-pub(crate) fn process_has_buzz_marker(pid: u32, instance_id: &str) -> bool {
-    let marker = buzz_marker_entry(instance_id);
-    let Some(buf) = sweep::procargs2_buffer(pid) else {
-        return false;
-    };
+fn process_env_value(pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+    let buf = sweep::procargs2_buffer(pid)?;
+    let env = procargs2_environment(&buf)?;
+    env.split(|&b| b == 0)
+        .find_map(|entry| entry.strip_prefix(key).map(Vec::from))
+}
 
+#[cfg(all(unix, not(target_os = "macos")))]
+fn process_env_value(pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+    let data = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    data.split(|&b| b == 0)
+        .find_map(|entry| entry.strip_prefix(key).map(Vec::from))
+}
+
+#[cfg(not(unix))]
+fn process_env_value(pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+    let _ = (pid, key);
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn procargs2_environment(buf: &[u8]) -> Option<&[u8]> {
     // Buffer layout: [i32 argc][exec_path\0][null padding][argv\0...][env\0...]
     if buf.len() < std::mem::size_of::<libc::c_int>() {
-        return false;
+        return None;
     }
     let mut n_args: libc::c_int = 0;
     unsafe {
@@ -186,22 +197,25 @@ pub(crate) fn process_has_buzz_marker(pid: u32, instance_id: &str) -> bool {
         }
         args_remaining -= 1;
     }
-    // Remaining bytes are null-delimited environment strings.
-    buf[pos..].split(|&b| b == 0).any(|entry| entry == marker)
+    Some(&buf[pos..])
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+/// Check if a running process is one of *our* managed agents: it must carry
+/// `BUZZ_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
+/// is this desktop instance's id. A process stamped with a *different* instance
+/// id belongs to another live Buzz app and must never be reaped here.
 pub(crate) fn process_has_buzz_marker(pid: u32, instance_id: &str) -> bool {
-    let marker = buzz_marker_entry(instance_id);
-    let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) else {
-        return false;
-    };
-    data.split(|&b| b == 0).any(|entry| entry == marker)
+    process_env_value(pid, b"BUZZ_MANAGED_AGENT=")
+        .is_some_and(|value| value.as_slice() == instance_id.as_bytes())
 }
 
-#[cfg(not(unix))]
-pub(crate) fn process_has_buzz_marker(_pid: u32, _instance_id: &str) -> bool {
-    false
+/// Read the unpredictable identity stamped on a Buzz harness generation.
+/// Descendants inherit it even when they daemonize and are reparented, while
+/// a later generation receives a different value.
+pub(crate) fn process_start_nonce(pid: u32) -> Option<String> {
+    process_env_value(pid, b"BUZZ_MANAGED_AGENT_START_NONCE=")
+        .filter(|value| !value.is_empty())
+        .and_then(|value| String::from_utf8(value).ok())
 }
 
 #[cfg(unix)]

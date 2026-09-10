@@ -109,14 +109,49 @@ pub(super) const PROC_PIDTBSDINFO: libc::c_int = 3;
 
 // ── Sweep ownership rule ──────────────────────────────────────────────────────
 //
-// The `BUZZ_MANAGED_AGENT` env marker is the SOLE authoritative ownership
-// proof for sweep/receipt decisions. Do NOT name-gate via
+// The `BUZZ_MANAGED_AGENT` env marker remains the authoritative instance
+// ownership gate for sweep/receipt decisions. For a marked process, a live
+// ancestry/PGID relationship OR a matching start nonce from a tracked harness
+// generation proves that it is still owned. Do NOT name-gate via
 // `process_belongs_to_us` here — custom harnesses use arbitrary binary names
 // and a name-gated predicate would silently leak their orphans (the old Linux
 // AND-gate bug). `process_belongs_to_us` remains in use only as a cheap
 // pre-check on paths that already know the binary (see runtime/stop.rs).
 // On Windows no `/proc`-based sweep runs, so `process_has_buzz_marker`
 // always returns `false`.
+
+fn tracked_generation_nonces(skip_pids: &[u32]) -> std::collections::HashSet<String> {
+    skip_pids
+        .iter()
+        .filter_map(|pid| process_start_nonce(*pid))
+        .collect()
+}
+
+/// True when a marked process is still owned by one of the currently tracked
+/// harness generations. The ancestry result remains authoritative when it is
+/// available; the nonce is the ownership receipt for descendants that have
+/// daemonized and been reparented outside the visible process tree.
+fn is_owned_by_tracked_generation(
+    live_descendant: bool,
+    candidate_start_nonce: Option<&str>,
+    tracked_nonces: &std::collections::HashSet<String>,
+) -> bool {
+    live_descendant
+        || candidate_start_nonce
+            .is_some_and(|nonce| !nonce.is_empty() && tracked_nonces.contains(nonce))
+}
+
+fn process_is_owned_by_tracked_generation(
+    pid: u32,
+    live_descendant: bool,
+    tracked_nonces: &std::collections::HashSet<String>,
+) -> bool {
+    is_owned_by_tracked_generation(
+        live_descendant,
+        process_start_nonce(pid).as_deref(),
+        tracked_nonces,
+    )
+}
 
 /// Enumerate all processes on the system owned by the current user and kill any
 /// agent binary stamped with *this* instance's `BUZZ_MANAGED_AGENT` marker
@@ -131,6 +166,7 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
     if pids.is_empty() {
         return;
     }
+    let tracked_nonces = tracked_generation_nonces(skip_pids);
     let my_pid = std::process::id() as i32;
     let mut orphans: Vec<i32> = Vec::new();
 
@@ -165,8 +201,12 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
-        if sweep::is_live_descendant_macos(upid, info.pbi_ppid, skip_pids) {
+        // Live descendants and same-generation detached descendants are exempt.
+        if process_is_owned_by_tracked_generation(
+            upid,
+            sweep::is_live_descendant_macos(upid, info.pbi_ppid, skip_pids),
+            &tracked_nonces,
+        ) {
             continue;
         }
         orphans.push(pid);
@@ -186,6 +226,7 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
     let my_uid = unsafe { libc::getuid() };
     let mut orphans: Vec<i32> = Vec::new();
     let my_pid = std::process::id() as i32;
+    let tracked_nonces = tracked_generation_nonces(skip_pids);
 
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return;
@@ -218,8 +259,12 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
-        if sweep::is_live_descendant_linux(upid, skip_pids) {
+        // Live descendants and same-generation detached descendants are exempt.
+        if process_is_owned_by_tracked_generation(
+            upid,
+            sweep::is_live_descendant_linux(upid, skip_pids),
+            &tracked_nonces,
+        ) {
             continue;
         }
         orphans.push(pid);
@@ -290,6 +335,7 @@ pub(crate) fn collect_same_instance_orphans(
     if pids.is_empty() {
         return orphans;
     }
+    let tracked_nonces = tracked_generation_nonces(skip_pids);
 
     for &pid in &pids {
         if pid <= 0 || pid == my_pid {
@@ -321,8 +367,12 @@ pub(crate) fn collect_same_instance_orphans(
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
-        if sweep::is_live_descendant_macos(upid, info.pbi_ppid, skip_pids) {
+        // Live descendants and same-generation detached descendants are exempt.
+        if process_is_owned_by_tracked_generation(
+            upid,
+            sweep::is_live_descendant_macos(upid, info.pbi_ppid, skip_pids),
+            &tracked_nonces,
+        ) {
             continue;
         }
         orphans.insert(upid);
@@ -338,6 +388,7 @@ pub(crate) fn collect_same_instance_orphans(
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
     let mut orphans = std::collections::HashSet::new();
+    let tracked_nonces = tracked_generation_nonces(skip_pids);
 
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return orphans;
@@ -369,8 +420,12 @@ pub(crate) fn collect_same_instance_orphans(
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
-        if sweep::is_live_descendant_linux(upid, skip_pids) {
+        // Live descendants and same-generation detached descendants are exempt.
+        if process_is_owned_by_tracked_generation(
+            upid,
+            sweep::is_live_descendant_linux(upid, skip_pids),
+            &tracked_nonces,
+        ) {
             continue;
         }
         orphans.insert(upid);
@@ -384,4 +439,29 @@ pub(crate) fn collect_same_instance_orphans(
     _skip_pids: &[u32],
 ) -> std::collections::HashSet<u32> {
     std::collections::HashSet::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_owned_by_tracked_generation;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generation_nonce_spares_only_matching_detached_processes() {
+        let tracked = HashSet::from(["generation-a".to_string()]);
+
+        assert!(is_owned_by_tracked_generation(
+            false,
+            Some("generation-a"),
+            &tracked,
+        ));
+        assert!(is_owned_by_tracked_generation(true, None, &tracked));
+        assert!(!is_owned_by_tracked_generation(
+            false,
+            Some("generation-b"),
+            &tracked,
+        ));
+        assert!(!is_owned_by_tracked_generation(false, Some(""), &tracked));
+        assert!(!is_owned_by_tracked_generation(false, None, &tracked));
+    }
 }

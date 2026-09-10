@@ -74,9 +74,8 @@ fn identifier_empty_returns_false() {
 
 #[test]
 fn marker_entry_is_namespaced_by_instance_id() {
-    // The spawn stamp and sweep matcher both go through buzz_marker_entry, pinning the on-the-wire
-    // format and guards against a dev build (`...app.dev`) matching a
-    // release build's (`...app`) agents.
+    // Pin the on-the-wire marker format and guard against a dev build
+    // (`...app.dev`) matching a release build's (`...app`) agents.
     assert_eq!(
         super::buzz_marker_entry("xyz.block.buzz.app"),
         b"BUZZ_MANAGED_AGENT=xyz.block.buzz.app".to_vec()
@@ -852,6 +851,344 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
     unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
     let _ = intermediate.wait();
+}
+
+/// Regression witness for detached daemon descendants. The child starts with
+/// the tracked harness's marker, then calls setsid() and outlives its
+/// intermediate parent. Once reparented, neither the PPID walk nor the PGID
+/// check can identify the live ownership relationship, so the generation
+/// identity must be part of the sweep decision.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn detached_marked_descendant_is_spared_while_harness_generation_is_tracked() {
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let instance_id = format!("phase2-detached-regression-{}", std::process::id());
+    let start_nonce = format!("phase2-generation-{}", std::process::id());
+    let mut harness = {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "/bin/sh -c '/usr/bin/setsid /bin/sleep 30 & echo $!' & /bin/sleep 30",
+        ])
+        .env("BUZZ_MANAGED_AGENT", &instance_id)
+        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce)
+        .stdout(Stdio::piped())
+        .process_group(0);
+        cmd.spawn().expect("spawn detached-descendant harness")
+    };
+    let harness_pid = harness.id();
+    let stdout = harness.stdout.take().expect("harness stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("read detached descendant PID");
+    let detached_pid: u32 = line.trim().parse().expect("parse detached descendant PID");
+
+    // Wait until setsid() has taken effect and the intermediate shell has
+    // exited. The host uses a subreaper, so PPID need not literally be 1;
+    // it must simply no longer point at the tracked harness, while PGID must
+    // be the detached process's own PID.
+    let reparented = (0..100).any(|_| {
+        let state = super::sweep::proc_stat_ppid_pgid_linux(detached_pid);
+        if let Some((ppid, pgid)) = state {
+            if ppid != harness_pid && pgid == detached_pid {
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        false
+    });
+    assert!(
+        reparented,
+        "detached descendant did not leave the harness tree"
+    );
+    assert!(
+        !super::sweep::is_live_descendant_linux(detached_pid, &[harness_pid]),
+        "the ancestry/PGID classifier must expose the detached shape"
+    );
+    assert!(
+        super::process::process_has_buzz_marker(detached_pid, &instance_id),
+        "the detached process must retain the Buzz marker"
+    );
+    assert_eq!(
+        super::process::process_start_nonce(harness_pid),
+        Some(start_nonce.clone()),
+        "the tracked harness must expose its generation identity"
+    );
+    assert_eq!(
+        super::process::process_start_nonce(detached_pid),
+        Some(start_nonce.clone()),
+        "the detached descendant must retain its generation identity"
+    );
+
+    // This is the regression assertion: a live tracked harness generation
+    // owns the detached marked descendant even though ancestry no longer can
+    // prove it. The pre-fix collector includes detached_pid and fails here.
+    let orphans = super::orphan_sweep::collect_same_instance_orphans(&instance_id, &[harness_pid]);
+    let orphans_without_tracked_root =
+        super::orphan_sweep::collect_same_instance_orphans(&instance_id, &[]);
+
+    // Detached children create their own session/group, so clean up both the
+    // original harness group and the detached group explicitly.
+    unsafe {
+        libc::kill(-(harness_pid as i32), libc::SIGTERM);
+        libc::kill(-(detached_pid as i32), libc::SIGKILL);
+    }
+    let _ = harness.wait();
+
+    assert!(
+        !orphans.contains(&detached_pid),
+        "detached marked descendant {detached_pid} was classified as an orphan: {orphans:?}"
+    );
+    assert!(
+        orphans_without_tracked_root.contains(&detached_pid),
+        "without a tracked root, the detached descendant must remain reclaimable"
+    );
+}
+
+/// Generation rollover must revoke ownership of detached descendants from the
+/// retired generation while retaining it for every currently tracked root.
+/// This uses the real Linux collector rather than only testing the nonce
+/// predicate: all candidates are live, marked processes in independent process
+/// groups, and the two-tick wrapper is exercised after the classification.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn detached_descendants_follow_current_tracked_generation_set() {
+    use std::collections::HashSet;
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    struct DetachedHarness {
+        child: Child,
+        root_pid: u32,
+        detached_pid: u32,
+    }
+
+    impl DetachedHarness {
+        fn retire_root(&mut self) {
+            if super::process::process_is_running(self.root_pid) {
+                unsafe { libc::kill(-(self.root_pid as i32), libc::SIGTERM) };
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    impl Drop for DetachedHarness {
+        fn drop(&mut self) {
+            for pid in [self.root_pid, self.detached_pid] {
+                if super::process::process_is_running(pid) {
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                }
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    fn spawn_detached_harness(
+        instance_id: Option<&str>,
+        start_nonce: Option<&str>,
+    ) -> DetachedHarness {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "/bin/sh -c '/usr/bin/setsid /bin/sleep 30 & echo $!' & /bin/sleep 30",
+            ])
+            // Make the negative cases independent of the environment running
+            // cargo test, then add only the requested ownership fields.
+            .env_remove("BUZZ_MANAGED_AGENT")
+            .env_remove("BUZZ_MANAGED_AGENT_START_NONCE")
+            .stdout(Stdio::piped())
+            .process_group(0);
+        if let Some(instance_id) = instance_id {
+            command.env("BUZZ_MANAGED_AGENT", instance_id);
+        }
+        if let Some(start_nonce) = start_nonce {
+            command.env("BUZZ_MANAGED_AGENT_START_NONCE", start_nonce);
+        }
+
+        let mut child = command.spawn().expect("spawn rollover harness");
+        let root_pid = child.id();
+        let stdout = child.stdout.take().expect("rollover harness stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .expect("read rollover descendant PID");
+        let detached_pid: u32 = line.trim().parse().expect("parse rollover descendant PID");
+
+        let detached = (0..100).any(|_| {
+            let state = super::sweep::proc_stat_ppid_pgid_linux(detached_pid);
+            if let Some((ppid, pgid)) = state {
+                if ppid != root_pid
+                    && pgid == detached_pid
+                    && !super::sweep::is_live_descendant_linux(detached_pid, &[root_pid])
+                {
+                    return true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        });
+        assert!(
+            detached,
+            "rollover descendant did not leave the tracked root's process tree"
+        );
+
+        DetachedHarness {
+            child,
+            root_pid,
+            detached_pid,
+        }
+    }
+
+    let instance_id = format!("phase2-rollover-{}", std::process::id());
+    let foreign_instance_id = format!("phase2-foreign-{}", std::process::id());
+    let nonce_1 = "phase2-generation-1";
+    let nonce_2 = "phase2-generation-2";
+    let nonce_3 = "phase2-generation-3";
+    let nonce_mismatch = "phase2-generation-mismatch";
+
+    // Generation A is initially tracked, so its detached N1 descendant is
+    // spared. Retiring A removes its nonce from the tracked set.
+    let mut generation_a = spawn_detached_harness(Some(&instance_id), Some(nonce_1));
+    assert!(super::process::process_has_buzz_marker(
+        generation_a.detached_pid,
+        &instance_id
+    ));
+    assert_eq!(
+        super::process::process_start_nonce(generation_a.root_pid),
+        Some(nonce_1.to_string())
+    );
+    assert_eq!(
+        super::process::process_start_nonce(generation_a.detached_pid),
+        Some(nonce_1.to_string())
+    );
+    let while_a =
+        super::orphan_sweep::collect_same_instance_orphans(&instance_id, &[generation_a.root_pid]);
+    assert!(
+        !while_a.contains(&generation_a.detached_pid),
+        "matching tracked generation must spare its detached descendant"
+    );
+    generation_a.retire_root();
+
+    // B and C are independently tracked current generations. The malformed
+    // root is included in skip_pids to prove that root presence alone does not
+    // add a nonce to the ownership set.
+    let generation_b = spawn_detached_harness(Some(&instance_id), Some(nonce_2));
+    let generation_c = spawn_detached_harness(Some(&instance_id), Some(nonce_3));
+    let mismatched = spawn_detached_harness(Some(&instance_id), Some(nonce_mismatch));
+    let missing_nonce = spawn_detached_harness(Some(&instance_id), None);
+    let foreign = spawn_detached_harness(Some(&foreign_instance_id), Some(nonce_2));
+    let unmarked = spawn_detached_harness(None, Some(nonce_2));
+    let tracked_roots = [
+        generation_b.root_pid,
+        generation_c.root_pid,
+        missing_nonce.root_pid,
+    ];
+
+    assert_eq!(
+        super::process::process_start_nonce(generation_b.detached_pid),
+        Some(nonce_2.to_string())
+    );
+    assert_eq!(
+        super::process::process_start_nonce(generation_c.detached_pid),
+        Some(nonce_3.to_string())
+    );
+    assert!(!super::process::process_has_buzz_marker(
+        foreign.detached_pid,
+        &instance_id
+    ));
+    assert_eq!(
+        super::process::process_start_nonce(foreign.detached_pid),
+        Some(nonce_2.to_string()),
+        "foreign process deliberately carries a current nonce but not our marker"
+    );
+    assert!(!super::process::process_has_buzz_marker(
+        unmarked.detached_pid,
+        &instance_id
+    ));
+    assert_eq!(
+        super::process::process_start_nonce(unmarked.detached_pid),
+        Some(nonce_2.to_string())
+    );
+
+    let after_rollover =
+        super::orphan_sweep::collect_same_instance_orphans(&instance_id, &tracked_roots);
+    assert!(
+        after_rollover.contains(&generation_a.detached_pid),
+        "retired N1 descendant must become reclaimable while B/C are tracked"
+    );
+    assert!(
+        !after_rollover.contains(&generation_b.detached_pid),
+        "tracked N2 descendant must be spared"
+    );
+    assert!(
+        !after_rollover.contains(&generation_c.detached_pid),
+        "tracked N3 descendant must be spared"
+    );
+    assert!(
+        after_rollover.contains(&mismatched.detached_pid),
+        "tracked roots with only N2/N3 must not spare mismatched nonce"
+    );
+    assert!(
+        after_rollover.contains(&missing_nonce.detached_pid),
+        "a marked descendant without a nonce must remain reclaimable"
+    );
+    assert!(
+        !after_rollover.contains(&foreign.detached_pid),
+        "a foreign-instance marker must remain outside this collector"
+    );
+    assert!(
+        !after_rollover.contains(&unmarked.detached_pid),
+        "a nonce without the current Buzz marker must remain outside this collector"
+    );
+
+    // With no tracked root, even a formerly valid generation nonce confers no
+    // liveness. The process is still alive here, so this is a real collector
+    // observation rather than a helper-only assertion.
+    let without_tracked_root =
+        super::orphan_sweep::collect_same_instance_orphans(&instance_id, &[]);
+    assert!(
+        without_tracked_root.contains(&generation_a.detached_pid),
+        "formerly valid N1 descendant must be reclaimable with no tracked root"
+    );
+    assert!(
+        without_tracked_root.contains(&generation_b.detached_pid),
+        "N2 must also be reclaimable when B is no longer tracked"
+    );
+    assert!(
+        without_tracked_root.contains(&generation_c.detached_pid),
+        "N3 must also be reclaimable when C is no longer tracked"
+    );
+
+    // Non-matching candidates enter the two-tick set and are reaped on the
+    // second observation; matching N2/N3 candidates never enter either set.
+    let first_tick = super::orphan_sweep::sweep_system_agent_processes_with_grace(
+        &instance_id,
+        &tracked_roots,
+        &HashSet::new(),
+    );
+    assert!(!first_tick.contains(&generation_b.detached_pid));
+    assert!(!first_tick.contains(&generation_c.detached_pid));
+    let second_tick = super::orphan_sweep::sweep_system_agent_processes_with_grace(
+        &instance_id,
+        &tracked_roots,
+        &first_tick,
+    );
+    assert!(!second_tick.contains(&generation_b.detached_pid));
+    assert!(!second_tick.contains(&generation_c.detached_pid));
+    assert!(super::process::process_is_running(
+        generation_b.detached_pid
+    ));
+    assert!(super::process::process_is_running(
+        generation_c.detached_pid
+    ));
 }
 
 // ── pair receipt validation tests ───────────────────────────────────────
