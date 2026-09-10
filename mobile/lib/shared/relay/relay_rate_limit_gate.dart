@@ -21,6 +21,9 @@ class RelayRateLimitGate {
 
   final DateTime Function() _now;
   final RelayTimerFactory _timerFactory;
+
+  /// Monotonic revision of admitted capacity pauses, including extensions.
+  int epoch = 0;
   DateTime? _expiresAt;
   Timer? _timer;
   Completer<void>? _completer;
@@ -53,6 +56,7 @@ class RelayRateLimitGate {
     final currentExpiry = _expiresAt;
     if (currentExpiry != null && !newExpiry.isAfter(currentExpiry)) return;
 
+    epoch++;
     _expiresAt = newExpiry;
     _timer?.cancel();
     _completer ??= Completer<void>();

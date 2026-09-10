@@ -31,6 +31,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return {};
   }
 
+  /// Latest observed profile revision; read-only fencing for publication.
+  ({int createdAt, String eventId})? profileEventOrder(String key) =>
+      _profileEventOrders[key];
+
   /// Request a profile for [pubkey]. Returns immediately from cache if
   /// available, otherwise schedules a batch fetch.
   UserProfile? get(String pubkey) {

@@ -24,6 +24,26 @@ export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
 
+final _publicationGuardKey = Object();
+
+/// Carries a synchronous local operation fence through async delivery adapters.
+/// The fence runs after transport backpressure and before socket enqueue only;
+/// it never changes how an already transmitted event's ACK is accounted for.
+/// Nested scopes retain their enclosing operation fence. Other callers need not
+/// opt in. This is not atomic authorization against unobserved remote changes.
+T withRelayPublicationGuard<T>(void Function() check, T Function() deliver) {
+  final enclosing = Zone.current[_publicationGuardKey] as void Function()?;
+  return runZoned(
+    deliver,
+    zoneValues: {
+      _publicationGuardKey: () {
+        enclosing?.call();
+        check();
+      },
+    },
+  );
+}
+
 class _HistorySubscription {
   final List<NostrEvent> events = [];
   final Completer<List<NostrEvent>> completer;
@@ -327,6 +347,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _unsubscribe(subId);
   }
 
+  /// Publishes after backpressure; the operation scope may synchronously abort.
+  /// Once enqueued, ACKs settle normally even if the operation later expires.
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
@@ -337,6 +359,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       throw StateError('Relay session is not connected');
     }
 
+    // No await between the operation fence and the actual socket enqueue.
+    // This is local observed currentness, not network-atomic authorization.
+    (Zone.current[_publicationGuardKey] as void Function()?)?.call();
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -381,7 +406,22 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugDispose() => _dispose();
 
   @visibleForTesting
-  void debugSupersedeConnection() => _connectionGeneration++;
+  void debugSupersedeConnection() => _supersedeConnection();
+
+  int _supersedeConnection() {
+    return ++_connectionGeneration;
+  }
+
+  /// Selected evidence cannot cross socket replacement or a capacity pause.
+  bool Function() retainPublicationEvidence() {
+    final generation = _connectionGeneration;
+    final epoch = _rateLimitGate.epoch;
+    final admitted = !_rateLimitGate.isActive;
+    return () =>
+        admitted &&
+        _isActiveConnection(generation) &&
+        epoch == _rateLimitGate.epoch;
+  }
 
   @visibleForTesting
   void debugHandleDisconnected([Object? error]) {
@@ -494,7 +534,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _connect(RelayConfig config) async {
     if (_disposed) return;
 
-    final generation = ++_connectionGeneration;
+    final generation = _supersedeConnection();
     state = SessionState(
       status: _hasConnectedOnce
           ? SessionStatus.reconnecting

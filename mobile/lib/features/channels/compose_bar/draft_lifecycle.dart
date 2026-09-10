@@ -19,6 +19,7 @@ Future<void> _sendTextOnlyDraft({
   required ComposeBarOnSend onSend,
   required ScaffoldMessengerState? messenger,
 }) async {
+  var delivered = false;
   TextEditingValue? clearedDraftText;
   Map<String, MentionCandidate>? clearedDraftMentions;
   int? clearedDraftRevision;
@@ -55,6 +56,7 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
+    delivered = true;
   } on _ComposeAuthorizationCancelled {
     restoreClearedDraft();
   } on StateError {
@@ -64,9 +66,13 @@ Future<void> _sendTextOnlyDraft({
     // The caller runs unawaited, so surface publish failures and restore the
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
-    messenger?.showSnackBar(
-      SnackBar(content: Text(_composeSendErrorMessage(error))),
-    );
+    if (outgoing.acceptedInvitations == 0) {
+      messenger?.showSnackBar(
+        SnackBar(content: Text(_composeSendErrorMessage(error))),
+      );
+    }
+  } finally {
+    if (!delivered) outgoing.reportIncomplete(messenger);
   }
 }
 

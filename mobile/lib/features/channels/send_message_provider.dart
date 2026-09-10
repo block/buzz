@@ -97,15 +97,18 @@ class SendMessage {
     _ensureDeliveryValid();
     NostrEvent? localMessage;
     try {
-      await _signedEventRelay.submit(
-        kind: EventKind.streamMessage,
-        content: content,
-        tags: tags,
-        onSigned: (event) {
-          localMessage = event;
-          _markLocalMessageForAnimation(channelId, event.id);
-          _addLocalMessage(channelId, event);
-        },
+      await withRelayPublicationGuard(
+        _ensureDeliveryValid,
+        () => _signedEventRelay.submit(
+          kind: EventKind.streamMessage,
+          content: content,
+          tags: tags,
+          onSigned: (event) {
+            localMessage = event;
+            _markLocalMessageForAnimation(channelId, event.id);
+            _addLocalMessage(channelId, event);
+          },
+        ),
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);

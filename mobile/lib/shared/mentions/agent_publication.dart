@@ -67,3 +67,30 @@ Future<void> authorizeAgentMentions(
     throw Exception(message);
   }
 }
+
+/// Session-bound all-key evidence reader. Saved agent keys are denial-only taint.
+typedef SelectedMentionAuthorizationReader =
+    Future<Map<String, SelectedMentionAuthorization>> Function(
+      Set<String> keys,
+      Set<String> priorAgentKeys,
+      String viewer,
+      String channelId,
+      bool Function() isCurrent,
+      void Function(Map<String, NostrEvent>) onProfileEvidence,
+    );
+
+/// Read-only publication seam; does not populate suggestion/profile caches.
+final selectedMentionAuthorizationReaderProvider =
+    Provider<SelectedMentionAuthorizationReader>((ref) {
+      final session = ref.watch(relaySessionProvider.notifier);
+      return (keys, prior, viewer, channel, current, observed) =>
+          readSelectedMentionAuthorization(
+            session,
+            keys,
+            viewer: viewer,
+            channelId: channel,
+            priorAgentKeys: prior,
+            isCurrent: current,
+            onProfileEvidence: observed,
+          );
+    });

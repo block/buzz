@@ -84,7 +84,12 @@ void sendLifecycleTests() {
       }
     });
   }
-  for (final action in ['revisit', 'cancel', 'partial refusal']) {
+  for (final action in [
+    'revisit',
+    'cancel',
+    'partial refusal',
+    'accepted scope switch',
+  ]) {
     testWidgets('$action cannot finish an old membership batch', (
       tester,
     ) async {
@@ -98,6 +103,9 @@ void sendLifecycleTests() {
       Widget build({String? thread}) => _buildComposeBar(
         uploadService: service,
         currentPubkey: signer.public,
+        relayConfig: () => _SwitchableRelayConfigNotifier(
+          RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+        ),
         relayAgents: [
           _testAgent('b' * 64),
           AgentDirectoryEntry(
@@ -126,6 +134,11 @@ void sendLifecycleTests() {
             if (event['kind'] == 9000) await gate.future;
           },
           onEventAcknowledged: (event) {
+            if (action == 'accepted scope switch' && event['kind'] == 9000) {
+              container
+                  .read(relayConfigProvider.notifier)
+                  .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+            }
             if (action == 'partial refusal' && event['kind'] == 9000) {
               session.debugAttachSocketForTest(
                 _RecordingRelaySocket(
@@ -138,10 +151,11 @@ void sendLifecycleTests() {
           },
         ),
       );
-      if (action == 'cancel') {
+      if (action == 'cancel' || action == 'revisit') {
         await _openAttachmentMenu(tester);
         await tester.tap(find.text('Video'));
         await tester.pumpAndSettle();
+        expect(find.byTooltip('Remove attachment'), findsOneWidget);
       }
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
@@ -155,11 +169,14 @@ void sendLifecycleTests() {
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
+      expect(find.textContaining('Invitations take effect'), findsOneWidget);
       await tester.tap(find.text('Invite'));
       await tester.pump();
       expect(events.where((e) => e['kind'] == 9000), hasLength(1));
       if (action == 'cancel') {
         await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('Cancel'), findsNothing);
+        expect(find.text('Stop remaining'), findsOneWidget);
         await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
       } else if (action == 'revisit') {
         await tester.pumpWidget(build(thread: 'other'));
@@ -167,9 +184,33 @@ void sendLifecycleTests() {
       }
       gate.complete();
       await tester.pumpAndSettle();
+      if (action == 'accepted scope switch') {
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      }
+      expect(
+        find.textContaining('1 invitation(s) completed and remain in effect'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Your draft is kept'), findsNothing);
+      expect(
+        find.textContaining('https://relay.example / channel-1'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('attachments may need reattaching'),
+        findsOneWidget,
+      );
+      if (action == 'revisit') {
+        expect(find.byTooltip('Remove attachment'), findsNothing);
+      }
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
       expect(sends, 0);
+      if (action == 'accepted scope switch') {
+        expect(events.where((e) => e['kind'] == 9000), hasLength(1));
+        return;
+      }
       await tester.tap(find.text('@Helper Bot @Other Bot'));
       await tester.pumpAndSettle();
       expect(
