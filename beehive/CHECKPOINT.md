@@ -5,6 +5,68 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Local management-client journal continuation 90950bdd
+
+Started verified published HEAD `6f893f51d20d93ff25770b66f3b52b50bcff151e`.
+`src/intents.ts` is LOCAL TUI/client state, not a controller process/service.
+No dependency, private-host-key, ordinary conversation permission or runtime change.
+TUI automatically creates owner-only `management-intents/<relay+owner digest>/`
+beside the existing operator identity. Each submitted operation is encrypted/signed
+ONCE, fsynced with an exclusive immutable intent file before any send, and replayed
+on bounded WS reconnect or ordinary reopen. A duplicate operation ID cannot prepare
+a replacement. Receipts are encrypted in separate exclusive files; stale publication
+observations cannot erase a terminal result. 1,000 intents maximum; no pruning yet.
+
+Host receipts now include the existing request fingerprint. Matching requires the
+actual owner decryption/signature, exact relay journal scope, host, agent, operation
+ID and fingerprint. Host outbox/operations remain lifecycle truth; no second admission
+model. Relay echo is publication evidence, not host admission/completion. The UI
+shows pending/completed/failed/unknown, with `operations` for retained details, and
+prints host/action/result rather than requiring operation IDs. Quit cancels transport
+reconnect only; it never cancels an operation or stops a host. Save remains selected-next.
+
+`test/intents.test.ts` proves actual socket loss before publication, reopen applying
+the original Start once, retained terminal results, unrelated/duplicate receipts not
+closing another intent, permanent host rejection, and relay-side socket termination
+when delivering a Stop receipt AFTER the host journal has committed stopped. Automatic
+client reconnect recovers that receipt. A separate actual Node subprocess exits 23
+without running the network event loop or graceful close after preparing an intent;
+reopen publishes byte-identical envelope, verified against the relay's stored log.
+Tampered signature fails closed. Relay policy close 1008 remains UNKNOWN and durably
+blocks blind automatic replay across reopen; no fabricated host failure. Normal
+network loss retries eight times; exhausted/offline pending work remains durable.
+File writes propagate errors instead of being swallowed as malformed network input.
+
+Evidence: strict TypeScript + full installed-enabled package suite **16/16** passed.
+After human-readable connection/status display refinement, strict + targeted real
+TUI/client suites **5/5** passed; final source strict + full default suite
+**15 pass / 1 installed opt-in skip** passed (the unchanged installed path was not
+repeated). Prior installed runtime evidence retained; this run
+also produced three verified fixture replies from agent
+`b727bb8ae1e277a522f8dbad00aae15cc7b71e39c57d43e7f5d532529e8087aa`.
+No real provider/admission calls, production activity, full repo CI or PR/merge/release.
+Independent preceding broad-tool/reconnect review still in progress (evidence directory
+exists; no completed report received). Existing B1/D1-D3 conclusions retained, not
+reopened or treated as approval of this new journal delta.
+
+Limits: relay URL is the community scope in this development topology, not a stable
+production community identifier. Publication echo observation is session-local; terminal
+host results persist. There is no relay per-event rejection/ACK protocol: policy failure
+is conservatively UNKNOWN/blocked, not claimed failed; explicit guided recovery and
+journal retention remain future UX work. Pre-upgrade host receipts lack fingerprints
+and cannot complete new journal intents. Arbitrary disk rollback, malicious local
+operator, simultaneous UI action coordination, log-full recovery and host SIGKILL
+recovery are not proved. Single-operation exclusive files prevent conflicting-ID
+replacement and receipt overwrite, not distributed UI serialization. Crash test is
+process exit without cleanup, not machine power-loss proof. Stop-during-Start remains
+covered by unchanged full-suite regressions; no claim that this new test automates the
+entire interactive crash workflow.
+
+**ONE next executable step:** independent review and real interactive TUI recovery
+acceptance of this client journal, especially policy-failure UNKNOWN recovery and
+receipt ordering, before expanding to the two-host same-identity assignment/Move slice.
+Full remaining parity scope below remains active, not declared complete.
+
 ## Recovery 4200a3ab
 
 Recovered clean HEAD `f8f161ffc10f274e13b9e1cd984ca8ffc2897cfd`, not
@@ -181,12 +243,10 @@ cryptographic signing key configured, so no invented signer/signature claim.
 
 ## Remaining product scope / ONE next executable step
 
-**Next:** add a durable controller pending-intent journal and receipt matching,
-then wire TUI reconnect/replay so a command saved locally before socket loss
-converges using its original operation ID even if it never reached the relay.
-Use a dropped-before-publication and dropped-after-commit test; retain UNKNOWN
-until a matching host receipt. Host-side recovery is now implemented above.
-Independent multi-tool and reconnect delta review can proceed against this artifact.
+**Next:** independently review and exercise the local client-journal recovery
+implemented above, including policy-failure UNKNOWN handling, then proceed to
+two-host identity assignment/Move. The bounded journal is not full recovery/parity
+completion. Independent multi-tool and reconnect review remains pending.
 
 README retains the full parity matrix: reconnect/ACKs/crash recovery; multiple
 hosts/agents/setups and S1 two-host identity; reusable profiles/metadata/history;

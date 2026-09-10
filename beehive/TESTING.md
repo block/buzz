@@ -17,6 +17,17 @@ A fresh-store/fresh-node_modules frozen install fetched all seven packages;
 strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
 `--ignore-workspace` so installation does not expand to unrelated client packages.
 
+## Client journal continuation
+
+`intents.test.ts`: real WS loss before publication, original-envelope reopen,
+post-host-commit receipt loss and automatic reconnect, retained terminal rejection,
+unrelated/duplicate receipt fencing, abrupt child-process exit before network effects,
+exact ciphertext/signature relay storage comparison, tampered file rejection, and
+policy close 1008 blocking blind retries across reopen. Strict + installed-enabled
+full suite passed 16/16; after status wording refinement strict + targeted TUI/client
+5/5 passed, then final source strict/full default 15 pass + 1 opt-in skip. These fixtures do not establish production community admission, hostile
+local storage/power loss or a polished manual recovery UX. See current CHECKPOINT.
+
 ## Automated production seams
 
 - `slice.test.ts`: malformed/wrong-owner/tampered encryption envelopes; real

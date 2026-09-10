@@ -74,7 +74,7 @@ export async function host(directory: string, url: string) {
     const fingerprint = digest(JSON.stringify(m)).toString('hex');
     const previous = Object.hasOwn(state.operations,m.id) ? state.operations[m.id] : undefined;
     if (previous) {
-      publish(previous.fingerprint === fingerprint ? previous.reply : message('receipt',setup.host,m.agent,state.revision,{ operation: m.id, result: 'operation-id-conflict' })); return;
+      publish(previous.fingerprint === fingerprint ? previous.reply : message('receipt',setup.host,m.agent,state.revision,{ operation: m.id, fingerprint, result: 'operation-id-conflict' })); return;
     }
     let result = 'accepted';
     if (m.agent !== agent) result = 'not-authority';
@@ -82,7 +82,7 @@ export async function host(directory: string, url: string) {
     else if ((state.phase === 'quarantined' || state.phase === 'transitioning') && !(m.type === 'stop' && (owned instanceof ConversationSession ? owned.connected : owned?.child.connected))) result = 'quarantined';
     else {
       // Reserve operation before any spawn/kill; interrupted admission never retries effects.
-      const pending = message('receipt',setup.host,agent,state.revision,{ operation: m.id, result: 'interrupted-reconcile-locally' });
+      const pending = message('receipt',setup.host,agent,state.revision,{ operation: m.id, fingerprint, result: 'interrupted-reconcile-locally' });
       state.operations[m.id] = { fingerprint, reply: pending }; save();
       try {
         if (m.type === 'save') {
@@ -143,7 +143,7 @@ export async function host(directory: string, url: string) {
         result = error instanceof Error ? error.message : 'Operation failed';
       }
     }
-    const reply = message('receipt',setup.host,m.agent,state.revision,{ operation: m.id, result });
+    const reply = message('receipt',setup.host,m.agent,state.revision,{ operation: m.id, fingerprint, result });
     Object.defineProperty(state.operations,m.id,{ value: { fingerprint, reply }, enumerable: true, configurable: true, writable: true });
     state.outbox.push(reply); save(); publish(reply); publish(inventory());
   }

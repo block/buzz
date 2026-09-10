@@ -1,10 +1,10 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup } from './host.ts';
-import { connect } from './client.ts';
+import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { prepareConversation } from './conversation.ts';
@@ -87,23 +87,24 @@ async function main() {
   } else if (command === 'tui') {
     const secret = text(object(readPrivate(resolve(text(args[0])))).secret);
     const inventory = new Map<string,Message>();
-    const client = connect(text(args[1]),secret,m => {
+    const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       if (m.type === 'inventory') {
         const prior = inventory.get(m.host);
         if (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt)) inventory.set(m.host,m);
       }
-      if (m.type === 'receipt') console.log(`\nHost receipt (may be replayed) ${m.body.operation}: ${JSON.stringify(m.body)}`);
+    }, () => {
+      console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; reconnect attempts are bounded.');
+      for (const operation of client.status()) console.log(`${operation.request.host} ${operation.request.type}: ${operation.state} | ${operation.result ?? operation.publication}`);
     });
-    await client.ready;
-    let intentionalClose = false;
-    client.socket.on('close',() => { if (!intentionalClose) console.log('\nRelay disconnected: live status and unresolved requests UNKNOWN. Received receipts remain valid. Reopen TUI.'); });
+    try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: hosts, select <host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, hosts, select <host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
     let selected = '';
     try {
       for (;;) {
         const line = (await ui.question('beehive> ')).trim();
         if (line === 'quit') break;
+        if (line === 'operations') { console.log(JSON.stringify(client.status(),null,2)); continue; }
         if (line === 'hosts') { for (const [name,m] of inventory) console.log(`${name}: ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'recent host report'}`); continue; }
         if (line.startsWith('select ')) { selected = line.slice(7); continue; }
         const current = inventory.get(selected);
@@ -117,10 +118,10 @@ async function main() {
           body = { model: await ui.question('Model: '), workspace: await ui.question('Workspace: '), profile: await ui.question('Behavior profile: ') };
         }
         const request = message(line as 'save' | 'start' | 'stop',selected,current.agent,current.revision,body);
-        client.send(request);
-        console.log(`Requested ${line} (${request.id}); publication is NOT host acceptance.`);
+        try { client.submit(request); } catch (error) { console.log(error instanceof Error ? error.message : 'Operation not submitted'); continue; }
+        console.log(`Durably pending ${line} (${request.id}); publication is NOT host acceptance.`);
       }
-    } finally { intentionalClose = true; ui.close(); client.close(); console.log('UI closed; host lifetime is independent.'); }
+    } finally { ui.close(); client.close(); console.log('UI closed; host lifetime is independent.'); }
   } else console.log(help);
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : 'Beehive failed'); process.exitCode = 1; });
