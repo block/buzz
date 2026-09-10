@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { prepareAgent, type AgentLaunch, type Evidence } from './acp.ts';
+import { ReplyTool } from './reply-tool.ts';
 import { prepareConversation, type ConversationSetup } from './conversation.ts';
 
 type RPC = { jsonrpc: string; id?: string | number; method?: string; params?: any; result?: any; error?: unknown };
@@ -19,6 +20,7 @@ export class ConversationSession {
   private capability = randomBytes(32).toString('hex');
   private sockets = new Set<Socket>();
   private harnesses: OwnedProcess[] = [];
+  private tools: ReplyTool[] = [];
   private shimPids = new Set<number>();
   private runtime?: OwnedProcess;
   private cancellations: (() => void)[] = [];
@@ -70,6 +72,7 @@ export class ConversationSession {
     if (this.failed) return;
     this.failed = true; clearTimeout(this.timeout); this.reject(Error(reason));
     for (const socket of this.sockets) socket.destroy();
+    for (const tool of this.tools) void tool.stop().catch(() => {}); // Retained promise is checked by stop().
     // Keep ownership handles until the caller verifies complete teardown.
   }
   /** Interrupt Start without allowing late ACP responses to commit readiness. */
@@ -91,7 +94,7 @@ export class ConversationSession {
     this.stopping = (async () => {
       await this.ready.catch(() => {});
       await new Promise<void>(resolve => this.server.close(() => resolve()));
-      const results = await Promise.allSettled([...this.harnesses, ...(this.runtime ? [this.runtime] : [])].map(p => p.stop()));
+      const results = await Promise.allSettled([...this.tools, ...this.harnesses, ...(this.runtime ? [this.runtime] : [])].map(p => p.stop()));
       if (results.some(r => r.status === 'rejected')) throw Error('Conversation ownership teardown failed; reconcile locally');
       // These numeric IDs are absence observations ONLY, never kill authority.
       // A shim is childless and exits on EOF even though upstream gave it a new PGID.
@@ -144,6 +147,12 @@ export class ConversationSession {
     });
   }
   private proxy(socket: Socket, harness: OwnedProcess, initial: string) {
+    const tool = this.plan.replyTool ? new ReplyTool(join(this.directory, `tool-${this.tools.length}`), this.plan.replyTool, this.plan.workspace, {
+      PATH: '/usr/bin:/bin', HOME: this.prepared.plan.home,
+      BUZZ_PRIVATE_KEY: this.plan.env.BUZZ_PRIVATE_KEY, BUZZ_RELAY_URL: this.plan.env.BUZZ_RELAY_URL,
+      ...(this.plan.env.BUZZ_AUTH_TAG ? { BUZZ_AUTH_TAG: this.plan.env.BUZZ_AUTH_TAG } : {}),
+    }, () => this.fail('Scoped Buzz reply tool failed (diagnostics withheld)')) : undefined;
+    if (tool) this.tools.push(tool);
     const pending = new Map<string | number, Pending>();
     const sessions = new Set<string>();
     const modelConfigs = new Set<string>(['model']);
@@ -167,9 +176,11 @@ export class ConversationSession {
       if (!fromHarness && msg.method) {
         const p = msg.params;
         // Session transport does not grant a shim authority to provision tools,
-        // workspaces or credentials. This slice has no locally approved MCP plan.
+        // workspaces or credentials. Replace only empty upstream provisioning with
+        // the host-local fixed reply adapter; never forward a supplied command.
         if (['session/new', 'session/load', 'session/resume'].includes(msg.method)) {
           if (p?.cwd !== this.prepared.plan.workspace || !Array.isArray(p.mcpServers) || p.mcpServers.length) throw Error();
+          if (tool) p.mcpServers = [tool.descriptor];
           sessions.delete(p.sessionId);
         }
         if (p && ['env', 'environment', 'executable', 'command'].some(key => Object.hasOwn(p, key))) throw Error();
@@ -182,10 +193,19 @@ export class ConversationSession {
         if (['session/set_model', 'session/set_config_option'].includes(msg.method)) sessions.delete(p?.sessionId);
         if (msg.method === 'session/prompt') {
           if (!sessions.has(p?.sessionId) || prompts.has(p.sessionId) || msg.id === undefined) throw Error();
+          if (tool) {
+            if (prompts.size) throw Error();
+            // This is a locally pinned single-thread grant, NOT authority parsed
+            // out of user text. Refuse prompts lacking the expected upstream routing
+            // instruction; parsing cannot enlarge the host's fixed destination.
+            const text = JSON.stringify(p.prompt);
+            if (!text.includes(`--reply-to ${this.plan.replyTool!.parent}`) || !text.includes(this.plan.replyTool!.channel)) throw Error();
+          }
+          tool?.setActive(true);
           prompts.set(p.sessionId, { id: msg.id, hash: createHash('sha256'), text: false, cancelled: false });
         }
         if (msg.method === 'session/cancel') {
-          const prompt = prompts.get(p?.sessionId); if (prompt) prompt.cancelled = true;
+          const prompt = prompts.get(p?.sessionId); if (prompt) { prompt.cancelled = true; tool?.setActive(false); }
         }
       }
       if (fromHarness && !msg.method && msg.id !== undefined) {
@@ -198,7 +218,12 @@ export class ConversationSession {
         const request = pending.get(msg.id);
         if (!request) throw Error();
         pending.delete(msg.id);
-        if (['session/new', 'session/load', 'session/resume', 'session/set_config_option'].includes(request.method) && msg.error === undefined) {
+        // B1: optional-setting application errors are recoverable upstream. Do
+        // not assume rejection had no side effect: re-ack the exact model before
+        // forwarding that original error. Model-changing errors remain fail-closed.
+        const optionalConfig = request.method === 'session/set_config_option' && !modelConfigs.has(request.params?.configId);
+        if (request.method === 'session/set_config_option' && !optionalConfig && msg.error !== undefined) throw Error();
+        if (['session/new', 'session/load', 'session/resume', 'session/set_config_option'].includes(request.method) && (msg.error === undefined || optionalConfig)) {
           const session = msg.result?.sessionId ?? request.params?.sessionId;
           if (!validID(session) || sessions.size >= 128 || injected.size >= 128) throw Error();
           for (const option of msg.result?.configOptions ?? []) {
@@ -216,7 +241,7 @@ export class ConversationSession {
           sessions.add(request.params.sessionId);
         }
         if (request.method === 'session/prompt') {
-          const session = request.params.sessionId; const prompt = prompts.get(session); prompts.delete(session);
+          const session = request.params.sessionId; const prompt = prompts.get(session); prompts.delete(session); tool?.setActive(false);
           if (msg.error === undefined && msg.result?.stopReason === 'end_turn' && prompt?.text && !prompt.cancelled) {
             const evidence: Evidence = { session, model: this.prepared.plan.model, executableHash: this.prepared.executableHash, responseHash: prompt.hash.digest('hex'), stopReason: 'end_turn', source: 'external-buzz-conversation', agentPublicKey: this.plan.agentPublicKey, runtimeExecutableHash: this.plan.executableHash };
             // Defer commit until all lines in this batch have been validated (D3).

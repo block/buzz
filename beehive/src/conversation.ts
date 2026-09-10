@@ -2,10 +2,11 @@ import { accessSync, constants, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { prepareAgent, type AgentLaunch } from './acp.ts';
+import { prepareReplyTool, type ReplyToolSetup } from './reply-tool.ts';
 import { publicKey } from './protocol.ts';
 
 /** Host-local external transport configuration. Never accepted through management messages. */
-export type ConversationSetup = { executable: string; relay: string; authTag?: string };
+export type ConversationSetup = { executable: string; relay: string; authTag?: string; replyTool?: ReplyToolSetup };
 /** Launch intent, not a claim of relay admission or a model-confirmed conversation. */
 export type ConversationPlan = ReturnType<typeof prepareConversation>;
 
@@ -17,6 +18,7 @@ export type ConversationPlan = ReturnType<typeof prepareConversation>;
 export function prepareConversation(input: ConversationSetup, agent: AgentLaunch, agentSecret: string, owner: string) {
   const prepared = prepareAgent(agent);
   const agentPublicKey = publicKey(agentSecret);
+  if (input.replyTool && input.replyTool.recipient !== owner) throw Error('This reply tool supports the explicit owner recipient only');
   if (!/^[a-f0-9]{64}$/.test(owner)) throw Error('Invalid conversation owner public key');
   if (!isAbsolute(input.executable) || realpathSync(input.executable) !== input.executable) throw Error('Conversation executable must be a canonical absolute path');
   accessSync(input.executable, constants.X_OK);
@@ -27,6 +29,7 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
   if (prepared.plan.args.some(a => a.includes(',') || a.includes('\0') || !a.length)) throw Error('ACP arguments cannot contain commas, NUL or empty values');
   if (input.authTag !== undefined && (typeof input.authTag !== 'string' || input.authTag.length > 16384 || !input.authTag.length)) throw Error('Invalid local owner attestation');
   return Object.freeze({
+    replyTool: input.replyTool ? prepareReplyTool(input.replyTool) : undefined,
     executable: input.executable,
     executableHash: createHash('sha256').update(readFileSync(input.executable)).digest('hex'),
     workspace: prepared.plan.workspace,
@@ -53,6 +56,6 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
 }
 
 /** Safe remote summary. Credentials and executable paths are never included. */
-export function conversationSummary(_setup: ConversationSetup) {
-  return { transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'host-owned ACP broker; awaiting conversation evidence' };
+export function conversationSummary(setup: ConversationSetup) {
+  return { replyTool: setup.replyTool ? 'fixed-owner-thread' : 'disabled', transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'host-owned ACP broker; awaiting conversation evidence' };
 }

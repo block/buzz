@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
-import { mkdtempSync, realpathSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -12,19 +12,22 @@ import { ConversationSession } from '../src/broker.ts';
 import { newKey, publicKey } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-test('installed buzz-acp authenticates and completes the same identity-bearing conversation through broker', { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+test('installed buzz-acp completes a signed scoped threaded reply through the actual Buzz CLI', { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
   writeFileSync(join(dir, 'mode'), 'ok');
   const secret = newKey(); const ownerSecret = newKey(); const agent = publicKey(secret); const owner = publicKey(ownerSecret);
   const channel = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  let replyID = '';
   let authenticated = false; let subscriptions = 0; let delivered = false;
   function observeReply(e: any) {
     if (![9, 40002].includes(e.kind) || e.pubkey !== agent) return;
-    assert.ok(schnorr.verify(e.sig, e.id, agent));
+    const hash = createHash('sha256').update(JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content])).digest('hex');
+    assert.equal(e.id, hash); assert.ok(schnorr.verify(e.sig, hash, agent));
+    assert.deepEqual(e.tags.filter((t: string[]) => t[0] === 'p').map((t: string[]) => t[1]), [owner]);
     assert.ok(e.tags.some((t: string[]) => t[0] === 'h' && t[1] === channel));
     assert.ok(e.tags.some((t: string[]) => t[0] === 'e' && t[1] === inbound.id));
     assert.ok(e.content.includes('Private conversation fixture response'));
-    delivered = true;
+    replyID = e.id; delivered = true;
   }
   function event(kind: number, tags: string[][], content: string, key = ownerSecret) {
     const pubkey = publicKey(key); const created_at = Math.floor(Date.now() / 1000);
@@ -39,7 +42,7 @@ test('installed buzz-acp authenticates and completes the same identity-bearing c
     res.setHeader('Content-Type', 'application/json');
     if (req.url?.includes('/query')) {
       const filters = JSON.parse(body); const serialized = JSON.stringify(filters);
-      res.end(JSON.stringify(serialized.includes('39002') ? [members] : serialized.includes('39000') ? [metadata] : []));
+      res.end(JSON.stringify(serialized.includes('39002') ? [members] : serialized.includes('39000') ? [metadata] : serialized.includes(inbound.id) ? [inbound] : []));
     } else if (req.url?.includes('/events')) {
       const e = JSON.parse(body); observeReply(e);
       res.end(JSON.stringify({ id: e.id, accepted: true }));
@@ -66,7 +69,7 @@ test('installed buzz-acp authenticates and completes the same identity-bearing c
   });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const address = http.address(); assert.ok(address && typeof address !== 'string');
-  const session = new ConversationSession({ executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: `ws://127.0.0.1:${address.port}` }, {
+  const session = new ConversationSession({ executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: `ws://127.0.0.1:${address.port}`, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')), channel, parent: inbound.id, recipient: owner } }, {
     executable: realpathSync(process.execPath), args: [resolve('test/conversation-harness-fixture.ts')], workspace: dir, home: dir, configDirectory: dir,
     databricksHost: 'https://fixture.invalid', model: 'databricks-claude-haiku-4-5',
   }, secret, owner, 10_000);
@@ -77,9 +80,16 @@ test('installed buzz-acp authenticates and completes the same identity-bearing c
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
     assert.equal(evidence.session, 'conversation-session');
-    console.log(`isolated installed runtime: NIP-42 verified, subscriptions=${subscriptions}, harnessSpawned=${existsSync(join(dir, 'harness-pid'))}, same-session completed=true, signed threaded reply observed=${delivered}`);
+    assert.ok(delivered, 'the actual Buzz CLI must publish a signed threaded agent reply, not just return tool JSON');
+    console.log(`isolated installed runtime: NIP-42 verified, subscriptions=${subscriptions}, harnessSpawned=${existsSync(join(dir, 'harness-pid'))}, same-session completed=true, signed threaded reply observed=${delivered}, reply=${replyID}, agent=${agent}, parent=${inbound.id}`);
   } finally {
-    await session.stop(); for (const socket of ws.clients) socket.terminate();
+    await session.stop();
+    for (const file of ['harness-pid', 'descendant-pid', 'tool-shim-pid']) {
+      if (!existsSync(join(dir, file))) continue;
+      const pid = Number(readFileSync(join(dir, file), 'utf8'));
+      assert.throws(() => process.kill(pid, 0), (e: any) => e.code === 'ESRCH', `${file} must be absent after owned Stop`);
+    }
+    for (const socket of ws.clients) socket.terminate();
     await new Promise<void>(resolve => ws.close(() => resolve()));
     await new Promise<void>(resolve => http.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });

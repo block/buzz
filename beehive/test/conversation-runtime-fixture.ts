@@ -26,6 +26,10 @@ const sessionId = created.result.sessionId;
 if (mode === 'conflict') await request('session/set_model', { sessionId, modelId: 'wrong' });
 else await request('session/set_model', { sessionId, modelId: process.env.BUZZ_ACP_MODEL });
 await request('session/load', { sessionId, cwd: process.cwd(), mcpServers: [] });
+if (['optional-ok', 'optional-reject', 'optional-reack-fails', 'model-config-reject'].includes(mode)) {
+  const config = await request('session/set_config_option', { sessionId, configId: mode === 'model-config-reject' ? 'model' : 'mode', value: mode === 'model-config-reject' ? process.env.BUZZ_ACP_MODEL : 'default' });
+  if (config.error) writeFileSync('config-error-forwarded', 'yes');
+}
 const prompt = request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'External runtime conversation input' }] });
 if (mode === 'cancel') setTimeout(() => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } }) + '\n'), 50);
 const response = await prompt;

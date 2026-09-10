@@ -60,12 +60,18 @@ async function main() {
       try {
         const executable = realpathSync(text(await ui.question('Absolute installed buzz-acp executable: ')));
         const relay = text(await ui.question('Buzz CONVERSATION relay URL (not the Beehive management relay): '));
-        const conversation = { executable, relay };
+        const replyTool = (await ui.question('Enable a fixed single-thread Buzz reply tool? This is not automatic per-turn routing. [yes/no]: ')) === 'yes' ? {
+          executable: realpathSync(text(await ui.question('Absolute installed buzz CLI executable: '))),
+          channel: text(await ui.question('Locally authorized reply channel UUID: ')),
+          parent: text(await ui.question('Locally authorized reply parent event hex ID: ')),
+          recipient: publicKey(setup.ownerSecret),
+        } : undefined;
+        const conversation = { executable, relay, ...(replyTool ? { replyTool } : {}) };
         const plan = prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: 'databricks-claude-haiku-4-5' }, setup.agentSecret, publicKey(setup.ownerSecret));
-        if ((await ui.question('Save onto existing identity? Start remains BLOCKED pending safe ACP subtree containment. [yes/no]: ')) !== 'yes') return;
+        if ((await ui.question('Save onto existing identity? Start waits for an admitted conversation and local provider sign-in. [yes/no]: ')) !== 'yes') return;
         // One atomic replacement; keys, assignment and provider auth context unchanged.
         writePrivate(join(dir, 'setup.json'), { ...setup, conversation });
-        console.log(`Conversation setup saved for existing agent ${plan.agentPublicKey}. No network connection, login or process started. The community operator must admit this public key and owner to the chosen relay/channels (or provision a valid owner attestation locally). Admission remains unverified. Start is blocked until host-owned ACP bridge containment is implemented.`);
+        console.log(`Conversation setup saved for existing agent ${plan.agentPublicKey}. No network connection, login or process started. The community operator must admit this public key and owner to the chosen relay/channels (or provision a valid owner attestation locally). Admission remains unverified. Start uses the host-owned ACP broker; fixed reply scope, when enabled, must match the incoming conversation. General automatic per-turn reply provisioning remains unsupported.`);
       } finally { ui.close(); }
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
