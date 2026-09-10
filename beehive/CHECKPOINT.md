@@ -1,5 +1,54 @@
 # Beehive executable checkpoint
 
+## Continuation 0346 — bounded disconnect investigation / partial UX increment
+
+**Final validation:** strict passes; one FULL DEFAULT concurrent installed-enabled
+run **69/70**, zero skips/cancellations, natural **32.943s**. Disconnect passed with
+handler-installed 51ms before disconnect, callback entry 27ms after disconnect,
+TERM write complete 59ms after disconnect, group absence observed 522ms after
+disconnect (diagnostic wall-clock deltas, not timing guarantees). No missing
+TERM recurrence; historical cause remains unclassified. Existing installed Buzz
+Agent/Goose conversation and installed Move tests passed. Sole failure unchanged
+`policy-tui.test.ts:122`: expected blocked Stop at revision 1, actual durable
+operation/output says revision 0. Cause not investigated in this bounded increment;
+full engineering gate remains OPEN. No repeat-to-green. Logs and separate source/
+binary hashes: workspace `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CONTINUATION_0346/`.
+Self-review: only capped fresh-fixture diagnostics and completion guidance; original
+TERM/group absence assertions retained, no runtime/relay/auth/assignment changes.
+Normal wizard conversion and installed selected-B Start/Restart are NOT delivered.
+
+
+Starting clean e8f9543ce4fc49704a47abca6ce607de8346cf24. Source inspection:
+`orphan-fixture.ts` installs SIGTERM before resistant.ready; disconnect already
+waits for that marker after spawnOwned.ready. The latter proves OS runner spawn,
+not script readiness, but this test does not rely solely on it. Fresh cwd exists
+before spawn; TERM writes synchronously there; cleanup follows assertions. Thus
+**no missing handler-readiness gate is established**. Historical ENOENT remains
+unclassified: scheduling/callback delivery, self-expiry or write failure were not
+recorded. Production owned/supervisor/relay code and original deadlines unchanged.
+Fixture now retains capped lifecycle timestamps/PID/cwd, TERM callback/write/error
+and self-expiry events; disconnect includes them in failure output before cleanup.
+Positive PID, group absence and TERM marker assertions remain. One focused probe
+and final strict/default installed-enabled gate will be recorded below, not used
+to retrospectively classify the historical failure.
+
+Small UX correction: initial Goose now receives the same honest ACP-probe-only
+completion warning as Buzz Agent, naming explicit conversation-setup and local
+service/runtime/tool/admission prerequisites. Actual CLI test asserts this warning.
+**This is NOT the requested normal-conversation wizard integration.** Existing
+conversation-setup mutates default; immutable addHarnessBinding requires common
+installation conversation authority. Selected-B conversion needs a designed local
+manifest/ref transition under lock with CAS, retaining old definitions/history;
+calling the existing command from the wizard alone is insufficient. No partial
+conversion is shipped. No active agent/key/provider context is changed.
+
+Next: implement that local-owner transition and a conversation/diagnostic initial
+choice; adapt GOOSE_REVIEW_D22_EVIDENCE/review-goose-journey.test.ts for actual wizard
+through installed Start AND Restart under selected B/profile, cross-channel/later
+turns. Reusable prior proof remains explicit separate conversation-setup + Start,
+not integrated normal wizard or installed Restart. Claude/Codex/other providers,
+presets/custom/mesh/compute, live admission and startup-signal cleanup remain open.
+
 Worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440`, branch `beehive/cbfd9440`.
 Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
@@ -1574,3 +1623,14 @@ commit is the commit containing this section. Required author/committer Logan
 Johnson <loganj@squareup.com>, DCO, no cryptographic signing claim. No repo-wide CI,
 merge or release. Remaining second-phase work and full-suite failure investigation
 are explicit handoff items, not closed by this partial key-import tracer.
+
+## 0346 pre-final gate
+
+Strict + one focused disconnect/Goose CLI run passed 3/3, natural 6.190s.
+The disconnect trace asserts actual handler-installed → handler-entered →
+term-written, same positive descendant and cwd; unchanged group ESRCH passed.
+This falsifies neither the historical missing-marker event nor older timeouts.
+Final source adds successful trace output to the test log for inspection; no
+clock-order correctness assertion (wall clocks are diagnostic, not authority).
+Next command is strict + FULL DEFAULT concurrent installed-enabled exactly once;
+no concurrent reviewer full suite, serial mode, retry or deadline change.

@@ -42,6 +42,9 @@ test('actual setup entry Goose/new/reuse/hidden standby and selected binding ACP
     { prompt: 'Add another independent NEW agent', answer: 'no' },
   ]);
   assert.match(output, /Goose owns provider credentials/); assert.ok(!output.includes('auth databricks'));
+  assert.match(output, /Start uses an ACP greeting probe, not yet a Buzz relay conversation agent/);
+  assert.match(output, /explicit local conversation-setup/);
+  assert.match(output, /no provider login or community admission has been verified/);
   const slots = installationSlots(source), X = slots[0]!, Y = slots[1]!;
   const state = () => readPrivate(X.path) as any;
   const originalY = readFileSync(Y.path), originalManifest = readFileSync(join(source, 'setup.json'));

@@ -89,7 +89,7 @@ async function main() {
         console.log(`Added agent ${publicKey(additional)} using harness setup default; no provider setup or key copy.`);
       }
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
-      if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
+      if (mode !== '1') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user context. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent. Conversation transport still requires explicit local conversation-setup ${shellQuote(dir)} with installed buzz-acp, a trusted conversation relay and optional installed Buzz CLI tool; no provider login or community admission has been verified.`);
     } finally { ui.close(); }
   } else if (command === 'local-setup') {
     if (args.length !== 1) throw Error('Use host directory only; no private key arguments');

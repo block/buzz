@@ -477,3 +477,19 @@ profile is not proof its numbered row exists. Config fixture now queries actual
 CAS assertions and operation counts remain. Admission failure assertions retain
 bounded fixture storage phases, actual receipts and durable receive order rather
 than assigning elapsed-time failure to storage without evidence.
+
+## Disconnect classification continuation 0346
+
+`disconnect.test.ts` already awaited `resistant.ready`, published after the
+fixture's SIGTERM handler installation, not merely OS spawn readiness. New capped
+fresh-fixture lifecycle trace captures handler installation, TERM callback entry,
+marker write/error and 15s self-expiry; failure output retains that trace before
+cleanup. Same positive descendant/cwd and unchanged TERM/group-absence assertions
+pass in one focused probe and final concurrent full run. This is diagnostic
+coverage, **not a historical ENOENT fix** or production containment change.
+Actual Goose setup CLI now asserts an honest ACP-probe-only completion warning,
+including explicit local conversation transport and unverified admission/login.
+Normal conversation wizard integration and installed selected-B Restart remain open.
+Final strict passed; full default installed-enabled 69/70, natural 32.943s, with
+unchanged policy-tui revision-1 expectation versus revision-0 output failing.
+No repeat, timeout change, serial mask or repository-wide CI claim; see CHECKPOINT.
