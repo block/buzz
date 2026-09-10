@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    infer_language, parse_event_id, parse_uuid, read_message_or_stdin, read_or_stdin,
+    truncate_diff, validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -616,8 +616,13 @@ pub async fn cmd_send_message(
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
+    p.content = read_message_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    if p.content.trim().is_empty() && p.files.is_empty() {
+        return Err(CliError::Usage(
+            "message must have content or attachments".into(),
+        ));
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
