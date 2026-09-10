@@ -9,7 +9,10 @@ import { verifyHostAttestation } from '../src/host-attestation.ts';
  * explicit giftwrap author/connection mismatch exception. req.rs p-gate.
  * No DB/token/push implementation; fixtures grant member MessagesWrite only.
  */
-export async function nostrFixture(owner: string) {
+export async function nostrFixture(owner: string, independentMembers?: ReadonlySet<string>) {
+  // api/mod.rs direct membership is distinct from ViaOwner. This is fixture
+  // policy only, NOT evidence that deployed membership has narrow permissions.
+  const members = independentMembers ? new Set(independentMembers) : undefined;
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 300000 });
   await new Promise<void>(resolve => server.once('listening', resolve));
   const address = server.address();
@@ -30,8 +33,10 @@ export async function nostrFixture(owner: string) {
       if (type === 'AUTH') {
         const event = value as Event;
         try {
-          if (!verifyEvent(event) || event.kind !== 22242 || Math.abs(event.created_at - now) > 900 || event.content !== '' || !event.tags.some(t => t[0] === 'relay' && t[1] === url) || !event.tags.some(t => t[0] === 'challenge' && t[1] === challenge)) throw Error('AUTH');
-          if (event.pubkey !== owner) verifyHostAttestation(event.tags.find(t => t[0] === 'auth'), event.pubkey, owner, event.created_at);
+          if (!verifyEvent(event) || event.kind !== 22242 || Math.abs(event.created_at - now) > 60 || event.content !== '' || !event.tags.some(t => t[0] === 'relay' && t[1] === url) || !event.tags.some(t => t[0] === 'challenge' && t[1] === challenge)) throw Error('AUTH');
+          if (members) {
+            if (!members.has(event.pubkey) || event.tags.some(t => t[0] === 'auth')) throw Error('Independent fixture membership required; OA prohibited');
+          } else if (event.pubkey !== owner) verifyHostAttestation(event.tags.find(t => t[0] === 'auth'), event.pubkey, owner, event.created_at);
           state.pubkey = event.pubkey;
           socket.send(JSON.stringify(['OK', event.id, true, 'authenticated']));
         } catch { socket.send(JSON.stringify(['OK', event.id, false, 'restricted: not a relay member'])); }

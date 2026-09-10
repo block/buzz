@@ -532,12 +532,12 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
 }
 
 /** One installation owns every slot, lock and management transport. */
-export async function host(directory: string, url: string, signal?: AbortSignal) {
+export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }) {
   signal?.throwIfAborted();
-  validateRelayURL(url);
+  (transport?.validate ?? validateRelayURL)(url);
   const lock = join(directory, 'host.lock');
   mkdirSync(lock, { mode: 0o700 }); // Never infer ownership from a recovered PID.
-  let client: ReturnType<typeof connect> | undefined;
+  let client: { ready: Promise<void>; send(m: Message): void; close(): void } | undefined;
   let initialized = false;
   const slots = new Map<string, ReturnType<typeof slot>>();
   const profiles = new Profiles();
@@ -557,6 +557,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal)
   try {
     const entries = installationSlots(directory);
     for (const entry of entries) {
+      if (transport && (entry.setup.host !== transport.binding.host || publicKey(entry.setup.ownerSecret) !== transport.binding.owner)) throw Error('Private transport differs from retained host/agent authority');
       slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, (id) => {
         const current = installationSlots(directory).find(e => e.agent === entry.agent);
         if (!current) throw Error('Key removed');
@@ -570,7 +571,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal)
     // Every slot is hydrated before dialing. Initial WS history may arrive in the
     // same event-loop turn as open, before the ready promise continuation.
     initialized = true;
-    client = connect(url, setup.ownerSecret, m => {
+    client = (transport ? transport.connect.bind(transport) : connect)(url, setup.ownerSecret, m => {
       if (!initialized) return;
       profiles.receive(m);
       if (m.host !== setup.host) return;

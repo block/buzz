@@ -1,4 +1,7 @@
 import { profile } from './profiles.ts';
+import { catalogTransport } from './catalog-transport.ts';
+import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
+import type { ScopedRelayAdmission } from './relay-admission.ts';
 import { existsSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect, validateRelayURL } from './client.ts';
@@ -16,8 +19,9 @@ function matches(request: Message, receipt: Message) {
  * Immutable intent files precede all network effects. Receipt files are separate
  * so another reader's old publication observation cannot erase a terminal result.
  */
-export function managementClient(root: string, url: string, secret: string, receive: (m: Message) => void, changed: () => void = () => {}) {
-  validateRelayURL(url);
+export function managementClient(root: string, url: string, secret: string, receive: (m: Message) => void, changed: () => void = () => {}, privateHosts?: { catalog: HostCatalog; admission?: ScopedRelayAdmission }) {
+  if (privateHosts) verifyHostCatalog(privateHosts.catalog, publicKey(secret), url);
+  else validateRelayURL(url);
   const scope = digest(JSON.stringify([url, publicKey(secret)])).toString('hex');
   const dir = join(root, scope);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -64,7 +68,8 @@ export function managementClient(root: string, url: string, secret: string, rece
     }
     changed();
   }
-  const transport = connect(url, secret, m => {
+  const connectTransport = privateHosts ? catalogTransport(privateHosts.catalog, privateHosts.admission) : connect;
+  const transport = connectTransport(url, secret, m => {
     if (m.type === 'receipt') {
       const intent = intents.get(String(m.body.operation));
       if (intent && !intent.receipt && matches(intent.request, m)) {
@@ -99,6 +104,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     submit(request: Message) {
       if (closed) throw Error('UI closed');
       if (!['profile','save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
+      if (privateHosts && !['save', 'start', 'restart', 'stop'].includes(request.type)) throw Error('Private profile distribution and Move authority are not integrated; no operation prepared');
       if (request.type === 'profile') {
         profile(request.body);
         if (request.host !== 'profiles' || request.agent !== 'profiles' || request.revision !== 0) throw Error('Invalid profile publication');

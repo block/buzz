@@ -8,6 +8,7 @@ import { readAgentSecret } from './key-input.ts';
 import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
 import { enrollmentInput } from './enrollment-input.ts';
+import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -26,9 +27,10 @@ const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ?
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
-  identity <new-directory>                  Create a NEW local owner identity
+  identity                                 Disabled: use your existing owner signer
   setup <host-directory>                     Offline host pairing/owner approval/import
   setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
+  catalog <new-file> <registration-files...> Retain verified public host registrations
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
@@ -47,11 +49,7 @@ assignment-export accepts agent public key after filename when several slots exi
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC or production relay support.`;
 async function main() {
   if (command === 'identity') {
-    const dir = resolve(text(args[0]));
-    mkdirSync(dir,{ mode: 0o700 });
-    const secret = newKey();
-    writePrivate(join(dir,'identity.json'),{ secret });
-    console.log(`Owner public key: ${publicKey(secret)}\nIdentity file: ${join(dir,'identity.json')}`);
+    throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
   } else if (command === 'presets') {
     showPresets();
   } else if (command === 'setup') {
@@ -260,8 +258,18 @@ async function main() {
       if (!controller.signal.aborted || error !== controller.signal.reason) throw error;
       // Transport ready rejection caused by intentional startup cancellation.
     } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+  } else if (command === 'catalog') {
+    if (args.length < 2) throw Error('Catalog requires private registration files');
+    const registrations = args.slice(1).map(file => readPrivate(resolve(text(file))));
+    const first = object(object(registrations[0]).request);
+    const catalog = verifyHostCatalog({ version: 1, owner: first.owner, relay: first.relay, registrations }, text(first.owner), text(first.relay));
+    writePrivate(resolve(text(args[0])), catalog, true);
+    console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; admission pending. Labels are not authority.`);
   } else if (command === 'tui') {
-    const secret = text(object(readPrivate(resolve(text(args[0])))).secret);
+    const identity = object(readPrivate(resolve(text(args[0]))));
+    const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;
+    const secret = catalog ? await readAgentSecret('Owner') : text(identity.secret);
+    if (catalog && publicKey(secret) !== catalog.owner) throw Error('Wrong catalog owner signer');
     const inventory = new Map<string,Message>();
     const profiles = new Profiles();
     const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
@@ -269,12 +277,13 @@ async function main() {
       if (m.type === 'inventory') {
         const key = JSON.stringify([m.host, m.agent]);
         const prior = inventory.get(key);
+        if (!prior && inventory.size >= 1000) return;
         if (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt)) inventory.set(key,m);
       }
     }, () => {
       console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
       for (const operation of client.status()) console.log(`${operationLabel(operation.request)}: ${operation.state} | ${operation.result ?? operation.publication}`);
-    });
+    }, catalog ? { catalog } : undefined);
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
     console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
@@ -300,7 +309,13 @@ async function main() {
           }
           continue;
         }
-        if (line === 'hosts') { [...inventory.values()].forEach((m, index) => console.log(`${index + 1}. ${m.host} | agent ${m.agent} | assigned ${m.body.assignedHost} | ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'recent host report'}`)); continue; }
+        if (line === 'hosts') {
+          if (catalog) for (const r of catalog.registrations) {
+            const expired = Date.now() >= r.expires * 1000;
+            console.log(`${r.request.label} | host ${r.request.host} | ${expired ? 'REGISTRATION EXPIRED / UNKNOWN' : [...inventory.values()].some(m => m.host === r.request.host) ? 'registered infrastructure' : 'UNREACHABLE / UNKNOWN (no host report)'}`);
+          }
+          [...inventory.values()].forEach((m, index) => console.log(`${index + 1}. ${m.host} | agent ${m.agent} | assigned ${m.body.assignedHost} | ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 || (catalog && !catalog.registrations.some(r => r.request.host === m.host && Date.now() < r.expires * 1000)) ? 'STALE/UNKNOWN' : 'recent host report'}`)); continue;
+        }
         if (line === 'agents') {
           const agents = new Set([...inventory.values()].map(m => m.agent));
           for (const agent of agents) console.log(`Agent ${agent}: ${[...inventory.values()].filter(m => m.agent === agent).map(m => `${m.host} (reports assigned ${m.body.assignedHost}, ${m.body.phase})`).join('; ')}`);
@@ -336,6 +351,7 @@ async function main() {
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') {
+          if (catalog && (Date.now() - Number(current.body.observedAt) > 6000 || !catalog.registrations.some(r => r.request.host === current.host && Date.now() < r.expires * 1000))) console.log('STALE/UNKNOWN: the following is a historical host report, not current actual state.');
           const next = current.body.selectedNext as any, actual = current.body.actualRun as any;
           const label = (s: any) => `${s?.configuration ? `${s.configuration.name} @ ${s.configuration.revision}` : 'default (legacy/unversioned)'} | behavior ${s?.behavior ? `${s.behavior.name} @ ${s.behavior.revision.slice(0, 12)}` : 'upstream default'}`;
           console.log(`Agent ${current.agent} | host ${current.host} | assigned ${current.body.assignedHost}\nCurrent: ${actual ? label(actual.selection) : 'no actual run'}\nSelected next: ${label(next)} (explicit Restart to apply)\n${JSON.stringify(current,null,2)}`); continue; }

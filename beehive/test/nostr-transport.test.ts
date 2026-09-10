@@ -1,3 +1,4 @@
+import { memoryCredentials } from './credential-fixture.ts';
 import { registerHost, verifyHostRegistration } from '../src/host-registration.ts';
 import test from 'node:test';
 import { WebSocket } from 'ws';
@@ -69,19 +70,20 @@ test('durable owner-public-only pending bootstrap, genuine enrollment and instal
   const directory = mkdtempSync(join(tmpdir(), 'beehive-host-key-'));
   try {
     const owner = generateSecretKey();
-    const identity = bootstrapHostIdentity(directory, 'desktop', getPublicKey(owner), 'wss://example.invalid');
+    const credentials = memoryCredentials();
+    const identity = bootstrapHostIdentity(directory, 'desktop', getPublicKey(owner), 'wss://example.invalid', credentials);
     assert.equal(identity.registration, null);
     assert.notEqual(identity.secret, hex(owner));
     assert.throws(() => requireHostEnrollment(identity));
     assert.equal(statSync(join(directory, 'host-identity.json')).mode & 0o777, 0o600);
-    assert.deepEqual(readHostIdentity(directory), identity);
+    assert.deepEqual(readHostIdentity(directory, credentials), identity);
     assert.throws(() => bootstrapHostIdentity(directory, 'other', identity.pairing.owner, 'wss://example.invalid'));
     const tag = attestHost(hex(owner), getPublicKey(Buffer.from(identity.secret, 'hex')), 'kind=1059');
     mkdirSync(join(directory, 'host.lock'));
-    assert.throws(() => enrollHostIdentity(directory, tag));
+    assert.throws(() => enrollHostIdentity(directory, tag, undefined, credentials));
     rmdirSync(join(directory, 'host.lock'));
-    assert.throws(() => enrollHostIdentity(directory, attestHost(hex(generateSecretKey()), getPublicKey(Buffer.from(identity.secret, 'hex')), '')));
-    assert.throws(() => enrollHostIdentity(directory, tag), 'broad OA must never enroll infrastructure');
+    assert.throws(() => enrollHostIdentity(directory, attestHost(hex(generateSecretKey()), getPublicKey(Buffer.from(identity.secret, 'hex')), ''), undefined, credentials));
+    assert.throws(() => enrollHostIdentity(directory, tag, undefined, credentials), 'broad OA must never enroll infrastructure');
     const registration = registerHost(identity.pairing, hex(owner), Math.floor(Date.now() / 1000) + 60);
     for (const key of ['host', 'owner', 'label', 'relay', 'nonce'] as const) {
       const changed = { ...identity.pairing, [key]: key === 'label' ? 'other' : key === 'relay' ? 'wss://other.invalid' : hex(generateSecretKey()) };
@@ -89,9 +91,9 @@ test('durable owner-public-only pending bootstrap, genuine enrollment and instal
     }
     assert.throws(() => verifyHostRegistration({ ...registration, expires: registration.expires + 1 }, identity.pairing));
     assert.throws(() => verifyHostRegistration(registration, identity.pairing, registration.expires));
-    enrollHostIdentity(directory, registration);
-    assert.deepEqual(readHostIdentity(directory).registration, registration);
-    assert.throws(() => requireHostEnrollment(readHostIdentity(directory)), /relay admission pending/);
+    enrollHostIdentity(directory, registration, undefined, credentials);
+    assert.deepEqual(readHostIdentity(directory, credentials).registration, registration);
+    assert.throws(() => requireHostEnrollment(readHostIdentity(directory, credentials)), /relay admission pending/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

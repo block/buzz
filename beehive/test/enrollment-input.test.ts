@@ -1,3 +1,4 @@
+import { isolatedFileCredentials } from './isolated-file-credentials.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -9,10 +10,10 @@ import { newKey, publicKey } from '../src/protocol.ts';
 import { readHostIdentity, requireHostEnrollment } from '../src/host-identity.ts';
 import { pairingFingerprint } from '../src/host-registration.ts';
 
-async function wizard(directory: string, steps: [string, string][]): Promise<string> {
-  const env = { ...process.env };
+async function wizard(directory: string, steps: [string, string][], credentialFile: string): Promise<string> {
+  const env: NodeJS.ProcessEnv = { ...process.env, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile };
   delete env.BUZZ_PRIVATE_KEY; delete env.BUZZ_AUTH_TAG; delete env.BUZZ_RELAY_URL;
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/cli.ts', import.meta.url)), 'setup', directory], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--import', fileURLToPath(new URL('./isolated-credentials-loader.ts', import.meta.url)), fileURLToPath(new URL('../src/cli.ts', import.meta.url)), 'setup', directory], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = '', cursor = 0, next = 0;
   const timer = setTimeout(() => child.kill(), 10000);
   child.stdout.on('data', data => {
@@ -36,25 +37,28 @@ test('actual standalone CLI private pairing, existing-owner approval and bootstr
   const host = join(root, 'host'), ownerContext = join(root, 'owner-context');
   const request = join(root, 'request.json'), approval = join(root, 'approval.json');
   const ownerSecret = newKey();
+  const credentialFile = join(root, 'isolated-fixture-secrets.json');
+  const credentials = isolatedFileCredentials(credentialFile);
   try {
     const created = await wizard(host, [
       ['Enrollment [', 'create'], ['Host label: ', 'desktop'], ['Owner PUBLIC key (hex): ', publicKey(ownerSecret)],
       ['Relay URL: ', 'wss://example.invalid'], ['NEW private pairing file: ', request],
-    ]);
-    const original = readHostIdentity(host);
+    ], credentialFile);
+    const original = readHostIdentity(host, credentials);
     assert.ok(created.includes(pairingFingerprint(original.pairing)));
     assert.equal(original.registration, null);
     const signed = await wizard(ownerContext, [
       ['Enrollment [', 'approve'], ['Private pairing file: ', request], ['[yes/no]: ', 'yes'],
       ['Registration expiration (Unix seconds): ', String(Math.floor(Date.now() / 1000) + 300)],
       ['NEW private approval file: ', approval], ['Owner private key (64 hex; hidden, never passed as an argument): ', ownerSecret],
-    ]);
+    ], credentialFile);
     assert.ok(signed.includes(pairingFingerprint(original.pairing)));
     assert.ok(!signed.includes(ownerSecret));
-    const imported = await wizard(host, [['Enrollment [', 'import'], ['Private approval file: ', approval]]);
+    const imported = await wizard(host, [['Enrollment [', 'import'], ['Private approval file: ', approval]], credentialFile);
     assert.ok(imported.includes('Pending/no network'));
-    const enrolled = readHostIdentity(host);
+    const enrolled = readHostIdentity(host, credentials);
     assert.equal(enrolled.secret, original.secret);
+    assert.ok(!readFileSync(join(host, 'host-identity.json'), 'utf8').includes(original.secret));
     assert.deepEqual(enrolled.pairing, original.pairing);
     assert.throws(() => requireHostEnrollment(enrolled), /relay admission pending/);
     assert.deepEqual(readdirSync(host), ['host-identity.json']);

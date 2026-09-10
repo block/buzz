@@ -1,3 +1,4 @@
+import { createCredential, credentialReference, readCredential, systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fields, newKey, object, publicKey } from './protocol.ts';
@@ -5,7 +6,7 @@ import { readPrivate, writePrivate } from './storage.ts';
 import { hostPairing, verifyHostRegistration, type HostPairing, type HostRegistration } from './host-registration.ts';
 
 /** Infrastructure registration is separate from relay admission and agent placement. */
-export type HostIdentity = { version: 2; pairing: HostPairing; secret: string; registration: HostRegistration | null };
+export type HostIdentity = { version: 3; pairing: HostPairing; secret: string; registration: HostRegistration | null };
 function locked<T>(directory: string, operation: () => T): T {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const lock = join(directory, 'host.lock');
@@ -13,31 +14,35 @@ function locked<T>(directory: string, operation: () => T): T {
   try { return operation(); } finally { rmdirSync(lock); }
 }
 /** Offline bootstrap; neither requires admission nor copies the owner's secret. */
-export function bootstrapHostIdentity(directory: string, label: string, owner: string, relay: string): HostIdentity {
+export function bootstrapHostIdentity(directory: string, label: string, owner: string, relay: string, credentials: CredentialBackend = systemCredentials): HostIdentity {
   return locked(directory, () => {
     if (existsSync(join(directory, 'setup.json'))) throw Error('Legacy installation retained; use a clean directory');
+    if (existsSync(join(directory, 'host-identity.json'))) throw Error('Host identity already exists; no replacement or automatic migration');
     const secret = newKey();
     const pairing = hostPairing({ version: 1, purpose: 'beehive-host-registration', host: publicKey(secret), owner, label, relay, nonce: newKey() });
-    const identity: HostIdentity = { version: 2, pairing, secret, registration: null };
-    writePrivate(join(directory, 'host-identity.json'), identity, true);
+    const key = createCredential('host', secret, credentials);
+    const identity: HostIdentity = { version: 3, pairing, secret, registration: null };
+    writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing, key, registration: null }, true);
     return identity;
   });
 }
 /** Reject legacy broad OA records rather than silently migrating their authority. */
-export function readHostIdentity(directory: string): HostIdentity {
+export function readHostIdentity(directory: string, credentials: CredentialBackend = systemCredentials): HostIdentity {
   const value = object(readPrivate(join(directory, 'host-identity.json')));
-  fields(value, ['version', 'pairing', 'secret', 'registration']);
-  if (value.version !== 2 || typeof value.secret !== 'string' || !/^[0-9a-f]{64}$/.test(value.secret)) throw Error('Invalid host identity; legacy OA is not infrastructure enrollment');
+  fields(value, ['version', 'pairing', 'key', 'registration']);
+  if (value.version !== 3) throw Error('Legacy identity retained; explicit consent required for migration');
   const pairing = hostPairing(value.pairing);
-  if (publicKey(value.secret) !== pairing.host) throw Error('Host key differs from pairing request');
-  return { version: 2, pairing, secret: value.secret, registration: value.registration as HostRegistration | null };
+  const key = credentialReference('host', pairing.host);
+  if (JSON.stringify(value.key) !== JSON.stringify(key)) throw Error('Invalid host credential reference');
+  const secret = readCredential(key, credentials);
+  return { version: 3, pairing, secret, registration: value.registration as HostRegistration | null };
 }
 /** Atomically import only an owner registration matching the exact retained request. */
-export function enrollHostIdentity(directory: string, registration: unknown, now = Math.floor(Date.now() / 1000)): void {
+export function enrollHostIdentity(directory: string, registration: unknown, now = Math.floor(Date.now() / 1000), credentials: CredentialBackend = systemCredentials): void {
   locked(directory, () => {
-    const identity = readHostIdentity(directory);
+    const identity = readHostIdentity(directory, credentials);
     identity.registration = verifyHostRegistration(registration, identity.pairing, now);
-    writePrivate(join(directory, 'host-identity.json'), identity);
+    writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: identity.pairing, key: credentialReference('host', identity.pairing.host), registration: identity.registration });
   });
 }
 /** Valid registration is NOT relay admission. Remains no-network until a narrow contract exists. */

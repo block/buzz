@@ -67,6 +67,7 @@ export function connectNostr(url: string, secret: Uint8Array, authTag: string[] 
   });
   return {
     ready,
+    get socket() { return socket; },
     /** Resolves on relay acceptance, never on host operation completion. */
     publish(message: Message, recipient: string): Promise<void> {
       if (!subscribed || ended) return Promise.reject(Error('Nostr not subscribed; result unknown'));
