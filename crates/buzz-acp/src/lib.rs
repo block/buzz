@@ -3065,10 +3065,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let final_text_fallback_candidate = config.final_text_fallback_enabled;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        final_text_fallback_candidate,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -5184,12 +5194,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let final_text_fallback_candidate = config.final_text_fallback_enabled;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            final_text_fallback_candidate,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -5415,6 +5435,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let final_text_fallback_candidate = config.final_text_fallback_enabled;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5426,7 +5447,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            final_text_fallback_candidate,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -5470,6 +5500,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    final_text_fallback_candidate: bool,
     model: Option<String>,
     effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
@@ -5483,6 +5514,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            final_text_fallback_candidate: config.final_text_fallback_enabled,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -5523,6 +5555,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        acp.set_final_text_fallback_enabled(
+                            startup.final_text_fallback_candidate
+                                && config::needs_final_text_fallback(
+                                    &startup.command,
+                                    &init_result,
+                                    std::env::var_os("BUZZ_MANAGED_AGENT")
+                                        .is_some_and(|value| !value.is_empty()),
+                                ),
+                        );
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -5535,6 +5576,7 @@ async fn initialize_agent_pool(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown"),
                             steering_supported = acp.steering_supported(),
+                            final_text_fallback_enabled = acp.final_text_fallback_enabled(),
                             "agent initialized"
                         );
                         acp.observe(
@@ -5606,6 +5648,7 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    final_text_fallback_candidate: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
@@ -5616,6 +5659,15 @@ async fn spawn_and_init(
 
     match acp.initialize().await {
         Ok(init_result) => {
+            acp.set_final_text_fallback_enabled(
+                final_text_fallback_candidate
+                    && config::needs_final_text_fallback(
+                        command,
+                        &init_result,
+                        std::env::var_os("BUZZ_MANAGED_AGENT")
+                            .is_some_and(|value| !value.is_empty()),
+                    ),
+            );
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(
@@ -9158,6 +9210,7 @@ mod build_mcp_servers_tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
+            final_text_fallback_enabled: false,
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
@@ -9384,6 +9437,7 @@ mod error_outcome_emission_tests {
             // feed emission under test.
             agent_command: "true".into(),
             agent_args: vec![],
+            final_text_fallback_enabled: false,
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,

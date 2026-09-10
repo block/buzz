@@ -22,6 +22,11 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Maximum final text retained from ACP `agent_message_chunk` updates for one
+/// prompt. This matches Buzz's stream-message content limit, so a retained
+/// response can be published without truncation.
+const MAX_FINAL_TEXT_BYTES: usize = 64 * 1024;
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -214,6 +219,21 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Text emitted through ACP `agent_message_chunk` notifications for the
+    /// current prompt. The harness can publish this when an adapter cannot use
+    /// the Buzz CLI from its tool environment.
+    final_text: String,
+    /// Whether the configured adapter relies on the harness to publish its
+    /// ACP final text. Disabled adapters keep using their own Buzz CLI reply
+    /// path and must not retain progress chunks as fallback content.
+    final_text_capture_enabled: bool,
+    /// Whether this initialized ACP process needs the harness to submit its
+    /// final text. This is negotiated from the adapter handshake, rather than
+    /// inferred from the configured command alone.
+    final_text_fallback_enabled: bool,
+    /// A prompt emitted more final text than Buzz can publish in one message.
+    /// Never truncate a response silently; the pool skips the fallback instead.
+    final_text_overflowed: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +583,10 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            final_text: String::new(),
+            final_text_capture_enabled: false,
+            final_text_fallback_enabled: false,
+            final_text_overflowed: false,
         })
     }
 
@@ -585,6 +609,43 @@ impl AcpClient {
     /// Return the pool slot index for this agent process.
     pub(crate) fn observer_agent_index(&self) -> Option<usize> {
         self.observer_agent_index
+    }
+
+    /// Take the current prompt's complete user-facing ACP text.
+    ///
+    /// Returns `None` when the agent emitted no displayable text or exceeded
+    /// Buzz's message limit. Starting every `session/prompt` clears the prior
+    /// value, so setup/initial-message output cannot leak into a later reply.
+    pub(crate) fn take_final_text(&mut self) -> Option<String> {
+        let overflowed = std::mem::replace(&mut self.final_text_overflowed, false);
+        let text = std::mem::take(&mut self.final_text);
+        if overflowed || text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Configure capture for the next ACP prompt. Only adapters in Buzz's
+    /// final-text fallback allowlist enable this; other adapters publish their
+    /// own channel reply and can emit non-final progress chunks.
+    pub(crate) fn set_final_text_capture(&mut self, enabled: bool) {
+        self.final_text_capture_enabled = enabled;
+        self.final_text.clear();
+        self.final_text_overflowed = false;
+    }
+
+    /// Record whether this initialized process requires harness final-text
+    /// delivery. The caller derives this from the ACP handshake after every
+    /// spawn, including respawns.
+    pub(crate) fn set_final_text_fallback_enabled(&mut self, enabled: bool) {
+        self.final_text_fallback_enabled = enabled;
+    }
+
+    /// Whether the current initialized process requires harness final-text
+    /// delivery.
+    pub(crate) fn final_text_fallback_enabled(&self) -> bool {
+        self.final_text_fallback_enabled
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
@@ -781,6 +842,10 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // ACP text belongs to exactly one prompt. Clearing here keeps an
+        // initial-message or failed-turn response from becoming a later reply.
+        self.final_text.clear();
+        self.final_text_overflowed = false;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1756,6 +1821,18 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    if self.final_text_capture_enabled
+                        && self.final_text.len().saturating_add(text.len()) <= MAX_FINAL_TEXT_BYTES
+                    {
+                        self.final_text.push_str(text);
+                    } else if self.final_text_capture_enabled && !self.final_text_overflowed {
+                        self.final_text_overflowed = true;
+                        tracing::warn!(
+                            target: "acp::stream",
+                            max_bytes = MAX_FINAL_TEXT_BYTES,
+                            "agent final text exceeds the Buzz message limit; fallback reply suppressed"
+                        );
+                    }
                 }
                 false
             }
@@ -3747,6 +3824,53 @@ mod tests {
                 },
             }
         })
+    }
+
+    fn agent_message_chunk_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": text},
+                },
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn final_text_accumulates_agent_message_chunks_and_drains_once() {
+        let mut client = spawn_inert_client().await;
+        client.set_final_text_capture(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("first "));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("reply"));
+
+        assert_eq!(client.take_final_text().as_deref(), Some("first reply"));
+        assert_eq!(
+            client.take_final_text(),
+            None,
+            "take must drain the prior turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_text_over_message_limit_is_not_published() {
+        let mut client = spawn_inert_client().await;
+        client.set_final_text_capture(true);
+        let oversized = "x".repeat(MAX_FINAL_TEXT_BYTES + 1);
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&oversized));
+
+        assert_eq!(client.take_final_text(), None);
+    }
+
+    #[tokio::test]
+    async fn final_text_capture_is_disabled_until_the_adapter_is_allowlisted() {
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("progress output"));
+
+        assert_eq!(client.take_final_text(), None);
     }
 
     #[tokio::test]
