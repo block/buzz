@@ -6,11 +6,12 @@ import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
 // Native profile evidence is recorded from session/new input, never the env fallback.
 const buzzProvider = process.env.BUZZ_AGENT_PROVIDER;
+const localCompute = buzzProvider === 'openai-compat' && /^http:\/\/127\.0\.0\.1:[0-9]+\/v1$/.test(process.env.OPENAI_COMPAT_BASE_URL ?? '');
 if (['anthropic', 'openai-compat', 'openrouter'].includes(buzzProvider ?? '')) {
   const p = buzzProvider!;
   const key = p === 'anthropic' ? 'ANTHROPIC_API_KEY' : p === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
   const endpoint = p === 'anthropic' ? 'ANTHROPIC_BASE_URL' : p === 'openai-compat' ? 'OPENAI_COMPAT_BASE_URL' : 'OPENROUTER_BASE_URL';
-  if (process.env[key] !== `fixture-${p}-private-key` || process.env[endpoint] !== `https://${p}.fixture.invalid/v1` || process.env.OPENAI_API_KEY || process.env.DATABRICKS_HOST || process.env.GOOSE_PROVIDER || process.env.ANTHROPIC_MODEL || !process.env.HOME?.endsWith('service-home') || !process.env.BUZZ_AGENT_CONFIG_DIR?.endsWith('agent-config') || (p === 'openai-compat' ? process.env.OPENAI_COMPAT_API !== 'responses' : process.env.OPENAI_COMPAT_API !== undefined)) throw Error('Incorrect Buzz provider contract');
+  if (process.env[key] !== `fixture-${p}-private-key` || (!localCompute && process.env[endpoint] !== `https://${p}.fixture.invalid/v1`) || process.env.OPENAI_API_KEY || process.env.DATABRICKS_HOST || process.env.GOOSE_PROVIDER || process.env.ANTHROPIC_MODEL || !process.env.HOME?.endsWith('service-home') || !process.env.BUZZ_AGENT_CONFIG_DIR?.endsWith('agent-config') || (p === 'openai-compat' ? process.env.OPENAI_COMPAT_API !== (localCompute ? 'chat' : 'responses') : process.env.OPENAI_COMPAT_API !== undefined)) throw Error('Incorrect Buzz provider contract');
   for (const other of ['ANTHROPIC_API_KEY', 'OPENAI_COMPAT_API_KEY', 'OPENROUTER_API_KEY']) if (other !== key && process.env[other]) throw Error('Mixed provider credentials');
   writeFileSync(`${p}-env-checked`, 'closed provider-specific contract');
 }
@@ -121,6 +122,16 @@ for await (const line of createInterface({ input: process.stdin })) {
     if ((goose || claude || codex || buzzProvider) && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
     appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
     if (selected !== model || m.params.sessionId !== sessionId) process.exit(8);
+    // Source-shaped OpenAI consumer: the loopback fixture is not a mesh network.
+    if (localCompute) {
+      const response = await fetch(`${process.env.OPENAI_COMPAT_BASE_URL}/chat/completions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_COMPAT_API_KEY}` },
+        body: JSON.stringify({ model: selected, stream: false, messages: [{ role: 'user', content: 'isolated fixture prompt' }] }),
+        signal: AbortSignal.timeout(2000),
+      });
+      const body = await response.json() as any;
+      if (!response.ok || body.model !== selected || typeof body.choices?.[0]?.message?.content !== 'string') throw Error('Local compute protocol/model failure');
+    }
     writeFileSync('prompt-started', selected); prompt = m.id;
     const drift = { jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: mode === 'config-drift' ? { sessionUpdate: 'config_option_update', configOptions: [{ category: 'model', currentValue: 'other' }] } : { sessionUpdate: 'current_model_update', currentModelId: 'other' } } };
     if (['current-drift', 'config-drift'].includes(mode)) send(drift);

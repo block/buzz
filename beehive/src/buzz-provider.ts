@@ -16,7 +16,9 @@ export function validateBuzzProvider(value: BuzzProvider): void {
   if (value.auth === 'external-oauth' ? value.apiKeyFile !== undefined : typeof value.apiKeyFile !== 'string' || !isAbsolute(value.apiKeyFile)) throw Error('Provider requires owner-only key file; external OAuth forbids token fallback');
   let url: URL;
   try { url = new URL(value.baseUrl); } catch { throw Error('Invalid local provider endpoint'); }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw Error('Provider endpoint requires HTTPS without credentials, query or fragment');
+  // Literal loopback only: no DNS resolution, LAN exposure or alternative URL spellings.
+  const loopback = value.provider === 'openai-compat' && url.protocol === 'http:' && /^http:\/\/(127\.0\.0\.1|\[::1\])(?::[0-9]+)?\/v1\/?$/.test(value.baseUrl);
+  if ((!loopback && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash) throw Error('Provider endpoint requires HTTPS or OpenAI-compatible literal loopback HTTP /v1, without credentials, query or fragment');
   if (value.provider === 'databricks_v2' && (url.pathname !== '/' || url.port)) throw Error('Databricks workspace requires an HTTPS origin without path or custom port');
   if (value.provider === 'openai-compat' ? !['auto', 'chat', 'responses'].includes(value.wire ?? '') : value.wire !== undefined) throw Error('Unsupported provider wire combination; only OpenAI-compatible accepts auto/chat/responses');
 }
@@ -38,7 +40,7 @@ export function buzzProviderEnvironment(value: BuzzProvider, home: string, confi
   return { ...base, [contract.key]: key, [contract.url]: value.provider === 'databricks_v2' ? new URL(value.baseUrl).origin : value.baseUrl, ...(value.wire ? { OPENAI_COMPAT_API: value.wire } : {}) };
 }
 /** Operator guidance; no automatic install, login, refresh or cache harvesting. */
-export const buzzProviderGuidance = 'Buzz Agent provider binding: install buzz-agent locally as the dedicated service user. Anthropic uses ANTHROPIC_API_KEY; OpenAI-compatible uses OPENAI_COMPAT_API_KEY (NOT OPENAI_API_KEY), with explicit auto/chat/responses wire mode; OpenRouter uses OPENROUTER_API_KEY and Chat Completions only. Endpoint and owner-only key file stay local. Approved models are not an authenticated catalog. Start must prove the exact session model; Save never restarts. Databricks v2 uses DATABRICKS_HOST and either an owner-only DATABRICKS_TOKEN file or explicitly external native OAuth (no token fallback). Local configuration and key presence are not verified login, refresh or model access. No login or endpoint probe initiated.';
+export const buzzProviderGuidance = 'Buzz Agent provider binding: install buzz-agent locally as the dedicated service user. Anthropic uses ANTHROPIC_API_KEY; OpenAI-compatible uses OPENAI_COMPAT_API_KEY (NOT OPENAI_API_KEY), with explicit auto/chat/responses wire mode; OpenRouter uses OPENROUTER_API_KEY and Chat Completions only. Endpoint and owner-only key file stay local. Approved models are not an authenticated catalog. Start must prove the exact session model; Save never restarts. Databricks v2 uses DATABRICKS_HOST and either an owner-only DATABRICKS_TOKEN file or explicitly external native OAuth (no token fallback). Local configuration and key presence are not verified login, refresh or model access. No login or endpoint probe initiated. For an already provisioned owner-local compatible compute gateway, choose openai-compat, its literal loopback HTTP /v1 endpoint, chat wire and exact served model ID. Provision its real required bearer token in the owner-only key file. No service is downloaded, launched or exposed. This is connection setup, not backend provisioning. The pinned Desktop mesh uses a placeholder key for its unauthenticated frontend; native Buzz Agent still requires a nonempty key. That unauthenticated mesh contract is NOT supported here: do not create a fake key. Use a genuinely authenticated compatible local gateway or await native optional-auth support. Desktop auto maps to mesh; Beehive requires the exact wire model, with no auto alias or committee-capacity attestation. Management/conversation relay URLs are separate from this model endpoint.';
 /** Shared normal/management wizard, not a generic remote environment form. */
 export async function buzzProviderInput(ui: { question(prompt: string): Promise<string> }): Promise<BuzzProvider> {
   console.log(buzzProviderGuidance);
@@ -47,7 +49,7 @@ export async function buzzProviderInput(ui: { question(prompt: string): Promise<
   const auth = provider === 'databricks_v2' ? await ui.question('Databricks authentication [token / external-oauth]: ') as BuzzProvider['auth'] : undefined;
   if (provider === 'databricks_v2' && !['token', 'external-oauth'].includes(auth ?? '')) throw Error('Choose explicit Databricks auth; no fallback');
   const apiKeyFile = auth === 'external-oauth' ? undefined : await ui.question(`Absolute owner-only local ${contracts[provider].key} file (contents never relayed): `);
-  const baseUrl = await ui.question('Provider HTTPS base URL (local only): ');
+  const baseUrl = await ui.question('Provider HTTPS base URL (or OpenAI-compatible http://127.0.0.1:PORT/v1; local only): ');
   const wire = provider === 'openai-compat' ? await ui.question('OpenAI-compatible wire [auto / chat / responses]: ') as BuzzProvider['wire'] : undefined;
   const models = (await ui.question('Operator-approved compatible exact Buzz Agent model IDs (comma-separated): ')).split(',').map(m => m.trim());
   const result = { provider, ...(apiKeyFile === undefined ? {} : { apiKeyFile }), ...(auth ? { auth } : {}), baseUrl, ...(wire ? { wire } : {}), models };

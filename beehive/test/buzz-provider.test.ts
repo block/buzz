@@ -51,3 +51,11 @@ for (const auth of ['token', 'external-oauth'] as const) test(`Databricks v2 ${a
   if (auth === 'token') assert.throws(() => prepareAgent(launch), /API key prerequisite/);
   else assert.doesNotThrow(() => prepareAgent(launch), 'external OAuth does not inspect credential/cache files, including absent refresh stores');
 });
+
+test('owner-local compatible compute URL boundary remains credential-required', () => {
+  const binding: BuzzProvider = { provider: 'openai-compat', apiKeyFile: '/missing-local-key', baseUrl: 'http://127.0.0.1:9337/v1', wire: 'chat', models: ['mesh'] };
+  for (const baseUrl of ['http://127.0.0.1:9337/v1', 'http://[::1]:9337/v1/']) assert.doesNotThrow(() => validateBuzzProvider({ ...binding, baseUrl }));
+  for (const baseUrl of ['http://localhost:9337/v1', 'http://127.1:9337/v1', 'http://2130706433:9337/v1', 'http://127.0.0.1:9337', 'http://192.168.1.2:9337/v1', 'http://127.0.0.1:9337/v1?key=secret', 'http://user:pass@127.0.0.1:9337/v1']) assert.throws(() => validateBuzzProvider({ ...binding, baseUrl }));
+  assert.throws(() => validateBuzzProvider({ ...binding, apiKeyFile: undefined }));
+  assert.throws(() => validateBuzzProvider({ ...binding, provider: 'anthropic', wire: undefined }));
+});

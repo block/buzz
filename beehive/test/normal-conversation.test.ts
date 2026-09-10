@@ -25,7 +25,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
   const databricks = kind.startsWith('databricks'), oauth = kind === 'databricks-oauth';
   const buzz = databricks || ['anthropic', 'openai-compat', 'openrouter'].includes(kind);
   const provider = databricks ? 'databricks_v2' : kind;
-  const endpoint = databricks ? 'https://databricks.fixture.invalid' : `https://${kind}.fixture.invalid/v1`;
+  let endpoint = databricks ? 'https://databricks.fixture.invalid' : `https://${kind}.fixture.invalid/v1`;
   const keyName = databricks ? 'DATABRICKS_TOKEN' : kind === 'anthropic' ? 'ANTHROPIC_API_KEY' : kind === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
   const title = codex ? 'Codex' : 'Claude';
   const model = goose ? 'goose-model-a' : `${kind}-model-a`;
@@ -47,6 +47,25 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       args: ['acp', literal], env: { CUSTOM_PRIVATE: 'owner-only-custom-value' }, installHint: 'Fixture only', installInstructionsUrl: '', contract: 'goose-native' });
     writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (process.argv.length !== 4 || process.argv[2] !== 'acp' || process.argv[3] !== ${JSON.stringify(literal)} || process.env.CUSTOM_PRIVATE !== 'owner-only-custom-value') throw Error('custom argv/env mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
   }
+  const computeRequests: string[] = [];
+  let computeFailure = '';
+  const compute = kind === 'openai-compat' ? createServer(async (req, res) => {
+    let bytes = ''; for await (const chunk of req) bytes += chunk;
+    assert.equal(req.url, '/v1/chat/completions'); assert.equal(req.method, 'POST');
+    assert.equal(req.headers.authorization, 'Bearer fixture-openai-compat-private-key');
+    const body = JSON.parse(bytes); assert.equal(body.model, model);
+    assert.equal(body.stream, false); assert.ok(Array.isArray(body.messages));
+    computeRequests.push(body.model);
+    res.setHeader('Content-Type', 'application/json');
+    if (computeFailure === 'protocol') { res.end('{}'); return; }
+    res.end(JSON.stringify({ model: computeFailure === 'model' ? 'wrong' : model, choices: [{ message: { role: 'assistant', content: 'local fixture response' }, finish_reason: 'stop' }] }));
+  }) : undefined;
+  if (compute) {
+    await new Promise<void>(resolve => compute.listen(0, '127.0.0.1', resolve));
+    const address = compute.address(); assert.ok(address && typeof address !== 'string');
+    endpoint = `http://127.0.0.1:${address.port}/v1`;
+    t.after(async () => { compute.closeAllConnections(); if (compute.listening) await new Promise<void>(resolve => compute.close(() => resolve())); });
+  }
   const http = createServer();
   t.after(async () => { http.closeAllConnections(); if (http.listening) await new Promise<void>(resolve => http.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -64,7 +83,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       ...(databricks ? [{ prompt: 'Databricks authentication [', answer: oauth ? 'external-oauth' : 'token' }] : []),
       ...(!oauth ? [{ prompt: `Absolute owner-only local ${converting ? 'ANTHROPIC_API_KEY' : keyName} file`, answer: converting ? initialKey : keyFile }] : []),
       { prompt: 'Provider HTTPS base URL', answer: converting ? 'https://anthropic.fixture.invalid/v1' : endpoint },
-      ...(kind === 'openai-compat' ? [{ prompt: 'OpenAI-compatible wire [', answer: 'responses' }] : []),
+      ...(kind === 'openai-compat' ? [{ prompt: 'OpenAI-compatible wire [', answer: 'chat' }] : []),
       { prompt: 'Operator-approved compatible exact Buzz Agent model IDs', answer: model },
     ] : []),
     { prompt: 'Allowed workspace (absolute directory): ', answer: dir },
@@ -367,6 +386,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     assert.deepEqual(readFileSync(join(installation, 'setup.json')), convertedManifest);
     assert.equal(state().actual.selection.behavior.revision, restartBehavior.revision);
     assert.equal(replies.length, 4, 'Restart must produce a fresh installed signed reply');
+    if (compute) assert.ok(computeRequests.length >= 4, 'source-shaped local HTTP Chat Completions consumer crossed on actual prompts');
     assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /NORMAL-PROFILE-BOUNDARY/);
     if (buzz) {
       assert.equal(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), restartInstructions);
@@ -397,6 +417,15 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
           writeFileSync(join(dir, 'mode'), failure);
           assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
           assert.deepEqual(state().actual, actual);
+        }
+      }
+      if (compute) {
+        writeFileSync(join(dir, 'mode'), 'ok');
+        for (const failure of ['model', 'protocol', 'unreachable']) {
+          computeFailure = failure;
+          if (failure === 'unreachable') { compute.closeAllConnections(); await new Promise<void>(resolve => compute.close(() => resolve())); }
+          assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
+          assert.deepEqual(state().actual, actual, `${failure} local service preflight preserves actual`);
         }
       }
       if (buzz && !oauth) {
