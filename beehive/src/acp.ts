@@ -1,3 +1,4 @@
+import { validateCustom, type CustomAcp } from './custom-acp.ts';
 import { CODEX_ADAPTER, codexEnvironment, codexModels, type CodexSetup } from './codex.ts';
 import { CLAUDE_ADAPTER, claudeEnvironment, claudeModels, type ClaudeSetup } from './claude.ts';
 import { type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -7,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
 /** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
+export type AgentLaunch = Readonly<{ custom?: CustomAcp; executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -39,10 +40,14 @@ export function prepareAgent(input: AgentLaunch) {
     if (plan.args.length || !plan.claude) throw Error('Claude requires a zero-argument ACP adapter and local CLI/key binding');
     return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(claudeEnvironment(plan.claude, plan.home, plan.model)), cliExecutableHash: hash(readFileSync(plan.claude.cli)) });
   }
+  if (plan.custom) {
+    const d = validateCustom(plan.custom);
+    if (plan.harness !== 'goose' || d.contract !== 'goose-native' || d.executable !== plan.executable || JSON.stringify(d.args) !== JSON.stringify(plan.args)) throw Error('Unsupported custom launch contract');
+  }
   if (plan.harness === 'goose') {
     identifier(plan.provider);
     identifier(plan.model);
-    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ PATH: '/usr/bin:/bin', HOME: plan.home, GOOSE_PROVIDER: plan.provider!, GOOSE_MODEL: plan.model, GOOSE_MODE: 'auto' }) });
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ ...plan.custom?.env, PATH: '/usr/bin:/bin', HOME: plan.home, GOOSE_PROVIDER: plan.provider!, GOOSE_MODEL: plan.model, GOOSE_MODE: 'auto' }) });
   }
   const url = new URL(plan.databricksHost);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin');

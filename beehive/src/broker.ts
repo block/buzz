@@ -233,6 +233,9 @@ export class ConversationSession {
         const request = pending.get(msg.id);
         if (!request) throw Error();
         pending.delete(msg.id);
+        if (request.method === 'initialize' && this.prepared.plan.custom) {
+          if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== 'goose') throw Error('Custom Goose-native contract unavailable');
+        }
         if (request.method === 'initialize' && this.prepared.plan.harness === 'codex') {
           if (msg.result?.protocolVersion !== 2 || msg.result?.agentInfo?.name !== CODEX_ADAPTER) throw Error('Codex native profile capability unavailable');
           codexNative = true;

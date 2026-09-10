@@ -1,3 +1,5 @@
+import { customInput } from './custom-input.ts';
+import { showPresets } from './presets.ts';
 import { prepareAgent } from './acp.ts';
 import { codexGuidance } from './codex.ts';
 import { claudeGuidance } from './claude.ts';
@@ -24,6 +26,7 @@ const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
   setup <host-directory> [identity-file]     New host or existing local wizard
+  presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
@@ -46,6 +49,8 @@ async function main() {
     const secret = newKey();
     writePrivate(join(dir,'identity.json'),{ secret });
     console.log(`Owner public key: ${publicKey(secret)}\nIdentity file: ${join(dir,'identity.json')}`);
+  } else if (command === 'presets') {
+    showPresets();
   } else if (command === 'setup') {
     const dir = resolve(text(args[0]));
     if (existsSync(dir)) {
@@ -56,11 +61,17 @@ async function main() {
     let ui = createInterface({ input: stdin, output: stdout });
     try {
       const name = text(await ui.question('Host name: '));
-      const mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose / 4 Claude Code / 5 Codex]: ');
+      let mode = await ui.question('Setup [1 deterministic fixture / 2 Buzz Agent + Databricks v2 / 3 Goose / 4 Claude Code / 5 Codex / 6 custom ACP / 7 preset discovery]: ');
+      if (mode === '7') { showPresets(); console.log('Use existing local-setup add-preset for immutable diagnostic registration. No conversation identity created.'); return; }
+      const custom = mode === '6' ? await customInput(ui) : undefined;
+      if (custom) {
+        if (custom.contract !== 'goose-native') throw Error('Diagnostic custom has no conversation model/profile contract; use existing local-setup add-custom. No identity created.');
+        mode = '3'; // Explicit source-supported contract owner, not arbitrary ACP compatibility.
+      }
       if (!['1','2','3','4','5'].includes(mode)) throw Error('Choose 1, 2, 3, 4 or 5');
       if (mode === '5') console.log(codexGuidance);
       if (mode === '4') console.log(claudeGuidance);
-      const runner = realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : mode === '5' ? 'Absolute installed codex-acp adapter: ' : mode === '4' ? 'Absolute installed claude-agent-acp adapter: ' : mode === '3' ? 'Absolute installed Goose executable (runs acp): ' : 'Absolute installed buzz-agent executable: ')));
+      const runner = custom ? realpathSync(custom.executable) : realpathSync(text(await ui.question(mode === '1' ? 'Absolute fixture runner executable: ' : mode === '5' ? 'Absolute installed codex-acp adapter: ' : mode === '4' ? 'Absolute installed claude-agent-acp adapter: ' : mode === '3' ? 'Absolute installed Goose executable (runs acp): ' : 'Absolute installed buzz-agent executable: ')));
       const claude = mode === '4' ? { cli: realpathSync(text(await ui.question('Absolute installed claude CLI: '))), apiKeyFile: text(await ui.question('Absolute owner-only local ANTHROPIC_API_KEY file (contents never relayed): ')), models: text(await ui.question('Operator-approved compatible exact Claude model IDs (comma-separated): ')).split(',').map(m => m.trim()) } : undefined;
       const codex = mode === '5' ? { cli: realpathSync(text(await ui.question('Absolute installed codex CLI: '))), apiKeyFile: text(await ui.question('Absolute owner-only local OPENAI_API_KEY file (contents never relayed): ')), models: text(await ui.question('Operator-approved compatible exact Codex model IDs (comma-separated): ')).split(',').map(m => m.trim()) } : undefined;
       const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
@@ -92,11 +103,11 @@ async function main() {
       } else if (identityAction !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
       if (mode !== '1') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '5' ? 'codex' : mode === '4' ? 'claude' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(codex ? { codex, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(claude ? { claude, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
+      const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, ...(custom ? { custom } : {}), args: custom ? custom.args : mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '5' ? 'codex' : mode === '4' ? 'claude' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(codex ? { codex, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(claude ? { claude, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
       const lock = join(dir, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
       try {
         if (setup.mode === 'codex') prepareAgent({ executable: runner, args: [], workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
-        if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
+        if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
         provision(dir, setup, genesis);
       } finally { rmdirSync(lock); }
       migrateSlots(dir);

@@ -102,6 +102,7 @@ export function addSlot(directory: string, secret: string, genesis: Genesis, set
     if (i.retiredBindings?.[setupName]) throw Error('Binding retired');
     if (!Object.hasOwn(i.setups, setupName)) throw Error('Unknown host harness setup');
     if (expectedFingerprint !== undefined && semanticHash(i.setups[setupName]) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');
+    if (!setupModels(validateSetup({ ...i.setups[setupName], host: i.host, ownerSecret: i.ownerSecret })).length) throw Error('Diagnostic-only binding cannot enroll an executable agent');
     const setup = validateSetup({ ...i.setups[setupName], host: i.host, ownerSecret: i.ownerSecret, agentSecret: secret });
     const slotDirectory = join(directory, 'agents', key);
     if (existsSync(slotDirectory)) throw Error('Partial slot requires local reconciliation; cannot reset');
@@ -209,14 +210,14 @@ export function addConversationBinding(directory: string, agent: string, source:
     const entry = entries.find(e => e.agent === agent), setup = entry?.bindings[source.id];
     if (!entry?.keyPresent || !setup?.agentSecret) throw Error('Retained agent key required; no key recreation');
     if (bindingFingerprint(setup) !== source.fingerprint) throw Error('Binding definition changed; reopen local setup');
-    if (setup.mode === 'fixture') throw Error('Choose an ACP binding, not fixture');
+    if (setup.mode === 'fixture' || setup.mode === 'diagnostic-acp') throw Error('Choose a compatible ACP contract; fixture/diagnostic-only cannot become normal');
     if (Object.hasOwn(i.setups, id) || Object.keys(i.setups).length >= 32) throw Error('Binding exists or inventory full');
     const common = i.conversation ?? i.setups.default?.conversation;
     if (common && semanticHash(common) !== semanticHash(conversation)) throw Error('Installation conversation authority already pinned; cannot retarget it');
     prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace,
       home: text(setup.serviceHome), configDirectory: text(setup.configDirectory),
       databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost),
-      ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]!
+      ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: setupModels(setup)[0]!
     }, setup.agentSecret, publicKey(setup.ownerSecret));
     i.conversation = structuredClone(conversation);
     i.setups[id] = { ...i.setups[source.id]!, conversation: structuredClone(conversation) };

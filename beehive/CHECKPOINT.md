@@ -1910,3 +1910,19 @@ committed candidate. Raw logs/results live outside source in workspace
 WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BINDING_1BC0 (final result recorded there, not an
 untested subsequent source edit). No repository CI or real provider approval;
 historical broker/tool failures remain unclassified by these focused passes.
+
+## Preset/custom ACP 8d6d — CODE checkpoint before integration gates
+
+Implemented process-free ten-preset discovery from pinned 051c3a2 definitions,
+local wizard immutable diagnostic registration, and owner-only structured custom
+JSON input. Presets are setup/diagnostic-only: no exact actual-session model/native
+profile contract established by their source; NotApplicable is NOT authenticated.
+No configured argv is shell-interpreted or comma-split. Custom normal entry opts
+explicitly into the existing Goose-native contract owner (identity/configOptions/
+native profile extension), not arbitrary protocol2/systemPrompt. No new runtime,
+auth registry or remote env editor. New/replacement/retirement remain under existing
+immutable binding/startup-lock ownership; diagnostic definitions advertise no models.
+Implementation exists; strict passes; user-shaped installed validation still pending.
+Closed Codex/Claude/NORMAL/CLI reviews remain closed in their prior scopes; historical
+broker/tool failures remain unclassified. Full remaining provider/mesh/compute and
+live-vendor gaps are not narrowed by source-shaped fixture claims.

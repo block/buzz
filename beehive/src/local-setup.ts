@@ -1,3 +1,5 @@
+import { customBindingInput } from './custom-input.ts';
+import { showPresets } from './presets.ts';
 import { codexGuidance } from './codex.ts';
 import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
@@ -22,8 +24,9 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
     for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)} | ${first.retiredBindings?.[id] ? 'retired' : 'available'}`);
     for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
-    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
+    const action = await ui.question('Local action [presets / add-preset / add-custom / reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
     if (action === 'cancel') return;
+    if (action === 'presets') { showPresets(); return; }
     if (action === 'normal') {
       const agent = await ui.question('Existing agent public key: ');
       const entry = entries.find(e => e.agent === agent);
@@ -31,7 +34,7 @@ export async function localSetup(directory: string): Promise<void> {
       const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } } };
       const id = state.selected.harnessSetup?.id ?? entry.setupId;
       const setup = entry.bindings[id];
-      if (!setup || setup.mode === 'fixture') throw Error('Select an ACP binding remotely first; fixture cannot become a conversation harness');
+      if (!setup || setup.mode === 'fixture' || setup.mode === 'diagnostic-acp') throw Error('Select an ACP binding remotely first; fixture cannot become a conversation harness');
       const fingerprint = bindingFingerprint(setup);
       console.log(`Selected source ${id}; old references remain diagnostic/unchanged. New binding only, no automatic selection or Start.`);
       const nextId = text(await ui.question('NEW immutable normal binding ID: '));
@@ -59,7 +62,7 @@ export async function localSetup(directory: string): Promise<void> {
       console.log(`Restored local key for ${agent}; no assignment or history reset, no Start permission added.`);
       return;
     }
-    if (!['replace-binding', 'retire-binding', 'new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
+    if (!['add-preset', 'add-custom', 'replace-binding', 'retire-binding', 'new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
     const id = await ui.question('Existing binding ID to reuse: ');
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
@@ -77,6 +80,14 @@ export async function localSetup(directory: string): Promise<void> {
         console.log(`Binding ${id} retired; selected references remain unavailable until explicit remote selection.`);
         return;
       }
+    }
+    if (action === 'add-custom' || action === 'add-preset') {
+      const harness = await customBindingInput(ui, action === 'add-preset');
+      const nextId = text(await ui.question('NEW immutable binding ID: '));
+      if (await ui.question('Save NEW binding only (no selection, key change or restart)? [yes/no]: ') !== 'yes') return;
+      addHarnessBinding(directory, nextId, { ...harness, ...(harness.mode !== 'diagnostic-acp' && setup.conversation ? { conversation: setup.conversation } : {}) }, { id, fingerprint });
+      console.log(`Saved ${nextId}; ${harness.mode === 'diagnostic-acp' ? 'setup/diagnostic only, no executable model/profile contract; Start unavailable' : 'select advertised binding/model/workspace remotely then explicitly Start/Restart; authentication unverified'}. Identity/selection/history unchanged.`);
+      return;
     }
     if (action === 'import-standby') {
       const genesis = validateGenesis(readPrivate(realpathSync(text(await ui.question('Local public genesis file (no key): ')))));
@@ -147,7 +158,7 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Create ${nextId} from ${id}; same ${setup.mode} contract and local service auth context. This does not add a provider or change conversation relay/authority. No authentication tested. Old binding remains immutable; no definition edit/deletion. Replacement retires the source for new execution and selection.`);
     if (action === 'replace-binding' && await ui.question(`Retire ${id} and replace with ${nextId}, without selecting it? [yes/no]: `) !== 'yes') return;
     if (await ui.question('Save NEW binding only (no selection, key change or restart)? [yes/no]: ') !== 'yes') return;
-    addHarnessBinding(directory, nextId, { ...harness, runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint, confirmation }, action === 'replace-binding');
+    addHarnessBinding(directory, nextId, { ...harness, ...(harness.custom ? { custom: { ...harness.custom, executable: runner, args } } : {}), runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint, confirmation }, action === 'replace-binding');
     console.log(`Binding ${nextId} saved. Reopen local-setup to reuse it for a new identity, or select it in the remote TUI for an existing identity. Save does not Restart.`);
   } finally { ui.close(); }
 }
