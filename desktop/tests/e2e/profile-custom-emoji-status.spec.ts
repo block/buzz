@@ -196,13 +196,13 @@ test("set status dialog uses the desktop modal with shared status choices", asyn
 test("keeps an open status draft when the saved status expires", async ({
   page,
 }) => {
-  // Freeze the browser clock before navigation so the seeded two-second
-  // status cannot expire while the popover/editor setup runs, and so the
-  // seeded node-side timestamps match the browser clock exactly. Expiry is
-  // crossed deliberately below, after the editor owns the saved draft.
+  // Pin the browser Date before navigation so the seeded two-second status
+  // cannot expire while the popover/editor setup runs, however slow the
+  // machine; timers, network, and rendering keep running, and the seeded
+  // node-side timestamps match the pinned Date exactly.
   const seededAt = new Date("2026-09-10T12:00:00.000Z");
   const nowSeconds = Math.floor(seededAt.getTime() / 1_000);
-  await page.clock.install({ time: seededAt });
+  await page.clock.setFixedTime(seededAt);
   await page.goto("/");
   await seedMockStatus(page, {
     text: "Original draft",
@@ -225,6 +225,8 @@ test("keeps an open status draft when the saved status expires", async ({
     0,
   );
   await dialog.getByTestId("set-status-input").fill("Unsaved draft");
+  // Advance the pinned Date past the deadline, then fire the pending timer.
+  await page.clock.setFixedTime(new Date(seededAt.getTime() + 3_000));
   await page.clock.fastForward(2_500);
   await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0, {
     timeout: 5_000,
@@ -249,13 +251,13 @@ test("keeps an open status draft when the saved status expires", async ({
 test("opens a fresh editor when the saved status expired before opening", async ({
   page,
 }) => {
-  // Causal control for the setup ordering above: the same frozen clock and
+  // Causal control for the setup ordering above: the same pinned clock and
   // seed, but the deadline is crossed before the editor opens. The dialog
   // must then be a new-status editor — the saved-editor precondition
   // assertions above would fail under this wrong ordering.
   const seededAt = new Date("2026-09-10T12:00:00.000Z");
   const nowSeconds = Math.floor(seededAt.getTime() / 1_000);
-  await page.clock.install({ time: seededAt });
+  await page.clock.setFixedTime(seededAt);
   await page.goto("/");
   await seedMockStatus(page, {
     text: "Original draft",
@@ -263,6 +265,7 @@ test("opens a fresh editor when the saved status expired before opening", async 
     expiresAt: nowSeconds + 2,
     createdAt: nowSeconds,
   });
+  await page.clock.setFixedTime(new Date(seededAt.getTime() + 5_000));
   await page.clock.fastForward(5_000);
   await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0);
   await page.getByTestId("profile-popover-set-status").click();
