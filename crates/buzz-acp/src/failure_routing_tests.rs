@@ -85,6 +85,7 @@ async fn fixture(
         members,
         invalid_attestation,
         MembershipMode::Valid,
+        None,
     )
     .await
 }
@@ -108,6 +109,7 @@ async fn fixture_mode(
         members,
         invalid_attestation,
         mode,
+        None,
     )
     .await
 }
@@ -119,6 +121,7 @@ async fn fixture_impl(
     members: &[&Keys],
     invalid_attestation: bool,
     mode: MembershipMode,
+    invalid_profile: Option<String>,
 ) -> (
     relay::RestClient,
     Arc<Mutex<Capture>>,
@@ -225,7 +228,11 @@ async fn fixture_impl(
                         .filter(|key| valid.contains(key))
                         .map(|key| {
                             let agent = nostr::PublicKey::from_hex(&key).unwrap();
-                            let auth = if invalid_attestation {
+                            // Corrupt one profile when isolating source authorization
+                            // from the independently valid handler's attestation.
+                            let auth = if invalid_attestation
+                                || invalid_profile.as_ref() == Some(&key)
+                            {
                                 serde_json::json!([
                                     "auth",
                                     owner.public_key().to_hex(),
@@ -342,16 +349,33 @@ async fn nonowner_invalid_attestation_and_missing_membership_are_blocked() {
     .is_none());
     server.abort();
 
-    let (rest, _, server) = fixture(channel, &owner, &[&sibling], &[&sibling], true).await;
-    let invalid = failure_routing::resolve(
-        &rest,
-        &batch(channel, vec![event(&sibling, channel, "x", false, &[])]),
-        &handlers(Some(&sibling), None),
-        Some(owner.public_key().to_hex()),
-    )
-    .await;
-    assert!(invalid.is_none());
-    server.abort();
+    // The source is the owner, so only the handler attestation changes.
+    for invalid_attestation in [false, true] {
+        let (rest, _, server) = fixture(
+            channel,
+            &owner,
+            &[&sibling],
+            &[&sibling],
+            invalid_attestation,
+        )
+        .await;
+        let route = failure_routing::resolve(
+            &rest,
+            &batch(
+                channel,
+                vec![event(&owner, channel, "handler-control", false, &[])],
+            ),
+            &handlers(Some(&sibling), None),
+            Some(owner.public_key().to_hex()),
+        )
+        .await;
+        assert_eq!(
+            route.is_some(),
+            !invalid_attestation,
+            "owner source isolates the handler attestation guard"
+        );
+        server.abort();
+    }
 
     let (rest, _, server) = fixture(channel, &owner, &[&sibling], &[], false).await;
     let missing = failure_routing::resolve(
@@ -365,14 +389,21 @@ async fn nonowner_invalid_attestation_and_missing_membership_are_blocked() {
     server.abort();
 
     let other_channel = uuid::Uuid::new_v4();
-    let (rest, _, server) = fixture(
-        other_channel,
-        &owner,
-        &[&owner, &sibling],
-        &[&sibling],
-        false,
-    )
-    .await;
+    let (rest, _, server) = fixture(channel, &owner, &[&owner, &sibling], &[&sibling], false).await;
+    assert!(
+        failure_routing::resolve(
+            &rest,
+            &batch(
+                channel,
+                vec![event(&owner, channel, "channel-control", false, &[])]
+            ),
+            &handlers(Some(&sibling), None),
+            Some(owner.public_key().to_hex()),
+        )
+        .await
+        .is_some(),
+        "membership is valid for the batch channel"
+    );
     let wrong_channel = failure_routing::resolve(
         &rest,
         &batch(
@@ -385,6 +416,43 @@ async fn nonowner_invalid_attestation_and_missing_membership_are_blocked() {
     .await;
     assert!(wrong_channel.is_none());
     server.abort();
+}
+
+#[tokio::test]
+async fn source_attestation_is_independent_of_valid_handler_attestation() {
+    let owner = Keys::generate();
+    let source = Keys::generate();
+    let sibling = Keys::generate();
+    let channel = uuid::Uuid::new_v4();
+    for invalid_profile in [None, Some(source.public_key().to_hex())] {
+        let should_accept = invalid_profile.is_none();
+        let (rest, _, server) = fixture_impl(
+            channel,
+            &owner,
+            &[&source, &sibling],
+            &[&sibling],
+            false,
+            MembershipMode::Valid,
+            invalid_profile,
+        )
+        .await;
+        let route = failure_routing::resolve(
+            &rest,
+            &batch(
+                channel,
+                vec![event(&source, channel, "source-control", false, &[])],
+            ),
+            &handlers(Some(&sibling), None),
+            Some(owner.public_key().to_hex()),
+        )
+        .await;
+        assert_eq!(
+            route.is_some(),
+            should_accept,
+            "only the source profile attestation differs between controls"
+        );
+        server.abort();
+    }
 }
 
 #[tokio::test]
