@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync } from 'node:fs';
@@ -23,7 +24,7 @@ test('a Stop received beside a pending Start cancels it before running, live and
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-admission-')));
     const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
     const acp = scenario !== 'fixture-live';
-    writePrivate(join(dir, 'setup.json'), { host: 'admission-host', ownerSecret: secret, agentSecret,
+    provisionSetup(join(dir, 'setup.json'), { host: 'admission-host', ownerSecret: secret, agentSecret,
       runner: process.execPath, args: acp ? [resolve('test/acp-fixture.ts'), 'delayed'] : [resolve('test/runner.ts')],
       workspace: dir, mode: acp ? 'buzz-agent-databricks-v2' : 'fixture',
       ...(acp ? { serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid' } : {}) });
@@ -65,7 +66,7 @@ test('same-batch Stop cancellation keeps authority, ordering, duplicate and revi
   for (const control of ['wrong-authority', 'conflicting-id', 'invalid-body', 'stop-first', 'duplicate-replay'] as const) {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), `beehive-admission-${control}-`)));
     const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
-    writePrivate(join(dir, 'setup.json'), { host: 'admission-host', ownerSecret: secret, agentSecret,
+    provisionSetup(join(dir, 'setup.json'), { host: 'admission-host', ownerSecret: secret, agentSecret,
       runner: process.execPath, args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' });
     const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
     const address = server.address(); assert.ok(address && typeof address !== 'string');

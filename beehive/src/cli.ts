@@ -3,10 +3,11 @@ import { stdin, stdout } from 'node:process';
 import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
-import { host, validateSetup } from './host.ts';
+import { host, validateSetup, provision, migrateAssignment } from './host.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
+import { createGenesis, validateGenesis } from './assignment.ts';
 import { prepareConversation } from './conversation.ts';
 
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
@@ -14,12 +15,15 @@ const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
   setup <new-host-directory> <identity-file> Guided local harness + key setup
+  assignment-export <host-directory> <new-file> Export public pinned genesis locally
+  migrate-assignment <host-directory>       Explicit stopped legacy enrollment
   auth-info <host-directory>                Print exact local sign-in context (no login)
   conversation-setup <host-directory>       Attach external buzz-acp to EXISTING identity (Start gated)
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
-No import, Move, provider login RPC or production relay support yet.`;
+setup accepts optional <local-key-file> <public-genesis-file> for standby import.
+No Move, provider login RPC or production relay support yet.`;
 async function main() {
   if (command === 'identity') {
     const dir = resolve(text(args[0]));
@@ -41,12 +45,30 @@ async function main() {
       const extra = mode === '1' ? text(await ui.question('Absolute fixture TypeScript script: ')) : '';
       const databricksHost = mode === '2' ? text(await ui.question('Databricks workspace HTTPS URL: ')) : undefined;
       if (databricksHost && new URL(databricksHost).protocol !== 'https:') throw Error('HTTPS workspace required');
-      if ((await ui.question('Create a NEW agent identity assigned exclusively to this host? [yes/no]: ')) !== 'yes') return;
+      const importing = args.length > 2;
+      const agentSecret = importing ? text(object(readPrivate(resolve(text(args[2])))).secret) : newKey();
+      const genesis = importing ? validateGenesis(readPrivate(resolve(text(args[3])))) : createGenesis(publicKey(secret), publicKey(agentSecret), name);
+      if (importing && genesis.initialHost === name) throw Error('Import cannot create a second initial authority installation');
+      if ((await ui.question(importing ? `Provision matching key as standby only; assignment remains ${genesis.initialHost}? [yes/no]: ` : 'Create a NEW agent identity assigned exclusively to this host? [yes/no]: ')) !== 'yes') return;
       mkdirSync(dir,{ mode: 0o700 });
       if (mode === '2') { mkdirSync(join(dir,'service-home'),{ mode: 0o700 }); mkdirSync(join(dir,'agent-config'),{ mode: 0o700 }); }
-      writePrivate(join(dir,'setup.json'),{ host: name, ownerSecret: secret, agentSecret: newKey(), runner, args: mode === '1' ? [resolve(extra)] : [], workspace, mode: mode === '1' ? 'fixture' : 'buzz-agent-databricks-v2', ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) });
+      provision(dir,{ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : [], workspace, mode: mode === '1' ? 'fixture' : 'buzz-agent-databricks-v2', ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}) }, genesis);
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
       if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
+    } finally { ui.close(); }
+  } else if (command === 'assignment-export') {
+    const state = object(readPrivate(join(resolve(text(args[0])), 'journal.json')));
+    const genesis = validateGenesis(object(state.assignment).genesis);
+    writePrivate(resolve(text(args[1])), genesis, true);
+    console.log('Public genesis exported; no keys or execution grant. Provision the matching key separately on the destination.');
+  } else if (command === 'migrate-assignment') {
+    const dir = resolve(text(args[0]));
+    const setup = validateSetup(readPrivate(join(dir, 'setup.json')));
+    const ui = createInterface({ input: stdin, output: stdout });
+    try {
+      if ((await ui.question('Enroll this existing stopped journal as the UNIQUE authority? Verify no clones or unmanaged execution of this identity exist. Missing journals cannot be repaired here. [yes/no]: ')) !== 'yes') return;
+      migrateAssignment(dir, createGenesis(publicKey(setup.ownerSecret), publicKey(setup.agentSecret), setup.host));
+      console.log('Legacy journal pinned; lifecycle history retained. Do not clone or roll back this installation.');
     } finally { ui.close(); }
   } else if (command === 'conversation-setup') {
     const dir = resolve(text(args[0]));
@@ -89,8 +111,9 @@ async function main() {
     const inventory = new Map<string,Message>();
     const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       if (m.type === 'inventory') {
-        const prior = inventory.get(m.host);
-        if (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt)) inventory.set(m.host,m);
+        const key = JSON.stringify([m.host, m.agent]);
+        const prior = inventory.get(key);
+        if (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt)) inventory.set(key,m);
       }
     }, () => {
       console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
@@ -98,7 +121,7 @@ async function main() {
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, select <host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
     let selected = '';
     try {
       for (;;) {
@@ -120,8 +143,19 @@ async function main() {
           }
           continue;
         }
-        if (line === 'hosts') { for (const [name,m] of inventory) console.log(`${name}: ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'recent host report'}`); continue; }
-        if (line.startsWith('select ')) { selected = line.slice(7); continue; }
+        if (line === 'hosts') { [...inventory.values()].forEach((m, index) => console.log(`${index + 1}. ${m.host} | agent ${m.agent} | assigned ${m.body.assignedHost} | ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'recent host report'}`)); continue; }
+        if (line === 'agents') {
+          const agents = new Set([...inventory.values()].map(m => m.agent));
+          for (const agent of agents) console.log(`Agent ${agent}: ${[...inventory.values()].filter(m => m.agent === agent).map(m => `${m.host} (reports assigned ${m.body.assignedHost}, ${m.body.phase})`).join('; ')}`);
+          console.log('Per-host reports are observations, not global liveness or consensus. Use hosts then select a numbered host/agent row.'); continue;
+        }
+        if (line.startsWith('select ')) {
+          const choice = line.slice(7);
+          const rows = [...inventory.entries()];
+          const matches = /^[1-9][0-9]*$/.test(choice) ? rows.slice(Number(choice)-1, Number(choice)) : rows.filter(([,m]) => m.host === choice);
+          if (matches.length !== 1) { console.log('Unknown or ambiguous host: use hosts and select its numbered host/agent row.'); continue; }
+          selected = matches[0]![0]; console.log(`Selected ${matches[0]![1].host} agent ${matches[0]![1].agent}`); continue;
+        }
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') { console.log(JSON.stringify(current,null,2)); continue; }
@@ -132,7 +166,7 @@ async function main() {
           console.log(`Allowed models: ${JSON.stringify(current.body.models)}; workspaces: ${JSON.stringify(current.body.workspaces)}; behavior profiles: ${JSON.stringify(current.body.profiles)}`);
           body = { model: await ui.question('Model: '), workspace: await ui.question('Workspace: '), profile: await ui.question('Behavior profile: ') };
         }
-        const request = message(line as 'save' | 'start' | 'stop',selected,current.agent,current.revision,body);
+        const request = message(line as 'save' | 'start' | 'stop',current.host,current.agent,current.revision,body);
         try { client.submit(request); } catch (error) { console.log(error instanceof Error ? error.message : 'Operation not submitted'); continue; }
         console.log(`Durably pending ${line} (${request.id}); publication is NOT host acceptance.`);
       }

@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,7 +26,7 @@ test('real websocket relay, external runner, durable retry, UI close/reopen, hos
   const dir = realpathSync(mkdtempSync(join(tmpdir(),'beehive-test-')));
   const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
   const hostDir = join(dir,'host'); mkdirSync(hostDir);
-  writePrivate(join(hostDir,'setup.json'),{ host:'test-host',ownerSecret:secret,agentSecret,runner:process.execPath,args:[resolve('test/runner.ts')],workspace:dir,mode:'fixture' });
+  provisionSetup(join(hostDir,'setup.json'),{ host:'test-host',ownerSecret:secret,agentSecret,runner:process.execPath,args:[resolve('test/runner.ts')],workspace:dir,mode:'fixture' });
   const log = join(dir,'relay.json');
   const server = await relay(0,publicKey(secret),log);
   const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -100,7 +101,7 @@ test('quarantined leader exit retains Stop and close teardown for owned descenda
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-orphan-')));
     const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
     const hd = join(dir, 'host'); mkdirSync(hd);
-    writePrivate(join(hd, 'setup.json'), { host: 'orphan-host', ownerSecret: secret, agentSecret, runner: process.execPath, args: [resolve('test/orphan-fixture.ts'), behavior], workspace: dir, mode: 'fixture' });
+    provisionSetup(join(hd, 'setup.json'), { host: 'orphan-host', ownerSecret: secret, agentSecret, runner: process.execPath, args: [resolve('test/orphan-fixture.ts'), behavior], workspace: dir, mode: 'fixture' });
     const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;

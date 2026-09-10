@@ -150,3 +150,17 @@ Both are read-only `/Applications/Buzz.app/Contents/MacOS/` binaries. Their dige
 are not a claim that they were built from the source base. The MCP adapter supports
 newline stdio and native CLI argv/stdin, with host-owned executable/identity/relay. Optional local attestation is forwarded using the normal CLI environment;
 no live admission/delegation policy proof is claimed from the fixture relay.
+
+## Assignment bootstrap continuation
+
+`assignment.test.ts` starts three actual TS host subprocesses over one isolated
+management relay: the same fresh agent key on source/standby plus a second identity
+on a third distinct installation. Destination Start and cross-agent routing fail;
+source Start/Stop/service restart retains assignment; absent source cannot authorize
+standby. Actual TUI selects and shows both identities with exact host routing.
+Deleting a running host's local setup does not block Stop, but subsequent Start
+fails without reconstructing the key. Missing journals fail closed; explicit legacy
+migration preserves revision/history and refuses replacement. This is assignment
+bootstrap evidence, NOT Move or multiple agent slots on one host evidence.
+All existing fixture setups now explicitly provision initial authority; none relies
+on host startup self-assigning from key presence.

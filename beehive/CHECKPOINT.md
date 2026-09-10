@@ -5,6 +5,73 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Assignment foundation handoff — delegated fb23e116
+
+Governing boundary: key possession is not assignment. Provisioning must create a
+public pinned genesis (owner, agent, initial host, random enrollment ID) and an
+explicit durable per-agent assignment before any host can Start. Host startup must
+never recreate a missing authority journal. Existing journals require explicit
+local stopped-state migration, not implicit re-enrollment. Import attaches to an
+existing public genesis and cannot root authority at the importing installation.
+Dedicated non-cloned/non-rollback installations and trusted one-time local enrollment
+remain assumptions; shared-owner signatures are not physical-host attestation.
+
+Planned transaction successor (NOT implemented): reserve exact source revision and
+immutable target inputs; relay target preflight; confirm all source owned groups
+absent; atomically consume source authority plus exact destination grant/outbox;
+accept once at destination before fresh launch. No timeout/receipt loss rolls back
+a grant. Unreachable source blocks transfer even when last observed stopped.
+
+Implemented bootstrap fence in `src/assignment.ts` and `src/host.ts`: new local
+provisioning pins explicit initial authority; startup cannot recreate missing
+journals; explicit lock-protected stopped legacy migration preserves history.
+CLI standby import binds the existing public root and identical locally provisioned
+key; root export never exports keys. Host admission and early Stop cancellation
+both check durable assignment. Source Stop/restart preserves assignment. Local key
+absence blocks future Start without restoring hydrated keys; Stop stays available.
+
+TUI inventory now keys by host AND agent, groups identities with `agents`, and offers
+numbered exact host/agent selection plus backward-compatible unique-host selection.
+`assignment.test.ts` uses THREE distinct real TS host processes on one isolated WS
+relay: source/standby share X; a third installation holds Y. Two identities run under
+separate assignments and actual TUI subprocess selection shows both. Standby and
+cross-agent Starts fail, source restart retains assignment, unreachable source cannot
+authorize standby, deleted setup stays deleted, missing journals/migration fail closed.
+This is not multiple slots on one host, nor an actual transfer. No duplicate daemon
+directories are presented as slots. No Move protocol/interface stub is exposed.
+
+Validation: strict TypeScript passed. Full installed-enabled package suite repeated
+on unchanged executable candidate: **21/21 passed, zero skips**, 16.72s. First full
+run was 20/21: existing `reply-tool.test.ts:68` observed a descendant PID still present
+after group Stop; isolated rerun passed and subsequent full run passed. No test was
+weakened and no containment implementation changed. That intermittent observation
+is unresolved, not claimed fixed; retain it for investigation before Move exit proof.
+Both installed executable hashes freshly match retained pins. Evidence directory:
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/ASSIGNMENT_FB23_EVIDENCE/` contains `check.log`,
+`full.log` (failure), `check-final.log`, and `full-repeat.log` (21/21). Existing installed
+signed-conversation tests passed, but this new assignment test is lifecycle fixture
+only; no destination conversation or live provider acceptance is claimed.
+
+Move and multi-agent slots on one installation remain gated. The current validator
+intentionally requires assignedHost == genesis.initialHost; do not merely relax it
+to simulate Move. Replace it with verified consumed-predecessor/grant-chain authority
+only when source revocation, outbox and target acceptance are implemented together.
+One dedicated owner scopes this development protocol; IDs route trusted installations,
+not independent host attestation or production-community enrollment. No timestamp,
+TTL, election, direct HTTP lifecycle route, remote secret or automatic takeover added.
+
+**ONE next executable action:** introduce per-agent slots under ONE installation lock
+and ONE management connection, preserving this bootstrap fence and receipt/admission
+state per slot; prove X and Y coexist before building the source-consumed Move
+transaction specified above. Then implement preflight/exit/grant/accept/fresh launch
+and failure/replay tests, including investigation of the intermittent descendant
+observation. Do not treat this prerequisite candidate as completed two-host Move.
+Remaining profiles/key CRUD/Restart, richer setup/provider/preset/mesh/compute parity,
+real UI/live auth acceptance, retention and trusted-scope recovery remain in README.
+No production services, owner stores, OAuth/provider access, Rust/native edits,
+repo-wide/GitHub CI, PR, merge or release. Author/committer Logan Johnson + DCO
+verified; no cryptographic signer configured.
+
 ## Published continuation 4341 — U1 policy recovery
 
 UX source committed/pushed as `4fa4fd146961f91fdace04f3c6fb59e6300e2473`;

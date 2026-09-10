@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -54,7 +55,7 @@ test('production host Start uses external ACP evidence; Save and Stop do not nee
   const ownerSecret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
   const p = plan(dir);
   const authDir = join(dir, 'isolated-auth'); mkdirSync(authDir);
-  writePrivate(join(hostDir, 'setup.json'), { host: 'acp-host', ownerSecret, agentSecret, runner: p.executable, args: p.args, workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: authDir, databricksHost: p.databricksHost });
+  provisionSetup(join(hostDir, 'setup.json'), { host: 'acp-host', ownerSecret, agentSecret, runner: p.executable, args: p.args, workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: authDir, databricksHost: p.databricksHost });
   const authInfo = spawnSync(process.execPath, ['src/cli.ts', 'auth-info', hostDir], { encoding: 'utf8', timeout: 3000 });
   assert.equal(authInfo.status, 0); assert.match(authInfo.stdout, /acp-host/); assert.match(authInfo.stdout, /auth databricks/);
   assert.ok(!authInfo.stdout.includes(ownerSecret) && !authInfo.stdout.includes(agentSecret));

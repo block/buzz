@@ -37,7 +37,7 @@ On Block-managed machines, the public npm registry is policy-blocked. Append
 to the install command to use the approved mirror. No credentials or persistent
 registry config are needed. The committed lockfile is registry-agnostic.
 
-TUI: `operations`, `reconcile`, `retry <number>`, `hosts`, `select <host-name>`, `show`, `start`, `save`, `stop`, `quit`.
+TUI: `agents`, `operations`, `reconcile`, `retry <number>`, `hosts`, `select <number or unique host-name>`, `show`, `start`, `save`, `stop`, `quit`.
 Save asks for advertised model, workspace and independent behavior profile.
 Only one fixture model and the `default` profile are currently supported;
 profile authoring/versioning and useful multi-setup selection remain to build.
@@ -95,8 +95,8 @@ arbitrary Nostr kind is not an admission solution.
 
 One dedicated owner shares signing/decryption authority with fully trusted host
 installations. Host IDs route messages; they are NOT cryptographic host proof.
-Agent identities are generated separately and only locally. Key import and
-Move are disabled. Setup refuses an existing host directory; saved journal
+Agent identities are generated separately and only locally. Standby key import
+attaches to an existing public genesis; Move remains disabled. Setup refuses an existing host directory; saved journal
 bindings prevent owner/agent/host replacement from resetting admission.
 An owner can still bypass software by cloning/recreating installations: safety
 assumes non-cloned, non-rollback, exclusively supervised installations.
@@ -132,7 +132,54 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
   TUI pending intents/reconnect are implemented with a local encrypted journal. Lost connection means
   unknown, not stopped or success; exhausted recovery needs operator attention.
 - Inventory has freshness, not liveness proof. Host starts no action based on peer
-  agent presence. Only its locally bound agent is manageable.
+  agent presence. Only its locally bound agent is manageable; one slot per installation remains a
+  limitation, not multi-agent-per-host support.
+
+## Explicit initial assignment (Move prerequisite, not Move)
+
+New local setup writes both setup and authority journal before a host can launch.
+The journal pins a public genesis (owner, agent, initial host, random enrollment
+ID) and a separate assigned-host field. Start/Save/Stop are denied at a standby
+host even with the identical local private key. Stop and service restart retain
+assignment. Startup refuses a missing journal rather than recreating authority
+from a cached key. Lifecycle checks current local key/setup availability before
+Start and never writes keys back; Stop does not need provider auth or a key file.
+
+For a second, independently provisioned installation, export only the public root:
+
+```sh
+node src/cli.ts assignment-export /absolute/source-host /new/public-genesis.json
+node src/cli.ts setup /new/target-host /local/owner-identity.json /local/agent-key.json /local/public-genesis.json
+```
+
+The key file is an owner-only local JSON `{ "secret": "<hex-private-key>" }`,
+provisioned by the local administrator, not sent over the management relay. The
+public root file is also read/written owner-only by these commands. The key must
+match that root; import cannot create a second initial-authority installation.
+No credential, workspace, session or provider configuration is exported. This is
+not existing unmanaged-agent enrollment, nsec parsing or a key-export feature.
+New-key setup remains the ordinary guided command without those optional files.
+
+Existing pre-assignment **stopped journals** require explicit local migration:
+`node src/cli.ts migrate-assignment /absolute/host-directory`. Verify there is
+exactly one installation and no unmanaged execution of that identity, then confirm.
+Migration preserves revision, receipts and configuration, uses the host exclusion
+lock and refuses missing journals, unknown execution or an already pinned assignment.
+It cannot recover journal loss, clone/rollback or retire an old installation.
+A partial setup remains inert and requires local investigation, not automatic repair.
+
+`agents` groups observations by persistent public key; `hosts` numbers host/agent
+rows, shows reported assignment, and `select` routes to the exact row. A unique host
+name remains a backward-compatible shortcut. Observations are not consensus; an
+unreachable source never makes its standby eligible. This candidate still has one
+agent slot per installation. Tests use three distinct installations for two agent
+identities; they do **not** disguise cloned daemons as multi-agent slots on one host.
+
+**Not yet implemented:** destination preflight, source reservation/whole-tree Stop
+as a transfer, irreversible grant/outbox lineage, target acceptance/fresh launch,
+and several independently managed agents in one host process. No `move` command
+is exposed until these boundaries are implemented and tested together. The root
+ID is an identity binding, not a lock service or partition/rollback solution.
 
 ## Real target: Buzz Agent + Databricks v2
 

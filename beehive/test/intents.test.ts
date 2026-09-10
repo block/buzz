@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, readFileSync, rmSync } from 'node:fs';
@@ -19,7 +20,7 @@ async function until(predicate: () => boolean) {
 test('durable client reopens exact unpublished intent, recovers lost post-commit receipt, and fences unrelated results', async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-intents-')));
   const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
-  writePrivate(join(dir, 'setup.json'), { host: 'reconnect-host', ownerSecret: secret, agentSecret,
+  provisionSetup(join(dir, 'setup.json'), { host: 'reconnect-host', ownerSecret: secret, agentSecret,
     runner: process.execPath, args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' });
   const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
   const address = server.address(); assert.ok(address && typeof address !== 'string');

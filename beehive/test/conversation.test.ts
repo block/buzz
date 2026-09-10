@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -54,7 +55,7 @@ test('real management WS runs identity-bearing external conversation through esc
   writeFileSync(runtime, `#!/bin/sh\nexec '${executable}' '${resolve('test/conversation-runtime-fixture.ts')}'\n`, { mode: 0o700 });
   writeFileSync(join(dir, 'mode'), 'ok');
   const setup = { host: 'conversation-host', ownerSecret, agentSecret, runner: executable, args: [resolve('test/conversation-harness-fixture.ts')], workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid', conversation: { executable: runtime, relay: 'wss://conversation.invalid', authTag: 'fixture-attestation' } };
-  writePrivate(join(dir, 'setup.json'), setup);
+  provisionSetup(join(dir, 'setup.json'), setup);
   const server = await relay(0, publicKey(ownerSecret), join(dir, 'relay.json'));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const url = `ws://127.0.0.1:${address.port}`;

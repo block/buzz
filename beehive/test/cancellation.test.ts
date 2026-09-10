@@ -1,3 +1,4 @@
+import { provisionSetup } from './provision.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -17,7 +18,7 @@ test('in-flight ACP Start is cancellable by authorized Stop and host close; malf
     const runtime = join(dir, 'runtime');
     writeFileSync(runtime, `#!/bin/sh\nexec '${realpathSync(process.execPath)}' '${resolve('test/conversation-runtime-fixture.ts')}'\n`, { mode: 0o700 });
     writeFileSync(join(dir, 'mode'), action === 'bad-tail' ? 'bad-tail' : 'delayed');
-    writePrivate(join(dir, 'setup.json'), { host: 'cancel-host', ownerSecret: secret, agentSecret, runner: realpathSync(process.execPath), args: target === 'probe' ? [resolve('test/acp-fixture.ts'), action === 'bad-tail' ? 'bad-tail' : 'delayed'] : [resolve('test/conversation-harness-fixture.ts')], ...(target === 'conversation' ? { conversation: { executable: runtime, relay: 'ws://127.0.0.1:1' } } : {}), workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid' });
+    provisionSetup(join(dir, 'setup.json'), { host: 'cancel-host', ownerSecret: secret, agentSecret, runner: realpathSync(process.execPath), args: target === 'probe' ? [resolve('test/acp-fixture.ts'), action === 'bad-tail' ? 'bad-tail' : 'delayed'] : [resolve('test/conversation-harness-fixture.ts')], ...(target === 'conversation' ? { conversation: { executable: runtime, relay: 'ws://127.0.0.1:1' } } : {}), workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid' });
     const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;
