@@ -179,12 +179,10 @@ mod tests {
             ) => panic!("response should wait for cancel: {result:?}"),
             _ = wait_for(&ready) => {}
         }
-        assert!(
-            client
-                .cancel_with_cleanup_grace("sess-test", Duration::from_secs(5))
-                .await
-                .is_ok()
-        );
+        assert!(client
+            .cancel_with_cleanup_grace("sess-test", Duration::from_secs(5))
+            .await
+            .is_ok());
         let text = std::fs::read_to_string(&capture).unwrap();
         let frames: Vec<serde_json::Value> = text
             .lines()
@@ -220,17 +218,15 @@ sleep 10"#;
                 .await,
             Err(AcpError::AgentError { .. })
         ));
-        assert!(
-            client
-                .session_prompt_with_idle_timeout(
-                    "sess-test",
-                    "second",
-                    Duration::from_secs(5),
-                    Duration::from_secs(5)
-                )
-                .await
-                .is_ok()
-        );
+        assert!(client
+            .session_prompt_with_idle_timeout(
+                "sess-test",
+                "second",
+                Duration::from_secs(5),
+                Duration::from_secs(5)
+            )
+            .await
+            .is_ok());
         client.shutdown().await;
     }
 }
