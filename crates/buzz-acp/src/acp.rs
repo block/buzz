@@ -106,6 +106,15 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
+    #[error("Agent did not advertise session/close; cannot release session {session_id}")]
+    SessionCloseUnsupported { session_id: String },
+
+    #[error("session/close failed; connection ownership is uncertain: {source}")]
+    SessionCloseFailed {
+        #[source]
+        source: Box<AcpError>,
+    },
+
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
 }
@@ -117,7 +126,17 @@ pub enum AcpError {
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
+        Some(m) => {
+            let details = error
+                .pointer("/data/details")
+                .and_then(|details| details.as_str())
+                .map(str::trim)
+                .filter(|details| !details.is_empty());
+            match details {
+                Some(details) if !m.contains(details) => format!("{m}: {details}"),
+                _ => m.to_string(),
+            }
+        }
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
@@ -208,6 +227,17 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// Whether `initialize` advertised the standard `session/close` capability.
+    /// A close request is never sent when this is false.
+    session_close_supported: bool,
+    /// Optional operator-declared maximum number of live sessions on this ACP
+    /// connection. ACP v1 has no standard field for connection cardinality;
+    /// `None` preserves Buzz's historical multi-session behavior.
+    max_sessions_per_connection: Option<usize>,
+    /// Session IDs invalidated by Buzz while the client was not in an async
+    /// lifecycle seam. They remain remote ownership until an idle-maintenance
+    /// or prompt/session lifecycle seam successfully closes them.
+    pending_session_closes: Vec<String>,
     /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
@@ -560,6 +590,9 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
+            session_close_supported: false,
+            max_sessions_per_connection: None,
+            pending_session_closes: Vec::new(),
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
@@ -617,6 +650,9 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.session_close_supported = result
+            .pointer("/agentCapabilities/sessionCapabilities/close")
+            .is_some_and(serde_json::Value::is_object);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -655,6 +691,8 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        self.close_pending_sessions().await?;
+
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -851,6 +889,77 @@ impl AcpClient {
             "sessionId": session_id,
         });
         self.send_notification("session/cancel", params).await
+    }
+
+    /// Send a negotiated `session/close` request and release exactly one
+    /// remote session.
+    ///
+    /// ACP requires clients to gate this method on the standard
+    /// `agentCapabilities.sessionCapabilities.close` capability. The guard is
+    /// repeated here so callers cannot accidentally send an unsupported method.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<(), AcpError> {
+        if !self.session_close_supported {
+            return Err(AcpError::SessionCloseUnsupported {
+                session_id: session_id.to_owned(),
+            });
+        }
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        self.send_request("session/close", params)
+            .await
+            .map(|_| ())?;
+        self.pending_session_closes
+            .retain(|pending| pending != session_id);
+        Ok(())
+    }
+
+    /// Whether the agent advertised the standard `session/close` capability.
+    pub fn session_close_supported(&self) -> bool {
+        self.session_close_supported
+    }
+
+    /// Set the operator-declared maximum number of live sessions for this ACP
+    /// connection. This is deliberately separate from `session/close`: ACP v1
+    /// defines the release capability but not connection capacity.
+    pub(crate) fn set_max_sessions_per_connection(&mut self, max: Option<usize>) {
+        debug_assert!(max.is_none_or(|value| value > 0));
+        self.max_sessions_per_connection = max;
+    }
+
+    /// Return whether another session may be admitted using the configured
+    /// connection capacity. Pending closes are excluded because
+    /// `session_new_full` performs them before sending a new session request.
+    pub(crate) fn can_open_session(&self, live_session_count: usize) -> bool {
+        self.max_sessions_per_connection
+            .is_none_or(|max| live_session_count < max)
+    }
+
+    /// Record a locally invalidated session for protocol release at the next
+    /// safe async lifecycle seam. Duplicate IDs are ignored.
+    pub(crate) fn queue_session_close(&mut self, session_id: &str) {
+        if !self
+            .pending_session_closes
+            .iter()
+            .any(|id| id == session_id)
+        {
+            self.pending_session_closes.push(session_id.to_owned());
+        }
+    }
+
+    pub(crate) fn has_pending_session_closes(&self) -> bool {
+        !self.pending_session_closes.is_empty()
+    }
+
+    pub(crate) async fn close_pending_sessions(&mut self) -> Result<(), AcpError> {
+        while let Some(session_id) = self.pending_session_closes.first().cloned() {
+            self.session_close(&session_id).await.map_err(|source| {
+                AcpError::SessionCloseFailed {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// Returns `true` if a `session/prompt` request is currently in flight.
@@ -4794,6 +4903,245 @@ mod tests {
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_error_from_json_preserves_details_with_generic_message() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"
+            }
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(message.contains("Internal error"));
+                assert!(
+                    message.contains("one session per connection"),
+                    "provider data.details must survive adapter error mapping, got: {message}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_does_not_duplicate_details_already_in_message() {
+        let details = "one session per connection";
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": format!("Internal error: {details}"),
+            "data": { "details": details },
+        });
+        let AcpError::AgentError { message, .. } = super::agent_error_from_json(&error) else {
+            panic!("expected AgentError");
+        };
+        assert_eq!(message, format!("Internal error: {details}"));
+    }
+
+    #[test]
+    fn agent_error_from_json_preserves_non_string_data_when_message_is_missing() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "data": { "details": { "reason": "occupied" } },
+        });
+        let AcpError::AgentError { message, .. } = super::agent_error_from_json(&error) else {
+            panic!("expected AgentError");
+        };
+        assert!(message.contains("occupied"), "message lost data: {message}");
+    }
+
+    #[tokio::test]
+    async fn session_close_is_sent_only_after_negotiated_capability() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-session-close-{}.ndjson",
+            uuid::Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r init
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r close
+printf '%s\n' "$close" > '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{}}}}'
+sleep 1"#
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.session_close_supported());
+        client
+            .session_close("session-a")
+            .await
+            .expect("negotiated session/close should succeed");
+        client.shutdown().await;
+
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&capture).expect("read captured session/close"),
+        )
+        .expect("captured session/close is JSON");
+        assert_eq!(request["method"], "session/close");
+        assert_eq!(request["params"]["sessionId"], "session-a");
+        std::fs::remove_file(capture).expect("remove session/close capture");
+    }
+
+    #[tokio::test]
+    async fn session_close_is_rejected_without_negotiated_capability() {
+        let mut client = spawn_script(
+            r#"read -r init
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+sleep 1"#,
+        )
+        .await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(!client.session_close_supported());
+        assert!(matches!(
+            client.session_close("session-a").await,
+            Err(AcpError::SessionCloseUnsupported { session_id }) if session_id == "session-a"
+        ));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unset_capacity_retains_multi_session_wire_behavior() {
+        let mut client = spawn_script(
+            r#"read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r session_a
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-a"}}'
+read -r session_b
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-b"}}'
+sleep 1"#,
+        )
+        .await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(!client.session_close_supported());
+        assert_eq!(
+            client
+                .session_new_full("/tmp", vec![], None, None)
+                .await
+                .expect("first session/new should succeed")
+                .session_id,
+            "session-a"
+        );
+        assert_eq!(
+            client
+                .session_new_full("/tmp", vec![], None, None)
+                .await
+                .expect("second session/new should remain admitted when capacity is unset")
+                .session_id,
+            "session-b"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_session_close_failure_blocks_replacement_session() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-session-close-failure-{}.ndjson",
+            uuid::Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r init
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r close
+printf '%s\n' "$close" > '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"error":{{"code":-32603,"message":"close failed"}}}}'
+if read -r replacement; then printf '%s\n' "$replacement" >> '{quoted_capture}'; fi
+sleep 1"#
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.queue_session_close("session-a");
+        let result = client.session_new_full("/tmp", vec![], None, None).await;
+        assert!(matches!(
+            result,
+            Err(AcpError::SessionCloseFailed { source })
+                if matches!(*source, AcpError::AgentError { code: -32603, .. })
+        ));
+        client.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured close failure")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        assert_eq!(
+            requests.len(),
+            1,
+            "session/new must not follow failed close"
+        );
+        assert_eq!(requests[0]["method"], "session/close");
+        std::fs::remove_file(capture).expect("remove close failure capture");
+    }
+
+    #[tokio::test]
+    async fn pending_session_close_can_be_flushed_before_sibling_reuse() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-session-close-sibling-{}.ndjson",
+            uuid::Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r init
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r close
+printf '%s\n' "$close" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{}}}}'
+read -r prompt
+printf '%s\n' "$prompt" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":"end_turn"}}}}'
+sleep 1"#
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.queue_session_close("retired-session");
+        client
+            .close_pending_sessions()
+            .await
+            .expect("pending close should succeed before sibling reuse");
+        client
+            .session_prompt_with_idle_timeout(
+                "sibling-session",
+                "hello",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("sibling prompt should remain usable");
+        client.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured sibling reuse")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .filter_map(|request| request["method"].as_str())
+                .collect::<Vec<_>>(),
+            ["session/close", "session/prompt"]
+        );
+        assert_eq!(requests[0]["params"]["sessionId"], "retired-session");
+        std::fs::remove_file(capture).expect("remove sibling reuse capture");
     }
 
     // ── build_codex_config_env ────────────────────────────────────────────────

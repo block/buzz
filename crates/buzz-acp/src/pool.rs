@@ -317,6 +317,29 @@ impl OwnedAgent {
             self.goose_system_prompt_supported,
         )
     }
+
+    fn live_session_count(&self) -> usize {
+        self.state.sessions.len() + usize::from(self.state.heartbeat_session.is_some())
+    }
+
+    fn can_create_session(&self) -> bool {
+        self.acp.can_open_session(self.live_session_count())
+    }
+
+    /// Preserve remote ownership when a synchronous pool-control path removes
+    /// a session from local scope state. The close is sent by idle maintenance
+    /// or the next prompt/session lifecycle seam before the connection is
+    /// reused.
+    pub(crate) fn queue_session_close_for_invalidation(&mut self, session_id: &str) {
+        self.acp.queue_session_close(session_id);
+    }
+
+    /// Queue a close for a scope before dropping its local ownership.
+    fn queue_scope_close_for_invalidation(&mut self, scope: &SessionScope) {
+        if let Some(session_id) = self.state.sessions.get(scope).cloned() {
+            self.queue_session_close_for_invalidation(&session_id);
+        }
+    }
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -408,6 +431,74 @@ fn apply_completed_before_control_signal(
         ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
     ) {
         state.invalidate(source);
+    }
+}
+
+/// Release a deliberately abandoned remote session before its local scope is
+/// forgotten. When the adapter does not advertise `session/close`, the
+/// connection cannot be safely reused after this deliberate invalidation; the
+/// caller must retire it.
+async fn close_session_before_invalidation(
+    agent: &mut OwnedAgent,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    if agent.acp.session_close_supported() {
+        agent
+            .acp
+            .session_close(session_id)
+            .await
+            .map_err(|source| AcpError::SessionCloseFailed {
+                source: Box::new(source),
+            })
+    } else {
+        Err(AcpError::SessionCloseUnsupported {
+            session_id: session_id.to_owned(),
+        })
+    }
+}
+
+/// Release a session that was created successfully but failed during the
+/// remainder of its per-session setup. The session is not in `SessionState`
+/// yet, so ordinary invalidation cannot account for it; a successful close
+/// preserves the original application error, while a failed close poisons the
+/// connection so the caller retires the process rather than reusing unknown
+/// remote ownership.
+async fn close_new_session_after_setup_failure(
+    agent: &mut OwnedAgent,
+    session_id: &str,
+    error: AcpError,
+) -> AcpError {
+    // Definitive process death or a broken/uncertain transport already forces
+    // connection retirement. Do not replace that evidence with a secondary
+    // session/close capability error.
+    if matches!(
+        &error,
+        AcpError::AgentExited
+            | AcpError::Io(_)
+            | AcpError::WriteTimeout(_)
+            | AcpError::Timeout(_)
+            | AcpError::Protocol(_)
+    ) {
+        return error;
+    }
+    if !agent.acp.session_close_supported() {
+        tracing::error!(
+            target: "pool::session",
+            "cannot release newly-created session {session_id} after setup error without negotiated session/close: {error}"
+        );
+        return AcpError::SessionCloseUnsupported {
+            session_id: session_id.to_owned(),
+        };
+    }
+    match close_session_before_invalidation(agent, session_id).await {
+        Ok(()) => error,
+        Err(close_error) => {
+            tracing::error!(
+                target: "pool::session",
+                "failed to release session after setup error: {close_error}"
+            );
+            close_error
+        }
     }
 }
 
@@ -903,7 +994,9 @@ impl AgentPool {
     /// Pass 1: prefer an agent that already has a session for this exact scope
     /// (thread affinity — repeated activity in a thread reuses that thread's
     /// provider session).
-    /// Pass 2: any idle agent.
+    /// Pass 2: any idle agent with capacity for a new session. A configured
+    /// capacity-1 connection that already owns another scope is therefore not
+    /// selected for an independent scope; the queue waits for a blank worker.
     ///
     /// Returns `None` if all agents are checked out.
     pub fn try_claim(&mut self, scope: Option<&SessionScope>) -> Option<OwnedAgent> {
@@ -920,8 +1013,11 @@ impl AgentPool {
         }
 
         // Pass 2: first idle agent.
-        let idx = self.agents.iter().position(|slot| slot.is_some());
-        idx.map(|i| self.agents[i].take().unwrap())
+        let idx = self
+            .agents
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(OwnedAgent::can_create_session));
+        idx.and_then(|i| self.agents[i].take())
     }
 
     /// Return an agent to its slot after a task completes.
@@ -938,6 +1034,37 @@ impl AgentPool {
             );
         }
         self.agents[idx] = Some(agent);
+    }
+
+    /// Flush remote closes queued by synchronous invalidation of idle agents.
+    ///
+    /// A checked-out agent owns its ACP stream exclusively and flushes its own
+    /// queue at the next async prompt seam. Idle agents have no such seam, so
+    /// the main loop calls this bounded maintenance operation. A failed close
+    /// returns the agent to the caller so the uncertain connection can be
+    /// retired instead of being reused.
+    pub async fn flush_pending_session_closes(&mut self) -> Vec<(OwnedAgent, AcpError)> {
+        let indices: Vec<usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot.as_ref()
+                    .filter(|agent| agent.acp.has_pending_session_closes())
+                    .map(|_| index)
+            })
+            .collect();
+        let mut failures = Vec::new();
+        for index in indices {
+            let Some(mut agent) = self.agents[index].take() else {
+                continue;
+            };
+            match agent.acp.close_pending_sessions().await {
+                Ok(()) => self.agents[index] = Some(agent),
+                Err(error) => failures.push((agent, error)),
+            }
+        }
+        failures
     }
 
     /// Whether any agent is currently idle (sitting in its slot).
@@ -1100,6 +1227,16 @@ impl AgentPool {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
+                let session_ids: Vec<String> = agent
+                    .state
+                    .sessions
+                    .iter()
+                    .filter(|(scope, _)| scope.channel_id() == channel_id)
+                    .map(|(_, session_id)| session_id.clone())
+                    .collect();
+                for session_id in session_ids {
+                    agent.queue_session_close_for_invalidation(&session_id);
+                }
                 // Channel-wide: clears every child thread scope for the channel.
                 count += agent.state.invalidate_channel(&channel_id);
             }
@@ -1128,6 +1265,7 @@ impl AgentPool {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
+                agent.queue_scope_close_for_invalidation(scope);
                 if agent.state.invalidate_scope(scope) {
                     count += 1;
                 }
@@ -1219,6 +1357,7 @@ impl AgentPool {
         // Carry the pick's correlator so a deferred-validation miss on the next
         // turn's session creation emits a late frame the Desktop can match.
         agent.desired_model_request_id = request_id;
+        agent.queue_scope_close_for_invalidation(&scope);
         agent.state.invalidate_scope(&scope);
         self.session_owners.remove(&scope);
         self.held_since.remove(&scope);
@@ -1420,7 +1559,14 @@ async fn create_session_and_apply_model(
                         "Goose does not support its system-prompt extension; using user-message framing"
                     );
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(close_new_session_after_setup_failure(
+                        agent,
+                        &resp.session_id,
+                        error,
+                    )
+                    .await)
+                }
             }
         }
     }
@@ -1455,8 +1601,21 @@ async fn create_session_and_apply_model(
         let pending_ack = std::mem::take(&mut agent.desired_model_pending_ack);
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                match apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?
-                {
+                let switch_result =
+                    match apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            return Err(close_new_session_after_setup_failure(
+                                agent,
+                                &resp.session_id,
+                                error,
+                            )
+                            .await)
+                        }
+                    };
+                match switch_result {
                     ModelSwitchOutcome::Applied(switch_result) => {
                         // The adapter rebuilds `session.configOptions` for the
                         // target model and echoes them here. Refresh capabilities
@@ -1555,7 +1714,13 @@ async fn create_session_and_apply_model(
     // the session is actually running; computed BEFORE the capture emission so
     // the cached configOptions tell the truth about the running session.
     let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
-    let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
+    let effort_outcome = match apply_startup_effort(agent, effort_snapshot, &resp.session_id).await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(close_new_session_after_setup_failure(agent, &resp.session_id, error).await)
+        }
+    };
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1606,7 +1771,13 @@ async fn create_session_and_apply_model(
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
+        if let Err(error) =
+            apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await
+        {
+            return Err(
+                close_new_session_after_setup_failure(agent, &resp.session_id, error).await,
+            );
+        }
     }
 
     Ok(resp.session_id)
@@ -2202,6 +2373,26 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // Synchronous pool-control paths queue remote closes because they cannot
+    // await on the ACP stream. Flush them before either reusing a sibling
+    // session or creating a replacement; waiting only for `session/new` would
+    // leave a queued close behind an otherwise healthy existing scope.
+    if let Err(error) = agent.acp.close_pending_sessions().await {
+        tracing::error!(
+            target: "pool::session",
+            "failed to release pending session before prompt: {error}"
+        );
+        send_prompt_result(
+            &result_tx,
+            &turn_id,
+            agent,
+            source,
+            PromptOutcome::Error(error),
+            requeue_batch_if_queue(&ctx, batch),
+        );
+        return;
+    }
+
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state
     // outcome: fail closed and preserve the batch without poisoning the healthy
@@ -2671,13 +2862,27 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    let error = match close_session_before_invalidation(&mut agent, &session_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            agent.state.invalidate(&source);
+                            e
+                        }
+                        Err(close_error) => {
+                            tracing::error!(
+                                target: "pool::session",
+                                "failed to release session after initial_message error: {close_error}"
+                            );
+                            close_error
+                        }
+                    };
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Error(e),
+                        PromptOutcome::Error(error),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -2915,9 +3120,11 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+                                let close_result =
+                                    close_session_before_invalidation(&mut agent, &session_id)
+                                        .await;
 
                                 let usage = agent.acp.take_turn_usage();
                                 publish_agent_turn_metric(
@@ -2929,6 +3136,22 @@ pub async fn run_prompt_task(
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
                                 )
                                 .await;
+                                if let Err(error) = close_result {
+                                    tracing::error!(
+                                        target: "pool::session",
+                                        "failed to release cancelled session: {error}"
+                                    );
+                                    send_prompt_result(
+                                        &result_tx,
+                                        &turn_id,
+                                        agent,
+                                        source,
+                                        PromptOutcome::Error(error),
+                                        retry_batch,
+                                    );
+                                    return;
+                                }
+                                agent.state.invalidate(&source);
                                 send_prompt_result(
                                     &result_tx,
                                     &turn_id,
@@ -2949,10 +3172,22 @@ pub async fn run_prompt_task(
                                     control_signal,
                                     batch,
                                 );
+                                let mut outcome = failure.outcome;
                                 if failure.invalidate_all {
                                     agent.state.invalidate_all();
                                 } else {
-                                    agent.state.invalidate(&source);
+                                    match close_session_before_invalidation(&mut agent, &session_id)
+                                        .await
+                                    {
+                                        Ok(()) => agent.state.invalidate(&source),
+                                        Err(close_error) => {
+                                            tracing::error!(
+                                                target: "pool::session",
+                                                "failed to release session after cancellation error: {close_error}"
+                                            );
+                                            outcome = PromptOutcome::Error(close_error);
+                                        }
+                                    }
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2970,7 +3205,7 @@ pub async fn run_prompt_task(
                                     &turn_id,
                                     agent,
                                     source,
-                                    failure.outcome,
+                                    outcome,
                                     failure.retry_batch,
                                 );
                                 return;
@@ -3014,6 +3249,38 @@ pub async fn run_prompt_task(
                                 standing_sent,
                                 &pending_delivered_event_ids,
                             );
+                        }
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
+                        ) {
+                            if let Err(error) =
+                                close_session_before_invalidation(&mut agent, &session_id).await
+                            {
+                                tracing::error!(
+                                    target: "pool::session",
+                                    "failed to release session after completed rotate/switch: {error}"
+                                );
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
+                                send_prompt_result(
+                                    &result_tx,
+                                    &turn_id,
+                                    agent,
+                                    source,
+                                    PromptOutcome::Error(error),
+                                    None,
+                                );
+                                return;
+                            }
                         }
                         apply_completed_before_control_signal(
                             &mut agent.state,
@@ -3090,6 +3357,32 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
+                if let Err(error) = close_session_before_invalidation(&mut agent, &session_id).await
+                {
+                    tracing::error!(
+                        target: "pool::session",
+                        "failed to release rotated session: {error}"
+                    );
+                    let usage = agent.acp.take_turn_usage();
+                    publish_agent_turn_metric(
+                        &ctx,
+                        usage,
+                        observer_channel_id,
+                        &session_id,
+                        &turn_id,
+                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    )
+                    .await;
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(error),
+                        None,
+                    );
+                    return;
+                }
                 agent.state.invalidate(&source);
             }
 
@@ -3255,8 +3548,19 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
-                agent.state.invalidate(&source);
+            let mut prompt_error = e;
+            if !matches!(&prompt_error, AcpError::AgentError { .. }) {
+                if let Err(close_error) =
+                    close_session_before_invalidation(&mut agent, &session_id).await
+                {
+                    tracing::error!(
+                        target: "pool::session",
+                        "failed to release session after prompt error: {close_error}"
+                    );
+                    prompt_error = close_error;
+                } else {
+                    agent.state.invalidate(&source);
+                }
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -3273,7 +3577,7 @@ pub async fn run_prompt_task(
                 &turn_id,
                 agent,
                 source,
-                PromptOutcome::Error(e),
+                PromptOutcome::Error(prompt_error),
                 requeue_batch_if_queue(&ctx, batch),
             );
         }
@@ -6547,6 +6851,495 @@ mod tests {
         }
     }
 
+    /// Regression witness for one-session-per-connection ACP runtimes.
+    ///
+    /// The scripted adapter accepts session A, cancels its prompt, and rejects
+    /// session B/new unless Buzz releases A first. The assertions bind each
+    /// session/new to its distinct thread scope through the session title and
+    /// require the release to occur before the replacement request.
+    #[tokio::test]
+    async fn one_session_connection_rejects_second_scope_after_buzz_cancellation() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-one-session-ownership-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-one-session-prompt-ready-{}",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_marker = marker.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"session-a"}}}}'
+
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+touch '{quoted_marker}'
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":"cancelled"}}}}'
+
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+case "$line" in
+  *'"method":"session/close"'*)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{}}}}'
+    IFS= read -r line
+    printf '%s\n' "$line" >> '{quoted_capture}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"sessionId":"session-b"}}}}'
+    IFS= read -r line
+    printf '%s\n' "$line" >> '{quoted_capture}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"stopReason":"end_turn"}}}}'
+    ;;
+  *)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":3,"error":{{"code":-32603,"message":"Internal error","data":{{"details":"prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"}}}}}}'
+    ;;
+esac"#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn one-session ACP script");
+        acp.initialize()
+            .await
+            .expect("initialize one-session ACP script");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "prime-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+
+        let channel_id = Uuid::new_v4();
+        let scope_a = SessionScope::Thread {
+            channel_id,
+            root_event_id: "a".repeat(64),
+        };
+        let scope_b = SessionScope::Thread {
+            channel_id,
+            root_event_id: "b".repeat(64),
+        };
+        let batch_a = batch_with_scope(scope_a, signed_event_with_tags(vec![]));
+        let batch_b = batch_with_scope(scope_b, signed_event_with_tags(vec![]));
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metadata stub");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let metadata_stub = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let _ = socket.read(&mut request).await;
+                let body = "[]";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_title = Some("prime-agent".into());
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                ChannelInfo {
+                    name: "test-dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now(),
+                value: None,
+            },
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let first_task = tokio::spawn(run_prompt_task(
+            agent,
+            Some(batch_a),
+            Some("scoped turn A".into()),
+            Arc::clone(&ctx),
+            result_tx.clone(),
+            Some(control_rx),
+            "turn-a".into(),
+        ));
+
+        let mut prompt_ready = false;
+        for _ in 0..2000 {
+            if marker.exists() {
+                prompt_ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(prompt_ready, "script did not observe session A/prompt");
+        control_tx
+            .send(ControlSignal::Cancel)
+            .expect("send cancellation to session A");
+        first_task.await.expect("session A task join");
+
+        let first_result = result_rx.recv().await.expect("session A result");
+        assert!(
+            matches!(&first_result.outcome, PromptOutcome::Cancelled),
+            "session A should be cancelled cleanly"
+        );
+        assert!(
+            first_result.agent.state.sessions.is_empty(),
+            "Buzz cancellation must currently remove session A from local scope state"
+        );
+
+        run_prompt_task(
+            first_result.agent,
+            Some(batch_b),
+            Some("scoped turn B".into()),
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "turn-b".into(),
+        )
+        .await;
+        let mut second_result = result_rx.recv().await.expect("session B result");
+        let second_outcome = match second_result.outcome {
+            PromptOutcome::Ok(reason) => format!("Ok({reason:?})"),
+            PromptOutcome::Error(AcpError::AgentError { code, message }) => {
+                format!("AgentError({code}, {message})")
+            }
+            PromptOutcome::Error(error) => format!("Error({error:?})"),
+            PromptOutcome::Cancelled => "Cancelled".into(),
+            PromptOutcome::AgentExited => "AgentExited".into(),
+            PromptOutcome::Timeout(kind) => format!("Timeout({kind:?})"),
+            PromptOutcome::ProjectContextIndeterminate(error) => {
+                format!("ProjectContextIndeterminate({error})")
+            }
+            PromptOutcome::CancelDrainTimeout(duration) => {
+                format!("CancelDrainTimeout({duration:?})")
+            }
+        };
+        second_result.agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        let methods: Vec<&str> = requests
+            .iter()
+            .filter_map(|request| request["method"].as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "session/new",
+                "session/prompt",
+                "session/cancel",
+                "session/close",
+                "session/new",
+                "session/prompt"
+            ],
+            "Buzz must release the retired session before reusing a one-session connection"
+        );
+        let new_requests: Vec<&serde_json::Value> = requests
+            .iter()
+            .filter(|request| request["method"] == "session/new")
+            .collect();
+        assert_eq!(new_requests.len(), 2);
+        assert!(new_requests[0]["params"]["_meta"]["sessionTitle"]
+            .as_str()
+            .expect("session A title")
+            .contains("aaaaaaaa"));
+        assert!(new_requests[1]["params"]["_meta"]["sessionTitle"]
+            .as_str()
+            .expect("session B title")
+            .contains("bbbbbbbb"));
+        let close_index = methods
+            .iter()
+            .position(|method| *method == "session/close")
+            .expect("session/close request");
+        let replacement_index = methods
+            .iter()
+            .enumerate()
+            .skip(close_index + 1)
+            .find_map(|(index, method)| (*method == "session/new").then_some(index))
+            .expect("replacement session/new request");
+        assert!(
+            close_index < replacement_index,
+            "session/close must precede replacement session/new"
+        );
+        let close_request = requests
+            .iter()
+            .find(|request| request["method"] == "session/close")
+            .expect("captured session/close request");
+        assert_eq!(close_request["params"]["sessionId"], "session-a");
+        println!(
+            "one-session wire witness: methods={methods:?}, session_titles={:?}, second_outcome={second_outcome}",
+            new_requests
+                .iter()
+                .map(|request| request["params"]["_meta"]["sessionTitle"].as_str())
+                .collect::<Vec<_>>()
+        );
+        metadata_stub.abort();
+        std::fs::remove_file(&capture).expect("remove ACP capture");
+        std::fs::remove_file(&marker).expect("remove prompt marker");
+
+        assert!(
+            second_outcome.starts_with("Ok("),
+            "session B should be admitted only after the retired session is released; observed {second_outcome}; wire methods={methods:?}"
+        );
+    }
+
+    /// The cancellation-drain error branch must release the remote session too.
+    /// An application error is returned as an application outcome, so the
+    /// existing agent remains eligible for reuse; local invalidation alone
+    /// would leave a one-session connection occupied and make the next scope's
+    /// `session/new` fail.
+    #[tokio::test]
+    async fn one_session_connection_releases_session_after_cancellation_error() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-one-session-cancel-error-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-one-session-cancel-error-ready-{}",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_marker = marker.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+touch '{quoted_marker}'
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"error":{{"code":-32603,"message":"Internal error","data":{{"details":"cancelled turn failed"}}}}}}'
+
+IFS= read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+case "$line" in
+  *'"method":"session/close"'*)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{}}}}'
+    IFS= read -r line
+    printf '%s\n' "$line" >> '{quoted_capture}'
+    case "$line" in
+      *'"method":"session/new"'*)
+        printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"sessionId":"session-b"}}}}'
+        IFS= read -r line
+        printf '%s\n' "$line" >> '{quoted_capture}'
+        printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"end_turn"}}}}'
+        ;;
+      *)
+        printf '%s\n' '{{"jsonrpc":"2.0","id":3,"error":{{"code":-32603,"message":"unexpected method after close"}}}}'
+        ;;
+    esac
+    ;;
+  *)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32603,"message":"Internal error","data":{{"details":"prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"}}}}}}'
+    ;;
+esac
+sleep 1"#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn cancellation-error ACP script");
+        acp.initialize()
+            .await
+            .expect("initialize cancellation-error ACP script");
+
+        let channel_id = Uuid::new_v4();
+        let scope_a = SessionScope::Thread {
+            channel_id,
+            root_event_id: "a".repeat(64),
+        };
+        let scope_b = SessionScope::Thread {
+            channel_id,
+            root_event_id: "b".repeat(64),
+        };
+        let mut state = SessionState::default();
+        state
+            .sessions
+            .insert(scope_a.clone(), "session-a".to_string());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "prime-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let batch_a = batch_with_scope(scope_a, signed_event_with_tags(vec![]));
+        let batch_b = batch_with_scope(scope_b, signed_event_with_tags(vec![]));
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metadata stub");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let metadata_stub = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let _ = socket.read(&mut request).await;
+                let body = "[]";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_title = Some("prime-agent".into());
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                ChannelInfo {
+                    name: "test-dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let first_task = tokio::spawn(run_prompt_task(
+            agent,
+            Some(batch_a),
+            Some("scoped turn A".into()),
+            Arc::clone(&ctx),
+            result_tx.clone(),
+            Some(control_rx),
+            "turn-a".into(),
+        ));
+
+        let mut prompt_ready = false;
+        for _ in 0..2000 {
+            if marker.exists() {
+                prompt_ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(prompt_ready, "script did not observe session A/prompt");
+        control_tx
+            .send(ControlSignal::Cancel)
+            .expect("send cancellation to session A");
+        first_task.await.expect("session A task join");
+
+        let first_result = result_rx.recv().await.expect("session A result");
+        assert!(
+            matches!(
+                &first_result.outcome,
+                PromptOutcome::Error(AcpError::AgentError { code: -32603, message })
+                    if message.contains("cancelled turn failed")
+            ),
+            "cancellation error should remain an application error"
+        );
+        assert!(
+            first_result.agent.state.sessions.is_empty(),
+            "cancellation error must invalidate session A locally after close"
+        );
+
+        run_prompt_task(
+            first_result.agent,
+            Some(batch_b),
+            Some("scoped turn B".into()),
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "turn-b".into(),
+        )
+        .await;
+        let mut second_result = result_rx.recv().await.expect("session B result");
+        assert!(
+            matches!(
+                second_result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ),
+            "session B should succeed after the error path releases A"
+        );
+        second_result.agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        let methods: Vec<&str> = requests
+            .iter()
+            .filter_map(|request| request["method"].as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "session/prompt",
+                "session/cancel",
+                "session/close",
+                "session/new",
+                "session/prompt"
+            ],
+            "cancellation errors must release the old session before replacement"
+        );
+        let close_request = requests
+            .iter()
+            .find(|request| request["method"] == "session/close")
+            .expect("captured session/close request");
+        assert_eq!(close_request["params"]["sessionId"], "session-a");
+        println!(
+            "one-session cancellation-error wire witness: methods={methods:?}, close_session={:?}",
+            close_request["params"]["sessionId"]
+        );
+        metadata_stub.abort();
+        std::fs::remove_file(capture).expect("remove ACP capture");
+        std::fs::remove_file(marker).expect("remove prompt marker");
+    }
+
     #[tokio::test]
     async fn run_prompt_task_commits_standing_context_only_after_acp_success() {
         let capture = std::env::temp_dir().join(format!(
@@ -7513,14 +8306,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
     }
 
-    /// An idle agent (slot 0) holding a provider session for `scope`, so
-    /// `has_session_for(scope)` is true.
-    async fn idle_agent_with_session(scope: SessionScope) -> OwnedAgent {
+    async fn idle_agent(index: usize) -> OwnedAgent {
         let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
             .await
             .expect("spawn dummy ACP");
-        let mut agent = OwnedAgent {
-            index: 0,
+        OwnedAgent {
+            index,
             acp,
             state: SessionState::default(),
             model_capabilities: None,
@@ -7532,9 +8323,218 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "test".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
-        };
+        }
+    }
+
+    /// An idle agent (slot 0) holding a provider session for `scope`, so
+    /// `has_session_for(scope)` is true.
+    async fn idle_agent_with_session(scope: SessionScope) -> OwnedAgent {
+        let mut agent = idle_agent(0).await;
         agent.state.sessions.insert(scope, "sess".into());
         agent
+    }
+
+    #[tokio::test]
+    async fn one_session_capacity_skips_occupied_connection_for_new_scope() {
+        let channel_id = Uuid::new_v4();
+        let scope_a = thread_scope(channel_id, &"a".repeat(64));
+        let scope_b = thread_scope(channel_id, &"b".repeat(64));
+        let mut occupied = idle_agent_with_session(scope_a).await;
+        occupied.acp.set_max_sessions_per_connection(Some(1));
+        let spare = idle_agent(1).await;
+        let mut pool = AgentPool::from_slots(vec![Some(occupied), Some(spare)]);
+
+        let mut claimed = pool
+            .try_claim(Some(&scope_b))
+            .expect("a blank connection should admit the independent scope");
+        assert_eq!(
+            claimed.index, 1,
+            "occupied capacity-1 connection was reused"
+        );
+        claimed.acp.shutdown().await;
+
+        let mut occupied = pool
+            .agents_mut()
+            .first_mut()
+            .and_then(Option::take)
+            .expect("occupied connection remains idle in its slot");
+        occupied.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_session_capacity_blocks_new_scope_when_no_blank_connection_exists() {
+        let channel_id = Uuid::new_v4();
+        let scope_a = thread_scope(channel_id, &"a".repeat(64));
+        let scope_b = thread_scope(channel_id, &"b".repeat(64));
+        let mut occupied = idle_agent_with_session(scope_a).await;
+        occupied.acp.set_max_sessions_per_connection(Some(1));
+        let mut pool = AgentPool::from_slots(vec![Some(occupied)]);
+
+        assert!(
+            pool.try_claim(Some(&scope_b)).is_none(),
+            "an occupied capacity-1 connection must not admit another scope"
+        );
+        let mut occupied = pool
+            .agents_mut()
+            .first_mut()
+            .and_then(Option::take)
+            .expect("occupied connection remains idle in its slot");
+        occupied.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_close_adapter_cannot_reuse_after_invalidation() {
+        for max_sessions in [None, Some(1), Some(2)] {
+            let channel_id = Uuid::new_v4();
+            let scope = thread_scope(channel_id, &"a".repeat(64));
+            let mut agent = idle_agent_with_session(scope).await;
+            agent.acp.set_max_sessions_per_connection(max_sessions);
+
+            let error = close_session_before_invalidation(&mut agent, "sess")
+                .await
+                .expect_err("a connection without close needs retirement");
+            assert!(matches!(
+                error,
+                AcpError::SessionCloseUnsupported { session_id } if session_id == "sess"
+            ));
+            agent.acp.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn initialized_no_close_adapter_is_retired_at_invalidation_seam() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-no-close-invalidation-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{}}}}}}'
+if read -r unexpected; then printf '%s\n' "$unexpected" > '{quoted_capture}'; fi"#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn no-close ACP script");
+        acp.initialize()
+            .await
+            .expect("initialize no-close ACP script");
+        assert!(!acp.session_close_supported());
+        acp.set_max_sessions_per_connection(Some(1));
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "no-close-test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let error = close_session_before_invalidation(&mut agent, "session-a")
+            .await
+            .expect_err("known capacity without close must fail closed");
+        assert!(matches!(
+            error,
+            AcpError::SessionCloseUnsupported { session_id } if session_id == "session-a"
+        ));
+        agent.acp.queue_session_close("session-a");
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let mut failures = pool.flush_pending_session_closes().await;
+        assert_eq!(
+            failures.len(),
+            1,
+            "failed idle close must leave the agent for retirement"
+        );
+        let (mut agent, error) = failures.pop().expect("one idle close failure");
+        assert!(matches!(
+            error,
+            AcpError::SessionCloseFailed { source }
+                if matches!(source.as_ref(), AcpError::SessionCloseUnsupported { session_id } if session_id == "session-a")
+        ));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !capture.exists(),
+            "unsupported session/close must not reach the adapter"
+        );
+        agent.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn idle_pending_session_close_is_flushed_before_connection_reuse() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-idle-session-close-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r initialize
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r close
+printf '%s\n' "$close" > '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{}}}}'
+sleep 1"#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn idle-close ACP script");
+        acp.initialize()
+            .await
+            .expect("initialize idle-close ACP script");
+        acp.queue_session_close("session-a");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "idle-close-test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert!(
+            pool.flush_pending_session_closes().await.is_empty(),
+            "a successful idle close should keep the connection in its slot"
+        );
+        let mut agent = pool
+            .agents_mut()
+            .first_mut()
+            .and_then(Option::take)
+            .expect("idle connection remains available after close");
+        agent.acp.shutdown().await;
+
+        let close_request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&capture).expect("read captured idle close"),
+        )
+        .expect("captured idle close is JSON");
+        assert_eq!(close_request["method"], "session/close");
+        assert_eq!(close_request["params"]["sessionId"], "session-a");
+        std::fs::remove_file(capture).expect("remove idle close capture");
+    }
+
+    #[tokio::test]
+    async fn unset_capacity_preserves_multi_session_admission() {
+        let channel_id = Uuid::new_v4();
+        let scope_a = thread_scope(channel_id, &"a".repeat(64));
+        let scope_b = thread_scope(channel_id, &"b".repeat(64));
+        let occupied = idle_agent_with_session(scope_a).await;
+        let mut pool = AgentPool::from_slots(vec![Some(occupied)]);
+
+        let mut claimed = pool
+            .try_claim(Some(&scope_b))
+            .expect("unset capacity retains legacy multi-session admission");
+        claimed.acp.shutdown().await;
     }
 
     // `hold_decision` is gated on the scope variant (not session policy),
@@ -10211,6 +11211,83 @@ exit 0"#
             matches!(err, AcpError::AgentExited | AcpError::Io(_)),
             "process exit mid-effort is a transport error, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_setup_error_closes_session_created_before_setup_failed() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-session-setup-error-{}.ndjson",
+            uuid::Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"read -r line
+printf '%s\n' "$line" > '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"close":{{}}}}}}}}}}'
+read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"session-new","configOptions":[]}}}}'
+read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32000,"message":"setup rejected"}}}}'
+read -r line
+printf '%s\n' "$line" >> '{quoted_capture}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{}}}}'
+sleep 1"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn session-setup ACP script");
+        let mut agent = effort_agent(acp, None);
+        agent.agent_name = "goose".into();
+        agent
+            .acp
+            .initialize()
+            .await
+            .expect("initialize session-setup ACP script");
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.system_prompt = Some("setup prompt".into());
+
+        let err = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            None,
+            NewSessionChannelContext {
+                huddle_instructions: None,
+                canvas: None,
+                name: None,
+                scope: None,
+                channel_type: None,
+            },
+        )
+        .await
+        .expect_err("post-session setup error must propagate");
+        assert!(
+            matches!(err, AcpError::AgentError { code: -32000, .. }),
+            "the original setup error should remain visible: {err:?}"
+        );
+        agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured setup error")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .filter_map(|request| request["method"].as_str())
+                .collect::<Vec<_>>(),
+            [
+                "initialize",
+                "session/new",
+                "_goose/unstable/session/system-prompt/set",
+                "session/close"
+            ],
+            "a setup failure must close the newly-created remote session"
+        );
+        assert_eq!(requests[3]["params"]["sessionId"], "session-new");
+        std::fs::remove_file(capture).expect("remove setup error capture");
     }
 
     #[test]

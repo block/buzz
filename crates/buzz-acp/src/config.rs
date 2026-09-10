@@ -35,6 +35,14 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+    let value = raw.parse::<usize>().map_err(|error| format!("{error}"))?;
+    if value == 0 {
+        return Err("must be at least 1".into());
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -299,6 +307,16 @@ pub struct CliArgs {
           value_parser = clap::value_parser!(u32).range(1..=32))]
     pub agents: u32,
 
+    /// Operator-declared maximum number of simultaneous ACP sessions per
+    /// subprocess/connection. ACP v1 does not negotiate this value; when unset,
+    /// preserve the historical multi-session behavior.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_MAX_SESSIONS_PER_CONNECTION",
+        value_parser = parse_positive_usize
+    )]
+    pub max_sessions_per_connection: Option<usize>,
+
     /// Seconds between heartbeat prompts. 0 = disabled.
     #[arg(long, env = "BUZZ_ACP_HEARTBEAT_INTERVAL", default_value_t = 0)]
     pub heartbeat_interval: u64,
@@ -546,6 +564,9 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
+    /// Optional operator-declared ACP connection session capacity. `None`
+    /// retains the legacy multi-session admission policy.
+    pub max_sessions_per_connection: Option<usize>,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
     /// `heartbeat_interval_secs` (agent self-prompting) — this is the desktop
@@ -1159,6 +1180,7 @@ impl Config {
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
+            max_sessions_per_connection: args.max_sessions_per_connection,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
             heartbeat_prompt,
@@ -1225,7 +1247,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} max_sessions_per_connection={:?} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1234,6 +1256,7 @@ impl Config {
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
+            self.max_sessions_per_connection,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
             self.dedup_mode,
@@ -1543,6 +1566,7 @@ mod tests {
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            max_sessions_per_connection: None,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
@@ -2716,6 +2740,34 @@ channels = "ALL"
         ]);
         assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
         assert_eq!(args.session_policy.to_string(), "thread");
+    }
+
+    #[test]
+    fn max_sessions_per_connection_accepts_positive_capacity() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-sessions-per-connection",
+            "1",
+        ])
+        .expect("positive ACP connection capacity should parse");
+        assert_eq!(args.max_sessions_per_connection, Some(1));
+    }
+
+    #[test]
+    fn max_sessions_per_connection_rejects_zero() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-sessions-per-connection",
+            "0",
+        ]);
+        assert!(
+            args.is_err(),
+            "zero ACP connection capacity must be rejected"
+        );
     }
 
     // ── Multiple-event-handling validation + default ──────────────────────────

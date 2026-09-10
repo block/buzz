@@ -252,6 +252,17 @@ test("code -32603 with specific message → original message preserved, NOT hint
   });
 });
 
+test("code -32603 preserves Prime's session-capacity detail", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): Internal error: prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session",
+    -32603,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "Internal error: prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session",
+  });
+});
+
 test("embedded code -32603 recovered from message when code param is null", () => {
   const result = friendlyAgentLastError(
     "Agent reported error (code -32603): Internal error",

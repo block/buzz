@@ -2910,6 +2910,12 @@ async fn tokio_main() -> Result<()> {
     // spawn_and_init never blocks the main loop.
     let maintenance_interval = Duration::from_secs(30);
     let mut last_maintenance = std::time::Instant::now();
+    // Synchronous pool-control invalidations queue protocol closes because
+    // they cannot await on the ACP stream. Keep idle connections from holding
+    // those remote sessions until the next user prompt; checked-out agents
+    // flush at the prompt seam instead.
+    let mut pending_session_close_reaper = tokio::time::interval(Duration::from_secs(1));
+    pending_session_close_reaper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Channel for background respawn tasks to return completed agents.
     // Bounded to agent count — at most one respawn per slot in flight.
@@ -3064,10 +3070,13 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let max_sessions = config.max_sessions_per_connection;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result =
+                        spawn_and_init(&cmd, &args, &env, has_codex, max_sessions, idx, observer)
+                            .await;
                     guard.send(result);
                 });
             }
@@ -3729,6 +3738,32 @@ async fn tokio_main() -> Result<()> {
                             if let Err(e) = relay.try_publish_event(event) {
                                 tracing::debug!("typing indicator dropped for {ch}: {e}");
                             }
+                        }
+                    }
+                    None
+                }
+                _ = pending_session_close_reaper.tick(), if pool_ready => {
+                    let _ = result_rx;
+                    for (agent, error) in pool.flush_pending_session_closes().await {
+                        let index = agent.index;
+                        tracing::error!(
+                            agent = index,
+                            error = %error,
+                            "failed to release an idle ACP session; retiring the connection"
+                        );
+                        let slot_history = &mut crash_history[index];
+                        if !spawn_respawn_task(
+                            agent,
+                            &config,
+                            slot_history,
+                            &respawn_tx,
+                            &mut respawn_tasks,
+                            observer.clone(),
+                        ) {
+                            tracing::error!(
+                                agent = index,
+                                "idle ACP session close failure could not be respawned"
+                            );
                         }
                     }
                     None
@@ -4802,6 +4837,19 @@ fn handle_prompt_result(
     // agent was checked out. This covers the gap where invalidate_channel_sessions
     // only touches idle agents.
     for ch in removed_channels {
+        let session_ids: Vec<String> = result
+            .agent
+            .state
+            .sessions
+            .iter()
+            .filter(|(scope, _)| scope.channel_id() == *ch)
+            .map(|(_, session_id)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
+            result
+                .agent
+                .queue_session_close_for_invalidation(&session_id);
+        }
         result.agent.state.invalidate_channel(ch);
     }
 
@@ -4984,6 +5032,8 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
+                    | acp::AcpError::SessionCloseUnsupported { .. }
+                    | acp::AcpError::SessionCloseFailed { .. }
             );
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
@@ -5136,12 +5186,13 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let max_sessions = config.max_sessions_per_connection;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, max_sessions, i, observer).await;
         guard.send(result);
     });
 }
@@ -5367,6 +5418,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let max_sessions = config.max_sessions_per_connection;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5378,7 +5430,8 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, has_codex, max_sessions, index, observer).await;
         guard.send(result);
     });
 
@@ -5422,6 +5475,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    max_sessions_per_connection: Option<usize>,
     model: Option<String>,
     effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
@@ -5435,6 +5489,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            max_sessions_per_connection: config.max_sessions_per_connection,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -5459,6 +5514,7 @@ async fn initialize_agent_pool(
         .await;
         match spawn_result {
             Ok(mut acp) => {
+                acp.set_max_sessions_per_connection(startup.max_sessions_per_connection);
                 acp.set_observer(startup.observer.clone(), i);
                 let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
                 let initialize_result = match shutdown.as_mut() {
@@ -5558,12 +5614,14 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    max_sessions_per_connection: Option<usize>,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    acp.set_max_sessions_per_connection(max_sessions_per_connection);
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -9064,6 +9122,7 @@ mod build_mcp_servers_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            max_sessions_per_connection: None,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
@@ -9290,6 +9349,7 @@ mod error_outcome_emission_tests {
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
+            max_sessions_per_connection: None,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
