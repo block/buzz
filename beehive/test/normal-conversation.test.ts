@@ -344,11 +344,18 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
     for (let n = 0; n < 400 && !seen.some(m => m.type === 'receipt' && m.body.operation === changed.id); n++) await delay(20);
     assert.match(String(seen.find(m => m.type === 'receipt' && m.body.operation === changed.id)?.body.result), /saved/);
     profileClient.close();
+    // Save receipt and inventory use separate subscriptions/publications. A receipt
+    // does not advance this observer: freezing its old revision can ask a newly
+    // connected TUI to observe a revision already superseded by the Save.
+    const restartRevision = changed.revision + 1;
+    for (let n = 0; n < 400 && state().revision !== restartRevision; n++) await delay(20);
+    assert.equal(state().revision, restartRevision, 'public Save inventory before freezing the TUI revision fence');
+    assert.equal(state().selected.behavior.revision, restartBehavior.revision);
     assert.deepEqual(state().actual, oldActual);
     expected = inbound;
     await terminal(['tui', identity, managementURL], [
       { prompt: 'beehive> ', answer: 'select 1' },
-      { prompt: 'beehive> ', answer: 'restart', observedRevision: state().revision },
+      { prompt: 'beehive> ', answer: 'restart', observedRevision: restartRevision },
       { prompt: 'beehive> ', answer: 'show', gate: () => state().phase === 'running' && state().actual.run !== oldActual.run },
       { prompt: 'beehive> ', answer: 'quit' },
     ]);

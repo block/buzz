@@ -2138,3 +2138,24 @@ No kernel/scheduling root cause proven, historical2572/2612 remain unresolved.
 No rerun or speculative fix. DATABRICKS_BFCE_RESULT.md records exact contracts,
 source-only variants, installed/source hashes, raw evidence and limits. This final
 record is documentation-only after tested executable; no real OAuth/provider calls.
+
+## MODEL_PROVIDER_CORRECTION recovery candidate
+
+R1 generic same-session drift guards now cover current-model and model-category
+config updates, including completion tails. Restart and Move seal prerequisite
+health after owned probe teardown, before destroying the old actual/source.
+Native Buzz requests protocol 2 and sends bare session/new.systemPrompt, following
+pinned source 051c3a270be9c73da9ab06700bcab7d5552fceaa (not generic ACP-v2 capability).
+Fixture native input evidence no longer comes from the environment marker.
+
+The new installed Restart test initially froze an already superseded revision:
+instrumented old Goose case captured inventory 2 after Save receipt 3, while the
+new TUI displayed 3 and could never satisfy equality with 2. The test now awaits
+exact public Save inventory before freezing the TUI fence; no production client,
+deadline, retry, or equality relaxation. Same Goose case passes. Cases within
+normal-conversation.test.ts run sequentially, files use default Node concurrency.
+Evidence: workspace WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/MODEL_PROVIDER_CORRECTION/
+observation-old-instrumented.log, observation-fix-goose.log, final-protocol2-drift.log,
+strict-delivery.log. Original failures preserved. Full final gate pending here.
+Installed Buzz transport/CLI plus TypeScript provider fixture only: no real vendor,
+OAuth login/refresh, inference, or production current-kind40002 claim.

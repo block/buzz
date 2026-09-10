@@ -799,3 +799,11 @@ Source-shaped fixture acceptance does not establish real vendor inference.
 Databricks static-token setup and expanded OAuth diagnostics remain future work;
 existing v2 native service-user OAuth setup remains separate (never copy owner,
 Goose or Claude caches). Preset diagnostics are not provider parity.
+
+Model/profile correction: native Buzz Agent's pinned protocol-2 contract carries
+selected instructions in fresh `session/new.systemPrompt`, not just an environment
+fallback. Diagnostic ACP model evidence remains guarded against same-session drift;
+Restart/Move prerequisite evidence is sealed after probe teardown before old actual
+teardown. Installed acceptance uses real Buzz transport/CLI with source-shaped
+TypeScript provider fixtures, not live vendor authentication or inference. See
+CHECKPOINT's MODEL_PROVIDER_CORRECTION entry for validation and observation limits.
