@@ -514,3 +514,21 @@ no secret echo, retained assignment, 0600). Initial/imported executable paths he
 are deliberately metadata-only fixtures; no provider/login or runtime spawn claimed.
 Existing Goose/assignment tests retain actual standby Start denial and secure-input
 negatives. The normal installed journeys run only with the existing installed opt-in.
+
+## CLI lifecycle recovery 5360
+
+`cli-shutdown.test.ts` launches the actual relay CLI. Test-only module loading
+injects the existing directory persistence boundary: wire1011 and possible
+replacement must lead to uncertainty stderr and SIGINT exit1, versus clean exit0.
+`startup-transport.test.ts` adds actual host CLI SIGINT/SIGTERM while upgrade is
+withheld, clean lock/journal/restart checks, quarantine retention and double close.
+`policy-tui.test.ts` now waits for relevant PUBLIC running rev1 inventory before
+spawning Stop TUI; private journal rev1 is not asynchronous relay visibility.
+Original unknown/byte-identical retry/accepted rev2 assertions remain unchanged.
+`normal-conversation.test.ts` now starts actual host CLI subprocesses from the
+wizard-produced installations instead of in-process host construction. Initial
+normal and selected-B conversion still require four signed installed CLI replies
+including Restart, same identity, exact model/profile and unchanged sibling/history.
+Strict + one default concurrent installed-enabled full run: 78/78, natural 44.186s.
+This closes scoped service-subprocess continuity, not real Goose/provider or
+production kind40002/service deployment proof. See CHECKPOINT for historical failures.

@@ -1,3 +1,86 @@
+## Recovery 5360 — final validation / publication candidate
+
+Recovered base HEAD: 425feb343e07f5d36fb7ee18b9502c0fd172b15d. The source
+candidate is the commit containing this section; all surviving predecessor edits
+were preserved and completed, not reset or duplicated.
+
+**Explicit relay-review R1: CLOSED.** CLI consumes relay close callback, drains
+queued persistence, surfaces sanitized possible durability uncertainty and exits 1;
+actual subprocess directory-fault (wire1011 + possible replacement) and clean
+SIGINT exit0 controls pass. No storage-fence/uncertain-vs-rejected change.
+
+Final strict PASS; exactly ONE FULL DEFAULT concurrent installed-enabled suite
+**78/78, zero skips/cancellations, natural 44.186s**, on Node 24.15.0/pnpm 11.4.0.
+Both host CLI service journeys, pre-ready SIGINT/SIGTERM and policy driver pass.
+No serial mask, retry-to-green, timeout increase, force exit or weak assertions.
+No executable edits after this run; only acceptance documentation. The prior
+71/73 broker/reply-tool failures and older disconnect/admission observations
+remain separately scoped, not classified by nonrecurrence. Independent diagnosis
+and normal-transition review operate the immutable base and remain to consume.
+
+Self-review: one natural host close promise owns startup abort and ready shutdown;
+all slots drain with allSettled, uncertain teardown retains lock, and CLI awaits
+errors. No PID-derived cleanup authority. Policy barrier is public inventory for
+exact host/agent/revision, not sleep or operation retry; product CAS unchanged.
+Recovered service test uses actual CLI from wizard installation, never direct host
+construction. Captured child output is capped at 8192 characters.
+Evidence directory: WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/RECOVERY_5360, including
+final-strict.log, full-installed-default.log and separate source/installed hashes.
+Installed pins unchanged (buzz-acp 10612d00…441ea; Buzz CLI 147cc2cc…766bb2af5a37b856c5).
+Configured Logan Johnson <loganj@squareup.com> author/committer + DCO; no invented
+cryptographic signer. Publication verification recorded in that evidence directory.
+
+Remaining: independent findings reconciliation, actual Goose/provider login and
+production service/current kind40002 admission; Claude/Codex/providers/presets/
+custom/mesh/compute and full parity. Installed Goose is a deterministic TS fixture,
+not real Goose or live LLM proof. No owner credentials, OAuth caches, private run
+journals, provider calls, production operations, Rust/native/client changes, repo
+CI, merge, release or full-product claim.
+
+## Recovery 5360 — pre-final exact candidate gate
+
+R1 CLOSED locally: actual CLI fault/clean SIGINT 2/2 + strict on pinned
+Node 24.15.0/pnpm 11.4.0. Startup/policy focused 8/8 (5.349s): actual
+SIGINT/SIGTERM before withheld upgrade ready releases clean lock, unchanged
+journal, subsequent startup/ready shutdown; quarantine keeps lock and double
+close shares teardown. No reconnect/deadline changes.
+Policy driver now waits for relevant PUBLIC host+agent running inventory rev1
+before spawning Stop TUI. This source-grounded bounded barrier preserves all
+CAS/unknown/retry/operation-count assertions; pinned runtime reproduces accepted
+unchanged original Stop at rev2 in both loss modes. Not a product recovery fix.
+Recovered service subprocess journeys PASS 2/2 (38.142s): wizard-produced initial
+normal and selected-B NEW immutable conversion, actual host CLI subprocess,
+installed buzz-acp/Buzz CLI, four signed same-agent replies including Restart,
+model/profile/history/Y assertions. Goose is still a TS protocol fixture, no
+live provider/current-kind40002 admission or production service deployment.
+Bounded recovered test stdout/stderr tails to 8 KiB. Evidence RECOVERY_5360/
+{r1,startup-policy,service}.log; older CLI_333D partial log retained unchanged.
+Next: strict + ONE FULL DEFAULT concurrent installed-enabled run of this exact
+executable candidate, no serial masking/retries/deadline increase/force exit.
+Historical full 71/73 and older failures remain separately scoped.
+
+## Recovery 5360 — preserved working state, before validation
+
+Recovered HEAD 425feb343e07f5d36fb7ee18b9502c0fd172b15d; no new commits.
+Preserved prior edits to cli.ts, host.ts, normal-conversation/startup-transport tests,
+and untracked cli-shutdown.test.ts / relay-cli-fault.ts. No reset/cleanup.
+R1 patch already present (callback diagnostic/nonzero exit); prior local 2/2 claim
+retained below, fresh pinned validation pending. Startup abort and actual service
+journey edits also survived; not yet accepted. Policy public-inventory driver fix
+was absent and is next after R1 validation. Evidence: CLI_333D existing public logs;
+new evidence will be in RECOVERY_5360. No private run journals consulted.
+
+## CLI lifecycle continuation 333d — early R1 checkpoint
+
+425feb actual CLI still discarded relay.close errors: R1 was OPEN, not fixed by
+normal wizard work. Now the real CLI consumes close callback, reports sanitized
+possible durability uncertainty, exits 1, and leaves history/fences intact. Clean
+SIGINT exits 0. Actual CLI subprocess regressions (test-only module load injection
+at existing directory boundary, no copied CLI) pass 2/2, strict passes on Node
+24.15.0/pnpm 11.4.0. Replacement present + wire1011 is NOT durable rejection or
+accepted data loss. R1 implementation/regression CLOSED locally; final gate and
+publication pending. Startup signals and service subprocess work follow.
+
 # Beehive executable checkpoint
 
 ## Normal conversation wizard A661 — final gate / scoped handoff

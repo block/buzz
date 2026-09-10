@@ -98,3 +98,62 @@ test('initial HTTP policy denial fails explicitly without automatic retry even w
     assert.equal(e.upgrades, 1); assert.equal(recovered, 0);
   } finally { client.close(); await e.close(); }
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) test(`actual host CLI ${signal} during withheld upgrade drains startup; subsequent ready shutdown`, { timeout: 10000 }, async () => {
+  const { spawn } = await import('node:child_process');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-cli-startup-')));
+  const secret = newKey(), agentSecret = newKey();
+  const e = await endpoint();
+  provision(dir, { host: 'startup', ownerSecret: secret, agentSecret, runner: process.execPath,
+    args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' },
+  createGenesis(publicKey(secret), publicKey(agentSecret), 'startup'));
+  const before = readFileSync(join(dir, 'journal.json'));
+  const launch = () => {
+    const child = spawn(process.execPath, ['src/cli.ts', 'host', dir, e.url], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', errors = '';
+    child.stdout.on('data', b => output = (output + b).slice(-8192)); child.stderr.on('data', b => errors = (errors + b).slice(-8192));
+    return { child, exited: once(child, 'exit'), get output() { return output; }, get errors() { return errors; } };
+  };
+  let running = launch();
+  try {
+    await until(() => e.upgrades === 1);
+    assert.ok(existsSync(join(dir, 'host.lock')));
+    running.child.kill(signal);
+    assert.deepEqual(await running.exited, [0, null], running.errors);
+    assert.equal(running.errors, '');
+    assert.equal(existsSync(join(dir, 'host.lock')), false);
+    assert.deepEqual(readFileSync(join(dir, 'journal.json')), before);
+    assert.equal(e.upgrades, 1);
+    e.mode = 'accept'; running = launch();
+    await until(() => running.output.includes('Host online;'));
+    running.child.kill(signal);
+    assert.deepEqual(await running.exited, [0, null], running.errors);
+    assert.equal(existsSync(join(dir, 'host.lock')), false);
+    assert.deepEqual(readFileSync(join(dir, 'journal.json')), before);
+  } finally {
+    if (running.child.exitCode === null && running.child.signalCode === null) { running.child.kill('SIGTERM'); await running.exited; }
+    await e.close(); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startup abort retains quarantine lock; ready double close shares teardown', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-abort-fence-')));
+  const secret = newKey(), agentSecret = newKey();
+  const e = await endpoint();
+  const { writePrivate, readPrivate } = await import('../src/storage.ts');
+  try {
+    provision(dir, { host: 'startup', ownerSecret: secret, agentSecret, runner: process.execPath,
+      args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' },
+    createGenesis(publicKey(secret), publicKey(agentSecret), 'startup'));
+    e.mode = 'accept'; const clean = await host(dir, e.url);
+    const one = clean.close(); assert.equal(clean.close(), one); await one;
+    const path = join(dir, 'journal.json');
+    const state = readPrivate(path) as Record<string, unknown>;
+    state.phase = 'quarantined'; writePrivate(path, state);
+    e.mode = 'stall'; const controller = new AbortController();
+    const pending = host(dir, e.url, controller.signal);
+    const rejected = assert.rejects(pending, /Incomplete owned teardown/);
+    await until(() => e.upgrades === 2); controller.abort(); await rejected;
+    assert.equal(existsSync(join(dir, 'host.lock')), true, 'unproven execution remains fenced');
+  } finally { await e.close(); rmSync(dir, { recursive: true, force: true }); }
+});

@@ -501,7 +501,8 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
 }
 
 /** One installation owns every slot, lock and management transport. */
-export async function host(directory: string, url: string) {
+export async function host(directory: string, url: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   validateRelayURL(url);
   const lock = join(directory, 'host.lock');
   mkdirSync(lock, { mode: 0o700 }); // Never infer ownership from a recovered PID.
@@ -510,6 +511,18 @@ export async function host(directory: string, url: string) {
   const slots = new Map<string, ReturnType<typeof slot>>();
   const profiles = new Profiles();
   const publish = (m: Message) => { try { client?.send(m); } catch { /* Slot outbox survives transport loss. */ } };
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= (async () => {
+    initialized = false; client?.close(); clearInterval(heartbeat);
+    const results = await Promise.allSettled([...slots.values()].map(s => s.close()));
+    const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason);
+    if (errors.length) throw new AggregateError(errors, 'Incomplete owned teardown; installation remains locked');
+    rmdirSync(lock);
+  })();
+  // Abort uses the same owner as ready shutdown, including quarantine fences.
+  const abort = () => { void close().catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
   try {
     const entries = installationSlots(directory);
     for (const entry of entries) {
@@ -535,19 +548,17 @@ export async function host(directory: string, url: string) {
       else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
     }, () => { if (initialized) for (const s of slots.values()) s.replay(); });
     await client.ready;
-  } catch (e) { client?.close(); rmdirSync(lock); throw e; }
+    signal?.throwIfAborted();
+  } catch (e) {
+    try { await close(); } finally { signal?.removeEventListener('abort', abort); }
+    if (signal?.aborted) throw signal.reason;
+    throw e;
+  }
   initialized = true;
   for (const s of slots.values()) s.replay();
-  const heartbeat = setInterval(() => { for (const s of slots.values()) s.heartbeat(); }, 2000);
-  let closing: Promise<void> | undefined;
+  heartbeat = setInterval(() => { for (const s of slots.values()) s.heartbeat(); }, 2000);
   return { agent: [...slots.keys()][0]!, agents: [...slots.keys()], close() {
-    return closing ??= (async () => {
-      initialized = false; client?.close(); clearInterval(heartbeat);
-      // allSettled starts every teardown and preserves each slot's durable truth.
-      const results = await Promise.allSettled([...slots.values()].map(s => s.close()));
-      const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason);
-      if (errors.length) throw new AggregateError(errors, 'Incomplete owned teardown; installation remains locked');
-      rmdirSync(lock);
-    })();
+    signal?.removeEventListener('abort', abort);
+    return close();
   } };
 }

@@ -195,12 +195,33 @@ async function main() {
   } else if (command === 'relay') {
     const server = await relay(Number(args[0]),text(args[1]),resolve(text(args[2])));
     console.log(`Development relay listening ${JSON.stringify(server.address())}`);
-    process.once('SIGINT',() => { for (const c of server.clients) c.close(); server.close(); });
+    let closing = false;
+    const close = () => {
+      if (closing) return; closing = true;
+      for (const c of server.clients) c.close();
+      server.close(error => {
+        if (error) { console.error('Relay shutdown failed; storage durability may be uncertain. Retain history for reconciliation.'); process.exitCode = 1; }
+      });
+    };
+    process.on('SIGINT', close); process.on('SIGTERM', close);
   } else if (command === 'host') {
-    const running = await host(resolve(text(args[0])),text(args[1]));
-    console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
-    process.once('SIGINT',() => { void running.close(); });
-    process.once('SIGTERM',() => { void running.close(); });
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.on('SIGINT', stop); process.on('SIGTERM', stop);
+    try {
+      const running = await host(resolve(text(args[0])), text(args[1]), controller.signal);
+      console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
+      // The host owns teardown both before and after ready. Observe its one
+      // completion promise so uncertain teardown cannot disappear as a rejection.
+      await new Promise<void>(resolve => {
+        if (controller.signal.aborted) resolve();
+        else controller.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      await running.close();
+    } catch (error) {
+      if (!controller.signal.aborted || error !== controller.signal.reason) throw error;
+      // Transport ready rejection caused by intentional startup cancellation.
+    } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
   } else if (command === 'tui') {
     const secret = text(object(readPrivate(resolve(text(args[0])))).secret);
     const inventory = new Map<string,Message>();

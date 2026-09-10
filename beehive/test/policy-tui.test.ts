@@ -30,10 +30,16 @@ test('actual TUI: policy repair, bounded unchanged retry, lost committed receipt
     const address = server.address(); assert.ok(address && typeof address !== 'string');
     const url = `ws://127.0.0.1:${address.port}`;
     const h = await host(dir, url);
-    const control = connect(url, secret, () => {}); await control.ready;
+    let relayVisibleRunning = false;
+    const control = connect(url, secret, m => {
+      // A private journal commit is not yet public relay inventory visibility.
+      if (m.type === 'inventory' && m.host === 'policy-host' && m.agent === agent && m.revision === 1 && m.body.phase === 'running') relayVisibleRunning = true;
+    }); await control.ready;
     const journal = () => JSON.parse(readFileSync(join(dir, 'journal.json'), 'utf8'));
     control.send(message('start', 'policy-host', agent, 0));
     await until(() => journal().phase === 'running');
+    // Later TUI connections replay this durably committed revision before Stop.
+    await until(() => relayVisibleRunning);
     let deny = true; let denials = 0;
     const attempts: string[] = [];
     const upstreams = new Set<WebSocket>();

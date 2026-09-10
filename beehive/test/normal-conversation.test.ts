@@ -10,7 +10,8 @@ import { schnorr } from '@noble/curves/secp256k1';
 import { setTimeout as delay } from 'node:timers/promises';
 import { terminal } from './local-terminal.ts';
 import { installationSlots } from '../src/slots.ts';
-import { host } from '../src/host.ts';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { relay } from '../src/relay.ts';
 import { readPrivate, writePrivate } from '../src/storage.ts';
 import { pathToFileURL } from 'node:url';
@@ -19,7 +20,7 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart + production host + installed CLI signed replies (${converting ? 'selected diagnostic B conversion' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const goose = true;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
   writeFileSync(join(dir, 'mode'), 'ok');
@@ -67,7 +68,13 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
     { prompt: 'Save NEW Goose binding only', answer: 'yes' },
   ]);
   assert.ok(!setupOutput.includes(ownerSecret));
-  const state = () => readPrivate(entry.path) as any;
+  // Lifecycle decisions come from signed public inventory, not a private journal.
+  let inventory: Message | undefined;
+  const state = () => {
+    assert.ok(inventory, 'public host inventory required');
+    return { revision: inventory.revision, phase: inventory.body.phase,
+      selected: inventory.body.selectedNext as any, actual: inventory.body.actualRun as any };
+  };
   const channel = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
   const replies: any[] = [];
   const subscriptionsBySocket = new Map<string, { socket: any; id: string }>();
@@ -138,7 +145,31 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
   const management = await relay(0, owner, join(dir, 'management.json'));
   const ma = management.address(); assert.ok(ma && typeof ma !== 'string');
   const managementURL = `ws://127.0.0.1:${ma.port}`;
-  let h = await host(installation, managementURL);
+  const observer = connect(managementURL, ownerSecret, m => {
+    if (m.type === 'inventory' && m.host === 'journey' && m.agent === agent) inventory = m;
+  });
+  await observer.ready;
+  const service = async () => {
+    const child = spawn(process.execPath, ['src/cli.ts', 'host', installation, managementURL], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', errors = '';
+    child.stdout.on('data', b => output = (output + b).slice(-8192)); child.stderr.on('data', b => errors = (errors + b).slice(-8192));
+    const exited = once(child, 'exit');
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      assert.deepEqual(await exited, [0, null], errors);
+      assert.equal(errors, '');
+      assert.equal(existsSync(join(installation, 'host.lock')), false);
+    })();
+    try {
+      for (let n = 0; n < 400 && !(output.includes('Host online;') && inventory); n++) {
+        assert.equal(child.exitCode, null, errors); await delay(20);
+      }
+      assert.match(output, /Host online;/); assert.ok(inventory);
+      return { close };
+    } catch (error) { await close(); throw error; }
+  };
+  let h = await service();
   if (converting) {
     await terminal(['tui', identity, managementURL], [
       { prompt: 'beehive> ', answer: 'select 1' },
@@ -163,7 +194,7 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
     assert.deepEqual(readFileSync(entry.path), beforeJournal);
     assert.deepEqual(installationSlots(installation)[0]!.bindings.B, beforeB);
     assert.deepEqual(installationSlots(installation)[0]!.bindings.default, originalA);
-    h = await host(installation, managementURL);
+    inventory = undefined; h = await service();
     await terminal(['tui', identity, managementURL], [
       { prompt: 'beehive> ', answer: 'select 1' },
       { prompt: 'beehive> ', answer: 'binding B-normal', observedRevision: 3 },
@@ -234,7 +265,7 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
     ]);
     assert.notEqual(state().actual.evidence.session, oldActual.evidence.session);
     assert.equal(state().actual.evidence.model, oldActual.evidence.model);
-    assert.deepEqual(state().runs[oldActual.run], oldActual);
+    assert.deepEqual((readPrivate(entry.path) as any).runs[oldActual.run], oldActual, 'fresh fixture history audit only; never used to admit execution');
     assert.deepEqual(readFileSync(join(installation, 'setup.json')), manifest);
     assert.deepEqual(readFileSync(sibling.path), originalY);
     assert.deepEqual(readFileSync(join(installation, 'setup.json')), convertedManifest);
@@ -274,6 +305,7 @@ for (const converting of [false, true]) test(`normal wizard + TUI Start/Restart 
 
   } finally {
     if (goose && existsSync(join(dir, 'goose-rpc-methods'))) console.log(readFileSync(join(dir, 'goose-rpc-methods'), 'utf8'));
+    observer.close();
     await session.stop();
     for (const file of ['harness-pid', 'descendant-pid', 'tool-shim-pid']) {
       if (!existsSync(join(dir, file))) continue;
