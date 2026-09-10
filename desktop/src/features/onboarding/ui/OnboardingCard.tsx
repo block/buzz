@@ -26,6 +26,7 @@ export function OnboardingCard({
   backAction,
   children,
   current,
+  stableWideWidth = false,
   systemColorScheme,
   testId,
   total,
@@ -34,6 +35,8 @@ export function OnboardingCard({
   backAction?: OnboardingBackAction;
   children: React.ReactNode;
   current: number;
+  /** Holds wide, mode-switching steps at the card's full width. */
+  stableWideWidth?: boolean;
   systemColorScheme?: "dark" | "light";
   testId: string;
   total?: number;
@@ -51,7 +54,8 @@ export function OnboardingCard({
       <OnboardingChrome current={current} total={total} />
       <Card
         className={cn(
-          "flex h-[min(41.5rem,calc(100dvh-3rem))] w-max min-w-[calc(38rem+2px)] max-w-[50rem] flex-col overflow-hidden rounded-[2rem] border-0 bg-white p-12 text-left shadow-lg",
+          "flex h-[min(41.5rem,calc(100dvh-3rem))] min-w-[calc(38rem+2px)] max-w-[50rem] flex-col overflow-hidden rounded-[2rem] border-0 bg-white p-12 text-left shadow-lg",
+          stableWideWidth ? "w-full" : "w-max",
           "[--buzz-onboarding-cta-label:#fff] [&_.buzz-onboarding-slide]:min-h-0",
           "[&_.buzz-onboarding-transition-content]:w-full [&_.buzz-onboarding-transition-content]:min-w-0 [&_.buzz-onboarding-transition-content]:!text-left",
           "[&_.buzz-onboarding-transition-line]:justify-start [&_h1+p]:!mx-0 [&_h1+p]:!mt-2 [&_h1+p]:!text-left [&_h1+p]:!text-base [&_h1+p]:!leading-6",

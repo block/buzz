@@ -3002,7 +3002,7 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
-  await page.getByRole("tab", { name: "Emoji" }).click();
+  await page.getByTestId("onboarding-avatar-mode-emoji").click();
 
   const colorGridShell = page.getByTestId("onboarding-avatar-color-grid-shell");
   await expect(colorGridShell).toHaveAttribute("aria-hidden", "true");
