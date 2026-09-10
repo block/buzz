@@ -101,5 +101,59 @@ test.describe("message author name overflow", () => {
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
       headerBox.x + headerBox.width + 1,
     );
+
+    // The action rail (reactions/reply controls) is absolutely positioned OVER
+    // the row and appears on hover and on focus-within. In both states the
+    // author's painted box must end before the rail's left edge — a name that
+    // merely stays inside the header can still be painted over by the rail.
+    const actionBar = row.locator('[data-testid^="message-action-bar-"]');
+
+    const expectAuthorClearOfActionBar = async (state: string) => {
+      // Playwright's toBeVisible() passes at opacity 0; the rail's shown/hidden
+      // states are driven by opacity, so assert the computed style directly.
+      await expect(actionBar).toHaveCSS("opacity", "1");
+      const authorBox = await button.boundingBox();
+      const actionBarBox = await actionBar.boundingBox();
+      if (!authorBox || !actionBarBox) {
+        throw new Error(`Author or action bar not rendered on ${state}.`);
+      }
+      expect(actionBarBox.width).toBeGreaterThan(0);
+      // The squeeze must still be a real ellipsis, not a vacuous fit.
+      const stillTruncated = await button.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      );
+      expect(stillTruncated).toBe(true);
+      expect(authorBox.x + authorBox.width).toBeLessThanOrEqual(actionBarBox.x);
+    };
+
+    // Pointer hover.
+    await row.hover();
+    await waitForAnimations(page);
+    await page.screenshot({
+      clip: {
+        height: 72,
+        width: 900,
+        x: 0,
+        y: Math.max(0, headerBox.y - 12),
+      },
+      path: `${SHOTS}/02-author-header-hovered.png`,
+    });
+    await expectAuthorClearOfActionBar("hover");
+
+    // Reset the pointer, then re-reveal the rail via keyboard focus-within.
+    await page.mouse.move(0, 0);
+    await expect(actionBar).toHaveCSS("opacity", "0");
+    await button.focus();
+    await waitForAnimations(page);
+    await page.screenshot({
+      clip: {
+        height: 72,
+        width: 900,
+        x: 0,
+        y: Math.max(0, headerBox.y - 12),
+      },
+      path: `${SHOTS}/03-author-header-focused.png`,
+    });
+    await expectAuthorClearOfActionBar("focus-within");
   });
 });
