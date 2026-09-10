@@ -339,7 +339,7 @@ export function AppShell() {
         ...terminalContext,
         channelId: terminalContextOverride.channelId,
         channelName: terminalContextOverride.channelName,
-        threadId: null,
+        threadId: terminalContextOverride.threadId ?? null,
       }
     : terminalContext;
   const managedChannel = React.useMemo(() => {
@@ -943,7 +943,10 @@ export function AppShell() {
                           isHuddleRoomStarting={isHuddleRoomStarting}
                           mainInsetRef={mainInsetRef}
                           terminal={
-                            <TerminalBootstrap {...effectiveTerminalContext} />
+                            <TerminalBootstrap
+                              {...effectiveTerminalContext}
+                              sidePanel={isPulse}
+                            />
                           }
                         >
                           <Outlet />

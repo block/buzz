@@ -7,6 +7,7 @@ import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManag
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
+import { MessageBubbleContext } from "./MessageBubbleContext";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
@@ -122,6 +123,7 @@ export function MessageRowItem({
   unfollowThreadById,
   videoReviewContext,
 }: MessageRowItemProps) {
+  const bubbleLayout = React.useContext(MessageBubbleContext) !== null;
   const { message, summary } = entry;
   const canManage = canManageMessageForCurrentUser(
     message,
@@ -133,15 +135,29 @@ export function MessageRowItem({
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
+    const threadSummary = (
+      <MessageThreadSummaryRow
+        inline={bubbleLayout}
+        depth={message.depth}
+        message={message}
+        onOpenThread={onOpenThread}
+        showDepthGuides={false}
+        summary={summary}
+        summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
+        unreadCount={threadUnreadCounts?.get(message.id)}
+      />
+    );
     return (
       <div
         className={cn(
-          "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          !bubbleLayout && "mb-1 py-1",
           isHighlighted &&
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
         )}
       >
         <MessageRow
+          bubbleFooter={bubbleLayout ? threadSummary : undefined}
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
@@ -176,15 +192,8 @@ export function MessageRowItem({
           showDepthGuides={false}
           videoReviewContext={videoReviewContext}
         />
-        <MessageThreadSummaryRow
-          depth={message.depth}
-          message={message}
-          onOpenThread={onOpenThread}
-          showDepthGuides={false}
-          summary={summary}
-          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
-          unreadCount={threadUnreadCounts?.get(message.id)}
-        />
+        {!bubbleLayout && threadSummary}
+
         {footer}
       </div>
     );
@@ -197,7 +206,7 @@ export function MessageRowItem({
     <div
       className={cn(
         "flex flex-col gap-1",
-        isFollowedByContinuation ? "pb-0" : "pb-2.5",
+        bubbleLayout || isFollowedByContinuation ? "pb-0" : "pb-2.5",
       )}
     >
       <MessageRow

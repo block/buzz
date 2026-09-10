@@ -1,5 +1,8 @@
 import { ArrowUp, Bot, Hash, Inbox, MessageCircle, Search } from "lucide-react";
 import * as React from "react";
+import { TerminalSurfaceContext } from "@/features/terminal/TerminalSurfaceContext";
+import { useTerminalPanel } from "@/features/terminal/terminalPanelStore";
+import { cn } from "@/shared/lib/cn";
 import { useUnifiedPulseFeed } from "@/features/pulse/useUnifiedPulseFeed";
 import {
   matchesPulseFilter,
@@ -46,7 +49,6 @@ const combinedFilters = [
   { id: "search", label: "Search", icon: Search },
   { id: "all", label: "For you", icon: Inbox },
   { id: "conversation", label: "Conversations", icon: MessageCircle },
-  { id: "agent", label: "Agents", icon: Bot },
 ] as const;
 
 export function UnifiedPulseView({
@@ -59,6 +61,11 @@ export function UnifiedPulseView({
   const [briefingFilter, setBriefingFilter] =
     React.useState<BriefingKind | null>(null);
   const { values, applyPatch } = useHistorySearchState(FEED_SEARCH_KEYS);
+  const terminal = React.useContext(TerminalSurfaceContext);
+  const terminalPanel = useTerminalPanel();
+  const expanded =
+    terminalPanel.mode !== "closed" ||
+    Boolean(values.channelManagement || values.profile || values.agentSession);
   const combined = values.layout === "combined";
   const filters = combined ? combinedFilters : separateFilters;
   const filter: PulseView = filters.some((f) => f.id === values.feed)
@@ -112,6 +119,14 @@ export function UnifiedPulseView({
   }, [accepted?.scope, feed.scope, feed.query.isSuccess, feed.conversations]);
   const acceptedSet = new Set(acceptedIds);
   const newCount = ids.filter((id) => !acceptedSet.has(id)).length;
+  React.useEffect(() => {
+    if (newCount > 0 && (!scrollElement || scrollElement.scrollTop <= 24)) {
+      setAccepted({
+        scope: feed.scope,
+        ids: feed.conversations.map((item) => item.id),
+      });
+    }
+  }, [feed.conversations, feed.scope, newCount, scrollElement]);
   const byId = new Map(feed.conversations.map((item) => [item.id, item]));
   const acceptedConversations = acceptedIds
     .map((id) => byId.get(id))
@@ -227,155 +242,185 @@ export function UnifiedPulseView({
         )
       )}
       <footer className="px-6 py-7 text-center text-2xs text-muted-foreground">
-        Recent activity · Refreshes every 30 seconds while focused
+        Recent activity · Updates live while focused
         <br />
         Private conversations stay private. Replies go to their original thread.
       </footer>
     </>
   );
+  const content = (
+    <>
+      {filter === "search" && (
+        <div className="px-5 py-5 sm:px-7">
+          <div className="relative w-full">
+            <Search
+              aria-hidden
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              type="search"
+              aria-label="Search loaded feed"
+              placeholder="Search this feed"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-11 w-full rounded-xl border-0 bg-muted/30 pl-10 text-sm shadow-none"
+            />
+          </div>
+          {briefingFilter && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              onClick={() => setBriefingFilter(null)}
+            >
+              Show all activity
+            </Button>
+          )}
+        </div>
+      )}
+      {filter === "all" && (
+        <PulseBriefing
+          groups={briefing}
+          conversations={byId}
+          profiles={feed.profiles}
+          currentPubkey={currentPubkey}
+          onRefresh={() => void refresh()}
+          onSelect={(kind) => {
+            if (!setFilter("search")) return;
+            setBriefingFilter(kind);
+            setAccepted({ scope: feed.scope, ids });
+            setSearch("");
+            scrollRef.current?.scrollTo({ top: 0 });
+          }}
+          loading={
+            feed.isLoading ||
+            (summaryInput.conversations.length > 0 && summary.isPending)
+          }
+          hasError={Boolean(feed.error || summary.error)}
+          onRetry={() => {
+            feed.retry();
+            void summary.refetch();
+          }}
+        />
+      )}
+      {filter !== "all" && feed.error && (
+        <div
+          role="alert"
+          className="m-5 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm"
+        >
+          <p>Some activity couldn’t be loaded. Your feed may be out of date.</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2"
+            onClick={feed.retry}
+          >
+            Try again
+          </Button>
+        </div>
+      )}
+      {filter === "dm" ? (
+        <PulseDmView
+          channels={feed.channels}
+          currentPubkey={currentPubkey}
+          search={""}
+        />
+      ) : filter === "channel" ? (
+        <PulseChannelsView
+          channels={feed.channels}
+          search={""}
+          scrollRef={setScrollElement}
+        >
+          {feedContent}
+        </PulseChannelsView>
+      ) : filter !== "all" ? (
+        feedContent
+      ) : null}
+    </>
+  );
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col bg-[#f7f7f8] py-[12px] dark:bg-muted/20"
+      className={cn(
+        "flex min-h-0 flex-1 flex-col py-[12px]",
+        expanded && "px-[8px]",
+      )}
       data-testid="unified-pulse"
     >
       <div
         data-testid="pulse-main-container"
-        className="relative mx-auto flex min-h-0 w-full max-w-[800px] flex-1 flex-col overflow-hidden rounded-[24px] border border-border/40 bg-background"
+        className={cn(
+          "relative mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[24px] border border-border/40 bg-background",
+          !expanded && "max-w-[960px]",
+        )}
+        data-expanded={expanded}
       >
-        <div className="z-20 flex shrink-0 items-center border-b border-border/50 bg-background px-3 sm:px-5">
-          <div className="min-w-0 flex-1 overflow-x-auto">
-            <fieldset
-              aria-label="Pulse views"
-              data-testid="pulse-tabs"
-              className="flex min-w-max"
-            >
-              {filters.map(({ id, label, icon: Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  aria-pressed={filter === id}
-                  onClick={() => setFilter(id)}
-                  className={`relative flex flex-1 items-center justify-center gap-2 whitespace-nowrap px-3 py-4 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${filter === id ? "text-foreground" : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"}`}
-                >
-                  <Icon aria-hidden className="h-4 w-4" />
-                  {label}
-                  {filter === id && (
-                    <span
-                      aria-hidden
-                      className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-primary"
-                    />
-                  )}
-                </button>
-              ))}
-            </fieldset>
-          </div>
-          <PulseVariationMenu
-            value={combined ? "combined" : "separate"}
-            onChange={setVariation}
-          />
-        </div>
-        <div
-          className={`min-h-0 flex-1 ${isSplitView ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
-          ref={isSplitView ? undefined : setScrollElement}
-          data-testid="pulse-scroll-area"
-        >
-          {filter === "search" && (
-            <div className="px-5 py-5 sm:px-7">
-              <div className="relative w-full">
-                <Search
-                  aria-hidden
-                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-                />
-                <Input
-                  type="search"
-                  aria-label="Search loaded feed"
-                  placeholder="Search this feed"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="h-11 w-full rounded-xl border-0 bg-muted/30 pl-10 text-sm shadow-none"
-                />
-              </div>
-              {briefingFilter && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="mt-2"
-                  onClick={() => setBriefingFilter(null)}
-                >
-                  Show all activity
-                </Button>
-              )}
-            </div>
-          )}
-          {filter === "all" && (
-            <PulseBriefing
-              groups={briefing}
-              conversations={byId}
-              profiles={feed.profiles}
-              currentPubkey={currentPubkey}
-              onRefresh={() => void refresh()}
-              onSelect={(kind) => {
-                if (!setFilter("search")) return;
-                setBriefingFilter(kind);
-                setAccepted({ scope: feed.scope, ids });
-                setSearch("");
-                scrollRef.current?.scrollTo({ top: 0 });
-              }}
-              loading={
-                feed.isLoading ||
-                (summaryInput.conversations.length > 0 && summary.isPending)
-              }
-              hasError={Boolean(feed.error || summary.error)}
-              onRetry={() => {
-                feed.retry();
-                void summary.refetch();
-              }}
-            />
-          )}
-          {filter !== "all" && feed.error && (
-            <div
-              role="alert"
-              className="m-5 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm"
-            >
-              <p>
-                Some activity couldn’t be loaded. Your feed may be out of date.
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-2"
-                onClick={feed.retry}
+        {!combined && (
+          <div className="z-20 flex shrink-0 items-center border-b border-border/50 bg-background px-3 sm:px-5">
+            <div className="min-w-0 flex-1 overflow-x-auto">
+              <fieldset
+                aria-label="Pulse views"
+                data-testid="pulse-tabs"
+                className="flex min-w-max"
               >
-                Try again
-              </Button>
+                {filters.map(({ id, label, icon: Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={filter === id}
+                    onClick={() => setFilter(id)}
+                    className={`relative flex flex-1 items-center justify-center gap-2 whitespace-nowrap px-3 py-4 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${filter === id ? "text-foreground" : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"}`}
+                  >
+                    <Icon aria-hidden className="h-4 w-4" />
+                    {label}
+                    {filter === id && (
+                      <span
+                        aria-hidden
+                        className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-primary"
+                      />
+                    )}
+                  </button>
+                ))}
+              </fieldset>
             </div>
-          )}
-          {filter === "conversation" ? (
-            <PulseCombinedView
-              channels={feed.channels}
-              conversations={feed.conversations}
-              currentPubkey={currentPubkey}
-              scrollRef={setScrollElement}
-            >
-              {feedContent}
-            </PulseCombinedView>
-          ) : filter === "dm" ? (
-            <PulseDmView
-              channels={feed.channels}
-              currentPubkey={currentPubkey}
-              search={""}
-            />
-          ) : filter === "channel" ? (
-            <PulseChannelsView
-              channels={feed.channels}
-              search={""}
-              scrollRef={setScrollElement}
-            >
-              {feedContent}
-            </PulseChannelsView>
-          ) : filter !== "all" ? (
-            feedContent
-          ) : null}
+          </div>
+        )}
+        <PulseVariationMenu
+          value={combined ? "combined" : "separate"}
+          onChange={setVariation}
+          onRefresh={() => void feed.refresh()}
+          refreshing={feed.query.isFetching}
+        />
+        <div className="pulse-conversation-workspace flex min-h-0 flex-1">
+          <div
+            className={`min-h-0 min-w-0 flex-1 ${combined || isSplitView ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
+            ref={combined || isSplitView ? undefined : setScrollElement}
+            data-testid="pulse-scroll-area"
+          >
+            {combined ? (
+              <PulseCombinedView
+                channels={feed.channels}
+                conversations={feed.conversations}
+                currentPubkey={currentPubkey}
+                scrollRef={setScrollElement}
+                view={
+                  filter === "search" || filter === "all"
+                    ? filter
+                    : "conversation"
+                }
+                onSelectView={setFilter}
+              >
+                {content}
+              </PulseCombinedView>
+            ) : (
+              content
+            )}
+          </div>
+          <div
+            className="pulse-terminal-side-host"
+            data-testid="pulse-terminal-panel"
+          >
+            {terminal}
+          </div>
         </div>
       </div>
     </div>

@@ -8,6 +8,7 @@ import {
 } from "../lib/pulsePanelState";
 import { PulseChannelAvatar } from "./PulseChannelAvatar";
 import { PulseChannelDetail } from "./PulseChannelDetail";
+import { PulseUnreadDot, usePulseUnreadChannels } from "./PulseUnreadDot";
 
 function rowClass(selected: boolean) {
   return `mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`;
@@ -24,6 +25,7 @@ export function PulseChannelsView({
   scrollRef: React.RefCallback<HTMLDivElement>;
   children: React.ReactNode;
 }) {
+  const isUnread = usePulseUnreadChannels();
   const { values, applyPatch } = useHistorySearchState(PULSE_CONVERSATION_KEYS);
   const memberChannels = channels.filter(
     (channel) => channel.channelType !== "dm",
@@ -56,7 +58,7 @@ export function PulseChannelsView({
     >
       <nav
         aria-label="Channels"
-        className="w-[200px] min-w-0 shrink-0 overflow-y-auto border-r border-border/50 p-2"
+        className="w-[220px] min-w-0 shrink-0 overflow-y-auto border-r border-border/50 p-2"
         data-testid="pulse-channels-list"
       >
         <button
@@ -75,12 +77,16 @@ export function PulseChannelsView({
               type="button"
               key={channel.id}
               data-channel-name={channel.name}
+              aria-description={
+                isUnread(channel.id) ? "Unread messages" : undefined
+              }
               aria-current={selected?.id === channel.id ? "true" : undefined}
               onClick={() => selectChannel(channel.id)}
               className={rowClass(selected?.id === channel.id)}
             >
               <PulseChannelAvatar channel={channel} />
               <span className="truncate">{channel.name}</span>
+              {isUnread(channel.id) && <PulseUnreadDot />}
             </button>
           );
         })}

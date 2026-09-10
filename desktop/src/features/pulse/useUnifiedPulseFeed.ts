@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
@@ -11,8 +11,10 @@ import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { fetchPulseFeed } from "./lib/fetchPulseFeed";
 import { buildPulseConversations, PULSE_SOURCE_LIMIT } from "./lib/unifiedFeed";
+import { usePulseRefresh } from "./usePulseRefresh";
 
 export function useUnifiedPulseFeed(currentPubkey?: string) {
+  const queryClient = useQueryClient();
   const channelsQuery = useChannelsQuery();
   const contactsQuery = useContactListQuery(currentPubkey);
   const agentPubkeys = useKnownAgentPubkeys();
@@ -71,6 +73,14 @@ export function useUnifiedPulseFeed(currentPubkey?: string) {
     retry: 1,
     refetchOnWindowFocus: false,
   });
+  usePulseRefresh({
+    enabled:
+      Boolean(currentPubkey) &&
+      channelsQuery.isSuccess &&
+      connection === "connected",
+    scope: `${currentPubkey}:${scope}`,
+    refresh: () => query.refetch({ cancelRefetch: false }),
+  });
   const pubkeys = React.useMemo(
     () => [...new Set((query.data ?? []).map((event) => event.pubkey))],
     [query.data],
@@ -116,6 +126,20 @@ export function useUnifiedPulseFeed(currentPubkey?: string) {
     toggleSource,
     includeNotes,
     setIncludeNotes,
+    refresh: () =>
+      queryClient.invalidateQueries(
+        {
+          predicate: (entry) =>
+            [
+              "pulse-unified",
+              "channels",
+              "channel-messages",
+              "thread-replies",
+            ].includes(String(entry.queryKey[0])),
+          refetchType: "active",
+        },
+        { cancelRefetch: false },
+      ),
     error:
       channelsQuery.error ??
       (includeNotes ? contactsQuery.error : null) ??

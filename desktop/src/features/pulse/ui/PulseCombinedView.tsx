@@ -10,12 +10,16 @@ export function PulseCombinedView({
   currentPubkey,
   scrollRef,
   children,
+  view,
+  onSelectView,
 }: {
   channels: Channel[];
   conversations: PulseConversation[];
   currentPubkey?: string;
   scrollRef: React.RefCallback<HTMLDivElement>;
   children: React.ReactNode;
+  view: "search" | "all" | "conversation";
+  onSelectView: (view: "search" | "all") => void;
 }) {
   const sorted = React.useMemo(
     () => sortConversationsByRecency(channels, conversations),
@@ -29,6 +33,7 @@ export function PulseCombinedView({
       label="Conversations by recent activity"
       testPrefix="pulse-combined"
       allMessages={{ content: children, scrollRef }}
+      navigation={{ view, onSelectView }}
     />
   );
 }

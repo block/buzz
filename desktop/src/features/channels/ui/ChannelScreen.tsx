@@ -92,6 +92,7 @@ export function ChannelScreen({
   autoSendDraftKey,
   currentIdentity,
   currentProfile,
+  drillInThreads = false,
   headerEndActions, idleAuxiliaryPanel,
   idleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread,
   idleAuxiliaryTitle,
@@ -694,7 +695,8 @@ export function ChannelScreen({
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const isSinglePanelView =
-    isNarrowPanelViewport &&
+    (isNarrowPanelViewport ||
+      (drillInThreads && Boolean(effectiveOpenThreadHeadId))) &&
     activeChannel?.channelType !== "forum" &&
     hasAuxiliaryPanel;
   const shouldCompactHeaderActions =

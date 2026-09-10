@@ -1,5 +1,5 @@
 import * as React from "react";
-import { MessageCircle, Users } from "lucide-react";
+import { Inbox, Search, MessageCircle, Users } from "lucide-react";
 import { allowNavigation } from "@/app/navigation/navigationGuard";
 import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -9,10 +9,13 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 import { PulseChannelAvatar } from "./PulseChannelAvatar";
 import { PulseChannelDetail } from "./PulseChannelDetail";
+import { PulseUnreadDot, usePulseUnreadChannels } from "./PulseUnreadDot";
 import {
   PULSE_CONVERSATION_KEYS,
   CLEAR_CONVERSATION_PANELS,
 } from "../lib/pulsePanelState";
+
+const SPLIT_VIEW_SEARCH_KEYS = ["feed", ...PULSE_CONVERSATION_KEYS] as const;
 
 export function PulseConversationSplitView({
   channels,
@@ -22,6 +25,7 @@ export function PulseConversationSplitView({
   label,
   testPrefix,
   allMessages,
+  navigation,
 }: {
   channels: Channel[];
   currentPubkey?: string;
@@ -33,8 +37,13 @@ export function PulseConversationSplitView({
     content: React.ReactNode;
     scrollRef: React.RefCallback<HTMLDivElement>;
   };
+  navigation?: {
+    view: "search" | "all" | "conversation";
+    onSelectView: (view: "search" | "all") => void;
+  };
 }) {
-  const { values, applyPatch } = useHistorySearchState(PULSE_CONVERSATION_KEYS);
+  const isUnread = usePulseUnreadChannels();
+  const { values, applyPatch } = useHistorySearchState(SPLIT_VIEW_SEARCH_KEYS);
   const pubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -68,9 +77,11 @@ export function PulseConversationSplitView({
     (row) => !query || row.name.toLocaleLowerCase().includes(query),
   );
   const selected =
-    channels.find((channel) => channel.id === values[selectionKey]) ??
-    (allMessages ? null : visibleRows[0]?.channel) ??
-    null;
+    navigation && navigation.view !== "conversation"
+      ? null
+      : (channels.find((channel) => channel.id === values[selectionKey]) ??
+        (allMessages ? null : visibleRows[0]?.channel) ??
+        null);
   const selectedId = selected?.id;
   React.useEffect(() => {
     if (!values[selectionKey] && selectedId) {
@@ -80,6 +91,7 @@ export function PulseConversationSplitView({
   const selectConversation = (channel: Channel | null) => {
     const channelId = channel?.id ?? null;
     if (
+      (!navigation || navigation.view === "conversation") &&
       channelId === (selected?.id ?? null) &&
       values[selectionKey] === channelId
     )
@@ -91,7 +103,11 @@ export function PulseConversationSplitView({
       })
     )
       return;
-    applyPatch({ ...CLEAR_CONVERSATION_PANELS, [selectionKey]: channelId });
+    applyPatch({
+      ...CLEAR_CONVERSATION_PANELS,
+      [selectionKey]: channelId,
+      ...(navigation ? { feed: "conversation" } : {}),
+    });
   };
 
   return (
@@ -101,16 +117,43 @@ export function PulseConversationSplitView({
     >
       <nav
         aria-label={label}
-        className="w-[200px] min-w-0 shrink-0 overflow-y-auto border-r border-border/50 p-2"
+        className="w-[220px] min-w-0 shrink-0 overflow-y-auto border-r border-border/50 p-2"
         data-testid={`${testPrefix}-list`}
       >
+        {navigation &&
+          (
+            [
+              { id: "search", label: "Search", icon: Search },
+              { id: "all", label: "For you", icon: Inbox },
+            ] as const
+          ).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              aria-current={navigation.view === id ? "true" : undefined}
+              onClick={() => navigation.onSelectView(id)}
+              className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${navigation.view === id ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`}
+            >
+              <span
+                aria-hidden
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+              >
+                <Icon className="h-4 w-4" />
+              </span>
+              {label}
+            </button>
+          ))}
         {allMessages && (
           <>
             <button
               type="button"
-              aria-current={!selected ? "true" : undefined}
+              aria-current={
+                !selected && (!navigation || navigation.view === "conversation")
+                  ? "true"
+                  : undefined
+              }
               onClick={() => selectConversation(null)}
-              className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${!selected ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`}
+              className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${!selected && (!navigation || navigation.view === "conversation") ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`}
             >
               <PulseChannelAvatar />
               All messages
@@ -127,6 +170,9 @@ export function PulseConversationSplitView({
                 key={row.channel.id}
                 data-testid={`${testPrefix}-${row.channel.id}`}
                 data-channel-name={row.channel.name}
+                aria-description={
+                  isUnread(row.channel.id) ? "Unread messages" : undefined
+                }
                 aria-label={
                   row.channel.channelType === "dm"
                     ? `Open DM with ${row.name}`
@@ -158,6 +204,7 @@ export function PulseConversationSplitView({
                 >
                   {row.name}
                 </span>
+                {isUnread(row.channel.id) && <PulseUnreadDot />}
               </button>
             );
           })
@@ -171,7 +218,13 @@ export function PulseConversationSplitView({
         <div
           ref={allMessages.scrollRef}
           className="min-h-0 min-w-0 flex-1 overflow-y-auto"
-          data-testid="pulse-all-messages-feed"
+          data-testid={
+            navigation?.view === "search"
+              ? "pulse-search-feed"
+              : navigation?.view === "all"
+                ? "pulse-briefing-feed"
+                : "pulse-all-messages-feed"
+          }
         >
           {allMessages.content}
         </div>

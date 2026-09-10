@@ -44,6 +44,8 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
+import { MessageBubbleContext } from "./MessageBubbleContext";
+import { MessageBubbleLayout } from "./MessageBubbleLayout";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
@@ -69,6 +71,7 @@ export type ThreadDepthGuideAction = {
 };
 export const MessageRow = React.memo(
   function MessageRow({
+    bubbleFooter,
     channelId = null,
     currentPubkey,
     collapseDepthGuideActions,
@@ -110,6 +113,7 @@ export const MessageRow = React.memo(
     videoReviewCommentRootId,
     videoReviewContext,
   }: {
+    bubbleFooter?: React.ReactNode;
     channelId?: string | null;
     currentPubkey?: string;
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
@@ -161,6 +165,13 @@ export const MessageRow = React.memo(
     videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
+    const bubbleViewer = React.useContext(MessageBubbleContext);
+    const bubbleLayout = bubbleViewer !== null;
+    const outgoingBubble = Boolean(
+      bubbleViewer &&
+        message.pubkey &&
+        normalizePubkey(bubbleViewer) === normalizePubkey(message.pubkey),
+    );
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
@@ -541,9 +552,19 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
+      <MessageAuthorText
+        className={bubbleLayout ? "text-message-timestamp" : undefined}
+        hoverUnderline
+      >
+        {message.author}
+      </MessageAuthorText>
     ) : (
-      <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
+      <MessageAuthorText
+        as="h3"
+        className={bubbleLayout ? "text-message-timestamp" : undefined}
+      >
+        {message.author}
+      </MessageAuthorText>
     );
     const agentOwnerNode = message.isAgent ? (
       <MessageAgentOwner
@@ -555,12 +576,15 @@ export const MessageRow = React.memo(
     const actionBarNode = (
       <div
         className={cn(
-          "absolute right-2 top-1 z-10 sm:pointer-events-none",
-          actionBarPlacement === "floating"
-            ? isContinuation
-              ? "sm:-top-3 sm:-translate-y-1/2"
-              : "sm:top-0 sm:-translate-y-1/2"
-            : "sm:top-1 sm:translate-y-0",
+          bubbleLayout
+            ? "relative"
+            : "absolute right-2 top-1 z-10 sm:pointer-events-none",
+          !bubbleLayout &&
+            (actionBarPlacement === "floating"
+              ? isContinuation
+                ? "sm:-top-3 sm:-translate-y-1/2"
+                : "sm:top-0 sm:-translate-y-1/2"
+              : "sm:top-1 sm:translate-y-0"),
         )}
       >
         <MessageActionBar
@@ -666,26 +690,32 @@ export const MessageRow = React.memo(
       ? "mt-0"
       : bodyOffsetClass;
 
-    const messageBodyNode = (
+    const messageContentNode = (
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
         {continuationMetadataNode}
-        <MessageReactions
-          messageId={message.id}
-          reactions={reactions}
-          canToggle={canToggleReactions}
-          pending={reactionPending}
-          burstEmojiOnRender={badgeBurstEmoji}
-          onBurstEmojiRendered={(emoji) => {
-            setBadgeBurstEmoji((current) =>
-              current === emoji ? null : current,
-            );
-          }}
-          onSelect={(emoji) => {
-            void handleReactionSelect(emoji);
-          }}
-        />
+      </>
+    );
+    const messageReactionsNode = (
+      <MessageReactions
+        showPicker={!bubbleLayout}
+        messageId={message.id}
+        reactions={reactions}
+        canToggle={canToggleReactions}
+        pending={reactionPending}
+        burstEmojiOnRender={badgeBurstEmoji}
+        onBurstEmojiRendered={(emoji) => {
+          setBadgeBurstEmoji((current) => (current === emoji ? null : current));
+        }}
+        onSelect={(emoji) => {
+          void handleReactionSelect(emoji);
+        }}
+      />
+    );
+    const messageExtrasNode = (
+      <>
+        {!bubbleLayout && messageReactionsNode}
         {reactionErrorMessage ? (
           <p className="mt-1.5 text-xs text-destructive">
             {reactionErrorMessage}
@@ -708,6 +738,13 @@ export const MessageRow = React.memo(
             />
           </React.Suspense>
         ) : null}
+      </>
+    );
+
+    const messageBodyNode = (
+      <>
+        {messageContentNode}
+        {messageExtrasNode}
       </>
     );
 
@@ -876,14 +913,22 @@ export const MessageRow = React.memo(
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
-            "py-conversation-row",
-            hoverBackground
-              ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
-              : isThreadReplyLayout
-                ? "mx-1 px-2"
-                : "px-2",
+            bubbleLayout
+              ? isDisplayedAsContinuation
+                ? "py-[1px]"
+                : "pt-[23px] pb-[1px]"
+              : "py-conversation-row",
+            bubbleLayout
+              ? "mx-1 px-2"
+              : hoverBackground
+                ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
+                : isThreadReplyLayout
+                  ? "mx-1 px-2"
+                  : "px-2",
             "flex gap-2.5",
             isDisplayedAsContinuation ? "items-center" : "items-start",
+            bubbleLayout && "w-auto",
+            bubbleLayout && outgoingBubble && "justify-end",
             hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -893,7 +938,20 @@ export const MessageRow = React.memo(
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
         >
-          {isThreadReplyLayout ? (
+          {bubbleLayout ? (
+            <MessageBubbleLayout
+              outgoing={outgoingBubble}
+              continuation={isDisplayedAsContinuation}
+              avatar={avatarGutterNode}
+              header={headerNode}
+              metadata={inlineMetadataNode}
+              body={messageContentNode}
+              extras={messageExtrasNode}
+              footer={bubbleFooter}
+              reactions={reactions.length ? messageReactionsNode : undefined}
+              actions={actionBarNode}
+            />
+          ) : isThreadReplyLayout ? (
             <>
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col">
@@ -914,7 +972,7 @@ export const MessageRow = React.memo(
               </div>
             </>
           )}
-          {actionBarNode}
+          {!bubbleLayout && actionBarNode}
         </article>
       </div>
     );
@@ -922,6 +980,7 @@ export const MessageRow = React.memo(
     // from parent create new refs every render — including them defeats memo.
   },
   (prev, next) =>
+    prev.bubbleFooter === next.bubbleFooter &&
     prev.message.id === next.message.id &&
     prev.message.pubkey === next.message.pubkey &&
     prev.message.body === next.message.body &&

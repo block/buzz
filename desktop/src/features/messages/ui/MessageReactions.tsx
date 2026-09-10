@@ -148,6 +148,7 @@ export function MessageReactions({
   pending,
   onSelect,
   className,
+  showPicker = true,
   burstEmojiOnRender = null,
   onBurstEmojiRendered,
 }: {
@@ -157,6 +158,8 @@ export function MessageReactions({
   pending: boolean;
   onSelect: (emoji: string) => void;
   className?: string;
+  /** Omit the inline add button when a nearby action bar owns the picker. */
+  showPicker?: boolean;
   burstEmojiOnRender?: string | null;
   onBurstEmojiRendered?: (emoji: string) => void;
 }) {
@@ -269,7 +272,7 @@ export function MessageReactions({
           onSelect={onSelect}
         />
       ))}
-      {canToggle ? (
+      {canToggle && showPicker ? (
         <InlineReactionPicker
           messageId={messageId}
           onSelect={onSelect}

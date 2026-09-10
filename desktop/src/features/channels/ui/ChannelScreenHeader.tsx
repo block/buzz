@@ -129,7 +129,7 @@ export function ChannelScreenHeader({
   );
   const actions =
     terminalButton || channelActions ? (
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1" data-conversation-header-actions>
         {terminalButton}
         {channelActions}
       </div>

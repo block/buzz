@@ -7,7 +7,6 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { parseChannelLink } from "@/features/messages/lib/channelLink";
-import { isAudioAttachment } from "@/features/messages/lib/audioAttachment";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
@@ -35,13 +34,8 @@ import {
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 
-import {
-  classifyChildren,
-  hasBlockMedia,
-  isImageOnlyParagraph,
-  markdownPropsAreEqual,
-} from "./markdownUtils";
-import { ImageMosaic } from "./markdown/ImageMosaic";
+import { hasBlockMedia, markdownPropsAreEqual } from "./markdownUtils";
+import { MarkdownParagraph } from "./markdown/MarkdownParagraph";
 import { copyImageToClipboard, downloadImage } from "./markdown/imageActions";
 import { ImageGalleryStatus } from "./markdown/ImageGalleryStatus";
 import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls";
@@ -1516,33 +1510,7 @@ export function createMarkdownComponents(
     ol: ({ children }) => (
       <ol className={cn("list-decimal", listClassName)}>{children}</ol>
     ),
-    p: function MarkdownParagraph({ children }) {
-      const { imetaByUrl } = useMarkdownRuntime();
-      // Detect media-only paragraphs (images + <br> from remarkBreaks).
-      // Multi-image: render as a compact, count-aware mosaic. Two images split
-      // a row, three form a hero-and-stack triptych, and larger odd counts let
-      // the final image span both columns.
-      // Single media: render as a plain <div> to avoid invalid <p><div> nesting
-      // (the img component returns block-level wrappers for lightbox/video).
-      const childArray = React.Children.toArray(children);
-      const { imageChildren } = classifyChildren(childArray);
-      const hasAudioAttachment = childArray.some(
-        (child) =>
-          React.isValidElement<{ href?: string }>(child) &&
-          typeof child.props.href === "string" &&
-          isAudioAttachment(imetaByUrl?.get(child.props.href)),
-      );
-
-      if (isImageOnlyParagraph(childArray)) {
-        return <ImageMosaic>{imageChildren}</ImageMosaic>;
-      }
-
-      if (hasBlockMedia(childArray) || hasAudioAttachment) {
-        return <div>{children}</div>;
-      }
-
-      return <p>{children}</p>;
-    },
+    p: MarkdownParagraph,
     pre: ({ children }) => {
       if (!interactive && !blockCode) return <span>{children}</span>;
       let language = "";
@@ -1643,7 +1611,7 @@ export function createMarkdownComponents(
  * sixteen instances ever exist. Module-stable maps mean cached markdown
  * element trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "9";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };

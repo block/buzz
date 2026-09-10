@@ -1,5 +1,6 @@
 import type * as React from "react";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
+import { TerminalSurfaceContext } from "@/features/terminal/TerminalSurfaceContext";
 import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
@@ -54,8 +55,14 @@ export function AppShellChannelSurface({
           />
         ) : null}
         {isHuddleRoom && !isHuddleRoomStarting ? <HuddleRoomHeader /> : null}
-        <BuzzTheme.ContentSurface terminal={terminal} unframed={isHuddleRoom}>
-          {isHuddleRoomStarting ? <HuddleStartingView /> : children}
+        <BuzzTheme.ContentSurface
+          terminal={isPulse ? undefined : terminal}
+          unframed={isHuddleRoom}
+          transparent={isPulse}
+        >
+          <TerminalSurfaceContext.Provider value={isPulse ? terminal : null}>
+            {isHuddleRoomStarting ? <HuddleStartingView /> : children}
+          </TerminalSurfaceContext.Provider>
         </BuzzTheme.ContentSurface>
       </SidebarInset>
     </MainInsetProvider>

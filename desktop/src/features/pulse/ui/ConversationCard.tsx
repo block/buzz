@@ -21,6 +21,16 @@ import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+import { MessageBubbleContext } from "@/features/messages/ui/MessageBubbleContext";
+import { MessageBubbleLayout } from "@/features/messages/ui/MessageBubbleLayout";
+import {
+  hasSameMessageAuthor,
+  isWithinGroupingWindow,
+} from "@/features/messages/lib/messageGrouping";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
+
 function relativeTime(time: number) {
   const minutes = Math.max(0, Math.floor((Date.now() / 1000 - time) / 60));
   if (minutes < 1) return "now";
@@ -37,61 +47,99 @@ function FeedMessage({
   continuation = false,
   context,
   summary,
+  currentPubkey,
+  profiles,
+  footer,
 }: {
   message: TimelineMessage;
   continuation?: boolean;
   context?: React.ReactNode;
   summary?: boolean;
+  currentPubkey?: string;
+  profiles: Record<string, UserProfileSummary>;
+  footer?: React.ReactNode;
 }) {
-  return (
-    <div className="relative flex gap-3">
-      <UserProfilePopover
-        pubkey={message.pubkey ?? ""}
-        role={message.isAgent ? "bot" : undefined}
-        triggerAriaLabel={`Open ${message.author}'s profile`}
-      >
-        <span className="relative z-10 h-fit shrink-0 rounded-full bg-background focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
-          <UserAvatar
-            avatarUrl={message.avatarUrl ?? null}
-            displayName={message.author}
-            fallbackDelayMs={0}
-            className={
-              summary ? "!h-12 !w-12" : continuation ? "!h-7 !w-7" : "!h-9 !w-9"
-            }
-            shape={message.isAgent ? "squircle" : "circle"}
-          />
+  const outgoing = Boolean(
+    currentPubkey &&
+      message.pubkey &&
+      normalizePubkey(currentPubkey) === normalizePubkey(message.pubkey),
+  );
+  const mentionProps = resolveMentionProps(
+    message.tags,
+    profiles,
+    message.body,
+  );
+  const avatar = (
+    <UserProfilePopover
+      pubkey={message.pubkey ?? ""}
+      role={message.isAgent ? "bot" : undefined}
+      triggerAriaLabel={`Open ${message.author}'s profile`}
+    >
+      <span className="relative z-10 h-fit shrink-0 rounded-full bg-background focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+        <UserAvatar
+          avatarUrl={message.avatarUrl ?? null}
+          displayName={message.author}
+          fallbackDelayMs={0}
+          className={summary ? "!h-12 !w-12" : "!h-7 !w-7"}
+          shape={message.isAgent ? "squircle" : "circle"}
+        />
+      </span>
+    </UserProfilePopover>
+  );
+  const header = (
+    <div
+      className={`flex flex-wrap items-center gap-x-1.5 gap-y-1 ${summary ? "text-message" : "text-message-timestamp"}`}
+    >
+      <span className="font-semibold text-foreground">{message.author}</span>
+      {message.isAgent && (
+        <span className="text-muted-foreground" title="Agent">
+          <Bot aria-hidden className="h-3 w-3" />
+          <span className="sr-only">Agent</span>
         </span>
-      </UserProfilePopover>
-      <div className={`min-w-0 flex-1 ${summary ? "self-center" : ""}`}>
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-message">
-          <span className="font-semibold text-foreground">
-            {message.author}
-          </span>
-          {message.isAgent && (
-            <span className="text-muted-foreground" title="Agent">
-              <Bot aria-hidden className="h-3 w-3" />
-              <span className="sr-only">Agent</span>
-            </span>
-          )}
-          {context}
-          <span aria-hidden className="text-muted-foreground/60">
-            ·
-          </span>
-          <time
-            className="text-muted-foreground"
-            dateTime={new Date(message.createdAt * 1000).toISOString()}
-            title={`${new Date(message.createdAt * 1000).toLocaleString()}${message.edited ? " · Edited" : ""}`}
-          >
-            {relativeTime(message.createdAt)}
-          </time>
-        </div>
-        {!summary && (
-          <div className="mt-0.5 break-words text-message leading-relaxed [&_p]:my-1">
-            <Markdown content={message.body} />
-          </div>
-        )}
-      </div>
+      )}
+      {context}
+      <span aria-hidden className="text-muted-foreground/60">
+        ·
+      </span>
+      <time
+        className="text-muted-foreground"
+        dateTime={new Date(message.createdAt * 1000).toISOString()}
+        title={`${new Date(message.createdAt * 1000).toLocaleString()}${message.edited ? " · Edited" : ""}`}
+      >
+        {relativeTime(message.createdAt)}
+      </time>
     </div>
+  );
+  if (summary)
+    return (
+      <div className="relative flex gap-3">
+        {avatar}
+        <div className="min-w-0 flex-1 self-center">{header}</div>
+      </div>
+    );
+  return (
+    <MessageBubbleContext.Provider value={currentPubkey ?? ""}>
+      <div className={`relative flex gap-2.5 ${outgoing ? "justify-end" : ""}`}>
+        <MessageBubbleLayout
+          outgoing={outgoing}
+          continuation={continuation}
+          avatar={avatar}
+          header={header}
+          metadata={header}
+          extras={null}
+          footer={footer}
+          body={
+            <Markdown
+              content={message.body}
+              {...mentionProps}
+              imetaByUrl={
+                message.tags ? parseImetaTags(message.tags) : undefined
+              }
+            />
+          }
+        />
+      </div>
+    </MessageBubbleContext.Provider>
   );
 }
 
@@ -204,11 +252,57 @@ export function ConversationCard({
       setSending(false);
     }
   };
+  const replyToggle =
+    replies.length > 0 ? (
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded(!expanded)}
+        className="my-3 flex items-center gap-2 rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {expanded
+          ? "Hide replies"
+          : `View ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`}
+      </button>
+    ) : null;
+  const actions = (
+    <div
+      className={`flex items-center gap-5 text-xs text-muted-foreground ${summary ? "mt-5" : "mt-2"}`}
+    >
+      <button
+        type="button"
+        aria-expanded={replying}
+        aria-label="Reply"
+        title="Reply"
+        onClick={() => setReplying(!replying)}
+        className="inline-flex h-8 min-w-8 items-center justify-center gap-2 rounded-full px-2 hover:bg-muted/50 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <MessageCircle aria-hidden className="h-4 w-4" />
+        {summary ? (
+          <span>Reply</span>
+        ) : (
+          replies.length > 0 && <span>{replies.length}</span>
+        )}
+      </button>
+      {(item.channel || onOpenContext) && (
+        <button
+          type="button"
+          onClick={openContext}
+          aria-label="Open conversation"
+          title="Open conversation"
+          className="ml-auto inline-flex h-8 min-w-8 items-center justify-center gap-2 rounded-full px-2 hover:bg-muted/50 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {summary && <span>View conversation</span>}
+          <ArrowUpRight aria-hidden className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
   return (
     <article
       data-testid={summary ? "pulse-briefing-highlight" : "pulse-conversation"}
       data-conversation-id={item.id}
-      className={`border-b border-border/50 px-5 sm:px-7 ${summary ? "py-6" : "py-4"}`}
+      className={`px-5 sm:px-7 ${summary ? "border-b border-border/50 py-6" : "py-[12px]"}`}
     >
       {!summary && head.id !== item.rootId && (
         <p className="mb-3 pl-12 text-xs text-muted-foreground">
@@ -224,6 +318,16 @@ export function ConversationCard({
       <FeedMessage
         message={head}
         summary={Boolean(summary)}
+        currentPubkey={currentPubkey}
+        profiles={profiles}
+        footer={
+          !summary ? (
+            <>
+              {replyToggle}
+              {actions}
+            </>
+          ) : undefined
+        }
         context={
           item.channel ? (
             <button
@@ -253,56 +357,37 @@ export function ConversationCard({
           {summary}
         </p>
       )}
-      {replies.length > 0 && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
-          className={`my-3 flex items-center gap-2 rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring ${summary ? "" : "ml-12"}`}
-        >
-          {expanded
-            ? "Hide replies"
-            : `View ${replies.length} ${replies.length === 1 ? "reply" : "replies"}`}
-        </button>
-      )}
+      {summary && replyToggle}
       {visibleReplies.length > 0 && (
-        <div className="relative ml-4 mt-4 space-y-4 border-l border-border/70 pl-7">
-          {visibleReplies.map((message) => (
-            <FeedMessage key={message.id} message={message} continuation />
-          ))}
+        <div className="mt-[24px]">
+          {visibleReplies.map((message, index) => {
+            const previous = visibleReplies[index - 1];
+            const continuation =
+              hasSameMessageAuthor(previous, message) &&
+              isWithinGroupingWindow(previous?.createdAt, message.createdAt);
+            return (
+              <div
+                key={message.id}
+                className={
+                  index === 0
+                    ? undefined
+                    : continuation
+                      ? "mt-[2px]"
+                      : "mt-[24px]"
+                }
+              >
+                <FeedMessage
+                  message={message}
+                  continuation={continuation}
+                  currentPubkey={currentPubkey}
+                  profiles={profiles}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
-      <div
-        className={`flex items-center gap-5 text-xs text-muted-foreground ${summary ? "mt-5" : "ml-10 mt-2"}`}
-      >
-        <button
-          type="button"
-          aria-expanded={replying}
-          aria-label="Reply"
-          title="Reply"
-          onClick={() => setReplying(!replying)}
-          className="inline-flex h-8 min-w-8 items-center justify-center gap-2 rounded-full px-2 hover:bg-muted/50 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <MessageCircle aria-hidden className="h-4 w-4" />
-          {summary ? (
-            <span>Reply</span>
-          ) : (
-            replies.length > 0 && <span>{replies.length}</span>
-          )}
-        </button>
-        {(item.channel || onOpenContext) && (
-          <button
-            type="button"
-            onClick={openContext}
-            aria-label="Open conversation"
-            title="Open conversation"
-            className="ml-auto inline-flex h-8 min-w-8 items-center justify-center gap-2 rounded-full px-2 hover:bg-muted/50 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {summary && <span>View conversation</span>}
-            <ArrowUpRight aria-hidden className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
+      {summary && actions}
       {replying && (
         <div
           className={`mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 ${summary ? "" : "ml-12"}`}

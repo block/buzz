@@ -191,7 +191,7 @@ export function ChannelMembersBar({
 
   const controls =
     variant === "compact" ? (
-      <div className="flex items-center gap-[6px]">
+      <div className="flex items-center gap-[6px]" data-channel-header-controls>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -228,7 +228,7 @@ export function ChannelMembersBar({
         {endActions}
       </div>
     ) : (
-      <div className="flex items-center gap-[6px]">
+      <div className="flex items-center gap-[6px]" data-channel-header-controls>
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <Button

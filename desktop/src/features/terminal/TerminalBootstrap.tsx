@@ -53,12 +53,15 @@ export function TerminalBootstrap({
   threadId,
   npub,
   relayUrl,
+  sidePanel = false,
 }: {
   channelId: string | null;
   channelName: string | null;
   threadId: string | null;
   npub: string | null;
   relayUrl: string | null;
+  /** Dock beside the conversation instead of below it. */
+  sidePanel?: boolean;
 }) {
   const context =
     channelId && npub && relayUrl
@@ -360,6 +363,7 @@ export function TerminalBootstrap({
 
   return (
     <TerminalSubstrate
+      sidePanel={sidePanel}
       bracketedPaste={active?.frame?.bracketedPaste ?? false}
       channelName={active?.context.channelName ?? channelName}
       enabled={available && Boolean(context)}

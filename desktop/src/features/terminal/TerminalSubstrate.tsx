@@ -45,6 +45,8 @@ type TerminalSubstrateProps = {
   bracketedPaste: boolean;
   focusReportingEnabled: boolean;
   enabled?: boolean;
+  /** Fill a side-panel host instead of using a resizable bottom dock. */
+  sidePanel?: boolean;
   mode?: "docked" | "maximized";
   visible?: boolean;
   onHide?: () => void;
@@ -84,6 +86,7 @@ export function TerminalSubstrate({
   bracketedPaste,
   focusReportingEnabled,
   enabled = true,
+  sidePanel = false,
   mode = "docked",
   visible = true,
   onHide = NOOP,
@@ -478,11 +481,14 @@ export function TerminalSubstrate({
       aria-label="Buzz Term"
       className="buzz-terminal-substrate"
       data-terminal-mode={mode}
+      data-terminal-side-panel={sidePanel || undefined}
       data-terminal-owner={owner}
       data-terminal-visible={visible ? "true" : "false"}
       style={{
         ...terminalStyle,
-        ...(mode === "docked" ? { height: dockHeight } : undefined),
+        ...(mode === "docked" && !sidePanel
+          ? { height: dockHeight }
+          : undefined),
       }}
       onWheel={(event) => {
         event.preventDefault();
@@ -503,7 +509,7 @@ export function TerminalSubstrate({
         if (result.lines !== 0) onScroll(result.lines);
       }}
     >
-      {mode === "docked" ? (
+      {mode === "docked" && !sidePanel ? (
         <hr
           aria-label="Resize Buzz Term"
           aria-orientation="horizontal"
@@ -600,7 +606,10 @@ export function TerminalSubstrate({
           tabIndex={0}
         />
       ) : null}
-      <div className="buzz-terminal-contract-bar">
+      <div
+        className={cn("buzz-terminal-contract-bar", sidePanel && "font-sans")}
+        data-testid="terminal-header"
+      >
         <div className="buzz-terminal-tabs" role="tablist">
           {sessions.map((session, index) => (
             <div

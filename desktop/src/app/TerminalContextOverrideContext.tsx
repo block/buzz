@@ -3,6 +3,8 @@ import * as React from "react";
 export type TerminalContextOverride = {
   channelId: string;
   channelName: string;
+  /** Optional thread scope for embedded conversation surfaces. */
+  threadId?: string | null;
 };
 
 const TerminalContextOverrideContext = React.createContext<React.Dispatch<

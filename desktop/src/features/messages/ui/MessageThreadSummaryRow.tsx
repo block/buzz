@@ -54,6 +54,7 @@ function ParticipantAvatar({
 }
 
 export function MessageThreadSummaryRow({
+  inline = false,
   collapseDepthGuideActions,
   depth = 0,
   depthGuideDepths,
@@ -67,6 +68,7 @@ export function MessageThreadSummaryRow({
   summaryIndentOffsetRem = 0,
   unreadCount,
 }: {
+  inline?: boolean;
   collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
   depth?: number;
   depthGuideDepths?: ReadonlyArray<number>;
@@ -214,9 +216,9 @@ export function MessageThreadSummaryRow({
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
         style={{
-          marginLeft: hoverLeft,
-          maxWidth: `calc(100% - ${hoverLeft})`,
-          paddingLeft: contentPaddingStart,
+          marginLeft: inline ? 0 : hoverLeft,
+          maxWidth: inline ? "100%" : `calc(100% - ${hoverLeft})`,
+          paddingLeft: inline ? 0 : contentPaddingStart,
         }}
         type="button"
       >
@@ -225,7 +227,7 @@ export function MessageThreadSummaryRow({
           className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
           data-testid="message-thread-summary-surface"
           style={{
-            left: surfaceInsetStart,
+            left: inline ? 0 : surfaceInsetStart,
             right: 0,
           }}
         />

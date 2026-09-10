@@ -1,0 +1,102 @@
+/* Keep rich media outside the message surface. The renderer already marks
+   image/video blocks, so captions and attachments retain their original order. */
+.message-bubble-body {
+  --bubble-background: #f0f0f2;
+  --bubble-foreground: var(--foreground);
+  --bubble-link-color: var(--color-blue-600);
+}
+.dark .message-bubble-body {
+  --bubble-background: hsl(var(--muted));
+  --bubble-link-color: var(--color-blue-400);
+}
+.message-bubble-body[data-message-bubble="outgoing"] {
+  --bubble-background: hsl(var(--primary));
+  --bubble-foreground: var(--primary-foreground);
+}
+
+/* Media renderers carry their own document spacing. In a bubble, use one
+   precise gap between the caption and the visible attachment instead. */
+.message-bubble-body [data-bubble-media-paragraph] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.message-bubble-body [data-block-media] {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+}
+.message-bubble-body [data-block-media] > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.message-bubble-body [data-testid="video-player"] > div:first-child,
+.message-bubble-body [data-image-lightbox-trigger],
+.message-bubble-body [data-progressive-image-frame],
+.message-bubble-body [data-progressive-image-frame] img {
+  border: 0;
+}
+.message-bubble-body:has([data-block-media]) > .message-markdown > * + * {
+  margin-top: 2px;
+}
+.message-bubble-body[data-message-bubble="outgoing"] [data-block-media] {
+  justify-content: flex-end;
+}
+.message-bubble-body:has([data-block-media]) [data-bubble-caption],
+.message-bubble-body:not(:has([data-block-media])),
+.message-bubble-body:has([data-block-media])
+  > .message-markdown
+  > :not(:has([data-block-media])):not([data-block-media]):not(
+    [data-link-preview]
+  ) {
+  border-radius: 20px;
+  background: var(--bubble-background);
+  color: hsl(var(--bubble-foreground));
+  padding: 0.5rem 0.875rem;
+}
+.message-bubble-body[data-message-bubble="outgoing"] [data-bubble-caption],
+.message-bubble-body[data-message-bubble="outgoing"]:not(
+  :has([data-block-media])
+),
+.message-bubble-body[data-message-bubble="outgoing"]:has([data-block-media])
+  > .message-markdown
+  > :not(:has([data-block-media])):not([data-block-media]):not(
+    [data-link-preview]
+  ) {
+  --foreground: var(--primary-foreground);
+  --muted-foreground: var(--primary-foreground);
+  --muted: var(--primary);
+  --background: var(--primary);
+  --card: var(--primary);
+  --card-foreground: var(--primary-foreground);
+  --border: var(--primary-foreground);
+}
+
+/* Only the message surface loses its hover fill; buttons retain feedback. */
+[data-testid="unified-pulse"] .group\/message:has(.message-bubble-body):hover,
+[data-testid="unified-pulse"]
+  .group\/message:has(.message-bubble-body):focus-within {
+  background-color: transparent;
+}
+
+.message-bubble-body
+  .message-markdown
+  a:not([data-link-preview], [data-link-preview] *) {
+  color: var(--bubble-link-color);
+}
+.message-bubble-body
+  .message-markdown
+  .mention-chip:is([data-mention], [data-channel-link]) {
+  --inline-chip-padding-inline: 0px;
+  --inline-chip-padding-block-start: 0px;
+  --inline-chip-padding-block-end: 0px;
+  background: transparent;
+  color: var(--bubble-link-color);
+}
+.message-bubble-body
+  .message-markdown
+  .mention-chip-hover:is([data-mention], [data-channel-link]):hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
