@@ -116,10 +116,10 @@ test("lost boot offers phone recovery with a single-use QR", async ({
     page.getByText(
       "Scan this code with a device where you’re currently signed in to Buzz.",
     ),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByText("On your phone, open Settings → Send identity to desktop."),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("desktop-phone-recovery-qr.png"),

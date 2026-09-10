@@ -356,23 +356,26 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02a-backup-option-hover.png` });
 
-  // The private key is visible by default. Hovering the key well blurs the
-  // value and reveals the copy action without changing the layout.
+  // The reusable secret stays out of the DOM until the user explicitly asks
+  // to reveal it. Copy is a separate action and leaves the rendered value
+  // masked.
   const keyValue = page.getByTestId("backup-key-value");
-  const keyWell = page.getByTestId("backup-key-well");
+  const revealButton = page.getByTestId("backup-reveal-key");
   const copyButton = page.getByTestId("backup-copy-key");
   await expect(keyValue).toBeVisible();
+  await expect(keyValue).not.toContainText("nsec1mock");
+  await expect(revealButton).toHaveAccessibleName("Reveal private key");
+  await revealButton.click();
   await expect(keyValue).toContainText("nsec1mock");
-  await expect(keyValue).toHaveCSS("filter", "none");
-  await expect(copyButton).toHaveCSS("opacity", "0");
-  await keyWell.hover();
-  await expect(keyValue).toHaveCSS("filter", /blur\(4px\)/);
-  await expect(copyButton).toHaveCSS("opacity", "1");
+  await expect(revealButton).toHaveAccessibleName("Hide private key");
+  await revealButton.click();
+  await expect(keyValue).not.toContainText("nsec1mock");
   await expect(copyButton).toBeEnabled();
   await copyButton.click();
   await expect(copyButton).toContainText("Copied to clipboard");
+  await expect(keyValue).not.toContainText("nsec1mock");
   await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/02b-backup-hover.png` });
+  await page.screenshot({ path: `${SHOT_DIR}/02b-backup-copy.png` });
 
   // The locked-backup action is part of the generated-key sheet.
   await page.getByTestId("backup-option-password").click();

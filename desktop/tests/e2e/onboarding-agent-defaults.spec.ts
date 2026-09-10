@@ -115,15 +115,11 @@ test("setup filters the bundled harnesses by connection method", async ({
     page.getByRole("heading", { name: "Connect your AI provider" }),
   ).toBeVisible();
   await expect(
-    page.getByText(
-      "Simpler setup — use the harness and models included with your AI subscription",
-    ),
-  ).toBeVisible();
-  await expect(
-    page.getByText(
-      "More flexibility — choose a compatible harness, provider, and model",
-    ),
-  ).toBeVisible();
+    page.getByTestId("onboarding-harness-method-subscription"),
+  ).toContainText("Log in with a subscription");
+  await expect(page.getByTestId("onboarding-harness-method-api")).toContainText(
+    "Use an API key",
+  );
   await page.getByTestId("onboarding-harness-method-subscription").click();
 
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
@@ -407,7 +403,7 @@ test("a ready harness opens its provider settings without an intermediate page",
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Choose your model settings" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(page.getByTestId("onboarding-setup-next")).toHaveCount(0);
   await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
     "Claude Code",
@@ -579,7 +575,7 @@ test("sign in stays pending until catalog detection confirms Ready", async ({
   });
   await expect(
     page.getByRole("heading", { name: "Choose your model settings" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
     "Claude Code",
   );

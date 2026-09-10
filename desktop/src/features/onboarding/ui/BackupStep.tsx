@@ -2,6 +2,8 @@ import {
   Check,
   ChevronRight,
   Copy,
+  Eye,
+  EyeOff,
   FileLock2,
   ShieldCheck,
 } from "lucide-react";
@@ -64,8 +66,9 @@ type BackupStepProps = {
 
 /**
  * Onboarding identity-key step — shows the freshly created key, then opens a
- * dark backup-options state. Hovering obscures the visible key and presents an
- * explicit copy action; password backup opens the separate security flow.
+ * dark backup-options state. The reusable secret stays out of the DOM until an
+ * explicit reveal or copy action; password backup opens the separate security
+ * flow.
  * Neither method blocks Next.
  */
 export function BackupStep({
@@ -84,6 +87,8 @@ export function BackupStep({
   >("idle");
   const [copyError, setCopyError] = React.useState<string | null>(null);
   const [nsec, setNsec] = React.useState<string | null>(null);
+  const [isRevealed, setIsRevealed] = React.useState(false);
+  const [isRevealPending, setIsRevealPending] = React.useState(false);
   const cancelledRef = React.useRef(false);
   const copiedTimerRef = React.useRef<number | null>(null);
 
@@ -111,21 +116,6 @@ export function BackupStep({
     };
   }, []);
 
-  React.useEffect(() => {
-    void getNsec()
-      .then((value) => {
-        if (!cancelledRef.current) setNsec(value);
-      })
-      .catch((err: unknown) => {
-        if (cancelledRef.current) return;
-        setCopyError(
-          err instanceof Error
-            ? err.message
-            : "Failed to retrieve private key.",
-        );
-      });
-  }, []);
-
   const copyKeyToClipboard = React.useCallback(async () => {
     setCopyState("copying");
     setCopyError(null);
@@ -149,6 +139,35 @@ export function BackupStep({
     }
   }, [nsec]);
 
+  const toggleReveal = React.useCallback(async () => {
+    if (isRevealed) {
+      setIsRevealed(false);
+      return;
+    }
+
+    setIsRevealPending(true);
+    setCopyError(null);
+    try {
+      const value = nsec ?? (await getNsec());
+      if (cancelledRef.current) return;
+      setNsec(value);
+      setIsRevealed(true);
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setCopyError(
+        err instanceof Error ? err.message : "Failed to retrieve private key.",
+      );
+    } finally {
+      if (!cancelledRef.current) setIsRevealPending(false);
+    }
+  }, [isRevealed, nsec]);
+
+  // Never read the credential merely to size its placeholder. The complete
+  // reusable secret enters the DOM only after an explicit Reveal action.
+  const maskedKey = React.useMemo(
+    () => Array.from({ length: nsec?.length ?? 63 }, () => "•").join("\u200b"),
+    [nsec],
+  );
   const storageDescription =
     identityStorage === "system-keyring"
       ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
@@ -368,24 +387,39 @@ export function BackupStep({
         >
           <div className="w-full">
             <div
-              className="group/key relative flex h-[7.625rem] w-full items-center justify-center overflow-hidden rounded-xl border border-[#e5e5e5] bg-[#f5f5f5] px-4 py-6"
+              className="relative flex h-[7.625rem] w-full items-center justify-center overflow-hidden rounded-xl border border-[#e5e5e5] bg-[#f5f5f5] px-4 py-6"
               data-testid="backup-key-well"
             >
               <p
                 className={cn(
                   ONBOARDING_KEY_TEXT_CLASS,
-                  "buzz-onboarding-key-text-v3 select-text break-all group-hover/key:select-none group-hover/key:blur-[4px] group-focus-within/key:select-none group-focus-within/key:blur-[4px]",
+                  "buzz-onboarding-key-text-v3 select-text break-all",
                 )}
                 data-testid="backup-key-value"
               >
-                {nsec}
+                {isRevealed ? nsec : maskedKey}
               </p>
-              <div
-                aria-hidden
-                className="pointer-events-none absolute inset-px rounded-[11px] bg-white/60 opacity-0 transition-opacity duration-150 ease-out group-hover/key:opacity-100 group-focus-within/key:opacity-100 motion-reduce:transition-none"
-              />
               <Button
-                className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-8 -translate-x-1/2 -translate-y-1/2 gap-2 rounded-full bg-foreground px-4 text-sm text-background opacity-0 shadow-none transition-opacity duration-150 ease-out group-hover/key:pointer-events-auto group-hover/key:opacity-100 group-focus-within/key:pointer-events-auto group-focus-within/key:opacity-100 hover:bg-foreground/90 hover:text-background motion-reduce:transition-none"
+                aria-label={
+                  isRevealed ? "Hide private key" : "Reveal private key"
+                }
+                className="absolute right-3 top-3 size-8 rounded-full bg-transparent p-0 text-foreground/70 shadow-none hover:bg-foreground/[0.06] hover:text-foreground"
+                data-testid="backup-reveal-key"
+                disabled={isRevealPending}
+                onClick={() => void toggleReveal()}
+                type="button"
+                variant="ghost"
+              >
+                {isRevealPending ? (
+                  <Spinner className="size-4 border-2" />
+                ) : isRevealed ? (
+                  <EyeOff aria-hidden className="size-4" />
+                ) : (
+                  <Eye aria-hidden className="size-4" />
+                )}
+              </Button>
+              <Button
+                className="absolute bottom-3 left-1/2 h-8 -translate-x-1/2 gap-2 rounded-full bg-foreground px-4 text-sm text-background shadow-none hover:bg-foreground/90 hover:text-background"
                 data-testid="backup-copy-key"
                 disabled={copyState === "copying"}
                 onClick={() => void copyKeyToClipboard()}
@@ -447,7 +481,7 @@ export function BackupStep({
           onClick={onNext}
           type="button"
         >
-          I’ve saved my key
+          Continue
         </Button>
       </OnboardingFooter>
     </OnboardingSlideTransition>
