@@ -21,6 +21,7 @@ import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { homedir } from 'node:os';
 import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
@@ -36,10 +37,15 @@ import { prepareConversation } from './conversation.ts';
 const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
+// Default HOST state only, resolved from the current user's home (never cwd). Owner approval/catalog
+// files stay explicit and never land in this folder. An occupied default is never reinitialized.
+const defaultHostDirectory = () => join(homedir(), '.beehive', 'host');
 const help = `Beehive — private host preview (explicit direct relay membership required)
+Command: beehive <command> from any directory once installed (one-time user link, reversible: ln -s <beehive-package>/bin/beehive.cjs <user bin on PATH>/beehive, e.g. ~/.local/bin); source fallback inside the package: node src/cli.ts <command>.
   identity                                 Disabled: use your existing owner signer
-  setup <host-directory>                     Offline host pairing/owner approval/import
-  setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
+  setup                                    Offline pairing/owner approval/import on the default host folder ~/.beehive/host
+  setup <host-directory>                   Explicit host folder (additional hosts/tests); same offline wizard
+  setup <host-directory> <identity-file>  LEGACY loopback diagnostic setup (owner key copied)
   provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
   reconcile-provision <host-directory> <binding-file> <genesis-file> Explicit exact first-provision recovery
   catalog <new-file> <registration-files...> Retain verified public host registrations
@@ -55,9 +61,11 @@ const help = `Beehive — private host preview (explicit direct relay membership
   auth-info <host-directory> [binding-id]   Print local harness service context (no login)
   conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
-  host <host-directory> <relay> --owner-present Private foreground host; bounded OS key reads
+  host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
+  host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
   tui <catalog-file> <relay>                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
+The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval/catalog files remain explicit and separate from host state.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
@@ -79,6 +87,11 @@ async function main() {
   } else if (command === 'presets') {
     showPresets();
   } else if (command === 'setup') {
+    const usingDefaultHostFolder = args.length === 0;
+    if (usingDefaultHostFolder) {
+      args[0] = defaultHostDirectory();
+      console.log(`Default host folder: ${args[0]} (pass an explicit directory for another host; existing installations are never reinitialized)`);
+    }
     const dir = resolve(text(args[0]));
     if (args.length === 1 && !existsSync(join(dir, 'setup.json'))) {
       await enrollmentInput(dir); return;
@@ -320,9 +333,13 @@ async function main() {
     const stop = () => controller.abort();
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     try {
-      const directory = resolve(text(args[0])), url = text(args[1]);
+      // Either the classic <host-directory> <relay> form, or the default host
+      // folder with the relay first (beehive host <relay> --owner-present).
+      const relayFirst = args.length > 0 && /^(wss|ws):\/\//.test(args[0]);
+      const directory = args.length === 0 || relayFirst ? defaultHostDirectory() : resolve(text(args[0]));
+      const url = text(args[relayFirst ? 0 : 1]);
       const privateInstallation = existsSync(join(directory, 'host-identity.json'));
-      if (privateInstallation && args[2] !== '--owner-present') throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
+      if (privateInstallation && args[relayFirst ? 1 : 2] !== '--owner-present') throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
       const credentials = privateInstallation ? { ...systemCredentials, readAsync: credentialHelperReader({ operatorApproved: true }) } : systemCredentials;
       const identity = privateInstallation ? await readHostIdentityAsync(directory, credentials, controller.signal) : undefined;
       if (identity && identity.pairing.relay !== url) throw Error('Wrong registered host relay; no network request sent');

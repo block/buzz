@@ -8,8 +8,20 @@ compatibility. Do not use frozen or existing installations for this demo.
 
 ## Prerequisites
 
-- Node 24.15.0 and this package's frozen standalone dependencies. In `beehive`,
-  invoke `/absolute/path/to/node src/cli.ts ...`; no root bootstrap is needed.
+- Node 24.15.0 (any Node.js 22.18+ works; the `beehive` launcher checks the
+  version and says what to do) and this package's frozen standalone
+  dependencies. Install the command once, reversibly, into a user bin directory
+  already on your PATH, matching nothing else:
+  `ln -s /absolute/path/to/this/checkout/beehive/bin/beehive.cjs ~/.local/bin/beehive`
+  (adjust the target to a user-owned bin directory that is on *your* PATH;
+  undo with `rm`). Then run `beehive <command>` from any directory. Advanced
+  fallback inside the package: `/absolute/path/to/node src/cli.ts <command>`;
+  no root bootstrap is needed either way.
+- `beehive setup` with no directory uses the default host state folder
+  `~/.beehive/host`, resolved from your home (never the current directory) and
+  displayed once before the wizard. An occupied default is never silently
+  reinitialized; pass an explicit directory for additional hosts. Owner
+  approval/catalog files below stay explicit and never land in host state.
 - A deliberately chosen **new** 0700 host directory, a dedicated host service OS
   user with an interactive unlocked credential store, and a separate owner context.
   `@napi-rs/keyring` 2.0.0 may show OS approval/unlock prompts; it cannot suppress
@@ -31,16 +43,18 @@ compatibility. Do not use frozen or existing installations for this demo.
 
 ## Manual setup → Start → reply → Stop
 
-1. **Host, owner present:** `node src/cli.ts setup /new/private-host`
-   Choose `create`, supply label, owner's **public** hex key and `wss://relay-host`;
+1. **Host, owner present:** `beehive setup`
+   (default host folder `~/.beehive/host`; `beehive setup <explicit-directory>`
+   for an additional host). Choose `create`, supply label, owner's **public** hex key and `wss://relay-host`;
    choose a new private pairing file. Expect OS key creation/readback approval.
    If interrupted, use `export` on the same directory; never regenerate identity.
 2. Transfer the pairing file privately to the owner. **Owner context:** run
-   `node src/cli.ts setup /new/owner-exchange`, choose `approve`, select the pairing,
+   `beehive setup /new/owner-exchange` (an explicit directory keeps owner
+   approval files outside host state), choose `approve`, select the pairing,
    compare the full fingerprint with the host, confirm `yes`, enter a future Unix
    expiration and a new private approval file. Enter the existing owner key only
    at the hidden prompt. Transfer the approval file privately back to the host.
-3. **Host:** rerun `node src/cli.ts setup /new/private-host`, choose `import`, select
+3. **Host:** rerun `beehive setup` on the same default host folder, choose `import`, select
    that approval. This registers infrastructure only. Arrange the **already-member**
    prerequisite above out of band; there is no administrative operation here.
 4. Prepare a private local `binding.json` (absolute paths, no identity keys):
@@ -70,22 +84,23 @@ compatibility. Do not use frozen or existing installations for this demo.
    or invent a new root to bypass its assignment**; use a separately authorized
    initial demo identity/placement, not migration or Move.
 
-   Run `node src/cli.ts provision-agent /new/private-host /private/binding.json /private/genesis.json`.
+   Run `beehive provision-agent ~/.beehive/host /private/binding.json /private/genesis.json`.
    Enter the matching agent key at the hidden prompt. Expect OS create/readback
    prompts. The owner key is never placed on the host. If interrupted, retain all
    artifacts and use `reconcile-provision` with these exact same inputs, not a new key.
-5. Run `node src/cli.ts auth-info /new/private-host` for the exact service-user
+5. Run `beehive auth-info ~/.beehive/host` for the exact service-user
    native login context. Deliberately configure/login the supported provider as
    that user only. No borrowed Desktop cache. Presence of files is not login proof.
-6. **Owner:** `node src/cli.ts catalog /new/private-catalog.json /private/approval.json`.
+6. **Owner:** `beehive catalog /new/private-catalog.json /private/approval.json`.
 7. **Host, owner present:**
-   `node src/cli.ts host /new/private-host wss://relay-host --owner-present`
-   The flag consents to live OS reads, not relay admin or provider login. Each key
+   `beehive host wss://relay-host --owner-present`
+   (default host folder; the explicit `beehive host <host-directory> <relay>
+   --owner-present` form remains available). The flag consents to live OS reads, not relay admin or provider login. Each key
    read uses an owned helper with a 10s deadline; SIGINT/SIGTERM cancels and awaits
    its actual close. An OS-owned dialog may remain after helper termination;
    inspect/dismiss it deliberately. Denied/timeout is not a missing key. Expect a
    fresh host-signed HTTP membership check, then `Host online`.
-8. **Owner:** `node src/cli.ts tui /private/private-catalog.json wss://relay-host`.
+8. **Owner:** `beehive tui /private/private-catalog.json wss://relay-host`.
    Enter owner key at the hidden prompt. A separate owner-signed membership check
    precedes private transport. Use `hosts`, `select <full host hex>`, `show`, then
    `start`. Wait for `completed | accepted` and running actual state; publication

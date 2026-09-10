@@ -10,9 +10,28 @@ can close while the host/runner continues. No direct-host HTTP API or controller
 service exists. This package intentionally lives alongside, not inside, the
 native clients: it is a separately authorized product experiment.
 
+## Command launcher (one-time, reversible)
+
+`bin/beehive.cjs` is a plain launcher for this checkout: it checks Node
+(>= 22.18, with a short actionable error otherwise) and runs `src/cli.ts` from
+its own real location, so it works from any directory, through a user
+symlink, and with spaces in paths. Install once into a user-owned bin
+directory already on your PATH (matching no existing command):
+
+```sh
+ln -s "$(pwd)/bin/beehive.cjs" ~/.local/bin/beehive   # adjust if your PATH differs
+```
+
+`beehive setup` (no directory) then uses the default host state folder
+`~/.beehive/host`, resolved from your home and displayed once; an occupied
+default is never reinitialized. Pass an explicit directory for additional
+hosts. Owner approval/catalog files remain explicit and outside host state.
+Undo the command with `rm ~/.local/bin/beehive` (or your equivalent link).
+
 ## Offline standalone host enrollment (partial, no network)
 
-`node src/cli.ts setup <directory>` without an identity file opens Beehive's
+`beehive setup <directory>` (or `node src/cli.ts setup <directory>` inside the
+package) without an identity file opens Beehive's
 own enrollment interface. No Buzz Desktop is needed. Use **create** on a fresh
 host directory: enter its label, relay URL and your existing owner **public** key.
 The host generates its durable independent key and exports a private pairing file.
