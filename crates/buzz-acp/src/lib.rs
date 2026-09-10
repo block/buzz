@@ -4367,9 +4367,20 @@ fn try_native_steer(
             true
         }
         Err(e) => {
+            // Structured fixed-reason label from the stock admission owner
+            // (`pool::send_steer`): task_absent / sender_absent /
+            // mailbox_full / mailbox_closed. Only admission refusals reach
+            // this arm — the ack watcher is spawned solely on `Ok(())`, so
+            // ack-native write failures are logged by the main loop's
+            // SteerAck arm instead and are never conflated with admission.
+            // The label never carries request content.
+            let reason = e
+                .admission_reason()
+                .map(|reason| reason.as_str())
+                .unwrap_or("unclassified");
             tracing::info!(
                 channel = %channel_id,
-                error = ?e,
+                reason,
                 "non-cancelling steer not accepted — falling back to cancel+merge"
             );
             false
