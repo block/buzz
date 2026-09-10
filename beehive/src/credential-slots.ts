@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { initialState, loadSlotState, setupOwner, validateSetup, bindingFingerprint, setupModels, type Setup } from './host.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
-import { object, publicKey } from './protocol.ts';
+import { object, publicKey, text } from './protocol.ts';
+import { semanticHash } from './handoff.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { credentialReference, createCredential, readCredential, type CredentialBackend, type CredentialReference, systemCredentials } from './credential-store.ts';
 import type { SlotEntry } from './slots.ts';
@@ -159,6 +160,66 @@ export function addCredentialSlot(directory: string, secret: string, root: Genes
     if (existsSync(journalPath(directory, agent))) throw Error('Partial slot requires explicit reconciliation; refusing reset');
     writePrivate(journalPath(directory, agent), initialState(setup, genesis), true);
     const key = createCredential('agent', secret, backend);
+    manifest.agents[agent] = { key, setup: setupId };
+    writePrivate(manifestPath(directory), manifest);
+  });
+}
+
+/** Public-only discovery of interrupted ADDED identities: an agent directory
+ * holding a retained journal that no manifest entry activates. No credential is
+ * read or created and no file is modified; journal binding/assignment contents
+ * are already-public. Candidate bindings are derived from the journal's retained
+ * selection, never defaulted: a definition change or corrupt state fails closed. */
+export function orphanCredentialSlots(directory: string): { host: string; ownerPublic: string; orphans: { agent: string; genesis: Genesis; candidates: { setupId: string; fingerprint: string }[] }[] } {
+  const manifest = readManifest(directory);
+  const orphans: { agent: string; genesis: Genesis; candidates: { setupId: string; fingerprint: string }[] }[] = [];
+  const agentsDirectory = join(directory, 'agents');
+  if (!existsSync(agentsDirectory)) return { host: manifest.host, ownerPublic: manifest.ownerPublic, orphans };
+  for (const agent of readdirSync(agentsDirectory)) {
+    if (!/^[0-9a-f]{64}$/.test(agent) || Object.hasOwn(manifest.agents, agent) || !existsSync(journalPath(directory, agent))) continue;
+    const state = object(readPrivate(journalPath(directory, agent)));
+    const binding = object(state.binding), assignment = object(state.assignment), selected = object(state.selected);
+    if (text(binding.agent) !== agent) throw Error(`Partial journal for ${agent} carries a foreign identity; refusing`);
+    const genesis = validateGenesis(assignment.genesis);
+    if (genesis.owner !== manifest.ownerPublic || genesis.agent !== agent) throw Error(`Partial journal for ${agent} is not owned by this installation; refusing`);
+    const model = text(selected.model), workspace = text(selected.workspace);
+    const candidates = Object.entries(manifest.setups)
+      .filter(([, harness]) => { const setup = { ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }; return setupModels(setup)[0] === model && setup.workspace === workspace; })
+      .map(([id, harness]) => ({ setupId: id, fingerprint: bindingFingerprint({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }) }));
+    orphans.push({ agent, genesis, candidates });
+  }
+  return { host: manifest.host, ownerPublic: manifest.ownerPublic, orphans };
+}
+
+/** Explicit recovery of an interrupted ADDED identity on an active installation.
+ * The chosen immutable binding and supplied genesis must reproduce the orphan
+ * journal's exact untouched initial state; the journal is never reset, rewritten
+ * or moved. An existing credential is adopted only when it equals the supplied
+ * key; a missing one is created only by this explicit action, and both stores are
+ * revalidated before the manifest entry activates. Active/public-only slots never
+ * enter here; wrong or foreign inputs leave every retained byte inert. */
+export function reconcileCredentialSlot(directory: string, setupId: string, secret: string, root: Genesis, expectedFingerprint: string | undefined, backend: CredentialBackend = systemCredentials): void {
+  locked(directory, () => {
+    const manifest = readManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
+    if (manifest.agents[agent]) throw Error('Retained slot exists; use explicit import-agent-key');
+    if (Object.keys(manifest.agents).length >= 32) throw Error('Installation full; retained keys require explicit import');
+    const harness = manifest.setups[setupId];
+    if (!harness) throw Error('Unknown host harness setup');
+    if (expectedFingerprint !== undefined && bindingFingerprint({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');
+    if (genesis.agent !== agent || genesis.owner !== manifest.ownerPublic) throw Error('Genesis ownership mismatch');
+    const setup = validateSetup({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic, agentSecret: secret });
+    if (!setupModels(setup).length) throw Error('Diagnostic-only binding cannot enroll an executable agent');
+    const path = journalPath(directory, agent);
+    if (!existsSync(path)) throw Error('No interrupted added-slot journal for this identity; nothing to reconcile');
+    const expected = initialState(setup, genesis);
+    // Canonical equality: field order in a semantically identical genesis file is not identity.
+    if (semanticHash(readPrivate(path)) !== semanticHash(expected)) throw Error('Partial journal differs from exact inert state; refusing reset');
+    const key = credentialReference('agent', agent);
+    const existing = backend.read(key);
+    if (existing === null) createCredential('agent', secret, backend);
+    else if (readCredential(key, backend) !== secret) throw Error('Existing credential differs; refusing adoption');
+    // Recheck both stores before public activation; sibling journals are never touched.
+    if (readCredential(key, backend) !== secret || semanticHash(readPrivate(path)) !== semanticHash(expected)) throw Error('Partial slot changed during reconciliation');
     manifest.agents[agent] = { key, setup: setupId };
     writePrivate(manifestPath(directory), manifest);
   });

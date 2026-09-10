@@ -1,4 +1,4 @@
-import { credentialSlots, credentialSlotsAsync, addCredentialSlot, removeCredentialSlotKey, importCredentialSlotKey } from './credential-slots.ts';
+import { credentialSlots, credentialSlotsAsync, addCredentialSlot, removeCredentialSlotKey, importCredentialSlotKey, reconcileCredentialSlot } from './credential-slots.ts';
 import { systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { setupOwner } from './host.ts';
 import { prepareAgent } from './acp.ts';
@@ -129,6 +129,14 @@ function provisionSlotJournal(directory: string, setup: Setup, root: Genesis) {
   if (setup.agentSecret === undefined) throw Error('Slot enrollment requires its agent key');
   if (genesis.owner !== setupOwner(setup) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
   writePrivate(join(directory, 'journal.json'), initialState(setup, genesis), true);
+}
+
+/** Explicit v3-only recovery of an interrupted added identity slot. Legacy
+ * installations migrate first; there is no v2 partial-slot recovery path and
+ * no automatic migration. Arguments mirror reconcileCredentialSlot exactly. */
+export function reconcileSlot(directory: string, setupId: string, secret: string, root: Genesis, expectedFingerprint: string | undefined, backend: CredentialBackend = systemCredentials): void {
+  if (object(readPrivate(join(directory, 'setup.json'))).version === 3) return reconcileCredentialSlot(directory, setupId, secret, root, expectedFingerprint, backend);
+  throw Error('Legacy installation requires explicit migrate-slots before added-slot recovery');
 }
 /**
  * Deliberate LOCAL removal of one agent's key copy. The public slot stays: identity,

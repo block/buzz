@@ -46,11 +46,15 @@ backends cannot silently fall through to synchronous live reads.
   key is created only by this explicit matching-key action. Journal bytes remain;
   an active/public-only manifest refuses recovery and requires explicit import.
 
-Filesystem + OS store are not a transaction. Added-agent failure can still leave
-an inert orphan journal/key and currently refuses retry pending guided addition
-reconciliation. V3 immutable binding add/retire/conversion and full local wizard
-remain unfinished. No automatic plaintext migration/deletion, no owner key minted
-or copied to the host, and no relay admission or Start during provisioning.
+Filesystem + OS store are not a transaction. Added-agent failure can still
+leave an inert orphan journal/key; it is recovered only through the explicit
+guided `reconcile-agent` command: public-only orphan discovery, journal-derived
+binding candidates, exact canonical inert-journal match (never rewritten or reset),
+explicit matching-key adoption or one-time creation, and active/public-only slots
+refusing in favor of `import-agent-key`. V3 immutable binding add/retire/conversion
+and full local wizard remain unfinished. No automatic plaintext migration/deletion,
+no owner key minted or copied to the host, and no relay admission or Start during
+provisioning or recovery.
 
 ## Evidence / remaining
 
@@ -62,7 +66,9 @@ failure injection covers before-store and after-store first-provision recovery,
 wrong identity, standby addition, retained deletion refusing recovery/recreation,
 and byte-identical sibling journal. These are isolated fixtures, no OS operations.
 
-Independent async semantic review and actual owner-present OS verification remain.
+The independent async semantic review was cancelled without a verdict; nothing in
+this document or the added-slot recovery delta is independently reviewed. Actual
+owner-present OS verification remains.
 Workspace `cli-journey.ts` additionally exercises actual v3 CLI processes with the
 existing explicit isolated-file credential loader: first-provision reconciliation,
 new agent, hidden standby import, removal, refusal to recover an active manifest,

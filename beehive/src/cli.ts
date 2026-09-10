@@ -1,4 +1,4 @@
-import { provisionCredentialSlot, reconcileCredentialProvision } from './credential-slots.ts';
+import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
 import { readHostIdentity } from './host-identity.ts';
 import { verifyHostRegistration } from './host-registration.ts';
 import { setupOwner } from './host.ts';
@@ -20,11 +20,12 @@ import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { relay } from './relay.ts';
 import { host, validateSetup, provision, migrateAssignment, setupModels } from './host.ts';
-import { migrateSlots, addSlot, installationSlots, removeSlotKey, importSlotKey } from './slots.ts';
+import { migrateSlots, addSlot, installationSlots, removeSlotKey, importSlotKey, reconcileSlot } from './slots.ts';
 import { managementClient } from './intents.ts';
 import { message, newKey, publicKey, object, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { createGenesis, validateGenesis } from './assignment.ts';
+import { semanticHash } from './handoff.ts';
 import { prepareConversation } from './conversation.ts';
 
 const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
@@ -41,6 +42,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
+  reconcile-agent <host-directory> [agent-public-key] [public-genesis-file] Recover interrupted added slot
   remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
   import-agent-key <host-directory> <agent-public-key> Restore retained identity via hidden local entry
   assignment-export <host-directory> <new-file> Export public pinned genesis locally
@@ -51,6 +53,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
   tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
+reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC or production relay support.`;
 async function main() {
@@ -184,6 +187,37 @@ async function main() {
       if (await ui.question(importing ? `Add standby identity assigned to ${root.initialHost}, reusing host harness default? [yes/no]: ` : 'Create independent NEW agent assigned here, reusing host harness default? [yes/no]: ') !== 'yes') return;
       addSlot(dir, secret, root); console.log(`Agent ${publicKey(secret)} added; start/configure remotely after restarting the host.`);
     } finally { ui.close(); }
+  } else if (command === 'reconcile-agent') {
+    if (args.length > 3) throw Error('Use host directory and optional agent public key and public genesis file only');
+    const dir = resolve(text(args[0]));
+    if (args[1] !== undefined && !/^[0-9a-f]{64}$/.test(String(args[1]))) throw Error('Invalid agent public key');
+    const listing = orphanCredentialSlots(dir);
+    // A named agent key gets its exact refusal whether the installation holds no
+    // interrupted journal at all or none for that key; the installation-level
+    // message belongs to the key-less discovery form only.
+    const orphan = args[1] !== undefined ? listing.orphans.find(o => o.agent === String(args[1])) : listing.orphans.length === 1 ? listing.orphans[0]! : undefined;
+    if (!orphan) throw Error(args[1] !== undefined ? 'No interrupted added-slot journal for this agent public key'
+      : listing.orphans.length ? 'Specify the agent public key for a multi-slot host' : 'No interrupted added-slot journal on this installation; nothing to reconcile');
+    if (args[2] !== undefined && semanticHash(validateGenesis(readPrivate(resolve(text(args[2]))))) !== semanticHash(orphan.genesis)) throw Error('Provided public genesis differs from the retained journal; refusing substitution');
+    let setupId: string | undefined, fingerprint: string | undefined;
+    const ui = createInterface({ input: stdin, output: stdout });
+    try {
+      if (orphan.candidates.length === 1) { setupId = orphan.candidates[0]!.setupId; fingerprint = orphan.candidates[0]!.fingerprint; }
+      else {
+        if (!orphan.candidates.length) throw Error('Retained journal matches no current binding definition; explicit local repair required');
+        for (const candidate of orphan.candidates) console.log(`  binding ${candidate.setupId} | fingerprint ${candidate.fingerprint}`);
+        const chosen = text(await ui.question(`The retained journal matches ${orphan.candidates.length} binding definitions. Enter the binding id used by the interrupted add: `));
+        const candidate = orphan.candidates.find(c => c.setupId === chosen);
+        if (!candidate) throw Error('Chosen binding does not match the retained journal');
+        setupId = candidate.setupId; fingerprint = candidate.fingerprint;
+      }
+      console.log(`Interrupted added slot ${orphan.agent} | host ${listing.host} | owner ${listing.ownerPublic} | binding ${setupId} fingerprint ${fingerprint} | genesis owner ${orphan.genesis.owner}, initial host ${orphan.genesis.initialHost}.`);
+      console.log('The retained journal is never rewritten or reset; an existing matching credential is adopted, a missing one is created only by this explicit action, and foreign or ambiguous keys stay untouched.');
+      if (await ui.question('Reconcile this interrupted added slot exactly as shown? [yes/no]: ') !== 'yes') return;
+    } finally { ui.close(); }
+    const secret = await readAgentSecret();
+    reconcileSlot(dir, setupId!, secret, orphan.genesis, fingerprint);
+    console.log(`Reconciled added slot ${orphan.agent} on binding ${setupId!}; retained journal preserved byte-identically and manifest entry activated. No relay admission or Start performed.`);
   } else if (command === 'remove-agent-key') {
     const dir = resolve(text(args[0]));
     if (args[1] !== undefined && !/^[0-9a-f]{64}$/.test(String(args[1]))) throw Error('Invalid agent public key');
