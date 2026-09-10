@@ -1,8 +1,12 @@
 import { ChevronRight, Folders } from "lucide-react";
 import type * as React from "react";
+import { createContext, useContext } from "react";
 
 import { AppTopChromePortal } from "@/app/AppTopChromePortal";
 import type { Project, Repository } from "@/features/projects/hooks";
+
+/** Embedded workspaces can provide their own navigation in place of breadcrumbs. */
+export const ProjectBreadcrumbVisibilityContext = createContext(true);
 
 export type ProjectDetailWorkItemCrumb = {
   category: string;
@@ -28,6 +32,7 @@ export function ProjectDetailChrome({
   project: Project;
   repository?: Repository | null;
 }) {
+  const showBreadcrumb = useContext(ProjectBreadcrumbVisibilityContext);
   const repositoryCrumb = repository ? (
     activeWorkItemCrumb ? (
       <>
@@ -90,45 +95,47 @@ export function ProjectDetailChrome({
         data-tauri-drag-region
         data-testid="project-detail-chrome"
       >
-        <nav
-          aria-label="Project breadcrumb"
-          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
-          style={{
-            left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
-          }}
-        >
-          <button
-            className="flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 font-medium transition-colors hover:text-sidebar-accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            onClick={onGoProjects}
-            type="button"
+        {showBreadcrumb && (
+          <nav
+            aria-label="Project breadcrumb"
+            className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
+            style={{
+              left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
+            }}
           >
-            <Folders className="h-3.5 w-3.5" />
-            Projects
-          </button>
-          <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
-          {repositoryCrumb ? (
-            <>
-              <button
-                className="min-w-0 truncate rounded-md px-0.5 py-1 font-medium transition-colors hover:text-sidebar-accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            <button
+              className="flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 font-medium transition-colors hover:text-sidebar-accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={onGoProjects}
+              type="button"
+            >
+              <Folders className="h-3.5 w-3.5" />
+              Projects
+            </button>
+            <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
+            {repositoryCrumb ? (
+              <>
+                <button
+                  className="min-w-0 truncate rounded-md px-0.5 py-1 font-medium transition-colors hover:text-sidebar-accent-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  data-testid="project-breadcrumb-project"
+                  onClick={onGoProjectHome}
+                  type="button"
+                >
+                  {project.name}
+                </button>
+                <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
+                {repositoryCrumb}
+              </>
+            ) : (
+              <span
+                aria-current="page"
+                className="min-w-0 truncate px-0.5 font-medium opacity-60"
                 data-testid="project-breadcrumb-project"
-                onClick={onGoProjectHome}
-                type="button"
               >
                 {project.name}
-              </button>
-              <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
-              {repositoryCrumb}
-            </>
-          ) : (
-            <span
-              aria-current="page"
-              className="min-w-0 truncate px-0.5 font-medium opacity-60"
-              data-testid="project-breadcrumb-project"
-            >
-              {project.name}
-            </span>
-          )}
-        </nav>
+              </span>
+            )}
+          </nav>
+        )}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {actions}
         </div>
@@ -149,6 +156,7 @@ export function ProjectsWorkspaceChrome({
   onGoActivity: () => void;
   section: string;
 }) {
+  const showBreadcrumb = useContext(ProjectBreadcrumbVisibilityContext);
   const onActivity = section === "Activity";
 
   return (
@@ -158,36 +166,38 @@ export function ProjectsWorkspaceChrome({
         data-tauri-drag-region
         data-testid="projects-workspace-chrome"
       >
-        <nav
-          aria-label="Projects breadcrumb"
-          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
-          style={{
-            left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
-          }}
-        >
-          {onActivity ? (
-            <span className="flex min-w-0 items-center gap-1.5 px-1 py-1 font-medium">
-              <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
-            </span>
-          ) : (
-            <button
-              className={BREADCRUMB_BUTTON_CLASS}
-              onClick={onGoActivity}
-              type="button"
-            >
-              <Folders className="h-3.5 w-3.5 shrink-0" />
-              Projects
-            </button>
-          )}
-          <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
-          <span
-            aria-current="page"
-            className="min-w-0 truncate px-0.5 font-medium opacity-60"
+        {showBreadcrumb && (
+          <nav
+            aria-label="Projects breadcrumb"
+            className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
+            style={{
+              left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
+            }}
           >
-            {section}
-          </span>
-        </nav>
+            {onActivity ? (
+              <span className="flex min-w-0 items-center gap-1.5 px-1 py-1 font-medium">
+                <Folders className="h-3.5 w-3.5 shrink-0" />
+                Projects
+              </span>
+            ) : (
+              <button
+                className={BREADCRUMB_BUTTON_CLASS}
+                onClick={onGoActivity}
+                type="button"
+              >
+                <Folders className="h-3.5 w-3.5 shrink-0" />
+                Projects
+              </button>
+            )}
+            <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
+            <span
+              aria-current="page"
+              className="min-w-0 truncate px-0.5 font-medium opacity-60"
+            >
+              {section}
+            </span>
+          </nav>
+        )}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {actions}
         </div>

@@ -16,10 +16,8 @@ import {
   workspaceNavigationTarget,
 } from "../lib/workspaceNavigation";
 
-const ProjectsScreen = React.lazy(() =>
-  import("@/features/projects/ui/ProjectsScreen").then((m) => ({
-    default: m.ProjectsScreen,
-  })),
+const PulseProjectsView = React.lazy(() =>
+  import("./PulseProjectsView").then((m) => ({ default: m.PulseProjectsView })),
 );
 const ProjectDetailScreen = React.lazy(() =>
   import("@/features/projects/ui/ProjectDetailScreen").then((m) => ({
@@ -90,15 +88,18 @@ export function PulseWorkspacePage({ page }: { page: WorkspacePage }) {
         <MainInsetProvider mainInsetRef={mainRef}>
           <React.Suspense fallback={<ViewLoadingFallback kind={page} />}>
             {page === "projects" ? (
-              values.projectId ? (
-                <ProjectDetailScreen
-                  {...parseProjectDetailSearch(values)}
-                  projectId={values.projectId}
-                  entityNavigationId={state.entityNavigationId}
-                />
-              ) : (
-                <ProjectsScreen />
-              )
+              <PulseProjectsView
+                detail={
+                  values.projectId ? (
+                    <ProjectDetailScreen
+                      {...parseProjectDetailSearch(values)}
+                      initialPanelCollapsed
+                      projectId={values.projectId}
+                      entityNavigationId={state.entityNavigationId}
+                    />
+                  ) : undefined
+                }
+              />
             ) : page === "agents" ? (
               <AgentsScreen />
             ) : (

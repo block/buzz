@@ -85,6 +85,7 @@ function ProjectHomeHeaderToggle({
 }
 
 export function ProjectChannelHome({
+  initialPanelCollapsed = false,
   allowRepositoryHealing,
   autoSendDraftKey,
   project,
@@ -92,6 +93,7 @@ export function ProjectChannelHome({
   targetMessageEvents = EMPTY_TARGET_MESSAGE_EVENTS,
   targetMessageId,
 }: {
+  initialPanelCollapsed?: boolean;
   allowRepositoryHealing: boolean;
   autoSendDraftKey?: string | null;
   project: Project;
@@ -108,7 +110,7 @@ export function ProjectChannelHome({
     autoSend?: string;
     messageId?: string;
   };
-  const [summaryOpen, setSummaryOpen] = React.useState(true);
+  const [summaryOpen, setSummaryOpen] = React.useState(!initialPanelCollapsed);
   const [addRepositoryOpen, setAddRepositoryOpen] = React.useState(false);
   const [workspaceSheetTab, setWorkspaceSheetTab] =
     React.useState<ProjectHomeWorkspaceSheetTab | null>(null);

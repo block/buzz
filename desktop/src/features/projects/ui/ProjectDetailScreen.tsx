@@ -206,6 +206,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   );
   const repositoryPanel = useProjectRepositoryPanel(
     `${repository?.id ?? ""}:${activeTab}:${selectedPullRequestId ?? ""}:${selectedIssueId ?? ""}:${selectedCommitHash ?? ""}`,
+    props.initialPanelCollapsed,
   );
   const {
     commitDiffQuery,
@@ -694,6 +695,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   if (showChannelHome) {
     return (
       <ProjectChannelHome
+        initialPanelCollapsed={props.initialPanelCollapsed}
         allowRepositoryHealing={isProjectRelayValidated(project)}
         project={project}
         projects={projectsQuery.data ?? [project]}

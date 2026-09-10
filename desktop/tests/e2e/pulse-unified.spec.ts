@@ -1462,6 +1462,42 @@ test("bubbles follow the theme and anchor reactions and hover controls without r
       channelName: "alice-tyler",
     }),
   );
+  const linkIds = await page.evaluate(
+    ({ alice }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock emitter missing");
+      return [alice, undefined].map(
+        (pubkey) =>
+          emit({
+            channelName: "alice-tyler",
+            content: "https://example.com/accessible-link",
+            pubkey,
+          }).id,
+      );
+    },
+    { alice: TEST_IDENTITIES.alice.pubkey },
+  );
+  for (const id of linkIds) {
+    const message = page
+      .getByTestId("pulse-combined-detail")
+      .getByTestId("message-row")
+      .filter({ has: page.getByTestId(`message-action-bar-${id}`) });
+    await message.scrollIntoViewIfNeeded();
+    await message.hover();
+    const bar = message
+      .getByTestId(`message-action-bar-${id}`)
+      .locator(":scope > div");
+    await expect(bar).toBeVisible();
+    const bubbleBox = await boundsOf(message.getByTestId("message-body"));
+    const barBox = await boundsOf(bar);
+    expect(barBox.y + barBox.height - bubbleBox.y).toBeCloseTo(4, 0);
+    await message
+      .getByRole("link", {
+        name: "https://example.com/accessible-link",
+        exact: true,
+      })
+      .click({ trial: true });
+  }
   await page.evaluate(
     ({ alice }) => {
       const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
@@ -1898,13 +1934,66 @@ test("workspace entrypoints keep projects, agents, and workflows in the main pan
   await expect(editor).toHaveCount(0);
   await expect(main.getByTestId("workflows-view")).toBeVisible();
   await apps.getByRole("button", { name: "Projects", exact: true }).click();
-  await main.getByTestId("projects-section-projects").click();
+  const projectsRail = main.getByTestId("pulse-projects-list");
+  await expect(projectsRail).toBeVisible();
+  await expect(projectsRail).toHaveCSS("width", "220px");
+  for (const section of [
+    "repositories",
+    "issues",
+    "prs",
+    "channels",
+    "activity",
+  ]) {
+    const row = projectsRail.getByTestId(`projects-section-${section}`);
+    await row.click();
+    await expect(row).toHaveAttribute("aria-current", "page");
+    await expect(main.getByTestId("projects-panel-toolbar")).toBeVisible();
+  }
+  await expect(main.getByTestId("projects-page-tabs")).toHaveCount(0);
+  await expect(main.getByTestId("projects-overview-context-rail")).toHaveCount(
+    0,
+  );
+  await projectsRail.getByTestId("projects-section-projects").click();
+  await expect(
+    projectsRail.getByTestId("projects-section-projects"),
+  ).toHaveAttribute("aria-current", "page");
+  const search = main.getByRole("searchbox", {
+    name: "Search Projects",
+    exact: true,
+  });
+  await search.fill("no-such-project");
+  await expect(
+    main.locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    ),
+  ).toHaveCount(0);
+  await search.clear();
+  await main
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   const project = main.locator(
     '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
   );
   await expect(project).toBeVisible();
   await project.click();
   await expect(page).toHaveURL(/#\/pulse\?.*projectId=/);
+  await expect(projectsRail).toBeVisible();
+  await expect(
+    projectsRail.getByRole("button", {
+      name: "Open project buzz",
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-current", "page");
+  await waitForAnimations(page);
+  await expect(
+    page.getByRole("button", { name: "Show Overview", exact: true }),
+  ).toBeVisible();
+  await main.screenshot({
+    path: "test-results/pulse-prototype/project-detail-split.png",
+  });
   await expect(main.getByTestId("pulse-workspace-projects")).toBeVisible();
   await expect(apps).toBeVisible();
   await page.goBack();

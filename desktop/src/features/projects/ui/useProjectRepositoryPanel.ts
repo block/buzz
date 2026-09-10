@@ -33,8 +33,13 @@ function initialMode(): ProjectRightPanelMode {
   }
 }
 
-export function useProjectRepositoryPanel(ownerKey: string) {
-  const [collapsed, setCollapsedState] = React.useState(initialCollapsed);
+export function useProjectRepositoryPanel(
+  ownerKey: string,
+  initialPanelCollapsed?: boolean,
+) {
+  const [collapsed, setCollapsedState] = React.useState(
+    () => initialPanelCollapsed ?? initialCollapsed(),
+  );
   const [selectionAgentContext, setSelectionAgentContext] = React.useState<{
     context: ProjectDetailAgentContext;
     ownerKey: string;

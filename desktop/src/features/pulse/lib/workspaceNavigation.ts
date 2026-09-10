@@ -11,6 +11,7 @@ export function isPulseWorkspacePage(
 
 export const PULSE_WORKSPACE_KEYS = [
   "projectId",
+  "projectSection",
   "workflowId",
   "view",
   "pane",

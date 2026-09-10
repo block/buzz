@@ -28,6 +28,11 @@ import {
   useRepositoryUnavailableReasonFor,
 } from "@/features/projects/useRepositoryAccess";
 import { projectRepoHostForProject } from "@/features/projects/lib/projectRepoHost";
+import {
+  ProjectsPanelToolbar,
+  ProjectsPanelSelection,
+} from "./ProjectsPanelToolbar";
+import { ProjectsOverviewChatToggle } from "./ProjectsOverviewChatToggle";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
 import {
@@ -108,7 +113,14 @@ import {
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
 
-export function ProjectsView() {
+export function ProjectsView({
+  section,
+  onSectionChange,
+}: {
+  section?: ProjectsFilter;
+  onSectionChange?: (section: ProjectsFilter) => void;
+} = {}) {
+  const embedded = section !== undefined;
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const relayOrigin = useRelayOrigin();
@@ -126,12 +138,13 @@ export function ProjectsView() {
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
     activeCommunity?.reposDir,
   );
-  const [filter, setFilter] = React.useState<ProjectsFilter>(() => {
+  const [storedFilter, setFilter] = React.useState<ProjectsFilter>(() => {
     const storedFilter = readStoredFilter();
     return storedFilter === "mine" || storedFilter === "local"
       ? "repositories"
       : storedFilter;
   });
+  const filter = section ?? storedFilter;
   const [searchQuery, setSearchQuery] = React.useState("");
   const [overviewPanelOpen, setOverviewPanelOpen] = React.useState(true);
   const [narrowContextOpen, setNarrowContextOpen] = React.useState(false);
@@ -460,6 +473,7 @@ export function ProjectsView() {
   });
   const handleFilterChange = React.useCallback(
     (nextFilter: ProjectsFilter) => {
+      onSectionChange?.(nextFilter);
       writeStoredFilter(nextFilter);
       // Tab content swaps mount hundreds of rows/cards at once; a transition
       // lets React keep the click responsive and paint the previous tab until
@@ -469,7 +483,7 @@ export function ProjectsView() {
         setFilter(nextFilter);
       });
     },
-    [setSelectionAgentContext],
+    [setSelectionAgentContext, onSectionChange],
   );
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
@@ -669,10 +683,21 @@ export function ProjectsView() {
     ? narrowContextOpen
     : overviewPanelOpen;
   const overviewChatOpen =
-    selectionAgentContext !== null && !isNarrowProjectsLayout;
-  const overviewContextOpen = overviewPanelOpen && !isNarrowProjectsLayout;
+    selectionAgentContext !== null && (embedded || !isNarrowProjectsLayout);
+  const overviewContextOpen =
+    !embedded && overviewPanelOpen && !isNarrowProjectsLayout;
   const overviewDetached = overviewContextOpen || overviewChatOpen;
-  const chromeActions = isNarrowProjectsLayout ? (
+  const chromeActions = embedded ? (
+    <ProjectsOverviewChatToggle
+      active={overviewChatOpen}
+      onToggle={() =>
+        setSelectionAgentContext((context) =>
+          context ? null : overviewAgentContext,
+        )
+      }
+      sectionTitle={projectsSectionTitle(filter)}
+    />
+  ) : isNarrowProjectsLayout ? (
     <ProjectsOverviewNarrowContextToggle
       onToggle={() => setNarrowContextOpen((open) => !open)}
       open={contextOpen}
@@ -721,11 +746,14 @@ export function ProjectsView() {
       <div
         className={cn(
           "relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden",
-          !isNarrowProjectsLayout && "bg-sidebar pb-2 pr-2 pt-px",
-          !isNarrowProjectsLayout && sidebar?.open === false && "pl-2",
+          !embedded && !isNarrowProjectsLayout && "bg-sidebar pb-2 pr-2 pt-px",
+          !embedded &&
+            !isNarrowProjectsLayout &&
+            sidebar?.open === false &&
+            "pl-2",
         )}
         data-project-context-detached={
-          isNarrowProjectsLayout ? undefined : "true"
+          embedded || isNarrowProjectsLayout ? undefined : "true"
         }
         data-testid="projects-overview-layout"
       >
@@ -737,9 +765,11 @@ export function ProjectsView() {
         <div
           className={cn(
             "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-            !isNarrowProjectsLayout
-              ? "ml-px rounded-2xl bg-background"
-              : cn("rounded-tl-xl", topChromeInset.divider),
+            embedded
+              ? "bg-background"
+              : !isNarrowProjectsLayout
+                ? "ml-px rounded-2xl bg-background"
+                : cn("rounded-tl-xl", topChromeInset.divider),
           )}
           data-testid={
             overviewDetached ? "projects-overview-content-pod" : undefined
@@ -805,16 +835,50 @@ export function ProjectsView() {
                         PROJECT_COLUMN_HEADER_BACKDROP_CLASS,
                         overviewDetached && "rounded-t-2xl",
                       )}
-                      data-testid="projects-page-tabs"
+                      data-testid={
+                        embedded
+                          ? "projects-panel-toolbar"
+                          : "projects-page-tabs"
+                      }
                     >
-                      <ProjectsSectionSearch
-                        filter={filter}
-                        onFilterChange={handleFilterChange}
-                        onQueryChange={setSearchQuery}
-                        onSortChange={handleSortChange}
-                        sort={sort}
-                      />
+                      {embedded ? (
+                        <ProjectsPanelToolbar
+                          filter={filter}
+                          query={searchQuery}
+                          onQueryChange={setSearchQuery}
+                          sort={sort}
+                          onSortChange={handleSortChange}
+                          canCreateTarget={editableProjects.length > 0}
+                          onCreate={() => {
+                            if (filter === "repositories")
+                              setCreateRepositoryOpen(true);
+                            else if (filter === "channels")
+                              setCreateChannelOpen(true);
+                            else if (filter === "issues")
+                              setCreateIssueOpen(true);
+                            else if (filter === "prs")
+                              setCreatePullRequestOpen(true);
+                            else setCreateProjectOpen(true);
+                          }}
+                        />
+                      ) : (
+                        <ProjectsSectionSearch
+                          filter={filter}
+                          onFilterChange={handleFilterChange}
+                          onQueryChange={setSearchQuery}
+                          onSortChange={handleSortChange}
+                          sort={sort}
+                        />
+                      )}
                     </div>
+                    {embedded && (
+                      <ProjectsPanelSelection>
+                        <ProjectsOverviewContextPanel
+                          {...contextPanelProps}
+                          onSelectSection={handleFilterChange}
+                        />
+                      </ProjectsPanelSelection>
+                    )}
                     <div
                       className={
                         filter === "all" ? "mx-auto w-full max-w-6xl" : "w-full"
@@ -932,27 +996,29 @@ export function ProjectsView() {
             />
           ) : null}
         </ProjectContextRail>
-        <ProjectContextRail
-          open={overviewContextOpen}
-          panelWidthPx={PROJECT_CONTEXT_PANEL_DEFAULT_WIDTH_PX}
-          rounded={false}
-          testId="projects-overview-context-rail"
-        >
-          <aside
-            aria-label="Project context"
-            className="relative z-30 flex h-full flex-col overflow-hidden bg-sidebar text-sidebar-foreground"
+        {!embedded && (
+          <ProjectContextRail
+            open={overviewContextOpen}
+            panelWidthPx={PROJECT_CONTEXT_PANEL_DEFAULT_WIDTH_PX}
+            rounded={false}
+            testId="projects-overview-context-rail"
           >
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <ProjectsOverviewContextPanel
-                {...contextPanelProps}
-                onSelectSection={(section) => {
-                  handleFilterChange(section);
-                }}
-              />
-            </div>
-          </aside>
-        </ProjectContextRail>
-        {isNarrowProjectsLayout ? (
+            <aside
+              aria-label="Project context"
+              className="relative z-30 flex h-full flex-col overflow-hidden bg-sidebar text-sidebar-foreground"
+            >
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ProjectsOverviewContextPanel
+                  {...contextPanelProps}
+                  onSelectSection={(section) => {
+                    handleFilterChange(section);
+                  }}
+                />
+              </div>
+            </aside>
+          </ProjectContextRail>
+        )}
+        {!embedded && isNarrowProjectsLayout ? (
           <ProjectsOverviewContextSheet
             onCloseAutoFocus={(event) => {
               // Return focus to the chrome toggle so the keyboard journey can

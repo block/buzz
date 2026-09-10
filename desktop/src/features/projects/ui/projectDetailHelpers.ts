@@ -23,6 +23,8 @@ export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
 };
 
 export type ProjectDetailScreenProps = {
+  /** Start focused on content when embedded beside workspace navigation. */
+  initialPanelCollapsed?: boolean;
   commitHash?: string;
   entityNavigationId?: string;
   filePath?: string;

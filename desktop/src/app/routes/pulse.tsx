@@ -22,6 +22,7 @@ const PulseScreen = React.lazy(async () => {
 
 type PulseRouteSearch = ReturnType<typeof parseProjectDetailSearch> & {
   projectId?: string;
+  projectSection?: string;
   workflowId?: string;
   profilePersona?: string;
   view?: "create" | "edit" | "duplicate";
@@ -52,6 +53,7 @@ function validatePulseSearch(
   return {
     ...parseProjectDetailSearch(search),
     projectId: stringValue("projectId"),
+    projectSection: stringValue("projectSection"),
     workflowId: stringValue("workflowId"),
     profilePersona: stringValue("profilePersona"),
     view:

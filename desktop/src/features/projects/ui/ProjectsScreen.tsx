@@ -1,9 +1,16 @@
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
+import type { ProjectsFilter } from "@/features/projects/lib/projectsViewHelpers";
 import { ProjectsView } from "@/features/projects/ui/ProjectsView";
 
-export function ProjectsScreen() {
+export function ProjectsScreen({
+  section,
+  onSectionChange,
+}: {
+  section?: ProjectsFilter;
+  onSectionChange?: (section: ProjectsFilter) => void;
+} = {}) {
   const queryClient = useQueryClient();
   React.useEffect(() => {
     return () => {
@@ -27,7 +34,7 @@ export function ProjectsScreen() {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <ProjectsView />
+      <ProjectsView section={section} onSectionChange={onSectionChange} />
     </div>
   );
 }
