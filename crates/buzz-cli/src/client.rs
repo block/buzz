@@ -60,20 +60,26 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
-/// Maximum file size for image uploads (50 MB).
+const MAX_GIF_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
-
-/// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Client-side size cap for `mime`. Mirrors the relay per-category caps, which
+/// are resolved from `BUZZ_MAX_IMAGE_BYTES`, `BUZZ_MAX_GIF_BYTES`,
+/// `BUZZ_MAX_VIDEO_BYTES`, `BUZZ_MAX_FILE_BYTES` in `buzz_relay::config`
+/// (these constants are the env fallbacks, not `MediaConfig` serde defaults).
+fn max_bytes_for_mime(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime == "image/gif" {
+        MAX_GIF_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1170,21 +1176,17 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
+        // 2. Detect MIME from magic bytes. No client-side allow/deny gate here —
+        // the relay's generic-file deny-list (buzz_media::validation) is the sole
+        // enforcement point; a client-side copy of that policy would be a fourth
+        // copy to keep in sync with the relay, Desktop, and mobile.
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        // 3. Size check — must match the relay's per-category caps (see
+        // `max_bytes_for_mime` docs above).
+        let max = max_bytes_for_mime(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1244,6 +1246,14 @@ impl BuzzClient {
         // If the primary /upload endpoint definitively doesn't exist on this relay version
         // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
         // itself is not retried; only transient failures on the selected legacy endpoint are.
+        //
+        // Known gap: /media/upload is the older media-only alias and hard-rejects non-image/
+        // video MIME types server-side. Now that this client no longer pre-filters MIME
+        // client-side, a generic file (JSON/text/PDF/octet-stream) against an old relay that
+        // lacks /upload will 404 there, fall back here, and then fail with a confusing
+        // `DisallowedContentType` from /media/upload instead of a clear "relay too old"
+        // message. Not fixed in this change — flagged for a follow-up on relay-version
+        // detection or a clearer error translation.
         match result {
             Ok(desc) => return Ok(desc),
             Err(CliError::Relay { status: s, body: _ })
@@ -1666,7 +1676,7 @@ mod retry_policy_tests {
     use tokio::net::TcpListener;
 
     use super::super::error::CliError;
-    use super::BuzzClient;
+    use super::{max_bytes_for_mime, BuzzClient};
 
     /// Spawn a one-shot axum server on a random port.  The handler `f` receives the
     /// attempt counter (incremented before every call) and returns a `(StatusCode,
@@ -2269,6 +2279,131 @@ mod retry_policy_tests {
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
         );
+    }
+
+    /// Spawn a one-shot axum server that accepts any `PUT /upload` and echoes back
+    /// a minimal valid `BlobDescriptor` carrying the request's `Content-Type`.
+    async fn test_upload_server() -> String {
+        use axum::body::Bytes;
+        use axum::routing::put;
+
+        async fn handler(headers: HeaderMap, body: Bytes) -> Response<Body> {
+            let mime = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let ok_body = serde_json::json!({
+                "url": "https://relay.test/media/aabbcc",
+                "sha256": "a".repeat(64),
+                "size": body.len(),
+                "type": mime,
+                "uploaded": 0,
+            })
+            .to_string();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(ok_body))
+                .unwrap()
+        }
+
+        let app = Router::new().route("/upload", put(handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Write `contents` to a fresh temp file and return its path.
+    fn write_temp_file(contents: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(contents).unwrap();
+        tmp
+    }
+
+    /// Opaque/generic content — JSON, plain text, PDF, and un-sniffable bytes —
+    /// must upload successfully with no client-side MIME gate at all. These
+    /// previously hard-failed with "unsupported file type" because of a
+    /// client-side `ALLOWED_MIMES` allowlist covering only image/video MIME
+    /// types; the relay's own generic-file deny-list (buzz_media::validation)
+    /// is now the sole enforcement point, matching Desktop's uploader.
+    #[tokio::test]
+    async fn upload_file_accepts_json_text_and_pdf() {
+        let base = test_upload_server().await;
+        let client = test_client(&base);
+
+        let json_file = write_temp_file(br#"{"a":1}"#);
+        let result = client
+            .upload_file(json_file.path().to_str().unwrap())
+            .await;
+        assert!(result.is_ok(), "JSON upload should succeed, got {result:?}");
+
+        let text_file = write_temp_file(b"hello world, this is plain text");
+        let result = client
+            .upload_file(text_file.path().to_str().unwrap())
+            .await;
+        assert!(result.is_ok(), "plain text upload should succeed, got {result:?}");
+
+        // Minimal PDF header — enough for `infer` to detect application/pdf.
+        let pdf_file = write_temp_file(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
+        let result = client.upload_file(pdf_file.path().to_str().unwrap()).await;
+        assert!(result.is_ok(), "PDF upload should succeed, got {result:?}");
+
+        // Content `infer` cannot sniff at all falls back to octet-stream and
+        // must still be accepted, not rejected client-side.
+        let opaque_file = write_temp_file(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let result = client
+            .upload_file(opaque_file.path().to_str().unwrap())
+            .await;
+        assert!(
+            result.is_ok(),
+            "un-sniffable/octet-stream upload should succeed, got {result:?}"
+        );
+    }
+
+    /// `upload_file` must consult `max_bytes_for_mime` rather than a hardcoded
+    /// cap. GIF is deliberate: at 10 MB it is the smallest of the four caps,
+    /// so this asserts the wiring for the least buffer. Pins the cap value,
+    /// not just the rejection — a wrong-but-nonzero cap must fail here too.
+    #[tokio::test]
+    async fn upload_file_rejects_gif_over_gif_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = test_client(&base);
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.resize(10 * 1024 * 1024 + 1, 0);
+        let f = write_temp_file(&gif);
+
+        let err = client
+            .upload_file(f.path().to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(ref m) if m.contains("max 10485760")),
+            "expected rejection against the 10 MB gif cap, got {err:?}"
+        );
+    }
+
+    /// Each MIME category must resolve to its own cap, not fall through to a
+    /// shared 100 MB generic-file cap. `/upload` sniffs jpeg/png/gif/webp to
+    /// the relay's image pipeline (50 MB, 10 MB for GIF), not the
+    /// generic-file pipeline (100 MB) — a single cap for every non-video MIME
+    /// would let an oversized image pass client-side only to be rejected by
+    /// the relay after a full upload. Zero allocation, zero network: this is
+    /// a pure function over the branch, not an end-to-end upload.
+    #[test]
+    fn max_bytes_for_mime_matches_relay_per_category_caps() {
+        assert_eq!(max_bytes_for_mime("video/mp4"), 500 * 1024 * 1024);
+        assert_eq!(max_bytes_for_mime("image/gif"), 10 * 1024 * 1024);
+        assert_eq!(max_bytes_for_mime("image/png"), 50 * 1024 * 1024);
+        assert_eq!(
+            max_bytes_for_mime("application/octet-stream"),
+            100 * 1024 * 1024
+        );
+        assert_eq!(max_bytes_for_mime("application/pdf"), 100 * 1024 * 1024);
     }
 
     /// When all retry attempts for a stored event end with a partial body (200
