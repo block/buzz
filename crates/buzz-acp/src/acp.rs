@@ -22,6 +22,74 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Maximum ACP assistant text retained for harness-side reply publication.
+/// Matches the channel-message content bound enforced by `buzz-sdk`.
+const MAX_TURN_REPLY_BYTES: usize = 64 * 1024;
+
+/// Final publishable assistant segment captured from one `session/prompt`.
+#[derive(Default)]
+struct TurnReplyCapture {
+    content: String,
+    message_id: Option<String>,
+    overflowed: bool,
+}
+
+impl TurnReplyCapture {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn clear_for_tool_call(&mut self) {
+        self.reset();
+    }
+
+    fn push_chunk(&mut self, update: &serde_json::Value) {
+        if let Some(message_id) = update.get("messageId").and_then(|value| value.as_str()) {
+            if self
+                .message_id
+                .as_deref()
+                .is_some_and(|current| current != message_id)
+            {
+                self.reset();
+            }
+            self.message_id = Some(message_id.to_owned());
+        }
+
+        let Some(text) = update
+            .get("content")
+            .and_then(|content| content.get("text"))
+            .and_then(|value| value.as_str())
+        else {
+            return;
+        };
+        if self.overflowed {
+            return;
+        }
+        if self
+            .content
+            .len()
+            .checked_add(text.len())
+            .is_none_or(|size| size > MAX_TURN_REPLY_BYTES)
+        {
+            self.content.clear();
+            self.overflowed = true;
+            return;
+        }
+        self.content.push_str(text);
+    }
+}
+
+/// Assistant output retained from a completed ACP turn.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum CapturedTurnReply {
+    /// The final assistant segment contained publishable text.
+    Text(String),
+    /// The final assistant segment was empty.
+    Empty,
+    /// The final assistant segment exceeded the channel-message limit.
+    Overflow,
+}
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -214,6 +282,8 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Bounded final assistant segment for harness-side reply publication.
+    turn_reply_capture: TurnReplyCapture,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +633,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_reply_capture: TurnReplyCapture::default(),
         })
     }
 
@@ -781,6 +852,9 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // A new prompt must never inherit output from an initial-message prompt
+        // or a previous turn on this long-lived ACP process.
+        self.turn_reply_capture.reset();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1755,11 +1829,16 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_reply_capture.push_chunk(update);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
             }
             "tool_call" => {
+                // Assistant text before a tool request is commentary, not the
+                // final visible response. Retain only text emitted after the
+                // last tool call in the turn.
+                self.turn_reply_capture.clear_for_tool_call();
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1850,6 +1929,18 @@ impl AcpClient {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
             }
+        }
+    }
+
+    /// Take the final assistant segment emitted by the current prompt.
+    pub(crate) fn take_turn_reply(&mut self) -> CapturedTurnReply {
+        let capture = std::mem::take(&mut self.turn_reply_capture);
+        if capture.overflowed {
+            CapturedTurnReply::Overflow
+        } else if capture.content.trim().is_empty() {
+            CapturedTurnReply::Empty
+        } else {
+            CapturedTurnReply::Text(capture.content)
         }
     }
 
@@ -5026,5 +5117,60 @@ mod tests {
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_reply_capture_keeps_only_the_final_model_segment() {
+        let mut client = spawn_inert_client().await;
+        let update = |value| {
+            serde_json::json!({
+                "params": { "update": value }
+            })
+        };
+
+        client.handle_session_update(&update(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "first",
+            "content": { "text": "I will inspect that." }
+        })));
+        client.handle_session_update(&update(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tool-1",
+            "title": "inspect",
+            "kind": "read"
+        })));
+        client.handle_session_update(&update(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "final",
+            "content": { "text": "The " }
+        })));
+        client.handle_session_update(&update(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "final",
+            "content": { "text": "answer." }
+        })));
+
+        assert_eq!(
+            client.take_turn_reply(),
+            CapturedTurnReply::Text("The answer.".to_string())
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn turn_reply_capture_fails_closed_after_cumulative_overflow() {
+        let mut client = spawn_inert_client().await;
+        let chunk = "x".repeat(MAX_TURN_REPLY_BYTES / 2 + 1);
+        for _ in 0..2 {
+            client.handle_session_update(&serde_json::json!({
+                "params": { "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "text": chunk.as_str() }
+                }}
+            }));
+        }
+
+        assert_eq!(client.take_turn_reply(), CapturedTurnReply::Overflow);
+        client.shutdown().await;
     }
 }
