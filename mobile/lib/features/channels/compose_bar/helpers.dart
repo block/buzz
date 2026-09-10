@@ -342,7 +342,8 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
       content: Text(
         canInvite
             ? '${names.join(', ')} $verb not in this channel. Invite them to '
-                  'the channel, or send without inviting them.'
+                  'the channel, or send without inviting them. Invitations take effect '
+                  'immediately and remain if the message is stopped or fails.'
             : '${names.join(', ')} $verb not in this channel. '
                   '$privateChannelAddDeniedMessage You can still send without '
                   'inviting them.',
@@ -448,6 +449,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   required List<String> humanPubkeys,
   required bool canAddMembers,
   required VoidCallback ensureCurrent,
+  required VoidCallback onAccepted,
 }) async {
   final pending = [
     for (final pubkey in agentPubkeys) ([pubkey], 'bot'),
@@ -473,6 +475,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
         channelId: channelId,
         pubkeys: pubkeys,
         role: role,
+        onAccepted: (_) => onAccepted(),
       );
       ensureCurrent();
     } on _ComposeAuthorizationCancelled {
@@ -574,9 +577,26 @@ class _OutgoingMentions {
   final List<List<String>> referenceTags = [];
   List<String> _invitedHumanPubkeys = const [];
   bool _inviteAgents = false;
+  int acceptedInvitations = 0;
+  final String sourceDestination;
 
-  _OutgoingMentions(List<MentionCandidate> selectedMentions)
-    : pubkeys = LinkedHashSet<String>.from(
+  void reportIncomplete(ScaffoldMessengerState? messenger) {
+    if (acceptedInvitations == 0) return;
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Message not sent. $acceptedInvitations invitation(s) completed and remain '
+          'in effect in $sourceDestination. Review channel members before retrying. '
+          'Check your draft; attachments may need reattaching after leaving.',
+        ),
+      ),
+    );
+  }
+
+  _OutgoingMentions(
+    List<MentionCandidate> selectedMentions,
+    this.sourceDestination,
+  ) : pubkeys = LinkedHashSet<String>.from(
         selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
       ).toList();
 
@@ -623,6 +643,7 @@ class _OutgoingMentions {
       humanPubkeys: _invitedHumanPubkeys,
       canAddMembers: scan.canAddMembers,
       ensureCurrent: ensureCurrent,
+      onAccepted: () => acceptedInvitations++,
     );
     if (outcome.notAdded.isNotEmpty) {
       throw Exception('Message not sent. ${outcome.errors.join(' ')}');

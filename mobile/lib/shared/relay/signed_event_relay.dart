@@ -28,7 +28,8 @@ class SignedEventRelay {
 
   /// Sign and submit an event. Returns the relay's OK response as a [NostrEvent]
   /// whose `content` field contains the OK message (e.g. `"response:{...}"`
-  /// for command kinds).
+  /// for command kinds). Publication retains any [withRelayPublicationGuard]
+  /// scope through transport waits, without discarding accepted ACKs.
   Future<NostrEvent> submit({
     required int kind,
     required String content,

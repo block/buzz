@@ -77,10 +77,14 @@ class ChannelActions {
     return _refreshChannelsAndRead(channelId);
   }
 
+  /// Reports each acknowledged write before checking continuation scope.
+  /// [onAccepted] records irreversible outcomes; it must not mutate scope caches.
+  /// The community and enclosing operation scope also fence queued writes.
   Future<void> addMembers({
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    ValueChanged<String>? onAccepted,
   }) async {
     final normalizedRole = role.trim();
     if (normalizedRole.isEmpty) {
@@ -100,18 +104,23 @@ class ChannelActions {
       // add, not be recorded as this pubkey's rejection.
       _ensureCommunityValid();
       try {
-        await _signedEventRelay.submit(
-          kind: 9000,
-          content: '',
-          tags: [
-            ['h', channelId],
-            ['p', pubkey],
-            ['role', normalizedRole],
-          ],
+        await withRelayPublicationGuard(
+          _ensureCommunityValid,
+          () => _signedEventRelay.submit(
+            kind: 9000,
+            content: '',
+            tags: [
+              ['h', channelId],
+              ['p', pubkey],
+              ['role', normalizedRole],
+            ],
+          ),
         );
       } catch (error) {
         failures[pubkey] = _relayErrorMessage(error);
+        continue;
       }
+      onAccepted?.call(pubkey);
     }
     _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));

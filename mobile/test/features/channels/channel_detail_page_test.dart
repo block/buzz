@@ -14561,8 +14561,12 @@ class _FakeChannelActions extends ChannelActions {
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    ValueChanged<String>? onAccepted,
   }) async {
     await onAddMembers?.call(channelId, pubkeys);
+    for (final pubkey in pubkeys) {
+      onAccepted?.call(pubkey);
+    }
   }
 
   @override

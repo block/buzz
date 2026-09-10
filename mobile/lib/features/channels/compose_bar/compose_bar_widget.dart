@@ -82,6 +82,7 @@ class ComposeBar extends HookConsumerWidget {
     final uploadingCount = useState(0);
     final uploadProgress = useState(0.0);
     final uploadGeneration = useRef(0);
+    final invitationStarted = useState(false);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
     final voiceNote = _useComposerVoiceNote(
       context: context,
@@ -473,6 +474,7 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
+      invitationStarted.value = false;
       final attempt = Object();
       authorizationAttempt.value = attempt;
       isSending.value = true;
@@ -536,7 +538,10 @@ class ComposeBar extends HookConsumerWidget {
           for (final entry in mentionMap.value.entries)
             if (hasMention(text, entry.key)) entry.value,
         ];
-        final outgoing = _OutgoingMentions(selectedMentions);
+        final outgoing = _OutgoingMentions(
+          selectedMentions,
+          '${ref.read(relayConfigProvider).baseUrl} / $channelId',
+        );
         final intendedAgentKeys = {
           for (final mention in selectedMentions)
             if (mention.isAgent) mention.pubkey.toLowerCase(),
@@ -580,6 +585,8 @@ class ComposeBar extends HookConsumerWidget {
         Future<void> addMentionedNonMembers() async {
           final keys = intendedAgentKeys.intersection(outgoing.pubkeys.toSet());
           await authorize(keys, prepare: true);
+          ensureAuthorizationCurrent();
+          invitationStarted.value = true;
           await outgoing.addNonMembers(
             channelActions,
             scan: scan,
@@ -646,6 +653,7 @@ class ComposeBar extends HookConsumerWidget {
         final delivery = onSend;
         unawaited(() async {
           var retainedForRetry = false;
+          var delivered = false;
           try {
             final uploaded = <BlobDescriptor>[];
             for (var index = 0; index < queuedAttachments.length; index++) {
@@ -685,6 +693,7 @@ class ComposeBar extends HookConsumerWidget {
               outgoing.pubkeys,
               mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
+            delivered = true;
           } on _ComposeAuthorizationCancelled {
             // Keep the newer draft without displaying a false access error.
           } catch (error) {
@@ -706,6 +715,8 @@ class ComposeBar extends HookConsumerWidget {
               focusNode.requestFocus();
             }
           } finally {
+            if (!delivered) outgoing.reportIncomplete(messenger);
+            if (ownsSource()) invitationStarted.value = false;
             final sourceRetainsFiles =
                 preparingAgents &&
                 context.mounted &&
@@ -747,6 +758,7 @@ class ComposeBar extends HookConsumerWidget {
       } finally {
         if (context.mounted && authorizationAttempt.value == attempt) {
           authorizationAttempt.value = null;
+          if (uploadingCount.value == 0) invitationStarted.value = false;
           isSending.value = false;
         }
       }
@@ -1065,6 +1077,7 @@ class ComposeBar extends HookConsumerWidget {
             visible: hasPendingUploads,
             progress: uploadProgress.value,
             reducedMotion: reducedMotion,
+            cancelLabel: invitationStarted.value ? 'Stop remaining' : 'Cancel',
             onCancel: () {
               activeUploadCancellation.value?.cancel();
               uploadGeneration.value += 1;

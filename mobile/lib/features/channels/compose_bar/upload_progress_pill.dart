@@ -5,12 +5,14 @@ class _UploadProgressMotion extends StatelessWidget {
   final double progress;
   final bool reducedMotion;
   final VoidCallback onCancel;
+  final String cancelLabel;
 
   const _UploadProgressMotion({
     required this.visible,
     required this.progress,
     required this.reducedMotion,
     required this.onCancel,
+    this.cancelLabel = 'Cancel',
   });
 
   @override
@@ -47,6 +49,7 @@ class _UploadProgressMotion extends StatelessWidget {
                 progress: progress,
                 reducedMotion: reducedMotion,
                 onCancel: onCancel,
+                cancelLabel: cancelLabel,
               ),
             )
           : const SizedBox.shrink(
@@ -62,11 +65,13 @@ class _UploadProgressPill extends HookConsumerWidget {
   final double progress;
   final bool reducedMotion;
   final VoidCallback onCancel;
+  final String cancelLabel;
 
   const _UploadProgressPill({
     required this.progress,
     required this.reducedMotion,
     required this.onCancel,
+    this.cancelLabel = 'Cancel',
   });
 
   @override
@@ -172,7 +177,7 @@ class _UploadProgressPill extends HookConsumerWidget {
                                   vertical: Grid.quarter,
                                 ),
                                 child: Text(
-                                  'Cancel',
+                                  cancelLabel,
                                   style: context.textTheme.labelMedium
                                       ?.copyWith(
                                         color: context.colors.onSurface,

@@ -29,6 +29,9 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// Shared fixture prerequisite; production-observation rows land in the child PR.
+// ignore: unused_import
+import '../../shared/mentions/agent_policy_test.dart' show signed;
 
 part 'compose_bar_test/publication_tests.dart';
 part 'compose_bar_test/send_lifecycle_tests.dart';
@@ -180,6 +183,10 @@ Widget _buildComposeBar({
   Future<List<ChannelMember>>? membersFuture,
   Future<List<ChannelMember>> Function()? membersLoader,
   AgentAuthorizationReader? authorizationReader,
+  SelectedMentionAuthorizationReader? selectedReader,
+  RelayRateLimitGate? rateLimitGate,
+  http.Client? relayHttpClient,
+  void Function(NostrEvent)? beforePublish,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
@@ -202,6 +209,14 @@ Widget _buildComposeBar({
 }) {
   return ProviderScope(
     overrides: [
+      if (rateLimitGate != null || relayHttpClient != null)
+        relaySessionProvider.overrideWith(
+          () => _BeforePublishSession(
+            rateLimitGate: rateLimitGate,
+            httpClient: relayHttpClient,
+            beforePublish: beforePublish,
+          ),
+        ),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       if (voiceNoteRecorderFactory != null)
@@ -230,6 +245,49 @@ Widget _buildComposeBar({
                 ),
             ],
       ),
+      if (relayHttpClient == null || selectedReader != null)
+        selectedMentionAuthorizationReaderProvider.overrideWithValue(
+          selectedReader ??
+              (keys, prior, viewer, channel, current, observed) async {
+                final roster =
+                    await (membersLoader?.call() ??
+                        membersFuture ??
+                        Future.value(members));
+                final agentKeys = {
+                  ...prior,
+                  for (final agent in relayAgents)
+                    if (keys.contains(agent.pubkey)) agent.pubkey,
+                };
+                final agents = agentKeys.isEmpty
+                    ? <AgentDirectoryEntry>[]
+                    : await (authorizationReader?.call(
+                            agentKeys,
+                            viewer,
+                            channel,
+                            current,
+                          ) ??
+                          Future.value([
+                            for (final key in agentKeys)
+                              AgentDirectoryEntry(
+                                pubkey: key,
+                                respondTo: 'anyone',
+                                ownerPubkey: viewer,
+                                channelIds: [channel],
+                              ),
+                          ]));
+                return {
+                  for (final key in keys)
+                    key: SelectedMentionAuthorization(
+                      agentKeys.contains(key)
+                          ? SelectedMentionKind.agent
+                          : SelectedMentionKind.ordinary,
+                      roster.any((member) => member.pubkey == key) ||
+                          channels.any((c) => c.id == channel && c.isDm),
+                      agents.where((agent) => agent.pubkey == key).firstOrNull,
+                    ),
+                };
+              },
+        ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -578,6 +636,33 @@ class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() => initial;
 }
+
+// Shared fixture prerequisite; production-observation rows land in the child PR.
+// ignore: unused_element
+http.Client _selectedRosterClient(
+  String authority,
+  NostrEvent Function() rosterEvent, {
+  List<NostrEvent> Function()? extraEvents,
+}) => http_testing.MockClient((request) async {
+  if (request.method == 'GET') {
+    return http.Response(jsonEncode({'self': authority}), 200);
+  }
+  final filters = jsonDecode(request.body) as List;
+  return http.Response(
+    jsonEncode([
+      if (filters.any((f) => (f['kinds'] as List).contains(39002)))
+        rosterEvent().toJson(),
+      for (final event in extraEvents?.call() ?? <NostrEvent>[])
+        if (filters.any(
+          (f) =>
+              (f['kinds'] as List).contains(event.kind) &&
+              (f['authors'] as List).contains(event.pubkey),
+        ))
+          event.toJson(),
+    ]),
+    200,
+  );
+});
 
 class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
@@ -5673,4 +5758,23 @@ Channel _makeChannel({required String name, required String channelType}) {
     createdAt: DateTime(2024),
     memberCount: 5,
   );
+}
+
+// Observe the real signing→session boundary without supplying a validity guard.
+class _BeforePublishSession extends RelaySessionNotifier {
+  _BeforePublishSession({
+    super.rateLimitGate,
+    super.httpClient,
+    this.beforePublish,
+  });
+  final void Function(NostrEvent)? beforePublish;
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    beforePublish?.call(event);
+    return super.publish(event, timeout: timeout);
+  }
 }
