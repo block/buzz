@@ -11,13 +11,16 @@ Future<List<NostrEvent>> _queryAgentFilters(
   RelaySessionNotifier session,
   List<NostrFilter> filters, {
   void Function()? checkCurrent,
+  void Function(List<NostrFilter>, List<NostrEvent>?)? onQueryEvidence,
 }) async {
   final events = <NostrEvent>[];
+  onQueryEvidence?.call(filters, null);
   for (var start = 0; start < filters.length; start += 10) {
     checkCurrent?.call();
-    events.addAll(
-      await session.queryRelay(filters.skip(start).take(10).toList()),
-    );
+    final batch = filters.skip(start).take(10).toList();
+    final result = await session.queryRelay(batch);
+    onQueryEvidence?.call(batch, result);
+    events.addAll(result);
   }
   return events;
 }
@@ -32,6 +35,7 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
   Set<String>? requestedKeys,
   void Function()? checkCurrent,
   void Function(Map<String, NostrEvent> profiles)? onProfileEvidence,
+  void Function(List<NostrFilter>, List<NostrEvent>?)? onQueryEvidence,
 }) async {
   final latest = <String, NostrEvent>{};
   for (final event in runtimeEvents.where((event) => event.kind == 10100)) {
@@ -42,10 +46,15 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
   }
   final keys = requestedKeys ?? latest.keys.toSet();
   final profiles = latestProfileEvents(
-    await _queryAgentFilters(session, [
-      for (final key in keys)
-        NostrFilter(kinds: const [0], authors: [key], limit: 1),
-    ], checkCurrent: checkCurrent),
+    await _queryAgentFilters(
+      session,
+      [
+        for (final key in keys)
+          NostrFilter(kinds: const [0], authors: [key], limit: 1),
+      ],
+      checkCurrent: checkCurrent,
+      onQueryEvidence: onQueryEvidence,
+    ),
   );
   final owners = <String, String>{};
   for (final profile in profiles.values) {
@@ -55,17 +64,22 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
     }
   }
   checkCurrent?.call();
-  final policies = await _queryAgentFilters(session, [
-    for (final owner in owners.entries)
-      NostrFilter(
-        kinds: const [30177],
-        authors: [owner.value],
-        tags: {
-          '#d': [owner.key],
-        },
-        limit: 1,
-      ),
-  ], checkCurrent: checkCurrent);
+  final policies = await _queryAgentFilters(
+    session,
+    [
+      for (final owner in owners.entries)
+        NostrFilter(
+          kinds: const [30177],
+          authors: [owner.value],
+          tags: {
+            '#d': [owner.key],
+          },
+          limit: 1,
+        ),
+    ],
+    checkCurrent: checkCurrent,
+    onQueryEvidence: onQueryEvidence,
+  );
   checkCurrent?.call();
   onProfileEvidence?.call(Map.unmodifiable(profiles));
   return mergeAgentPolicies(latest.values, policies, owners);
