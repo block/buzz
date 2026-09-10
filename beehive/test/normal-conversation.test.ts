@@ -20,8 +20,10 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting of (kind === 'custom' ? [false] : [false, true])) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async t => {
+for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-compat', 'openrouter']) for (const converting of (['custom', 'anthropic', 'openai-compat', 'openrouter'].includes(kind) ? [false] : [false, true])) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async t => {
   const custom = kind === 'custom', goose = kind === 'goose' || custom, claude = kind === 'claude', codex = kind === 'codex';
+  const buzz = ['anthropic', 'openai-compat', 'openrouter'].includes(kind);
+  const keyName = kind === 'anthropic' ? 'ANTHROPIC_API_KEY' : kind === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
   const title = codex ? 'Codex' : 'Claude';
   const model = goose ? 'goose-model-a' : `${kind}-model-a`;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
@@ -30,7 +32,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting
   const identity = join(dir, 'owner.json'), installation = join(dir, 'host');
   writePrivate(identity, { secret: ownerSecret });
   const keyFile = join(dir, 'claude-key');
-  writeFileSync(keyFile, `fixture-${codex ? 'codex' : 'claude'}-private-key`, { mode: 0o600 });
+  writeFileSync(keyFile, `fixture-${buzz ? kind : codex ? 'codex' : 'claude'}-private-key`, { mode: 0o600 });
   const runner = join(dir, codex ? 'codex-acp' : claude ? 'claude-agent-acp' : 'goose');
   writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (${!goose ? 'process.argv.length !== 2' : "process.argv[2] !== 'acp'"}) throw Error('adapter argv mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
   const customFile = join(dir, 'custom.json');
@@ -45,12 +47,19 @@ for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const address = http.address(); assert.ok(address && typeof address !== 'string');
   const setupOutput = await terminal(['setup', installation, identity], [
-    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: custom ? '6' : codex ? '5' : claude ? '4' : '3' },
-    ...(custom ? [{ prompt: 'Absolute owner-only custom definition JSON file: ', answer: customFile }] : [{ prompt: codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner }]),
-    ...(!goose ? [
+    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: buzz ? '8' : custom ? '6' : codex ? '5' : claude ? '4' : '3' },
+    ...(custom ? [{ prompt: 'Absolute owner-only custom definition JSON file: ', answer: customFile }] : [{ prompt: buzz ? 'Absolute installed buzz-agent executable: ' : codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner }]),
+    ...(!goose && !buzz ? [
       { prompt: `Absolute installed ${kind} CLI: `, answer: realpathSync(process.execPath) },
       { prompt: `Absolute owner-only local ${codex ? 'OPENAI' : 'ANTHROPIC'}_API_KEY file`, answer: keyFile },
       { prompt: `Operator-approved compatible exact ${title} model IDs`, answer: model },
+    ] : []),
+    ...(buzz ? [
+      { prompt: 'Buzz Agent provider [', answer: kind },
+      { prompt: `Absolute owner-only local ${keyName} file`, answer: keyFile },
+      { prompt: 'Provider HTTPS base URL', answer: `https://${kind}.fixture.invalid/v1` },
+      ...(kind === 'openai-compat' ? [{ prompt: 'OpenAI-compatible wire [', answer: 'responses' }] : []),
+      { prompt: 'Operator-approved compatible exact Buzz Agent model IDs', answer: model },
     ] : []),
     { prompt: 'Allowed workspace (absolute directory): ', answer: dir },
     { prompt: 'Additional allowed workspace (blank for none): ', answer: '' },
@@ -77,8 +86,8 @@ for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting
     { prompt: 'Local action [', answer: codex ? 'add-codex' : claude ? 'add-claude' : 'add-goose' },
     { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
     { prompt: !goose ? `NEW immutable ${title} binding ID: ` : 'NEW immutable Goose binding ID: ', answer: 'B' },
-    { prompt: codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
-    ...(!goose ? [
+    { prompt: buzz ? 'Absolute installed buzz-agent executable: ' : codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    ...(!goose && !buzz ? [
       { prompt: `Absolute installed ${kind} CLI: `, answer: realpathSync(process.execPath) },
       { prompt: `Absolute owner-only local ${codex ? 'OPENAI' : 'ANTHROPIC'}_API_KEY file`, answer: keyFile },
       { prompt: `Operator-approved compatible exact ${title} model IDs`, answer: model },
@@ -274,11 +283,12 @@ for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting
       for (const privateValue of ['owner-only-custom-value', literal, customFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'custom local input never advertised');
       assert.ok(!existsSync(join(dir, 'shell-was-invoked')), 'structured argv never invokes shell');
     }
-    if (!goose) {
+    if (buzz) assert.ok(existsSync(join(dir, `${kind}-env-checked`)), 'distinct Buzz provider env contract');
+    if (!goose && !buzz) {
       assert.ok(existsSync(join(dir, `${kind}-env-checked`)));
       assert.ok(!readFileSync(join(dir, `${kind}-rpc-methods`), 'utf8').includes('session/set_model'));
-      for (const privateValue of [`fixture-${codex ? 'codex' : 'claude'}-private-key`, keyFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'private Claude context never advertised');
-      assert.ok(!setupOutput.includes(`fixture-${codex ? 'codex' : 'claude'}-private-key`));
+      for (const privateValue of [`fixture-${buzz ? kind : codex ? 'codex' : 'claude'}-private-key`, keyFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'private Claude context never advertised');
+      assert.ok(!setupOutput.includes(`fixture-${buzz ? kind : codex ? 'codex' : 'claude'}-private-key`));
     }
     assert.equal(state().actual.evidence.source, 'external-buzz-conversation');
     assert.match(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), /NORMAL-PROFILE-BOUNDARY/);
@@ -350,7 +360,7 @@ for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting
       if (!goose) {
         rmSync(keyFile);
         const failedAuth = await request(message('restart', 'journey', agent, state().revision, {}));
-        assert.match(String(failedAuth.body.result), new RegExp(`${title} API key prerequisite`));
+        assert.match(String(failedAuth.body.result), new RegExp(`${buzz ? 'Buzz Agent' : title} API key prerequisite`));
         assert.deepEqual(state().actual, actual);
       }
       writeFileSync(join(dir, 'mode'), 'ok');

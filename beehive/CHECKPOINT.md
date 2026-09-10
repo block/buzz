@@ -2023,3 +2023,22 @@ raw traces, source/binary pins, complete instrumentation patch/hash and cleanup:
 workspace WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/ADMISSION_0BEA. Publication is docs-only;
 unchanged installed hashes separately verified, Logan Johnson + DCO. No repo CI,
 provider/production/native/Rust/client changes or full-product acceptance claim.
+
+## Provider 16b4 — CODE checkpoint before journeys
+
+Implemented local Buzz Agent API-key bindings for Anthropic, OpenAI-compatible,
+and OpenRouter via normal setup option 8 and local-setup add-buzz-provider. Shared
+provider-specific input and validation, immutable binding storage, approved models,
+closed launch env and existing Buzz Agent exact-session/profile owner reused. No
+remote env/secret form or changes to authority/selection/Stop. Source pinned
+051c3a2 config.rs:631–691,922–960; native Databricks auth/cache consumers also read.
+No vendor invocation/login/cache reads. Strict passes after correcting a TS env
+return-type inference error (first strict failed; no runtime test run yet). New
+installed journeys are prepared but not yet executed. Databricks token and richer
+native OAuth diagnostics remain unfinished; existing v2 path unchanged. Full gate
+OPEN, original admission cause UNRESOLVED; no diagnostic full rerun authorized.
+Instrumentation-complete.patch retained at ADMISSION_0BEA, SHA256
+37de1d9fd5110017a8be3caf739a5b3a4cf56ee5e512b77ea1d7619580f84129;
+will adapt before any final full-candidate validation. Custom confirmation review
+COMPLETE SOURCE-ONLY/no new blocker; R1 source-closed plus actual wizard tests.
+Custom conversion remains source-only; historical report complete/unclassified.

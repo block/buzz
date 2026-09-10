@@ -1,3 +1,4 @@
+import { buzzProviderInput } from './buzz-provider.ts';
 import { customBindingInput } from './custom-input.ts';
 import { showPresets } from './presets.ts';
 import { codexGuidance } from './codex.ts';
@@ -24,7 +25,7 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
     for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)} | ${first.retiredBindings?.[id] ? 'retired' : 'available'}`);
     for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
-    const action = await ui.question('Local action [presets / add-preset / add-custom / reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
+    const action = await ui.question('Local action [presets / add-preset / add-custom / reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / add-buzz-provider / normal / cancel]: ');
     if (action === 'cancel') return;
     if (action === 'presets') { showPresets(); return; }
     if (action === 'normal') {
@@ -62,7 +63,7 @@ export async function localSetup(directory: string): Promise<void> {
       console.log(`Restored local key for ${agent}; no assignment or history reset, no Start permission added.`);
       return;
     }
-    if (!['add-preset', 'add-custom', 'replace-binding', 'retire-binding', 'new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
+    if (!['add-buzz-provider', 'add-preset', 'add-custom', 'replace-binding', 'retire-binding', 'new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
     const id = await ui.question('Existing binding ID to reuse: ');
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
@@ -100,6 +101,18 @@ export async function localSetup(directory: string): Promise<void> {
       if (publicKey(secret) !== genesis.agent) throw Error('Imported key does not match public genesis');
       addSlot(directory, secret, genesis, id, fingerprint);
       console.log(`Standby ${genesis.agent} saved using ${id}; key possession grants no Start. No key/session/workspace transfer.`);
+      return;
+    }
+    if (action === 'add-buzz-provider') {
+      const nextId = text(await ui.question('NEW immutable Buzz Agent binding ID: '));
+      const runner = realpathSync(text(await ui.question('Absolute installed buzz-agent executable: ')));
+      const buzzProvider = await buzzProviderInput(ui);
+      const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
+      const serviceHome = realpathSync(text(await ui.question('Existing dedicated Buzz Agent service HOME: ')));
+      const configDirectory = realpathSync(text(await ui.question('Existing dedicated Buzz Agent config directory: ')));
+      if (await ui.question('Save NEW Buzz Agent binding only (no identity/selection/restart)? [yes/no]: ') !== 'yes') return;
+      addHarnessBinding(directory, nextId, { mode: 'buzz-agent-api-key', runner, args: [], workspace, allowedWorkspaces: [workspace], serviceHome, configDirectory, buzzProvider, ...(setup.conversation ? { conversation: setup.conversation } : {}) }, { id, fingerprint });
+      console.log(`Buzz Agent binding ${nextId} saved; identity/key/history unchanged. Select remotely then explicit Start/Restart. Authentication unverified.`);
       return;
     }
     if (action === 'add-codex') {

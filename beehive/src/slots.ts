@@ -217,7 +217,7 @@ export function addConversationBinding(directory: string, agent: string, source:
     if (common && semanticHash(common) !== semanticHash(conversation)) throw Error('Installation conversation authority already pinned; cannot retarget it');
     prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace,
       home: text(setup.serviceHome), configDirectory: text(setup.configDirectory),
-      databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost),
+      ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost),
       ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: setupModels(setup)[0]!
     }, setup.agentSecret, publicKey(setup.ownerSecret));
     i.conversation = structuredClone(conversation);

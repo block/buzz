@@ -5,6 +5,15 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
 if (process.env.BUZZ_AGENT_SYSTEM_PROMPT) writeFileSync('received-system-instructions', process.env.BUZZ_AGENT_SYSTEM_PROMPT);
+const buzzProvider = process.env.BUZZ_AGENT_PROVIDER;
+if (['anthropic', 'openai-compat', 'openrouter'].includes(buzzProvider ?? '')) {
+  const p = buzzProvider!;
+  const key = p === 'anthropic' ? 'ANTHROPIC_API_KEY' : p === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
+  const endpoint = p === 'anthropic' ? 'ANTHROPIC_BASE_URL' : p === 'openai-compat' ? 'OPENAI_COMPAT_BASE_URL' : 'OPENROUTER_BASE_URL';
+  if (process.env[key] !== `fixture-${p}-private-key` || process.env[endpoint] !== `https://${p}.fixture.invalid/v1` || process.env.OPENAI_API_KEY || process.env.DATABRICKS_HOST || process.env.GOOSE_PROVIDER || process.env.ANTHROPIC_MODEL || !process.env.HOME?.endsWith('service-home') || !process.env.BUZZ_AGENT_CONFIG_DIR?.endsWith('agent-config') || (p === 'openai-compat' ? process.env.OPENAI_COMPAT_API !== 'responses' : process.env.OPENAI_COMPAT_API !== undefined)) throw Error('Incorrect Buzz provider contract');
+  for (const other of ['ANTHROPIC_API_KEY', 'OPENAI_COMPAT_API_KEY', 'OPENROUTER_API_KEY']) if (other !== key && process.env[other]) throw Error('Mixed provider credentials');
+  writeFileSync(`${p}-env-checked`, 'closed provider-specific contract');
+}
 const codex = process.env.CODEX_CONFIG !== undefined;
 if (codex) {
   const config = JSON.parse(process.env.CODEX_CONFIG!);
@@ -58,7 +67,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     tool = m.params.mcpServers[0]; selected = model;
     result = { sessionId, ...(mode === 'missing-model' ? {} : { models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } }) };
   }
-  else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : 'buzz-agent' } };
+  else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : (mode === 'missing-native' ? 'unknown' : 'buzz-agent') } };
   else if (m.method === 'session/new' && claude) {
     if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; }
     sessionId = `claude-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
@@ -67,7 +76,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (m.params._meta?.systemPrompt) writeFileSync('received-system-instructions', m.params._meta.systemPrompt.append);
     result = { sessionId, models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } };
   }
-  else if (m.method === 'session/new') { if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  else if (m.method === 'session/new') { if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; } if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
     if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported' } }); continue; }
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
