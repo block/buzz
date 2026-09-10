@@ -39,7 +39,7 @@ void _publicationTests() {
                 respondTo: mode == 'deny' || (mode == 'revoke' && reads == 2)
                     ? 'nobody'
                     : 'anyone',
-                channelIds: mode == 'removed' && reads == 2
+                channelIds: mode == 'removed' && reads >= 2
                     ? []
                     : ['channel-1'],
               ),
@@ -59,13 +59,21 @@ void _publicationTests() {
       );
       if (mode != 'allow') {
         expect(
-          find.textContaining('Could not authorize a mentioned agent'),
+          find.textContaining(
+            mode == 'error'
+                ? 'unavailable'
+                : 'Could not authorize a mentioned agent',
+          ),
           findsOneWidget,
         );
       }
       expect(
         reads,
-        const ['allow', 'revoke', 'removed'].contains(mode) ? 2 : 1,
+        mode == 'allow' || mode == 'removed'
+            ? 3
+            : mode == 'revoke'
+            ? 2
+            : 1,
       );
     });
   }
@@ -116,7 +124,16 @@ void _publicationTests() {
             ],
             authorizationReader: (_, _, _, _) {
               reads++;
-              return pending.future;
+              return boundary == 'prompt'
+                  ? Future.value([
+                      AgentDirectoryEntry(
+                        pubkey: key,
+                        ownerPubkey: signer.public,
+                        respondTo: 'anyone',
+                        channelIds: ['channel-1'],
+                      ),
+                    ])
+                  : pending.future;
             },
             onSend: (_, _, {mediaTags = const []}) async {
               sent++;
@@ -148,7 +165,7 @@ void _publicationTests() {
         }
         await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
-        expect(reads, boundary == 'reader' ? 1 : 0);
+        expect(reads, boundary == 'reader' || boundary == 'prompt' ? 1 : 0);
         if (boundary == 'prompt') {
           await tester.pump(const Duration(milliseconds: 300));
         }

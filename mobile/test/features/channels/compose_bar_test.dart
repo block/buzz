@@ -34,6 +34,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../shared/mentions/agent_policy_test.dart' show signed;
 
 part 'compose_bar_test/publication_tests.dart';
+part 'compose_bar_test/classification_tests.dart';
 part 'compose_bar_test/send_lifecycle_tests.dart';
 part 'compose_bar_test/invitation_tests.dart';
 
@@ -232,18 +233,6 @@ Widget _buildComposeBar({
       channelMembersProvider('channel-1').overrideWith(
         (ref) =>
             membersLoader?.call() ?? membersFuture ?? Future.value(members),
-      ),
-      agentAuthorizationReaderProvider.overrideWithValue(
-        authorizationReader ??
-            (keys, viewer, channel, current) async => [
-              for (final key in keys)
-                AgentDirectoryEntry(
-                  pubkey: key,
-                  respondTo: 'anyone',
-                  ownerPubkey: viewer,
-                  channelIds: [channel],
-                ),
-            ],
       ),
       if (relayHttpClient == null || selectedReader != null)
         selectedMentionAuthorizationReaderProvider.overrideWithValue(
@@ -760,6 +749,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   _publicationTests();
+  classificationTests();
   sendLifecycleTests();
   invitationTests();
   TestWidgetsFlutterBinding.ensureInitialized();

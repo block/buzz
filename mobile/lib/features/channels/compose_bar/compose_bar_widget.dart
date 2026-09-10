@@ -485,49 +485,59 @@ class ComposeBar extends HookConsumerWidget {
         var authorizationRevision = submittedDraftRevision;
         final visit = authorizationVisit.value;
         final config = ref.read(relayConfigProvider);
-        final readAuthorization = ref.read(agentAuthorizationReaderProvider);
+        // Equivalent refreshes retain scope; destination/credentials do not.
+        bool isConfigScopeCurrent() {
+          final current = ref.read(relayConfigProvider);
+          return current.baseUrl == config.baseUrl &&
+              current.nsec == config.nsec;
+        }
+
+        final readSelected = ref.read(
+          selectedMentionAuthorizationReaderProvider,
+        );
+        final session = ref.read(relaySessionProvider.notifier);
+        final observedProfiles = <String, NostrEvent>{};
+        final observedKeys = <String>{};
+        bool profilesCurrent() => observedProfiles.entries.every((entry) {
+          final order = ref
+              .read(userCacheProvider.notifier)
+              .profileEventOrder(entry.key);
+          final event = entry.value;
+          return order == null ||
+              order.createdAt < event.createdAt ||
+              (order.createdAt == event.createdAt &&
+                  order.eventId.compareTo(event.id) >= 0);
+        });
         bool ownsSource() =>
             context.mounted &&
             visit == authorizationVisit.value &&
-            identical(config, ref.read(relayConfigProvider));
+            isConfigScopeCurrent();
         bool isAuthorizationCurrent() =>
             ownsSource() &&
+            identical(session, ref.read(relaySessionProvider.notifier)) &&
+            currentPubkey == ref.read(currentPubkeyProvider) &&
+            profilesCurrent() &&
             submittedUploadGeneration == uploadGeneration.value &&
             authorizationRevision == draftRevision.value &&
-            identical(config, ref.read(relayConfigProvider));
+            isConfigScopeCurrent();
         void ensureAuthorizationCurrent() {
           if (!context.mounted) throw const _ComposeAuthorizationCancelled();
-          if (!identical(config, ref.read(relayConfigProvider))) {
-            throw StateError('Community changed during authorization');
+          if (!isConfigScopeCurrent()) {
+            throw const _ComposeCommunityChanged();
           }
           if (submittedUploadGeneration != uploadGeneration.value ||
               visit != authorizationVisit.value ||
               authorizationRevision != draftRevision.value) {
             throw const _ComposeAuthorizationCancelled();
           }
+          if (!identical(session, ref.read(relaySessionProvider.notifier)) ||
+              currentPubkey != ref.read(currentPubkeyProvider) ||
+              !profilesCurrent()) {
+            throw Exception('Mention evidence changed; retry the draft');
+          }
         }
 
         checkPreparationCurrent = ensureAuthorizationCurrent;
-
-        Future<void> authorize(Set<String> keys, {bool prepare = false}) async {
-          if (keys.isEmpty) return;
-          ensureAuthorizationCurrent();
-          try {
-            await authorizeAgentMentions(
-              readAuthorization,
-              keys,
-              currentPubkey,
-              channelId,
-              isAuthorizationCurrent,
-              prepare: prepare,
-            );
-          } catch (_) {
-            // A stale request is cancellation, not an access decision.
-            ensureAuthorizationCurrent();
-            rethrow;
-          }
-          ensureAuthorizationCurrent();
-        }
 
         // Resolved before any await: see
         // `_reportSendCancelledByCommunitySwitch`.
@@ -542,15 +552,34 @@ class ComposeBar extends HookConsumerWidget {
           selectedMentions,
           '${ref.read(relayConfigProvider).baseUrl} / $channelId',
         );
-        final intendedAgentKeys = {
+        final selectedKeys = outgoing.pubkeys.toSet();
+        final priorAgentKeys = {
           for (final mention in selectedMentions)
             if (mention.isAgent) mention.pubkey.toLowerCase(),
         };
+        Future<Map<String, SelectedMentionAuthorization>> authorize(
+          Set<String> keys, {
+          bool prepare = false,
+        }) => _authorizeSelectedMentions(
+          keys,
+          readSelected: readSelected,
+          priorAgentKeys: priorAgentKeys,
+          observedKeys: observedKeys,
+          observedProfiles: observedProfiles,
+          currentPubkey: currentPubkey,
+          channelId: channelId,
+          ensureAuthorizationCurrent: ensureAuthorizationCurrent,
+          isAuthorizationCurrent: isAuthorizationCurrent,
+          prepare: prepare,
+        );
+
+        final initialEvidence = await authorize(selectedKeys, prepare: true);
         final scan = await _scanNonMemberMentions(
           ref,
           channelId: channelId,
           selectedMentions: selectedMentions,
           currentPubkey: currentPubkey,
+          evidence: initialEvidence,
         );
 
         ensureAuthorizationCurrent();
@@ -583,7 +612,18 @@ class ComposeBar extends HookConsumerWidget {
 
         // Agent failures stop publication; the original draft keeps its keys.
         Future<void> addMentionedNonMembers() async {
-          final keys = intendedAgentKeys.intersection(outgoing.pubkeys.toSet());
+          final keys = outgoing.pubkeys.toSet();
+          Future<bool> authorizeWrite(String key, String role) async {
+            final evidence = await authorize(keys, prepare: true);
+            final fresh = evidence[key]!;
+            if (fresh.invitationRole != role) {
+              throw Exception(
+                'Mention classification changed; retry invitation consent',
+              );
+            }
+            return !fresh.isMember;
+          }
+
           await authorize(keys, prepare: true);
           ensureAuthorizationCurrent();
           invitationStarted.value = true;
@@ -592,6 +632,7 @@ class ComposeBar extends HookConsumerWidget {
             scan: scan,
             messenger: messenger,
             ensureCurrent: ensureAuthorizationCurrent,
+            authorizeWrite: authorizeWrite,
           );
           if (!outgoing.pubkeys.toSet().containsAll(keys)) {
             throw Exception(
@@ -600,7 +641,7 @@ class ComposeBar extends HookConsumerWidget {
           }
           await authorize(keys);
           if (queuedAttachments.isEmpty ||
-              (intendedAgentKeys.isNotEmpty ||
+              (selectedKeys.isNotEmpty ||
                   scan.humans.isNotEmpty ||
                   scan.agentPubkeys.isNotEmpty)) {
             ensureAuthorizationCurrent();
@@ -639,7 +680,7 @@ class ComposeBar extends HookConsumerWidget {
         );
         // Agent authorization is preparation, not a detached background send.
         final preparingAgents =
-            intendedAgentKeys.isNotEmpty || scan.humans.isNotEmpty;
+            selectedKeys.isNotEmpty || scan.humans.isNotEmpty;
         if (!preparingAgents) clearComposer();
         final clearedDraftRevision = draftRevision.value;
         authorizationRevision = clearedDraftRevision;
@@ -697,8 +738,11 @@ class ComposeBar extends HookConsumerWidget {
           } on _ComposeAuthorizationCancelled {
             // Keep the newer draft without displaying a false access error.
           } catch (error) {
-            if (cancellation.isCancelled) return;
-            if (error is StateError) {
+            if (cancellation.isCancelled &&
+                error is! _ComposeCommunityChanged) {
+              return;
+            }
+            if (error is _ComposeCommunityChanged) {
               _reportSendCancelledByCommunitySwitch(messenger);
             } else if (context.mounted) {
               uploadError.value = _formatUploadError(error);
@@ -735,25 +779,8 @@ class ComposeBar extends HookConsumerWidget {
           }
         }());
       } catch (error) {
-        var communityChanged = false;
-        // Failed awaits need the same scope/edit classification as success.
-        try {
-          checkPreparationCurrent?.call();
-          if (error is _ComposeAuthorizationCancelled) return;
-        } on _ComposeAuthorizationCancelled {
-          return;
-        } on StateError {
-          communityChanged = true;
-        }
         if (context.mounted) {
-          final messenger = ScaffoldMessenger.maybeOf(context);
-          if (communityChanged) {
-            _reportSendCancelledByCommunitySwitch(messenger);
-          } else {
-            messenger?.showSnackBar(
-              SnackBar(content: Text(_composeSendErrorMessage(error))),
-            );
-          }
+          _reportComposeSendError(context, error, checkPreparationCurrent);
         }
       } finally {
         if (context.mounted && authorizationAttempt.value == attempt) {
