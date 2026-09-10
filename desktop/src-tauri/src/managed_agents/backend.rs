@@ -10,7 +10,7 @@ const STDERR_CAP: usize = 65536;
 const STDOUT_CAP: usize = 1_048_576; // 1 MB
 const PROVIDER_PROTOCOL_VERSION: u64 = 1;
 
-fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
+fn validate_provider_info(info: &serde_json::Value) -> Result<Vec<String>, String> {
     let object = info
         .as_object()
         .ok_or_else(|| "provider info response must be a JSON object".to_string())?;
@@ -45,13 +45,33 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
         return Err("provider info response missing object config_schema".to_string());
     }
 
+    let capabilities = match object.get("capabilities") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| "provider info capabilities must be an array".to_string())?
+            .iter()
+            .map(|capability| {
+                capability
+                    .as_str()
+                    .filter(|capability| !capability.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        "provider info capabilities must contain non-empty strings".to_string()
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
     const FIELDS: &[&str] = &[
         "ok",
+        "request_id",
         "name",
         "version",
         "protocol_version",
         "description",
         "config_schema",
+        "capabilities",
     ];
     if let Some(field) = object
         .keys()
@@ -61,7 +81,7 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
             "provider info response contains unknown field {field}"
         ));
     }
-    Ok(())
+    Ok(capabilities)
 }
 
 /// Invoke a provider binary: write JSON to stdin, read JSON from stdout.
@@ -530,6 +550,111 @@ pub fn provider_deploy(
         .as_str()
         .map(String::from)
         .ok_or_else(|| "deploy response missing agent_id".to_string())
+}
+
+fn staged_provider_capabilities(binary: &Path) -> Result<Vec<String>, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    provider_capabilities_for_executable(&staged)
+}
+
+/// Probe a provider through an immutable staged copy and return only a
+/// protocol-v1 response that has passed the same validation creation uses.
+/// The UI must never make custody claims from an unvalidated provider blob.
+pub fn probe_provider_info(binary: &Path) -> Result<serde_json::Value, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    let request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let info = invoke_provider(&staged, &request, Duration::from_secs(10))?;
+    validate_provider_info(&info)?;
+    Ok(info)
+}
+
+fn provider_capabilities_for_executable(binary: &Path) -> Result<Vec<String>, String> {
+    let request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let info = invoke_provider(binary, &request, Duration::from_secs(10))?;
+    validate_provider_info(&info)
+}
+
+/// Return the capabilities advertised by a validated provider protocol-v1
+/// implementation. Unknown capabilities are preserved for forward-compatible
+/// negotiation; callers opt into only the operations they understand.
+pub fn provider_capabilities(binary: &Path) -> Result<Vec<String>, String> {
+    staged_provider_capabilities(binary)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRegistration {
+    pub agent_id: String,
+    pub pubkey: String,
+}
+
+/// Register a provider-custodied agent. The provider mints the key and returns
+/// only its public identity plus the registry id.
+pub fn provider_register(
+    binary: &Path,
+    agent: &serde_json::Value,
+    provider_config: &serde_json::Value,
+) -> Result<ProviderRegistration, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    let capabilities = provider_capabilities_for_executable(&staged)?;
+    if !capabilities.iter().any(|value| value == "register") {
+        return Err("provider does not advertise the register capability".to_string());
+    }
+    let request = serde_json::json!({
+        "op": "register",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "agent": agent,
+        "provider_config": provider_config,
+    });
+    let response = invoke_provider(&staged, &request, Duration::from_secs(120))?;
+    let agent_id = response["agent_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "register response missing agent_id".to_string())?;
+    let pubkey = response["pubkey"]
+        .as_str()
+        .ok_or_else(|| "register response missing pubkey".to_string())?;
+    if pubkey.len() != 64
+        || !pubkey
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("register response pubkey is not 64 hex characters".to_string());
+    }
+    Ok(ProviderRegistration {
+        agent_id,
+        pubkey: pubkey.to_ascii_lowercase(),
+    })
+}
+
+/// Complete ownership activation for a registered provider-custodied agent.
+pub fn provider_attest(
+    binary: &Path,
+    agent: &serde_json::Value,
+    provider_config: &serde_json::Value,
+) -> Result<(), String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    let capabilities = provider_capabilities_for_executable(&staged)?;
+    if !capabilities.iter().any(|value| value == "attest") {
+        return Err("provider does not advertise the attest capability".to_string());
+    }
+    let request = serde_json::json!({
+        "op": "attest",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "agent": agent,
+        "provider_config": provider_config,
+    });
+    let response = invoke_provider(&staged, &request, Duration::from_secs(120))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("attest response missing ok=true".to_string());
+    }
+    Ok(())
 }
 
 /// Validate provider_config: flat object, scalar values, no secret-like keys.

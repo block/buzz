@@ -509,6 +509,7 @@ export function MembersSidebar({
   const {
     actionErrorMessage,
     actionNoticeMessage,
+    handleCommunityEnrollment,
     handleLifecycleAction: handleAgentLifecycleAction,
     handleRemoveMember,
     isActionPending,
@@ -654,6 +655,9 @@ export function MembersSidebar({
           void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
         }}
         onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
+        onEnrollManagedAgent={(agent) => {
+          void handleCommunityEnrollment(agent);
+        }}
         onManagedAgentAction={(agent) => {
           void handleAgentLifecycleAction(agent, managedAgentRuntime);
         }}

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, AgentKeyCustody,
+    BackendKind, CatalogSource, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -183,6 +183,10 @@ pub struct CreateManagedAgentRequest {
     pub start_on_app_launch: bool,
     #[serde(default)]
     pub backend: BackendKind,
+    /// Custody mode shown to the user after probing the selected provider.
+    /// Provider creates fail closed when fresh negotiation no longer matches.
+    #[serde(default)]
+    pub expected_key_custody: Option<AgentKeyCustody>,
     /// `None` = caller expressed no preference: the definition's
     /// `respond_to` default applies when linked, `RespondTo::default()`
     /// otherwise. `Some` is an explicit instance-level choice and always

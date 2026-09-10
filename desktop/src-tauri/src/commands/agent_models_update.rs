@@ -35,6 +35,33 @@ fn ensure_access_policy_change_supported(
     Ok(())
 }
 
+/// Apply a supported name edit before any record is persisted.
+///
+/// Provider-custodied identities cannot currently sign the replacement kind-0
+/// profile required by a rename. Failing here keeps the durable record and its
+/// published profile in agreement instead of saving a name that the provider
+/// cannot publish.
+fn apply_supported_name_update(
+    record: &mut ManagedAgentRecord,
+    name_update: Option<String>,
+) -> Result<bool, String> {
+    let Some(name_update) = name_update else {
+        return Ok(false);
+    };
+    let trimmed = name_update.trim();
+    if trimmed.is_empty() || trimmed == record.name {
+        return Ok(false);
+    }
+    if record.key_custody == crate::managed_agents::AgentKeyCustody::Provider {
+        return Err(
+            "Provider-custodied agent names cannot be changed yet. Rename support requires the provider to publish the updated agent profile."
+                .to_string(),
+        );
+    }
+    record.name = trimmed.to_string();
+    Ok(true)
+}
+
 /// Reject an effort mutation for a non-local record. Remote effort is
 /// deployment-owned (set via `policy_env` at deploy time); persisting locally
 /// would make the canonical column diverge from the deployed runtime's actual
@@ -117,13 +144,24 @@ pub(crate) fn stamp_record_updated_at(
     record.updated_at = crate::util::now_iso();
 }
 
-/// Flush a retained managed-agent policy, preserving any earlier profile error.
-pub(crate) async fn flush_managed_agent_policy(
-    app: &AppHandle,
+pub(crate) async fn flush_managed_agent_policy_at(
     state: &AppState,
+    scope: &crate::managed_agents::retention::RetentionScope,
+) -> Result<u32, String> {
+    crate::managed_agents::persona_events::flush_pending_events_at(
+        &scope.db_path,
+        state,
+        &scope.relay_url,
+        &scope.owner_keys,
+    )
+    .await
+}
+
+pub(crate) fn merge_managed_agent_policy_error(
     existing_error: Option<String>,
+    result: Result<u32, String>,
 ) -> Option<String> {
-    match crate::managed_agents::persona_events::flush_active_pending_events(app, state).await {
+    match result {
         Ok(_) => existing_error,
         Err(error) => Some(match existing_error {
             Some(profile_error) => {
@@ -165,14 +203,7 @@ pub async fn update_managed_agent(
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
 
-        let mut name_changed = false;
-        if let Some(name_update) = input.name {
-            let trimmed = name_update.trim().to_string();
-            if !trimmed.is_empty() && trimmed != record.name {
-                record.name = trimmed;
-                name_changed = true;
-            }
-        }
+        let name_changed = apply_supported_name_update(record, input.name)?;
         apply_model_provider_prompt_update(
             record,
             input.model,

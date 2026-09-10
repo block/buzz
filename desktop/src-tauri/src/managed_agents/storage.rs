@@ -48,7 +48,7 @@ pub(crate) fn managed_agents_store_path<R: tauri::Runtime>(
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
 }
 
-fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn managed_agents_logs_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("logs");
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create logs dir: {error}"))?;
     Ok(dir)
@@ -82,14 +82,17 @@ fn is_safe_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
-pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
+pub fn managed_agent_log_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pubkey: &str,
+) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
 
 /// Pair-scoped log path for a managed runtime. The relay URL never appears in
 /// the filename; the suffix is a hash of the canonical URL.
-pub fn managed_agent_runtime_log_path(
-    app: &AppHandle,
+pub fn managed_agent_runtime_log_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     key: &ManagedAgentRuntimeKey,
 ) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
@@ -220,20 +223,22 @@ fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> Key
     }
 }
 
-/// Refuse to spawn an agent whose private key is unavailable. Returns
-/// `Some(error)` when `private_key_nsec` is empty — after [`hydrate_keys`] an
-/// empty key means a keyring outage or a genuinely absent secret, NOT a
-/// deliberately keyless agent. Spawning anyway would inject an empty
+/// Refuse to spawn a locally-custodied agent whose private key is unavailable.
+/// Provider-custodied records deliberately carry no local key and are launched
+/// by their controller; explicit `key_custody` distinguishes them from a local
+/// keyring outage or genuinely absent secret. Spawning a local record anyway
+/// would inject an empty
 /// `BUZZ_PRIVATE_KEY`/`NOSTR_PRIVATE_KEY`, launching with no identity. Callers
 /// (the spawn path) must fail closed (Wes storage.rs:158).
 pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
-    record.private_key_nsec.is_empty().then(|| {
-        format!(
-            "agent {} has no private key available — the OS keyring may be unreachable. \
+    (record.key_custody == super::AgentKeyCustody::Local && record.private_key_nsec.is_empty())
+        .then(|| {
+            format!(
+                "agent {} has no private key available — the OS keyring may be unreachable. \
              Refusing to start without an identity; retry once the keyring is reachable.",
-            record.pubkey
-        )
-    })
+                record.pubkey
+            )
+        })
 }
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
@@ -303,7 +308,8 @@ pub(crate) fn backup_invalid_store(path: &Path) {
 /// Fill in each record's in-memory `private_key_nsec` from the keyring, and
 /// opportunistically re-migrate any key that is still inline.
 ///
-/// - Empty key → fetch it from the keyring (the normal keyring-backed case).
+/// - Provider custody → skip the keyring entirely.
+/// - Empty local key → fetch it from the keyring (the normal keyring-backed case).
 /// - Non-empty key → the JSON carried it inline because the keyring was
 ///   unreachable at its last save. Re-migrate it now ([`migrate_inline_key`]):
 ///   if the keyring is reachable this boot, write-verify-strip so the next save
@@ -323,13 +329,13 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
 /// (genuinely absent). On an outage the key is left empty and the record is
 /// surfaced as unavailable rather than silently swallowed: callers must refuse
 /// to spawn an agent whose key could not be read (see the empty-key bail in
-/// `spawn_agent_child`). Empty here never means "fine" — it means "no usable
-/// key this boot."
+/// `spawn_agent_child`). Empty local custody never means "fine"; provider
+/// custody is skipped before any keyring access.
 fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         // A key-less definition (no pubkey yet — unified agent model) has no
         // keyring entry by construction; keys are minted on first start.
-        if record.pubkey.is_empty() {
+        if record.pubkey.is_empty() || record.key_custody == super::AgentKeyCustody::Provider {
             continue;
         }
         if record.private_key_nsec.is_empty() {
@@ -443,6 +449,9 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
 /// Testable core of [`persist_agent_keys`], generic over the [`KeyStore`] seam.
 fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
+        if record.key_custody == super::AgentKeyCustody::Provider {
+            continue;
+        }
         // Only a verified keyring entry lets us drop the inline copy. Both
         // other outcomes keep the key inline: `KeptInline` (keyring
         // unreachable) so it is not lost, and `Nothing` (empty key) because
@@ -813,8 +822,8 @@ fn agent_pids_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Stri
 /// Persist a pair-scoped runtime receipt atomically. Callers must register the
 /// process in memory in the same runtime transition; on write failure they must
 /// terminate the child before releasing that transition.
-pub fn write_agent_runtime_receipt(
-    app: &AppHandle,
+pub fn write_agent_runtime_receipt<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     receipt: &ManagedAgentRuntimeReceipt,
 ) -> Result<(), String> {
     let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));

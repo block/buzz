@@ -26,6 +26,18 @@ function toManagedBackend(
   return { type: "provider", id: backend.id, config: {} };
 }
 
+/**
+ * Saved templates predate provider-held identity consent and persist only the
+ * provider destination. Preserve that explicit legacy choice: deploy-only
+ * providers continue to work, while a provider that changed custody mode
+ * fails closed instead of silently taking possession of a new agent key.
+ */
+function expectedTemplateKeyCustody(
+  backend: ChannelTemplate["agents"]["personas"][number]["backend"],
+): CreateChannelManagedAgentInput["expectedKeyCustody"] {
+  return backend?.type === "provider" ? "local" : undefined;
+}
+
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
   const channelTemplatesQuery = useChannelTemplatesQuery();
@@ -100,6 +112,7 @@ export function useApplyTemplate() {
         model: entry.model ?? persona.model ?? undefined,
         role: "bot",
         backend: toManagedBackend(entry.backend),
+        expectedKeyCustody: expectedTemplateKeyCustody(entry.backend),
       });
     }
 
@@ -125,6 +138,7 @@ export function useApplyTemplate() {
           model: teamEntry.model ?? persona.model ?? undefined,
           role: "bot",
           backend: toManagedBackend(teamEntry.backend),
+          expectedKeyCustody: expectedTemplateKeyCustody(teamEntry.backend),
         });
       }
     }

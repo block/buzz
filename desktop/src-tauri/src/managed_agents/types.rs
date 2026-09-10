@@ -12,6 +12,17 @@ pub enum BackendKind {
     },
 }
 
+/// Where the agent's Nostr signing key is held. This must be explicit: an
+/// empty in-memory key for a locally-custodied agent means the keyring is
+/// unavailable, while an empty key for a provider-custodied agent is expected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKeyCustody {
+    #[default]
+    Local,
+    Provider,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub id: String,
@@ -114,6 +125,7 @@ impl AgentDefinition {
             name: self.display_name.clone(),
             persona_id: None,
             private_key_nsec: String::new(),
+            key_custody: AgentKeyCustody::Local,
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
@@ -137,6 +149,7 @@ impl AgentDefinition {
             backend: BackendKind::default(),
             backend_agent_id: None,
             provider_policy_pending: false,
+            provider_attestation_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -247,6 +260,8 @@ pub struct ManagedAgentRecord {
     /// store whose inline key was already migrated out and blanked.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
+    #[serde(default, skip_serializing_if = "is_local_key_custody")]
+    pub key_custody: AgentKeyCustody,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
     ///
     /// Pre-existing agents created before NIP-OA will have `None` here.
@@ -337,6 +352,12 @@ pub struct ManagedAgentRecord {
     pub backend_agent_id: Option<String>,
     #[serde(default)]
     pub provider_policy_pending: bool,
+    /// A provider-custodied identity has been registered but its owner
+    /// attestation has not yet been durably acknowledged by the provider.
+    /// While set, the agent remains startable so Desktop can retry the
+    /// idempotent attestation after an error or interrupted create flow.
+    #[serde(default)]
+    pub provider_attestation_pending: bool,
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.
@@ -478,6 +499,10 @@ pub struct ManagedAgentRecord {
     pub effort_level: Option<String>,
 }
 
+fn is_local_key_custody(custody: &AgentKeyCustody) -> bool {
+    *custody == AgentKeyCustody::Local
+}
+
 #[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
@@ -571,6 +596,7 @@ pub struct ManagedAgentSummary {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
+    pub key_custody: AgentKeyCustody,
     pub backend_agent_id: Option<String>,
     pub status: String,
     pub pid: Option<u32>,

@@ -35,6 +35,32 @@ fn undeployed_provider_accepts_access_edits() {
         .expect("no running provider deployment can retain stale access");
 }
 
+#[test]
+fn provider_custodied_rename_is_rejected_before_mutation() {
+    let mut record = provider_record(true);
+    record.key_custody = crate::managed_agents::AgentKeyCustody::Provider;
+
+    let error = apply_supported_name_update(&mut record, Some("Renamed".to_string()))
+        .expect_err("provider-custodied rename must fail closed");
+
+    assert!(error.contains("cannot be changed yet"));
+    assert_eq!(
+        record.name, "Agent",
+        "a rejected rename must leave the durable value unchanged"
+    );
+}
+
+#[test]
+fn local_name_update_still_trims_and_applies() {
+    let mut record = local_record();
+
+    let changed = apply_supported_name_update(&mut record, Some("  Renamed  ".to_string()))
+        .expect("locally-custodied rename remains supported");
+
+    assert!(changed);
+    assert_eq!(record.name, "Renamed");
+}
+
 fn local_record() -> ManagedAgentRecord {
     serde_json::from_value(serde_json::json!({
         "pubkey": "local", "name": "Local Agent", "relay_url": "", "acp_command": "",

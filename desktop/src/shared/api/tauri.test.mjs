@@ -211,6 +211,34 @@ test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape",
   );
 });
 
+// ── createManagedAgent: security-sensitive input forwarding ──────────────────
+
+test("createManagedAgent forwards the provider custody observed by the UI", async (t) => {
+  let capturedCall;
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: async (command, args) => {
+      capturedCall = { command, args };
+      throw new Error("stop after capture");
+    },
+  };
+  t.after(() => {
+    delete globalThis.window.__TAURI_INTERNALS__;
+  });
+
+  const { createManagedAgent } = await import("./tauri.ts");
+  await assert.rejects(
+    createManagedAgent({
+      name: "Provider agent",
+      backend: { type: "provider", id: "blox", config: {} },
+      expectedKeyCustody: "provider",
+    }),
+    /stop after capture/,
+  );
+
+  assert.equal(capturedCall.command, "create_managed_agent");
+  assert.equal(capturedCall.args.input.expectedKeyCustody, "provider");
+});
+
 // ── max_parallelism → maxParallelism mapping ──────────────────────────────────
 
 test("fromRawAcpRuntimeCatalogEntry maps max_parallelism to maxParallelism when present", () => {

@@ -14,6 +14,7 @@ fn bare_agent_record(
         name: "Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
         private_key_nsec: "".to_string(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: "ws://localhost:3000".to_string(),
         avatar_url: None,
@@ -36,6 +37,7 @@ fn bare_agent_record(
         backend: BackendKind::Local,
         backend_agent_id: None,
         provider_policy_pending: false,
+        provider_attestation_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -753,6 +755,12 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
     assert!(provider_access::needs_reconciliation_with_policy(
         &record, false
     ));
+
+    record.key_custody = crate::managed_agents::AgentKeyCustody::Provider;
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+    record.key_custody = crate::managed_agents::AgentKeyCustody::Local;
 
     record.backend_agent_id = None;
     assert!(!provider_access::needs_reconciliation_with_policy(

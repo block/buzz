@@ -86,6 +86,7 @@ export type BackendIntent = {
   type: "provider";
   id: string;
   config: Record<string, unknown>;
+  expectedKeyCustody: "local" | "provider";
 };
 
 /**
@@ -136,6 +137,7 @@ export async function buildInstanceInputForDefinition(
         id: backendIntent.id,
         config: backendIntent.config,
       },
+      expectedKeyCustody: backendIntent.expectedKeyCustody,
     };
   }
 

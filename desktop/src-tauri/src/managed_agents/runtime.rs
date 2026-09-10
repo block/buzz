@@ -108,8 +108,8 @@ fn persona_drift_state(
 /// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
 /// records that cannot form a valid pair key yet (e.g. key-less agents that
 /// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
+pub(crate) fn workspace_pair_key<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
     let state = app.state::<crate::app_state::AppState>();
@@ -133,8 +133,8 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
-pub fn build_managed_agent_summary(
-    app: &AppHandle,
+pub fn build_managed_agent_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -166,11 +166,7 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
-        } else {
-            "not_deployed".to_string()
-        };
+        let status = remote_deployment_status(record).to_string();
         (status, None, String::new())
     } else {
         let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
@@ -319,6 +315,7 @@ pub fn build_managed_agent_summary(
         restart_diff,
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
+        key_custody: record.key_custody,
         backend_agent_id: record.backend_agent_id.clone(),
         status,
         pid,
@@ -335,6 +332,14 @@ pub fn build_managed_agent_summary(
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
+}
+
+fn remote_deployment_status(record: &ManagedAgentRecord) -> &'static str {
+    if record.backend_agent_id.is_some() && !record.provider_attestation_pending {
+        "deployed"
+    } else {
+        "not_deployed"
+    }
 }
 
 pub fn find_managed_agent_mut<'a>(
@@ -444,8 +449,8 @@ pub(crate) fn spawn_with_effort_proof(
 /// publishes the triggering message before this spawn and passes its send
 /// timestamp here so the harness's first REQ replays past that message no
 /// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
-pub fn spawn_agent_child(
-    app: &AppHandle,
+pub fn spawn_agent_child<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
@@ -874,8 +879,8 @@ pub fn spawn_agent_child(
 /// exact workspace-relay read the caller's scope assertion passed on; it never
 /// re-reads the mutable override (see `relay::scope`). The key comes from
 /// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
-pub fn start_managed_agent_process(
-    app: &AppHandle,
+pub fn start_managed_agent_process<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     owner_hex: Option<&str>,

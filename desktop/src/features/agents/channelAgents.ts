@@ -86,6 +86,8 @@ export type CreateChannelManagedAgentInput = {
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
   backend?: ManagedAgentBackend;
+  /** Custody mode already disclosed by the creation surface. */
+  expectedKeyCustody?: "local" | "provider";
   /**
    * Inbound author gate mode. Omitted = linked persona default, then
    * `"owner-only"` when the persona leaves it unset or no persona is linked.
@@ -194,17 +196,15 @@ export async function attachManagedAgentToChannel(
   let started = false;
 
   if (ensureRunning) {
-    // Running agents (local or provider) auto-discover new channel membership
-    // via the harness's membership notifications — no restart needed. Only
-    // not-yet-running agents need a start/deploy call before the first mention
-    // can reach them. For a local agent the status check and the start are both
-    // pair-scoped to the active community: `agent.status` reflects that
-    // community's (agent, relay) pair, and `startManagedAgent` spawns that same
-    // pair — so this ensures the pair the caller is attaching to, never
-    // another community's.
+    // Local running agents auto-discover channel membership. Provider-custody
+    // agents must repeat their idempotent attest operation on every community
+    // attachment: the global deployment receipt says the identity is active,
+    // not that this community has enrolled it. Legacy provider agents still
+    // deploy only when their global receipt is absent.
     const isRemote = input.agent.backend.type === "provider";
     const needsStart = isRemote
-      ? input.agent.status !== "deployed"
+      ? input.agent.keyCustody === "provider" ||
+        input.agent.status !== "deployed"
       : input.agent.status !== "running" && input.agent.status !== "deployed";
     if (needsStart) {
       if (input.detachedStart) {
@@ -411,6 +411,7 @@ export async function provisionChannelManagedAgent(
     spawnAfterCreate: isProviderMode,
     startOnAppLaunch: isProviderMode ? false : undefined,
     backend: input.backend,
+    expectedKeyCustody: input.expectedKeyCustody,
     respondTo: input.respondTo,
     respondToAllowlist: input.respondToAllowlist,
   });

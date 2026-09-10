@@ -220,6 +220,33 @@ export function useMembersSidebarActions({
     }
   }
 
+  async function handleCommunityEnrollment(agent: ManagedAgent) {
+    clearActionFeedback();
+    setActiveActionKey(`enroll:${agent.pubkey}`);
+    try {
+      const expectedRelayUrl = relayUrl?.trim();
+      const expectedSignerPubkey = currentPubkey?.trim().toLowerCase();
+      if (!expectedRelayUrl || !expectedSignerPubkey) {
+        throw new Error("The active community changed. Reopen it and retry.");
+      }
+
+      await startManagedAgentMutation.mutateAsync({
+        pubkey: agent.pubkey,
+        expectedRelayUrl,
+        expectedSignerPubkey,
+      });
+      setActionNoticeMessage(`Enrolled ${agent.name} in this community.`);
+    } catch (error) {
+      setActionErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to enroll agent in this community.",
+      );
+    } finally {
+      setActiveActionKey(null);
+    }
+  }
+
   async function handleRespawnAll() {
     await runBulkAgentAction({
       action: async (agent) => {
@@ -326,6 +353,7 @@ export function useMembersSidebarActions({
   return {
     actionErrorMessage,
     actionNoticeMessage,
+    handleCommunityEnrollment,
     handleLifecycleAction,
     handleRemoveAll,
     handleRemoveMember,

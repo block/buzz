@@ -1483,21 +1483,20 @@ mod tests {
 
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // User env_vars must win over baked defaults; in OSS builds baked map is empty,
-        // so this validates the user-env layer is present in the output.
+        // User env_vars must win over baked defaults; this verifies the user-env output layer.
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
         env_vars.insert(
             "BUZZ_AGENT_MODEL".to_string(),
             "claude-opus-4-5".to_string(),
         );
-        // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
             description: None,
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),
             persona_id: None,
             private_key_nsec: String::new(),
+            key_custody: crate::managed_agents::AgentKeyCustody::Local,
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: None,
@@ -1521,6 +1520,7 @@ mod tests {
             backend: Default::default(),
             backend_agent_id: None,
             provider_policy_pending: false,
+            provider_attestation_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,

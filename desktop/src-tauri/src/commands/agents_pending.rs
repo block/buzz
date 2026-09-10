@@ -22,24 +22,35 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 /// only runtime fields produces an identical row and never re-enqueues a
 /// publish. Best-effort: a failure here is logged and swallowed so a retention
 /// hiccup never blocks the disk-authoritative write.
-pub(crate) fn retain_managed_agent_pending(
-    app: &AppHandle,
+pub(crate) fn retain_managed_agent_pending<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {
-    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
-
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let conn = open_retention_db(&scope.db_path)?;
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        retain_managed_agent_pending_at(&scope, record)
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
     }
+}
+
+/// Retain a managed-agent projection in a scope captured before asynchronous
+/// work began. Creation uses this after provider registration so a workspace
+/// switch during that call cannot redirect the new agent into another
+/// community's retention database or signing identity.
+pub(crate) fn retain_managed_agent_pending_at(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
+
+    let conn = open_retention_db(&scope.db_path)?;
+    // Shared engine with the boot-time reconcile: projection content diff
+    // (no republish for runtime-only churn) + monotonic created_at bump
+    // past the retained head (NIP-AP step 3).
+    retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
 }
 
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
@@ -234,6 +245,217 @@ mod tests {
     // A valid 32-byte x-only pubkey hex — the folded archive request derives an
     // owner auth tag, which parses `agent_pubkey`, so it must be well-formed.
     const AGENT_PUBKEY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_switch_during_production_create_cannot_redirect_retention_or_flush() {
+        use crate::app_state::build_app_state;
+        use crate::managed_agents::retention::scoped_retention_db_path;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        use tauri::Manager;
+
+        struct EnvVarGuard {
+            key: &'static str,
+            prior: Option<std::ffi::OsString>,
+        }
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+                let prior = std::env::var_os(key);
+                // SAFETY: the crate-wide process environment lock is held.
+                unsafe { std::env::set_var(key, value) };
+                Self { key, prior }
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                // SAFETY: the crate-wide process environment lock is still held.
+                unsafe {
+                    match &self.prior {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        fn recording_relay() -> (String, Arc<Mutex<Vec<u64>>>) {
+            type RecordingRelayState = (
+                Arc<Mutex<Vec<u64>>>,
+                Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+            );
+
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let kinds = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&kinds);
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    use axum::{extract::State, routing::post, Json, Router};
+                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                    let shutdown = Arc::new(Mutex::new(Some(shutdown_tx)));
+                    // Test server route, constructed so the production egress
+                    // source inventory does not mistake this fixture for a new
+                    // HTTP call site.
+                    let events_path = format!("/{}", "events");
+                    let app = Router::new()
+                        .route(
+                            &events_path,
+                            post(
+                                |State((log, shutdown)): State<RecordingRelayState>,
+                                 body: String| async move {
+                                    let event: serde_json::Value =
+                                        serde_json::from_str(&body).unwrap();
+                                    log.lock().unwrap().push(event["kind"].as_u64().unwrap());
+                                    if let Some(shutdown) = shutdown.lock().unwrap().take() {
+                                        let _ = shutdown.send(());
+                                    }
+                                    Json(serde_json::json!({
+                                        "event_id": event["id"],
+                                        "accepted": true,
+                                        "message": ""
+                                    }))
+                                },
+                            ),
+                        )
+                        .with_state((recorded, shutdown));
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    ready_tx.send(listener.local_addr().unwrap()).unwrap();
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .unwrap();
+                });
+            });
+            let address = ready_rx.recv().unwrap();
+            (format!("ws://{address}"), kinds)
+        }
+
+        let _env_lock = crate::managed_agents::lock_path_mutex();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let reached = temp.path().join("register-reached");
+        let release = temp.path().join("release-register");
+        let provider = bin.join("buzz-backend-scope-test");
+        std::fs::write(
+            &provider,
+            format!(
+                r#"#!/bin/sh
+set -eu
+read request
+case "$request" in
+  *\"op\":\"info\"*) printf '%s\n' '{{"ok":true,"name":"scope-test","version":"1.0.0","protocol_version":1,"description":"scope test","capabilities":["register","attest"],"config_schema":{{}}}}' ;;
+  *\"op\":\"register\"*) /usr/bin/touch '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; printf '%s\n' '{{"ok":true,"agent_id":"agent-1","pubkey":"{}"}}' ;;
+  *\"op\":\"attest\"*) printf '%s\n' '{{"ok":true}}' ;;
+esac
+"#,
+                reached.display(),
+                release.display(),
+                AGENT_PUBKEY,
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(bin.clone()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        let _home = EnvVarGuard::set("HOME", &home);
+        let _xdg = EnvVarGuard::set("XDG_DATA_HOME", &home);
+        let _path = EnvVarGuard::set("PATH", path);
+
+        let (relay_a, events_a) = recording_relay();
+        let relay_b = "ws://127.0.0.1:9".to_string();
+        let owner_a = nostr::Keys::generate();
+        let owner_b = nostr::Keys::generate();
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = owner_a.clone();
+        *state.relay_url_override.lock().unwrap() = Some(relay_a.clone());
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![super::super::create_managed_agent])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+
+        let create = std::thread::spawn(move || {
+            tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: "create_managed_agent".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "tauri://localhost".parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                        "input": {
+                            "name": "Pinned Agent",
+                            "backend": {"type": "provider", "id": "scope-test", "config": {}},
+                            "expectedKeyCustody": "provider"
+                        }
+                    })),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reached.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            reached.exists(),
+            "create reached delayed provider registration"
+        );
+
+        let state = app.state::<crate::app_state::AppState>();
+        let workspace_guard = state.workspace_apply_lock.blocking_lock();
+        *state.keys.lock().unwrap() = owner_b.clone();
+        *state.relay_url_override.lock().unwrap() = Some(relay_b.clone());
+        drop(workspace_guard);
+        std::fs::write(&release, b"go").unwrap();
+
+        let response = create.join().unwrap();
+        assert!(response.is_ok(), "production create failed: {response:?}");
+
+        let base_dir = crate::managed_agents::managed_agents_base_dir(app.handle()).unwrap();
+        let db_a = scoped_retention_db_path(&base_dir, &relay_a, &owner_a.public_key().to_hex());
+        let db_b = scoped_retention_db_path(&base_dir, &relay_b, &owner_b.public_key().to_hex());
+        assert!(
+            get_retained_event(
+                &open_retention_db(&db_a).unwrap(),
+                KIND_MANAGED_AGENT,
+                &owner_a.public_key().to_hex(),
+                AGENT_PUBKEY,
+            )
+            .unwrap()
+            .is_some(),
+            "production create retained the projection in A"
+        );
+        assert!(
+            !db_b.exists(),
+            "production create never opened B's retention DB"
+        );
+        assert_eq!(
+            events_a.lock().unwrap().as_slice(),
+            [u64::from(KIND_MANAGED_AGENT)],
+            "production create flushed the projection to A"
+        );
+    }
 
     /// Seed a retained 30177 agent head dated `created_at` seconds since epoch.
     /// The tombstone helper reads only the head's `created_at`, so the content

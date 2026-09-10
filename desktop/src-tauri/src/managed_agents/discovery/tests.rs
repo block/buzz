@@ -15,7 +15,6 @@ use crate::managed_agents::AcpAvailabilityStatus;
 #[test]
 fn resolves_known_avatar_for_bare_command() {
     let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
-
     assert_eq!(avatar_url, GOOSE_AVATAR_URL);
 }
 
@@ -205,7 +204,6 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -217,6 +215,7 @@ fn record_with(
         name: "r".to_string(),
         persona_id: persona_id.map(str::to_string),
         private_key_nsec: String::new(),
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
@@ -239,6 +238,7 @@ fn record_with(
         backend: Default::default(),
         backend_agent_id: None,
         provider_policy_pending: false,
+        provider_attestation_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,

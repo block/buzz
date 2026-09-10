@@ -105,6 +105,7 @@ function rawAgent(overrides = {}) {
     start_on_app_launch: false,
     auto_restart_on_config_change: true,
     backend: { type: "local" },
+    key_custody: "local",
     backend_agent_id: null,
     respond_to: "mentions",
     respond_to_allowlist: [],
@@ -273,7 +274,7 @@ function installEffortIpc({ deferUpdate = false, failUpdate = false } = {}) {
   };
 }
 
-function renderDialog(onOpenChange) {
+function renderDialog(onOpenChange, agentOverrides = {}) {
   const client = new QueryClient({
     defaultOptions: {
       mutations: { gcTime: 0 },
@@ -289,7 +290,7 @@ function renderDialog(onOpenChange) {
         QueryClientProvider,
         { client },
         createElement(AgentInstanceEditDialog, {
-          agent: { ...toCamelAgent(rawAgent()) },
+          agent: { ...toCamelAgent(rawAgent(agentOverrides)) },
           open: true,
           onOpenChange,
           onUpdated: () => {},
@@ -340,6 +341,7 @@ function toCamelAgent(raw) {
     startOnAppLaunch: raw.start_on_app_launch,
     autoRestartOnConfigChange: raw.auto_restart_on_config_change,
     backend: raw.backend,
+    keyCustody: raw.key_custody,
     backendAgentId: raw.backend_agent_id,
     respondTo: raw.respond_to,
     respondToAllowlist: raw.respond_to_allowlist,
@@ -444,6 +446,22 @@ afterEach(() => {
 });
 
 after(() => dom.window.close());
+
+test("provider-custodied agent name is read-only", async () => {
+  installIpc();
+  await act(async () => {
+    renderDialog(() => {}, {
+      backend: { type: "provider", id: "provider", config: {} },
+      key_custody: "provider",
+    });
+  });
+
+  assert.equal(
+    screen.getByRole("textbox", { name: "Agent name" }).disabled,
+    true,
+    "the UI must not offer a rename the backend cannot publish",
+  );
+});
 
 test("inherit toggle then Cancel dispatches no update_managed_agent", async () => {
   installIpc();

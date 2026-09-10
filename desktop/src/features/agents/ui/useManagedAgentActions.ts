@@ -27,11 +27,13 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
+  needsProviderAttestationRecovery,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
 import { clearActiveTurnsForAgentOnStop } from "../managedAgentRuntimeHooks";
+import { useProviderEnrollmentScope } from "../lib/useProviderEnrollmentScope";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
@@ -40,6 +42,8 @@ import {
 
 export function useManagedAgentActions() {
   const queryClient = useQueryClient();
+  const { expectedRelayUrl, expectedSignerPubkey } =
+    useProviderEnrollmentScope();
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -176,9 +180,22 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((c) => c.pubkey === pubkey);
       if (!agent) return;
-      assertStartNotBlockedByPresence(agent);
+      const isAttestationRecovery = needsProviderAttestationRecovery(agent);
+      if (!isAttestationRecovery) {
+        assertStartNotBlockedByPresence(agent);
+      }
+      if (
+        isAttestationRecovery &&
+        (!expectedRelayUrl || !expectedSignerPubkey)
+      ) {
+        throw new Error("Community enrollment scope is unavailable.");
+      }
       await startManagedAgentWithRules({
         agent,
+        expectedRelayUrl: isAttestationRecovery ? expectedRelayUrl : undefined,
+        expectedSignerPubkey: isAttestationRecovery
+          ? expectedSignerPubkey
+          : undefined,
         startManagedAgent: startMutation.mutateAsync,
       });
     } catch (error) {
@@ -433,10 +450,11 @@ export function useManagedAgentActions() {
     stopMutation.isPending ||
     startOnLaunchMutation.isPending ||
     deleteMutation.isPending;
-  const startingAgentPubkey =
-    startMutation.isPending && typeof startMutation.variables === "string"
+  const startingAgentPubkey = startMutation.isPending
+    ? typeof startMutation.variables === "string"
       ? startMutation.variables
-      : null;
+      : (startMutation.variables?.pubkey ?? null)
+    : null;
 
   return {
     relayAgentsQuery,

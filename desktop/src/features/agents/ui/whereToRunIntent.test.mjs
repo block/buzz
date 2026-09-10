@@ -6,11 +6,13 @@ import {
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
   providerConfigComplete,
+  providerManagesIdentity,
   resolveBackendIntent,
 } from "./whereToRunIntent.ts";
 
 const probed = {
   ok: true,
+  capabilities: ["register", "attest"],
   config_schema: {
     properties: { region: { type: "string" }, size: { type: "integer" } },
     required: ["region"],
@@ -48,6 +50,21 @@ test("local never gates submit", () => {
   assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft), true);
 });
 
+test("provider identity custody requires register and attest together", () => {
+  assert.equal(
+    providerManagesIdentity({
+      ok: true,
+      capabilities: ["register", "attest"],
+    }),
+    true,
+  );
+  assert.equal(
+    providerManagesIdentity({ ok: true, capabilities: ["register"] }),
+    false,
+  );
+  assert.equal(providerManagesIdentity(null), false);
+});
+
 test("local draft resolves to null intent", () => {
   assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
 });
@@ -58,7 +75,24 @@ test("provider draft resolves with coerced config values", () => {
     type: "provider",
     id: "blox",
     config: { region: "us", size: 3 },
+    expectedKeyCustody: "provider",
   });
+});
+
+test("provider draft binds the observed legacy custody mode", () => {
+  assert.equal(
+    resolveBackendIntent(
+      providerDraft({ probedProvider: { ...probed, capabilities: [] } }),
+    ).expectedKeyCustody,
+    "local",
+  );
+});
+
+test("unprobed provider intent fails closed", () => {
+  assert.throws(
+    () => resolveBackendIntent(providerDraft({ probedProvider: null })),
+    /must be probed/,
+  );
 });
 
 // ── applyProbeResult: probe resolution must merge, not overwrite ─────────────

@@ -3,12 +3,15 @@ import { toast } from "sonner";
 
 import {
   isManagedAgentActive,
+  needsProviderAttestationRecovery,
   respawnManagedAgentWithRules,
+  type StartManagedAgentInput,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
+import { useProviderEnrollmentScope } from "@/features/agents/lib/useProviderEnrollmentScope";
 import type {
   Channel,
   ManagedAgent,
@@ -28,9 +31,11 @@ export function useAgentLifecycleActions({
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
-  startManagedAgent: (pubkey: string) => Promise<unknown>;
+  startManagedAgent: (input: StartManagedAgentInput) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
+  const { expectedRelayUrl, expectedSignerPubkey } =
+    useProviderEnrollmentScope();
   const handleAgentPrimaryAction = React.useCallback(async () => {
     if (!managedAgent) return;
 
@@ -49,16 +54,32 @@ export function useAgentLifecycleActions({
         return;
       }
 
-      const blockReason = agentPresenceStartBlockReason(false, availability);
-      if (blockReason) throw new Error(blockReason);
+      const isAttestationRecovery =
+        needsProviderAttestationRecovery(managedAgent);
+      if (!isAttestationRecovery) {
+        const blockReason = agentPresenceStartBlockReason(false, availability);
+        if (blockReason) throw new Error(blockReason);
+      }
+      if (
+        isAttestationRecovery &&
+        (!expectedRelayUrl || !expectedSignerPubkey)
+      ) {
+        throw new Error("Community enrollment scope is unavailable.");
+      }
       await startManagedAgentWithRules({
         agent: managedAgent,
+        expectedRelayUrl: isAttestationRecovery ? expectedRelayUrl : undefined,
+        expectedSignerPubkey: isAttestationRecovery
+          ? expectedSignerPubkey
+          : undefined,
         startManagedAgent,
       });
       toast.success(
-        managedAgent.backend.type === "provider"
-          ? `Deploying ${managedAgent.name}.`
-          : `Started ${managedAgent.name}.`,
+        isAttestationRecovery
+          ? `Retrying enrollment for ${managedAgent.name}.`
+          : managedAgent.backend.type === "provider"
+            ? `Deploying ${managedAgent.name}.`
+            : `Started ${managedAgent.name}.`,
       );
     } catch (error) {
       toast.error(
@@ -68,6 +89,8 @@ export function useAgentLifecycleActions({
   }, [
     availability,
     channels,
+    expectedRelayUrl,
+    expectedSignerPubkey,
     managedAgent,
     relayAgents,
     startManagedAgent,

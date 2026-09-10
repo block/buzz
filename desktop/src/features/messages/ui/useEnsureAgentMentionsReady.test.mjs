@@ -141,6 +141,30 @@ test("only agents that are not up are queued", async () => {
   rendered.unmount();
 });
 
+test("a deployed provider-custodied member is queued for community enrollment", async () => {
+  const agent = managedAgent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "deployed",
+  });
+  const rendered = await renderEnsureReady({
+    getManagedAgentsByPubkey: async () => new Map([[MEMBER_AGENT, agent]]),
+    memberPubkeys: new Set([MEMBER_AGENT]),
+  });
+
+  const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(
+    result.agentsToWake.map((wake) => wake.agent.pubkey),
+    [MEMBER_AGENT],
+    "an existing member mention must retry community enrollment despite global deployment",
+  );
+  assert.deepEqual(tauriInvocations, []);
+  rendered.unmount();
+});
+
 test("a non-member agent's wake queues through the attach seam instead of firing", async () => {
   const agent = managedAgent();
   const attachCalls = [];

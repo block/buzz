@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canEnrollManagedAgentInCommunity,
+  needsProviderAttestationRecovery,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -34,12 +36,63 @@ function agent(overrides = {}) {
     logPath: null,
     startOnAppLaunch: false,
     backend: { type: "local" },
+    keyCustody: "local",
     backendAgentId: null,
     respondTo: "owner-only",
     respondToAllowlist: [],
     ...overrides,
   };
 }
+
+test("community enrollment remains reachable after another community clears the global error", async () => {
+  const providerAgent = agent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "deployed",
+    // Community B failed, then a successful retry in A/C cleared this global
+    // slot. B must still expose its idempotent enrollment action on return.
+    lastError: null,
+  });
+
+  assert.equal(canEnrollManagedAgentInCommunity(providerAgent), true);
+  let enrolled = null;
+  await startManagedAgentWithRules({
+    agent: providerAgent,
+    startManagedAgent: async (pubkey) => {
+      enrolled = pubkey;
+    },
+  });
+  assert.equal(enrolled, providerAgent.pubkey);
+});
+
+test("pending provider attestation remains community-retryable after registration", () => {
+  const providerAgent = agent({
+    backend: { type: "provider", id: "remote", config: {} },
+    backendAgentId: "agent-123",
+    keyCustody: "provider",
+    status: "not_deployed",
+  });
+
+  assert.equal(canEnrollManagedAgentInCommunity(providerAgent), true);
+  assert.equal(needsProviderAttestationRecovery(providerAgent), true);
+  assert.equal(
+    needsProviderAttestationRecovery({
+      ...providerAgent,
+      status: "deployed",
+    }),
+    false,
+  );
+  assert.equal(
+    needsProviderAttestationRecovery({
+      ...providerAgent,
+      backendAgentId: null,
+      keyCustody: "local",
+    }),
+    false,
+  );
+  assert.equal(needsProviderAttestationRecovery(agent()), false);
+});
 
 test("relay-mesh agents delegate start to the backend preflight", async () => {
   const meshAgent = agent({

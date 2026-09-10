@@ -366,6 +366,7 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
+  keyCustody: "local" | "provider";
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
@@ -389,6 +390,7 @@ export type BackendProviderProbeResult = {
   name?: string;
   version?: string;
   description?: string;
+  capabilities?: string[];
   config_schema?: Record<string, unknown>;
 };
 
@@ -425,6 +427,8 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  /** Custody mode shown after probing; provider creation fails if it changed. */
+  expectedKeyCustody?: "local" | "provider";
   /** Omitted uses the linked persona default, then `"owner-only"`. */
   respondTo?: RespondToMode;
   /**

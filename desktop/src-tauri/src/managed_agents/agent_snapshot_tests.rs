@@ -18,8 +18,9 @@ fn minimal_record() -> ManagedAgentRecord {
         persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
         team_id: Some("SENTINEL_TEAM_ID".to_string()),       // MUST NOT appear in snapshot
         private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot
-        auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
-        relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
+        key_custody: crate::managed_agents::AgentKeyCustody::Local,
+        auth_tag: Some("auth-tag-secret".to_string()), // MUST NOT appear in snapshot
+        relay_url: "wss://relay.example.com".to_string(), // MUST NOT appear in snapshot
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
         agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
@@ -49,6 +50,7 @@ fn minimal_record() -> ManagedAgentRecord {
         },
         backend_agent_id: Some("SENTINEL_BACKEND_AGENT_ID".to_string()), // MUST NOT appear
         provider_policy_pending: false,
+        provider_attestation_pending: false,
         provider_binary_path: Some("/usr/bin/SENTINEL_PROVIDER_BINARY".to_string()), // MUST NOT appear
         persona_team_dir: Some(std::path::PathBuf::from("SENTINEL_TEAM_DIR")), // MUST NOT appear
         persona_name_in_team: Some("SENTINEL_NAME_IN_TEAM".to_string()),       // MUST NOT appear
