@@ -60,8 +60,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
+/// MIME types with dedicated image/video handling on the relay (magic-byte
+/// validation, thumbnailing, dimension/duration checks).
+const ALLOWED_MEDIA_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
@@ -69,11 +70,40 @@ const ALLOWED_MIMES: &[&str] = &[
     "video/mp4",
 ];
 
+/// MIME types rejected on the relay's generic file-upload path, mirrored from
+/// `BLOCKED_FILE_MIME_TYPES` in `crates/buzz-media/src/validation.rs` — active
+/// web content (stored-XSS vectors) and native executables. Kept in sync with
+/// that list by hand since the CLI doesn't depend on `buzz-media`.
+///
+/// Any other recognized image/video/audio MIME (i.e. one not in
+/// `ALLOWED_MEDIA_MIMES`) is also rejected here: the relay's generic path
+/// fails those closed too, since they need its dedicated media pipelines
+/// rather than exact-byte attachment storage.
+const BLOCKED_FILE_MIMES: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
+];
+
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for the generic file-upload path (100 MB), matching the
+/// relay's `default_max_file_bytes` in `crates/buzz-media/src/config.rs`.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1175,15 +1205,25 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+        let is_media = ALLOWED_MEDIA_MIMES.contains(&mime.as_str());
+        if !is_media {
+            let is_other_media_family = mime.starts_with("image/")
+                || mime.starts_with("video/")
+                || mime.starts_with("audio/");
+            if is_other_media_family || BLOCKED_FILE_MIMES.contains(&mime.as_str()) {
+                return Err(CliError::Usage(format!(
+                    "unsupported file type: {mime} (rejected by the relay's upload policy)"
+                )));
+            }
         }
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
-        } else {
+        } else if is_media {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -2268,6 +2308,72 @@ mod retry_policy_tests {
         assert!(
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
+        );
+    }
+
+    /// A recognized non-media MIME type (PDF) must reach the relay instead of
+    /// being rejected client-side — the relay's generic file-upload path
+    /// accepts documents; only the old, stricter `ALLOWED_MIMES` blocked them.
+    #[tokio::test]
+    async fn upload_accepts_pdf_via_generic_file_path() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Minimal PDF magic bytes: enough for `infer` to detect application/pdf.
+        tmp.write_all(b"%PDF-1.4\n").unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            use tokio::io::AsyncReadExt;
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(200), stream.read(&mut buf))
+                    .await;
+            let ok_body = r#"{"url":"https://relay.test/media/aabbcc.pdf","sha256":"aabbcc","size":9,"type":"application/pdf","uploaded":0}"#;
+            let ok = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                ok_body.len(),
+                ok_body
+            );
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(ok.as_bytes()).await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let result = client.upload_file(&file_path).await;
+        assert!(
+            result.is_ok(),
+            "expected PDF upload to succeed, got {result:?}"
+        );
+    }
+
+    /// A recognized media MIME type outside `ALLOWED_MEDIA_MIMES` (audio) must
+    /// be rejected before any network call — the relay's generic file path
+    /// fails audio closed too, so surfacing a clear client-side error is
+    /// better than round-tripping to a 4xx.
+    #[tokio::test]
+    async fn upload_rejects_recognized_audio_type() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // ID3v2 header: enough for `infer` to detect audio/mpeg.
+        tmp.write_all(b"ID3\x03\x00\x00\x00\x00\x00\x00").unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        // Unroutable address — a network attempt would hang/fail the test via timeout,
+        // proving the rejection happens before any request is sent.
+        let client = test_client("http://127.0.0.1:1");
+        let result = client.upload_file(&file_path).await;
+        let err = result.expect_err("expected audio upload to be rejected");
+        assert!(
+            matches!(err, CliError::Usage(ref m) if m.contains("unsupported file type")),
+            "expected Usage error mentioning unsupported file type, got {err:?}"
         );
     }
 
