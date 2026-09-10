@@ -1,5 +1,6 @@
 use crate::error::CliError;
 use buzz_core::bw::{parse_json, Consumer};
+use nostr::JsonUtil;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -28,8 +29,22 @@ pub(crate) enum BwCmd {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Disabled until the full P3C readback gate is implemented.
-    Publish,
+    /// Prepare and confirm a single activation-bound, readback-proven operation.
+    ///
+    /// Performs no network access. Without `--signed` it only pins the event ID
+    /// the signature will carry; with `--signed` it also requires `--readback`,
+    /// because publication is proven by an exact relay readback and nothing else.
+    Publish {
+        /// Bundle of trust, external evidence, now, signed history and operation.
+        #[arg(long)]
+        input: PathBuf,
+        /// The signed event produced for the prepared operation.
+        #[arg(long)]
+        signed: Option<PathBuf>,
+        /// The event read back from the relay under the pinned ID.
+        #[arg(long, requires = "signed")]
+        readback: Option<PathBuf>,
+    },
 }
 fn input(path: &PathBuf) -> Result<Value, CliError> {
     let bytes = std::fs::read(path).map_err(|e| CliError::Usage(format!("read BW input: {e}")))?;
@@ -89,12 +104,67 @@ fn corpus(v: &Value) -> Result<Value, CliError> {
     }
     Ok(json!({"format":"nip-bw-results-v1","cases":results}))
 }
+/// Surface a BW producer refusal as its stable `bw:` code alone.
+///
+/// The vocabulary is closed and carries no event content, key material or
+/// signature bytes, so a caller can branch on it and a log can retain it.
+fn refusal(e: buzz_sdk::SdkError) -> CliError {
+    CliError::Usage(match e {
+        buzz_sdk::SdkError::InvalidInput(code) => code,
+        other => other.to_string(),
+    })
+}
+/// Load a single signed event from disk into the strict BW wire form.
+fn event(path: &PathBuf) -> Result<nostr::Event, CliError> {
+    let v = input(path)?;
+    nostr::Event::from_json(v.to_string()).map_err(|_| CliError::Usage("bw:envelope:fields".into()))
+}
+/// Rebuild the offline consumer from an explicit bundle: externally confirmed
+/// trust, external observations, explicit now and the signed history. Individual
+/// history outcomes are not asserted here — activation revalidates what it needs.
+fn history(v: &Value) -> Result<Consumer, CliError> {
+    let mut c = consumer(v)?;
+    for e in v["events"].as_array().unwrap_or(&Vec::new()) {
+        c.ingest(&wire(e)?);
+    }
+    Ok(c)
+}
+/// The readback-bound publish boundary: prepare, seal, confirm. No I/O, no
+/// signing and no local success latch — the relay readback is the only proof.
+fn publish(
+    path: &PathBuf,
+    signed: Option<&PathBuf>,
+    readback: Option<&PathBuf>,
+) -> Result<Value, CliError> {
+    let v = input(path)?;
+    let mut consumer = history(&v)?;
+    let publication =
+        buzz_sdk::bw::Publication::prepare(&consumer, v["operation"].clone()).map_err(refusal)?;
+    let activation = serde_json::to_value(publication.activation())
+        .map_err(|e| CliError::Other(e.to_string()))?;
+    let Some(signed) = signed else {
+        return Ok(
+            json!({"stage":"prepared","event_id":publication.event_id(),"activation":activation,"published":false}),
+        );
+    };
+    let signed = event(signed)?;
+    let readback = readback
+        .ok_or_else(|| CliError::Usage("bw:readback:missing".into()))
+        .and_then(event)?;
+    publication
+        .confirm(&mut consumer, &signed, Some(&readback))
+        .map_err(refusal)?;
+    Ok(
+        json!({"stage":"published","event_id":publication.event_id(),"activation":activation,"published":true}),
+    )
+}
 pub(crate) fn dispatch(cmd: &BwCmd) -> Result<(), CliError> {
     let output = match cmd {
-        BwCmd::Publish => {
-            buzz_sdk::bw::publish().map_err(|e| CliError::Usage(e.to_string()))?;
-            return Ok(());
-        }
+        BwCmd::Publish {
+            input: path,
+            signed,
+            readback,
+        } => publish(path, signed.as_ref(), readback.as_ref())?,
         BwCmd::DryRun { input: path } => {
             let v = input(path)?;
             let draft = buzz_sdk::bw::Draft::new(
@@ -158,8 +228,156 @@ mod tests {
             v["events"]["repo"]["event"]["id"]
         );
     }
+    fn fixtures() -> Value {
+        serde_json::from_str(include_str!("../../../../docs/nips/NIP-BW.fixtures.json"))
+            .expect("fixture")
+    }
+    /// Write a publish bundle for a pinned corpus case plus one unsigned operation.
+    fn bundle(dir: &std::path::Path, case: &str, labels: &[&str], operation: &str) -> PathBuf {
+        let f = fixtures();
+        let c = f["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .find(|c| c["name"] == case)
+            .expect("case");
+        let e = &f["events"][operation]["event"];
+        let bundle = json!({
+            "trust": c["trust"],
+            "external": c["external"],
+            "now": c["now"],
+            "events": labels.iter().map(|l| f["events"][l]["event"].clone()).collect::<Vec<_>>(),
+            "operation": {"pubkey":e["pubkey"],"created_at":e["created_at"],"kind":e["kind"],"tags":e["tags"],"content":e["content"]},
+        });
+        write(dir, "bundle.json", &bundle)
+    }
+    fn write(dir: &std::path::Path, name: &str, v: &Value) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, serde_json::to_vec(v).expect("json")).expect("write");
+        path
+    }
+    fn arg(p: &std::path::Path) -> String {
+        p.to_str().expect("path").to_owned()
+    }
+
     #[tokio::test]
-    async fn publish_stays_disabled_without_credentials() {
+    async fn publish_needs_an_explicit_bundle() {
+        // No bundle is no activation evidence; the historical gate stays closed.
         assert_eq!(crate::run_from_args(["buzz", "bw", "publish"]).await, 1);
+    }
+    #[tokio::test]
+    async fn publish_prepares_pins_and_requires_an_exact_readback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = fixtures();
+        let input = bundle(
+            dir.path(),
+            "issue-update-positive",
+            &["repo", "policy", "root_a", "enroll_a"],
+            "update_a",
+        );
+        let event = write(dir.path(), "signed.json", &f["events"]["update_a"]["event"]);
+        let foreign = write(
+            dir.path(),
+            "foreign.json",
+            &f["events"]["enroll_a"]["event"],
+        );
+        // Preparation alone never publishes and never needs live access.
+        assert_eq!(
+            crate::run_from_args(["buzz", "bw", "publish", "--input", &arg(&input)]).await,
+            0
+        );
+        // A signed event without a readback is not a success.
+        assert_eq!(
+            crate::run_from_args([
+                "buzz",
+                "bw",
+                "publish",
+                "--input",
+                &arg(&input),
+                "--signed",
+                &arg(&event),
+            ])
+            .await,
+            1
+        );
+        // A readback of a different event is not this event's readback.
+        assert_eq!(
+            crate::run_from_args([
+                "buzz",
+                "bw",
+                "publish",
+                "--input",
+                &arg(&input),
+                "--signed",
+                &arg(&event),
+                "--readback",
+                &arg(&foreign),
+            ])
+            .await,
+            1
+        );
+        // The exact readback of the pinned event is the only accepted proof.
+        assert_eq!(
+            crate::run_from_args([
+                "buzz",
+                "bw",
+                "publish",
+                "--input",
+                &arg(&input),
+                "--signed",
+                &arg(&event),
+                "--readback",
+                &arg(&event),
+            ])
+            .await,
+            0
+        );
+    }
+    #[tokio::test]
+    async fn publish_refuses_unauthorized_and_unactivated_bundles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No owner-signed genesis in the supplied history.
+        let bare = bundle(dir.path(), "issue-update-positive", &["policy"], "update_a");
+        assert_eq!(
+            crate::run_from_args(["buzz", "bw", "publish", "--input", &arg(&bare)]).await,
+            1
+        );
+        // Activated history, but the operation's signer holds no such role.
+        let wrong = bundle(
+            dir.path(),
+            "issue-update-wrong-role",
+            &["repo", "policy", "root_a", "enroll_a"],
+            "issue-update-wrong-role",
+        );
+        assert_eq!(
+            crate::run_from_args(["buzz", "bw", "publish", "--input", &arg(&wrong)]).await,
+            1
+        );
+    }
+    #[tokio::test]
+    async fn offline_subcommands_stay_usable_without_relay_or_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = fixtures();
+        let c = f["cases"].as_array().expect("cases")[2].clone();
+        let history = write(
+            dir.path(),
+            "history.json",
+            &json!({
+                "trust": c["trust"],
+                "external": c["external"],
+                "now": c["now"],
+                "events": c["input"].as_array().expect("input")
+                    .iter().map(|l| f["events"][l.as_str().expect("label")]["event"].clone())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+        // No BUZZ_RELAY_URL and no BUZZ_PRIVATE_KEY are consulted on these paths.
+        for cmd in ["validate", "show"] {
+            assert_eq!(
+                crate::run_from_args(["buzz", "bw", cmd, "--input", &arg(&history)]).await,
+                0,
+                "{cmd}"
+            );
+        }
     }
 }

@@ -379,6 +379,59 @@ fn check(w: &Value) -> Check<Value> {
         Ok(body)
     }
 }
+/// The five signed fields that exist before a signature is produced.
+fn unsigned_fields(w: &Value) -> bool {
+    key(s(&w["pubkey"]))
+        && primitive(&w["created_at"], "time")
+        && w["kind"].as_u64().is_some_and(|k| k <= 65535)
+        && w["content"].is_string()
+        && w["tags"].is_array()
+        && a(&w["tags"])
+            .iter()
+            .all(|t| t.is_array() && !a(t).is_empty() && a(t).iter().all(Value::is_string))
+}
+/// The NIP-01 event ID over the five signed fields. It is fully determined
+/// before signing, so a producer can pin it and never generate a second one.
+fn event_id(w: &Value) -> Check<String> {
+    let preimage = serde_json::to_vec(&json!([
+        0,
+        w["pubkey"],
+        w["created_at"],
+        w["kind"],
+        w["tags"],
+        w["content"]
+    ]))
+    .map_err(|_| fail("envelope", "json"))?;
+    Ok(hex::encode(Sha256::digest(preimage)))
+}
+/// Decode an unsigned candidate operation into the same record form used for
+/// signed events, pinning the ID the signature will later carry. This grants no
+/// role and authorizes nothing; the signature is the only field still missing.
+pub(super) fn draft(w: &Value) -> Check<Record> {
+    let obj = w.as_object().ok_or_else(|| fail("envelope", "fields"))?;
+    if obj.len() != 5
+        || !["pubkey", "created_at", "kind", "tags", "content"]
+            .iter()
+            .all(|k| obj.contains_key(*k))
+        || !unsigned_fields(w)
+    {
+        return Err(fail("envelope", "fields"));
+    }
+    // The placeholder signature is never published; it only keeps the envelope
+    // size accounting identical to the signed form it pins.
+    let wire = json!({
+        "id": event_id(w)?,
+        "pubkey": w["pubkey"],
+        "created_at": w["created_at"],
+        "kind": w["kind"],
+        "tags": w["tags"],
+        "content": w["content"],
+        "sig": "0".repeat(128),
+    });
+    let body = check(&wire)?;
+    attest(&wire)?;
+    Ok(Record { wire, body })
+}
 pub(super) fn decode(w: Value) -> Check<Record> {
     let obj = w.as_object().ok_or_else(|| fail("envelope", "fields"))?;
     if obj.len() != 7
@@ -394,28 +447,12 @@ pub(super) fn decode(w: Value) -> Check<Record> {
         .iter()
         .all(|k| obj.contains_key(*k))
         || !hex(s(&w["id"]), 64)
-        || !key(s(&w["pubkey"]))
         || !hex(s(&w["sig"]), 128)
-        || !primitive(&w["created_at"], "time")
-        || w["kind"].as_u64().is_none_or(|k| k > 65535)
-        || !w["content"].is_string()
-        || !w["tags"].is_array()
-        || !a(&w["tags"])
-            .iter()
-            .all(|t| t.is_array() && !a(t).is_empty() && a(t).iter().all(Value::is_string))
+        || !unsigned_fields(&w)
     {
         return Err(fail("envelope", "fields"));
     }
-    let preimage = serde_json::to_vec(&json!([
-        0,
-        w["pubkey"],
-        w["created_at"],
-        w["kind"],
-        w["tags"],
-        w["content"]
-    ]))
-    .map_err(|_| fail("envelope", "json"))?;
-    if hex::encode(Sha256::digest(preimage)) != s(&w["id"]) {
+    if event_id(&w)? != s(&w["id"]) {
         return Err(fail("id", "event-id"));
     }
     let e = nostr::Event::from_json(w.to_string()).map_err(|_| fail("signature", "signature"))?;
@@ -423,6 +460,12 @@ pub(super) fn decode(w: Value) -> Check<Record> {
         return Err(fail("signature", "signature"));
     }
     let body = check(&w)?;
+    attest(&w)?;
+    Ok(Record { wire: w, body })
+}
+/// Verify a NIP-OA delegation tag. Delegation never derives from the event's own
+/// signer, and the conditions are a closed grammar.
+fn attest(w: &Value) -> Check {
     if let Some(tag) = a(&w["tags"]).iter().find(|t| s(&t[0]) == "auth") {
         let owner =
             PublicKey::from_hex(s(&tag[1])).map_err(|_| fail("attestation", "auth-signature"))?;
@@ -474,5 +517,5 @@ pub(super) fn decode(w: Value) -> Check<Record> {
             }
         }
     }
-    Ok(Record { wire: w, body })
+    Ok(())
 }
