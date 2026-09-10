@@ -5,6 +5,59 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Current published-candidate continuation 4341 — U1 policy recovery
+
+R1 was separately committed and pushed as
+`64305a7a0020da0faa599b46be37b538b9533945`; origin branch verified at that exact
+head before this UX checkpoint. No reset/reimplementation or additional writer.
+
+TUI now offers numbered `operations`, `reconcile`, and informed `retry <number>`.
+Reconcile explicitly reconnects, reads relay history and queries host outbox via
+existing inspect messages; it does not replay blocked work or assert policy repair.
+Host inspect republishes durable terminal receipts so a receipt lost before relay
+storage remains recoverable. Retry sends the original retained envelope ONCE with
+unchanged ID/signature/ciphertext/body/fingerprint/revision. The durable policy block
+is deliberately NOT removed: socket success does not authorize blind future retry.
+Only a matched terminal receipt resolves pending work. Completed/known rejection/
+UNKNOWN remain distinct, historical results are labelled separately from current
+host inventory, and the confirmation explains policy repair, uncertain prior effect,
+permanently invalid events and no remote cancellation. Repeated 1008 remains blocked.
+No replacement ACK/control service, re-signing or host-precondition change.
+
+Acceptance is **actual TUI subprocess**, real package client/relay/host, fresh keys
+and fixture runner, with test-owned loopback WS fault placement (not a model or
+production policy test):
+- Policy denial before Stop publication -> explicit retry under continued denial ->
+  two denials total; correction/reopen sends zero blocked commands; reconcile sends
+  zero blocked commands; numbered confirmed retry completes original Stop once.
+  Three total attempts all byte-identical, one Start plus original Stop in host
+  operations, final stopped/revision2.
+- Committed Stop receipt dropped BEFORE relay storage -> 1008 block -> corrected
+  reopen queries host outbox and recovers original accepted result without a second
+  Stop attempt. Final revision2; completed entries reject further retry.
+- Reconcile after completion does not duplicate effects. Intentional Quit in each
+  subprocess exits 0 with independent-host-lifetime message, no spurious UNKNOWN.
+- Existing lost-Start/crash/receipt negatives and installed cross-conversation seams
+  remain green; predecessor independent seven crypto/receipt/perms negatives reused.
+
+Final semantic candidate: strict TypeScript + full installed-enabled package suite
+**19/19 pass, zero skips**, 15.64s. Evidence in workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CONTINUATION_4341_EVIDENCE/ux-check.log` and
+`ux-full.log`; production-bound regression source `test/policy-tui.test.ts`.
+Binary hashes freshly rechecked and match the two pins below. No dependency changes.
+No repo-wide just ci, GitHub CI approval, production admission, real provider/OAuth,
+PR/merge/release, or full delivery claim. Source candidate is the commit containing
+this section; publication record with exact head follows in the workspace evidence.
+Configured Logan Johnson author/committer + DCO verified before push; no crypto signer.
+
+Completed independent TOOLS_RECONNECT and INTENT_TUI reviews are consumed. The new
+UX delta has self-review and executable acceptance, not yet a separate immutable
+independent review. This is not a reason to leave the broader build waiting.
+**ONE next executable step:** implement conservative same-identity two-host assignment /
+Move with multi-host/agent selection, preserving remote-only normal configuration and
+lifecycle and refusing unreachable-host takeover. Retention1000/pruning, profiles/key
+lifecycle/Restart, broader harness parity and live-production gates remain unfinished.
+
 ## Continuation 4341 — R1 reconciliation
 
 Recovered d12ed7b4e08501e2e5829da80689c9759b32bd49 plus the prior worker's
@@ -74,15 +127,14 @@ repeated). Prior installed runtime evidence retained; this run
 also produced three verified fixture replies from agent
 `b727bb8ae1e277a522f8dbad00aae15cc7b71e39c57d43e7f5d532529e8087aa`.
 No real provider/admission calls, production activity, full repo CI or PR/merge/release.
-Independent preceding broad-tool/reconnect review still in progress (evidence directory
-exists; no completed report received). Existing B1/D1-D3 conclusions retained, not
+Completed preceding broad-tool/reconnect review is consumed in continuation 4341 above. Existing B1/D1-D3 conclusions retained, not
 reopened or treated as approval of this new journal delta.
 
 Limits: relay URL is the community scope in this development topology, not a stable
 production community identifier. Publication echo observation is session-local; terminal
 host results persist. There is no relay per-event rejection/ACK protocol: policy failure
-is conservatively UNKNOWN/blocked, not claimed failed; explicit guided recovery and
-journal retention remain future UX work. Pre-upgrade host receipts lack fingerprints
+is conservatively UNKNOWN/blocked, not claimed failed; guided recovery is now implemented in continuation 4341;
+journal retention remains future work. Pre-upgrade host receipts lack fingerprints
 and cannot complete new journal intents. Arbitrary disk rollback, malicious local
 operator, simultaneous UI action coordination, log-full recovery and host SIGKILL
 recovery are not proved. Single-operation exclusive files prevent conflicting-ID
@@ -91,9 +143,8 @@ process exit without cleanup, not machine power-loss proof. Stop-during-Start re
 covered by unchanged full-suite regressions; no claim that this new test automates the
 entire interactive crash workflow.
 
-**ONE next executable step:** independent review and real interactive TUI recovery
-acceptance of this client journal, especially policy-failure UNKNOWN recovery and
-receipt ordering, before expanding to the two-host same-identity assignment/Move slice.
+**Historical next step (completed in continuation 4341):** independent journal review
+and real TUI policy-recovery acceptance. Current next step is two-host assignment/Move.
 Full remaining parity scope below remains active, not declared complete.
 
 ## Recovery 4200a3ab
@@ -116,8 +167,8 @@ No recovered PID was used for cleanup and no private run artifacts were read.
 New implementation commit `998e919a9b26af0ec3b15eefba539661380eeed7`
 was pushed successfully as the first publication of `beehive/cbfd9440` to
 `https://github.com/block/buzz.git`. This checkpoint-only follow-up retains that
-source. No GitHub or NIP-34 PR has been created; repo-wide `just ci` and independent
-review remain outstanding. `buzz pr open --help` requires a NIP-34 repository
+source. No GitHub or NIP-34 PR has been created; repo-wide `just ci` remains outstanding; subsequent independent
+reviews are consumed in continuation 4341. `buzz pr open --help` requires a NIP-34 repository
 owner pubkey/id; neither was inferred from GitHub ownership. Any later Buzz PR
 must carry channel `f45d3304-dcf0-44e8-a46d-bcd63b235fbc`.
 
@@ -139,7 +190,7 @@ run and single revision/operation survive. Stop still tears down the owned run;
 intentional host/client close cannot reconnect. This proves relay-persisted
 intent recovery, not recovery of controller intent that never reached the relay.
 The existing receipt outbox is retained, not ACK-pruned. No protocol change or
-new remote/local lifecycle endpoint. New delta requires independent review.
+new remote/local lifecycle endpoint. This delta subsequently received TOOLS_RECONNECT review; R1 is resolved above.
 
 ## Implemented: ordinary multi-conversation Buzz CLI tool authority
 
@@ -205,7 +256,7 @@ B1 resolved through original/extended independent probes; strict/full12/12 and
 independently verified installed signed publication. Its retained invariants are
 host executable/env/key/relay ownership, childless shims, exact-model fencing,
 distinct tool/ACP/publication evidence and bounded resources. This ordinary-CLI
-delta has NOT yet received independent review. Long-lived request/session cap
+delta subsequently received TOOLS_RECONNECT independent review. Long-lived request/session cap
 recovery remains explicit subsequent work, not general MCP compatibility.
 
 ## Observable installed isolated outcome
@@ -272,10 +323,10 @@ cryptographic signing key configured, so no invented signer/signature claim.
 
 ## Remaining product scope / ONE next executable step
 
-**Next:** independently review and exercise the local client-journal recovery
-implemented above, including policy-failure UNKNOWN handling, then proceed to
-two-host identity assignment/Move. The bounded journal is not full recovery/parity
-completion. Independent multi-tool and reconnect review remains pending.
+**Next:** conservative same-identity two-host assignment/Move and multi-host/agent
+selection. Journal and multi-tool/reconnect independent reviews are completed and
+consumed above; R1 and U1 corrections have executable acceptance. The bounded
+journal is not full recovery/parity completion.
 
 README retains the full parity matrix: reconnect/ACKs/crash recovery; multiple
 hosts/agents/setups and S1 two-host identity; reusable profiles/metadata/history;

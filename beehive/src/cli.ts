@@ -93,24 +93,39 @@ async function main() {
         if (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt)) inventory.set(m.host,m);
       }
     }, () => {
-      console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; reconnect attempts are bounded.');
+      console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
       for (const operation of client.status()) console.log(`${operation.request.host} ${operation.request.type}: ${operation.state} | ${operation.result ?? operation.publication}`);
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, hosts, select <host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, select <host>, show, save, start, stop, quit. Closing this UI does not stop hosts.');
     let selected = '';
     try {
       for (;;) {
         const line = (await ui.question('beehive> ')).trim();
         if (line === 'quit') break;
-        if (line === 'operations') { console.log(JSON.stringify(client.status(),null,2)); continue; }
+        if (line === 'operations') {
+          client.status().forEach((o, index) => console.log(`${index + 1}. ${o.request.host} ${o.request.type} at revision ${o.request.revision}: ${o.state} | ${o.result ?? o.publication}${o.retryAvailable ? ` | reconcile, then retry ${index + 1}` : ''}`));
+          console.log('Historical results are not current host state. Reconcile queries receipts without retrying blocked work.'); continue;
+        }
+        if (line === 'reconcile') { client.reconcile(); console.log('Reconnecting/querying host results; blocked work stays blocked. Connection alone proves neither policy repair nor completion.'); continue; }
+        if (line.startsWith('retry ')) {
+          const number = line.slice(6);
+          const operation = /^[1-9][0-9]*$/.test(number) ? client.status()[Number(number) - 1] : undefined;
+          if (!operation?.retryAvailable) { console.log('Use operations to choose an unresolved policy-blocked operation.'); continue; }
+          console.log(`Retry original ${operation.request.host} ${operation.request.type} at revision ${operation.request.revision} ONCE, with unchanged signature, ID and preconditions. It may already have executed. Reconcile first. Repair relay policy before retry; expired/invalid signed events cannot be repaired here. This does not cancel remote work or enable automatic retries.`);
+          if ((await ui.question('Attempt unchanged operation after policy repair? [yes/no]: ')) === 'yes') {
+            try { client.retry(operation.request.id); console.log('Unchanged retry attempted; result UNKNOWN until host receipt. Automatic retry stays disabled.'); }
+            catch (error) { console.log(error instanceof Error ? error.message : 'Retry not sent'); }
+          }
+          continue;
+        }
         if (line === 'hosts') { for (const [name,m] of inventory) console.log(`${name}: ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'recent host report'}`); continue; }
         if (line.startsWith('select ')) { selected = line.slice(7); continue; }
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') { console.log(JSON.stringify(current,null,2)); continue; }
-        if (!['save','start','stop'].includes(line)) { console.log('Use hosts/select/show/save/start/stop/quit.'); continue; }
+        if (!['save','start','stop'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/stop/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};
         if (line === 'save') {

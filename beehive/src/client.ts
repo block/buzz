@@ -44,6 +44,12 @@ export function connect(url: string, secret: string, receive: (m: Message) => vo
     ready,
     sendEnvelope(e: Envelope) { if (closed || socket.readyState !== WebSocket.OPEN) throw Error('Relay disconnected; result unknown'); socket.send(JSON.stringify(e)); },
     send(m: Message) { if (closed || socket.readyState !== WebSocket.OPEN) throw Error('Relay disconnected; result unknown'); socket.send(JSON.stringify(seal(m,secret))); },
+    /** Explicit transport reconciliation; opening is never an operation result. */
+    reconnect() {
+      if (closed) throw Error('UI closed');
+      clearTimeout(retry); attempts = 0;
+      const previous = socket; socket = dial(); previous.close();
+    },
     close() { closed = true; clearTimeout(retry); socket.close(); },
   };
 }

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect, validateRelayURL } from './client.ts';
-import { digest, fields, object, open, publicKey, seal, type Envelope, type Message } from './protocol.ts';
+import { digest, fields, message, object, open, publicKey, seal, type Envelope, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 
 type Intent = { envelope: Envelope; request: Message; receipt?: Message; published: boolean; blocked?: boolean };
@@ -56,6 +56,11 @@ export function managementClient(root: string, url: string, secret: string, rece
     for (const intent of intents.values()) if (!intent.receipt && !intent.blocked) {
       try { transport.sendEnvelope(intent.envelope); } catch { break; } // Intent remains durable.
     }
+    // Query host outbox too: relay history alone may lack a lost terminal receipt.
+    const hosts = new Map([...intents.values()].filter(i => !i.receipt).map(i => [i.request.host, i.request]));
+    for (const request of hosts.values()) {
+      try { transport.send(message('inspect', request.host, request.agent)); } catch { break; }
+    }
     changed();
   }
   const transport = connect(url, secret, m => {
@@ -101,10 +106,22 @@ export function managementClient(root: string, url: string, secret: string, rece
       intents.set(request.id, { request: immutable, envelope, published: false });
       replay();
     },
+    /** Read host results without lifting durable policy blocks or changing intent. */
+    reconcile() { if (closed) throw Error('UI closed'); transport.reconnect(); },
+    /** One informed attempt of the exact envelope. Keep the durable block even on
+     * success at the socket seam: only a matched terminal host receipt resolves it. */
+    retry(id: string) {
+      if (closed) throw Error('UI closed');
+      const intent = intents.get(id);
+      if (!intent || intent.receipt || !intent.blocked) throw Error('Only unresolved policy-blocked operations can be retried');
+      transport.sendEnvelope(intent.envelope);
+      changed();
+    },
     status() {
       return [...intents.values()].map(i => ({ request: structuredClone(i.request),
         state: i.receipt ? (['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
-        publication: i.blocked ? 'relay policy failure; automatic retry disabled' : i.receipt ? 'host terminal receipt' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
+        retryAvailable: !i.receipt && !!i.blocked,
+        publication: i.receipt ? 'host terminal receipt' : i.blocked ? 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
         result: i.receipt?.body.result }));
     },
     close() { closed = true; transport.close(); },

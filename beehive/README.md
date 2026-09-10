@@ -37,7 +37,7 @@ On Block-managed machines, the public npm registry is policy-blocked. Append
 to the install command to use the approved mirror. No credentials or persistent
 registry config are needed. The committed lockfile is registry-agnostic.
 
-TUI: `hosts`, `select <host-name>`, `show`, `start`, `save`, `stop`, `quit`.
+TUI: `operations`, `reconcile`, `retry <number>`, `hosts`, `select <host-name>`, `show`, `start`, `save`, `stop`, `quit`.
 Save asks for advertised model, workspace and independent behavior profile.
 Only one fixture model and the `default` profile are currently supported;
 profile authoring/versioning and useful multi-setup selection remain to build.
@@ -45,6 +45,34 @@ profile authoring/versioning and useful multi-setup selection remain to build.
 restart. `quit` leaves the host running. Reopen TUI to inspect it; `stop` confirms
 the owned process group is absent and leaves the agent assigned to this host.
 Ctrl-C on **host** stops its owned fixture runner before exiting.
+
+### Recover an UNKNOWN operation
+
+`operations` lists numbered host/action/revision entries and historical results.
+A terminal host rejection is **failed**; a matched accepted receipt is **completed**.
+Neither a socket connection nor relay echo proves completion or current host state.
+Use `hosts`/`show` for separately dated host inventory.
+
+After a relay policy close (1008), unresolved work stays **UNKNOWN**, with automatic
+retry disabled even after Quit/reopen. Repair policy outside the TUI, then:
+
+1. `reconcile` reconnects and queries retained host receipts through the relay.
+   It does **not** resend policy-blocked operations or prove policy is repaired.
+2. `operations` shows any recovered terminal result. If still UNKNOWN and retry
+   is appropriate, use `retry <number>` for the displayed operation, and confirm
+   `yes` after reading the warning. This attempts the original signed encrypted
+   event **once**, preserving its ID, fingerprint, body and revision preconditions.
+3. A repeated denial stays blocked; another attempt requires another explicit
+   action. Even a successful socket send leaves UNKNOWN until a matched host receipt.
+
+Retry does not clear the durable automatic-retry block, cancel remote work, mint a
+replacement ID, update stale revisions, or re-sign an expired/invalid event. If the
+original event can never be admitted, continue reconciliation; there is no honest
+terminal result to invent. The development envelope has no built-in expiry, but
+external policy may still reject it permanently. Keep the retained intent. Journal
+retention (1,000 operations), pruning/log-full and host-crash recovery remain unfinished.
+Ordinary transient loss still has bounded automatic unchanged replay. Quit changes
+only UI transport lifetime, never the pending operation or host lifecycle.
 
 **Do not point fixture mode at real agents.** This seam deliberately passes no
 agent key, OAuth context, model, or instructions to the fixture. Executable trust
@@ -100,8 +128,8 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
 - Relay history max 10,000 envelopes, per-envelope limit, slow-reader disconnect.
   Log full closes publisher; no compaction. Outbox retained without ACK pruning;
   host auto-reconnect replays saved receipts and relay history with operation-ID
-  deduplication (eight attempts/lifetime, bounded backoff). Relay ACKs and durable
-  TUI pending intents/reconnect are not yet implemented. Lost connection means
+  deduplication (eight attempts/lifetime, bounded backoff). Per-event relay ACKs remain absent. Durable
+  TUI pending intents/reconnect are implemented with a local encrypted journal. Lost connection means
   unknown, not stopped or success; exhausted recovery needs operator attention.
 - Inventory has freshness, not liveness proof. Host starts no action based on peer
   agent presence. Only its locally bound agent is manageable.
@@ -205,7 +233,8 @@ Installed isolated validation covers two channels/threads and a later prompt in
 the first thread, three signed replies under one agent identity, native channel
 reads, non-member mention rejection and owner-only incoming dispatch. No local
 reconfiguration or key generation occurs between prompts. This new surface still
-needs independent delta review; see CHECKPOINT.md for exact evidence and limits.
+has received independent tool/reconnect review; its R1 and later journal U1
+recovery corrections are recorded in CHECKPOINT.md with exact evidence and limits.
 
 Community admission/attestation and normal OAuth in the named host-service context
 remain explicit local/operator actions. No live Databricks request has occurred.

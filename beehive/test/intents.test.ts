@@ -107,7 +107,7 @@ test('process exit before network effects leaves an exact prepared envelope; cor
     await ui.ready;
     await until(() => ui.status()[0]?.publication === 'relay observed; not host admission');
     const stored = JSON.parse(readFileSync(join(dir, 'relay.json'), 'utf8'));
-    assert.deepEqual(stored, [prepared], 'exact signed/encrypted event reused');
+    assert.deepEqual(stored.filter((e: unknown) => open(e, secret).type !== 'inspect'), [prepared], 'exact signed/encrypted event reused');
     const sender = connect(url, secret, () => {}); await sender.ready;
     sender.send(message('receipt', 'unrelated-host', request.agent, 1, { operation: request.id, fingerprint: 'f'.repeat(64), result: 'accepted' }));
     await delay(80); sender.close();
@@ -116,7 +116,7 @@ test('process exit before network effects leaves an exact prepared envelope; cor
     await until(() => ui.status()[0]?.state === 'unknown');
     ui.close();
     let republished = 0;
-    server.on('connection', socket => socket.on('message', () => { republished++; }));
+    server.on('connection', socket => socket.on('message', data => { if (open(JSON.parse(String(data)), secret).type !== 'inspect') republished++; }));
     ui = managementClient(root, url, secret, () => {}); await ui.ready;
     await delay(150);
     assert.equal(ui.status()[0]?.state, 'unknown');

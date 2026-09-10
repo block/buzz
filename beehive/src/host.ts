@@ -93,7 +93,7 @@ export async function host(directory: string, url: string) {
     if (closing || m.host !== setup.host || !['inspect','save','start','stop'].includes(m.type)) return;
     // Serialized Stop processing durably resolves that Stop's own retraction.
     if (m.type === 'stop') retracted.delete(m.id);
-    if (m.type === 'inspect') { publish(inventory()); return; }
+    if (m.type === 'inspect') { for (const receipt of state.outbox) publish(receipt); publish(inventory()); return; }
     const fingerprint = digest(JSON.stringify(m)).toString('hex');
     const previous = Object.hasOwn(state.operations,m.id) ? state.operations[m.id] : undefined;
     if (previous) {

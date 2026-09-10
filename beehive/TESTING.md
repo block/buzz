@@ -28,6 +28,21 @@ full suite passed 16/16; after status wording refinement strict + targeted TUI/c
 5/5 passed, then final source strict/full default 15 pass + 1 opt-in skip. These fixtures do not establish production community admission, hostile
 local storage/power loss or a polished manual recovery UX. See current CHECKPOINT.
 
+## Policy recovery continuation 4341
+
+`policy-tui.test.ts` drives actual Node TUI subprocesses over a fault proxy and the
+real package relay/host with a fresh fixture runner. Before-publication Stop denial
+remains UNKNOWN across reopen after repair; reconcile sends no blocked command;
+numbered, informed retry sends the byte-identical envelope and resolves the original
+Stop once. Repeated 1008 is bounded (one attempt per confirmation). A second journey
+drops a committed receipt **before relay storage**, proving host outbox query rather
+than merely cached relay history recovers it, with no extra lifecycle effect or
+operation ID. Completed entries cannot be retried. Intentional Quit remains clean.
+These are real client/relay/TUI subprocess seams, not a live model or production relay.
+Independent d12ed7b4 crypto/receipt/perms and installed tool evidence remains reusable;
+completed `INTENT_TUI_REVIEW_D12ED7B4.md` identifies U1, addressed by this delta.
+The earlier pending/manual-recovery statements are historical, not a review wait.
+
 ## Automated production seams
 
 - `slice.test.ts`: malformed/wrong-owner/tampered encryption envelopes; real
@@ -98,8 +113,8 @@ local storage/power loss or a polished manual recovery UX. See current CHECKPOIN
   CLI error (returned without killing the session) all clean up the shim and any TERM-resistant in-group descendants.
 
 Tests never open existing owner keys/profiles/cache, production services or native
-client resources. With installed opt-in: 18/18 pass; without: 17 pass/1 explicit
-skip. The installed fixture relay does not establish actual community admission,
+client resources. R1 checkpoint with installed opt-in: 18/18 pass; without: 17 pass/1 explicit
+skip. Current policy-recovery validation is recorded in CHECKPOINT. The installed fixture relay does not establish actual community admission,
 current relay compatibility, provider/model attestation. Multi-thread delivery is isolated legacy-binary evidence only.
 
 ## Independent evidence and limits
