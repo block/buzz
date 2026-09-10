@@ -4,8 +4,8 @@ import { isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
-/** Only local provisioning may supply these inputs; never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; model: string }>;
+/** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
+export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -30,7 +30,7 @@ export function prepareAgent(input: AgentLaunch) {
   const url = new URL(plan.databricksHost);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin');
   identifier(plan.model);
-  return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze({ PATH: '/usr/bin:/bin', HOME: plan.home, BUZZ_AGENT_CONFIG_DIR: plan.configDirectory, BUZZ_AGENT_PROVIDER: 'databricks_v2', DATABRICKS_HOST: url.origin, BUZZ_AGENT_MODEL: plan.model }) });
+  return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze({ PATH: '/usr/bin:/bin', HOME: plan.home, BUZZ_AGENT_CONFIG_DIR: plan.configDirectory, BUZZ_AGENT_PROVIDER: 'databricks_v2', DATABRICKS_HOST: url.origin, BUZZ_AGENT_MODEL: plan.model, ...(plan.instructions === undefined ? {} : { BUZZ_AGENT_SYSTEM_PROMPT: plan.instructions }) }) });
 }
 
 /** Bounded newline JSON-RPC boundary to an external Buzz Agent ACP executable. */

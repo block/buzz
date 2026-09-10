@@ -39,8 +39,9 @@ registry config are needed. The committed lockfile is registry-agnostic.
 
 TUI: `agents`, `operations`, `reconcile`, `retry <number>`, `hosts`, `select <number or unique host-name>`, `show`, `start`, `restart`, `save`, `stop`, `quit`.
 Save asks for advertised model, workspace and independent behavior profile.
-Only one fixture model and the `default` profile are currently supported;
-profile authoring/versioning and useful multi-setup selection remain to build.
+The fixture has one allowed model. Named behavior profiles are authored remotely
+with `profile-new`, `profiles`, `profile-edit <number>`, and `apply <number|default>`.
+Useful multi-setup selection remains to build.
 `show` separates selected-next and immutable actual-run snapshot. Save does not
 restart. `quit` leaves the host running. Reopen TUI to inspect it; `stop` confirms
 the owned process group is absent and leaves the agent assigned to this host.
@@ -75,7 +76,8 @@ Ordinary transient loss still has bounded automatic unchanged replay. Quit chang
 only UI transport lifetime, never the pending operation or host lifecycle.
 
 **Do not point fixture mode at real agents.** This seam deliberately passes no
-agent key, OAuth context, model, or instructions to the fixture. Executable trust
+agent key, OAuth context, or model to the fixture. It passes only the selected
+nonsecret behavior override for external-boundary acceptance. Executable trust
 is a local operator decision; remote messages cannot supply executable/args/env.
 The runner must remain within its process group. Escaping descendants require
 stronger OS containment before arbitrary harness support.
@@ -335,8 +337,8 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 |---|---|---|
 | Local owner/key setup | New owner + separately generated agent key | nsec import, saved-owner verification, revocation/key removal UX |
 | Host inventory | Real relay, multiple independent slots, shared host harness, freshness | multiple selectable setups, service install, richer reconciliation |
-| Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
-| Lifecycle | Start/Stop and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, expanded Restart acceptance |
+| Remote configuration | CAS model/workspace + reusable immutable profile publication/application; captured actual-run history | named launch configurations, metadata, setup revision pinning, retention UI |
+| Lifecycle | Start/Stop/Restart and experimental source-consumed conversation Move, UI-independent host | production admission/live-provider acceptance, installed-conversation Restart acceptance |
 | Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, production protocol compatibility and catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
@@ -417,6 +419,66 @@ replacement between final validation and spawn remains outside this preview.
 Current tests exercise actual two-agent TUI Restart X with Y's journal unchanged,
 fixture replay, missing setup and delayed ACP prerequisite cancellation. Named
 behavior profile authoring/revisions and actual applied-instruction evidence are
-**not implemented**: only the existing `default` profile selection works. Installed
+now implemented by the continuation below. Installed
 conversation Restart-specific acceptance remains to add; installed Move/Start tests
 remain separate reusable evidence, not a claim that this whole journey is complete.
+
+## Named behavior profiles (0aa71)
+
+Everyday workflow in the TUI:
+
+1. `profile-new`: enter a name and **nonsecret** behavior instructions; review and
+   confirm publication. The form is a draft until confirmed. No provider/model,
+   executable, workspace, key, credential or OAuth fields exist in a profile.
+2. `profiles`: numbered immutable versions, parents and instructions. `profile-edit
+   <number>` publishes a new child of that exact version. Concurrent edits remain
+   explicit branches; neither timestamps nor arrival order choose a latest version.
+3. `hosts` → `select <number>` → `apply <profile number>` selects that exact revision
+   for that agent at its advertised expected revision. `save` also accepts a profile
+   number (first run `profiles`) alongside allowed model/workspace. Host acceptance
+   is distinct from publication. `show` names agent, host, current and selected-next.
+4. `start` or explicit `restart` captures the selected snapshot. Editing/publishing
+   or applying while running never restarts anything, changes actual instructions,
+   touches another agent's journal, or creates/restores credentials.
+5. `apply default` explicitly clears the override for selected-next only. No delete
+   operation exists: historical revisions and running snapshots cannot be stranded
+   or silently switched. Retention/archiving is future work, not destructive CRUD.
+
+**Authority:** `src/profiles.ts` is the sole profile codec/lineage projection. The
+existing authenticated encrypted relay publications are definition truth, scoped by
+relay/owner; hosts and UI replay that same read-only projection. Content addresses
+cover canonical name, explicit parent and instruction bytes. There is no mutable
+host/CLI/broker profile database or new controller. The assigned host alone accepts
+per-agent association changes using existing Save/CAS/receipt durability. Missing
+or conflicting lineage remains incomplete, never executable. Publication completion
+means the relay observed the immutable event, NOT any agent applied it. Unsent
+publications use the existing encrypted client intent journal and unchanged replay.
+
+A selection contains the validated complete profile revision, not a floating name.
+The existing Start/Restart/Move preparation token covers those effective instructions.
+Move preserves the source's selected public behavior while choosing target-local
+launch settings; target keys/workspace/session are never copied. Later catalog
+publications cannot change an asynchronous preflight or accepted historical selection.
+Successful runs retain immutable full snapshots in the existing per-agent journal;
+Stop/Restart cannot overwrite them. Inventory exposes the last eight run IDs/revision/
+instruction hashes; actual-run carries full selected instructions plus prepared-input
+hash. Legacy journals/default selections need no migration and gain no invented old
+run evidence. `upstream-default` deliberately records no fabricated default-text hash.
+
+The host passes exact captured instructions through upstream `BUZZ_AGENT_SYSTEM_PROMPT`
+and installed `BUZZ_ACP_SYSTEM_PROMPT`. These are behavior inputs, never authorization
+for lifecycle, membership, tools or destinations. Existing owner-only dispatch,
+model-before-prompt and fixed CLI authority remain unchanged. Applied-instruction
+hash covers the explicit override, **not** all upstream orientation/memory/history.
+External fixture logs prove received bytes; installed conversation acceptance also
+observes the marker in the actual runtime-generated ACP prompt. No live-model
+obedience or production kind-40002/admission/OAuth claim follows from that evidence.
+
+Bounds: 2 KiB UTF-8 instructions, 1,000 catalog versions, 100 parent edges, 1,000
+retained successful runs per agent. Start/Restart refuse when run retention is full;
+Stop remains available. Wire payload checks and a conservative Move lineage budget
+refuse oversized new work before consuming source authority. No automatic pruning.
+The TUI currently uses a one-line instruction form; protocol supports line breaks.
+Named launch configurations, local key/setup CRUD and a small harness-specific wizard,
+Desktop harness/provider/preset/custom/mesh/compute parity, final real-TUI UX/live
+acceptance and independent review remain broader work, not completed by profiles.

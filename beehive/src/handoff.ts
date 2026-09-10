@@ -1,15 +1,19 @@
+import { profile, type Profile } from './profiles.ts';
 import { digest, fields, object, text, type Message, parseMessage } from './protocol.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 
 /** Public exact launch selection; credentials and executable choices remain local. */
-export type Selection = { model: string; workspace: string; profile: string };
+export type Selection = { model: string; workspace: string; profile: string; behavior?: Profile };
 /** A source-consumed successor. Outer management authentication assumes trusted hosts. */
 export type Grant = { root: string; predecessor: string; source: string; target: string; agent: string; operation: Message; prepared: string; selection: Selection; targetRevision: number; sourceRun: string | null };
 export type Assignment = { genesis: Genesis; assignedHost: string; chain?: Grant[] };
 export function hash(value: unknown): string { return digest(JSON.stringify(value)).toString('hex'); }
 export function selection(value: unknown): Selection {
-  const s = object(value); fields(s, ['model','workspace','profile']);
-  return { model: text(s.model), workspace: text(s.workspace), profile: text(s.profile) };
+  const s = object(value); fields(s, ['model','workspace','profile', ...(s.behavior === undefined ? [] : ['behavior'])]);
+  const behavior = s.behavior === undefined ? undefined : profile(s.behavior);
+  if (s.profile !== 'default' && (!behavior || s.profile !== behavior.revision)) throw Error('Invalid profile reference');
+  if (s.profile === 'default' && behavior) throw Error('Default cannot override instructions');
+  return { model: text(s.model), workspace: text(s.workspace), profile: text(s.profile), ...(behavior ? { behavior } : {}) };
 }
 /** Validate every predecessor, routing and immutable operation binding, not timestamps. */
 export function validateAssignment(a: Assignment): void {

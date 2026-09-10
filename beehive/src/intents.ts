@@ -1,3 +1,4 @@
+import { profile } from './profiles.ts';
 import { existsSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect, validateRelayURL } from './client.ts';
@@ -33,7 +34,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     const value = object(readPrivate(path)); fields(value, ['scope', 'envelope']);
     if (value.scope !== scope) throw Error('Wrong journal scope');
     const request = open(value.envelope, secret);
-    if (!['save','start','restart','stop','move'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
+    if (!['profile','save','start','restart','stop','move'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
     const intent: Intent = { envelope: value.envelope as Envelope, request, published: false };
     const receiptPath = join(dir, `${request.id}.receipt`);
     if (existsSync(receiptPath)) {
@@ -53,7 +54,7 @@ export function managementClient(root: string, url: string, secret: string, rece
   }
   let closed = false;
   function replay() {
-    for (const intent of intents.values()) if (!intent.receipt && !intent.blocked) {
+    for (const intent of intents.values()) if (!intent.receipt && !(intent.request.type === 'profile' && intent.published) && !intent.blocked) {
       try { transport.sendEnvelope(intent.envelope); } catch { break; } // Intent remains durable.
     }
     // Query host outbox too: relay history alone may lack a lost terminal receipt.
@@ -97,7 +98,11 @@ export function managementClient(root: string, url: string, secret: string, rece
     get socket() { return transport.socket; },
     submit(request: Message) {
       if (closed) throw Error('UI closed');
-      if (!['save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
+      if (!['profile','save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
+      if (request.type === 'profile') {
+        profile(request.body);
+        if (request.host !== 'profiles' || request.agent !== 'profiles' || request.revision !== 0) throw Error('Invalid profile publication');
+      }
       if (intents.size >= 1000) throw Error('Management journal full; no operation submitted');
       if (intents.has(request.id) || existsSync(join(dir, `${request.id}.intent`))) throw Error('Operation ID already prepared');
       const envelope = seal(request, secret);
@@ -119,9 +124,9 @@ export function managementClient(root: string, url: string, secret: string, rece
     },
     status() {
       return [...intents.values()].map(i => ({ request: structuredClone(i.request),
-        state: i.receipt ? (['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
-        retryAvailable: !i.receipt && !!i.blocked,
-        publication: i.receipt ? 'host terminal receipt' : i.blocked ? 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
+        state: i.request.type === 'profile' && i.published ? 'completed' : i.receipt ? (['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
+        retryAvailable: !i.receipt && !(i.request.type === 'profile' && i.published) && !!i.blocked,
+        publication: i.request.type === 'profile' && i.published ? 'immutable publication observed; no agent application' : i.receipt ? 'host terminal receipt' : i.blocked ? 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
         result: i.receipt?.body.result }));
     },
     close() { closed = true; transport.close(); },

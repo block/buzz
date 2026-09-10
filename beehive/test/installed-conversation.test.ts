@@ -86,6 +86,7 @@ test('installed buzz-acp completes multi-conversation signed replies and normal 
   const address = http.address(); assert.ok(address && typeof address !== 'string');
   const session = new ConversationSession({ executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: `ws://127.0.0.1:${address.port}`, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } }, {
     executable: realpathSync(process.execPath), args: [resolve('test/conversation-harness-fixture.ts')], workspace: dir, home: dir, configDirectory: dir,
+    instructions: 'BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting.',
     databricksHost: 'https://fixture.invalid', model: 'databricks-claude-haiku-4-5',
   }, secret, owner, 20_000);
   try {
@@ -94,6 +95,8 @@ test('installed buzz-acp completes multi-conversation signed replies and normal 
     assert.ok(authenticated, 'installed executable must authenticate with the provisioned key');
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
+    assert.equal(readFileSync(join(dir, 'received-system-instructions'), 'utf8'), 'BEHAVIOR-PROFILE-BOUNDARY: explain assumptions before acting.');
+    assert.match(readFileSync(join(dir, 'received-prompts.jsonl'), 'utf8'), /BEHAVIOR-PROFILE-BOUNDARY/);
     assert.equal(evidence.session, 'conversation-session');
     assert.equal(evidence.agentPublicKey, agent);
     assert.ok(delivered, 'the actual Buzz CLI must publish a signed threaded agent reply, not just return tool JSON');

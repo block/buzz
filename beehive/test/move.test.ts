@@ -1,3 +1,4 @@
+import { profileRevision } from '../src/profiles.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -39,15 +40,18 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
       const child = spawn(process.execPath, ['src/cli.ts','host',join(dir,name),url], { stdio: ['ignore','pipe','pipe'] });
       children.push(child); child.stdout?.resume(); child.stderr?.resume(); await wait(m => m.type === 'inventory' && m.host === name);
     }
-    assert.equal((await request('start','source',0)).body.result,'accepted');
+    const behavior = { name: 'Move behavior', parent: null, instructions: 'Retain intended behavior across hosts.', revision: profileRevision('Move behavior', null, 'Retain intended behavior across hosts.') };
+    const publication = message('profile', 'profiles', 'profiles', 0, behavior); ui.send(publication); await wait(m => m.id === publication.id);
+    const selected = { model: 'fixture-model', workspace: dir, profile: behavior.revision, behavior };
+    assert.equal((await request('save','source',0,selected)).body.result,'saved; running configuration unchanged');
+    assert.equal((await request('start','source',1)).body.result,'accepted');
     assert.equal((await request('start','source',0,{},publicKey(y))).body.result,'accepted');
     const siblingPath = join(dir,'source','agents',publicKey(y),'journal.json');
     const sibling = readFileSync(siblingPath,'utf8');
     assert.equal((await request('start','target',0)).body.result,'not-authority');
-    const selected = { model: 'fixture-model', workspace: dir, profile: 'default' };
-    const failed = await request('move','source',1,{ target: 'target', targetRevision: 9, selection: selected });
+    const failed = await request('move','source',2,{ target: 'target', targetRevision: 9, selection: selected });
     assert.match(String(failed.body.result),/preflight failed/);
-    assert.equal(journal('source').phase,'running'); assert.equal(journal('source').revision,1);
+    assert.equal(journal('source').phase,'running'); assert.equal(journal('source').revision,2);
     writePrivate(join(dir,'identity.json'),{ secret: ownerSecret });
     const terminal = spawn(process.execPath,['src/cli.ts','tui',join(dir,'identity.json'),url],{ stdio:['pipe','pipe','pipe'] }); children.push(terminal);
     let output = '', cursor = 0, index = 0;
@@ -73,17 +77,21 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
     await wait(m => m.type === 'inventory' && m.host === 'target' && m.body.phase === 'running');
     assert.equal(journal('source').assignment.assignedHost,'target'); assert.equal(journal('source').phase,'stopped'); assert.equal(journal('source').actual,null);
     assert.equal(journal('target').assignment.assignedHost,'target'); assert.equal(journal('target').actual.run,move.id);
+    assert.deepEqual(journal('target').actual.selection.behavior, behavior);
+    for (let i = 0; i < 200 && readFileSync(join(dir, 'received-instructions.jsonl'), 'utf8').trim().split('\n').length < 3; i++) await delay(10);
+    const received = readFileSync(join(dir, 'received-instructions.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line).instructions);
+    assert.deepEqual(received, [behavior.instructions, null, behavior.instructions]);
     assert.equal(readFileSync(siblingPath,'utf8'),sibling);
     const grant = await wait(m => m.type === 'grant'); const before = readFileSync(join(dir,'target','journal.json'),'utf8');
     ui.send(move); ui.send(grant); await delay(100); assert.equal(readFileSync(join(dir,'target','journal.json'),'utf8'),before);
-    assert.equal((await request('start','source',2)).body.result,'not-authority');
+    assert.equal((await request('start','source',3)).body.result,'not-authority');
     // Move back is a NEW successor; historical forward grant cannot seize it.
-    assert.equal((await request('move','target',1,{ target: 'source', targetRevision: 2, selection: selected })).body.result,'accepted');
-    await wait(m => m.type === 'inventory' && m.host === 'source' && m.revision === 3 && m.body.phase === 'running');
+    assert.equal((await request('move','target',1,{ target: 'source', targetRevision: 3, selection: selected })).body.result,'accepted');
+    await wait(m => m.type === 'inventory' && m.host === 'source' && m.revision === 4 && m.body.phase === 'running');
     ui.send(grant); await delay(100);
     assert.equal(journal('target').assignment.assignedHost,'source'); assert.equal(journal('target').phase,'stopped');
     assert.equal(journal('source').assignment.chain.length,2);
-    assert.equal((await request('stop','source',3)).body.result,'accepted');
+    assert.equal((await request('stop','source',4)).body.result,'accepted');
     assert.equal((await request('stop','source',1,{},publicKey(y))).body.result,'accepted');
   } finally {
     for (const child of children) { if (child.exitCode === null && child.signalCode === null) { const exit = once(child,'exit'); child.kill('SIGTERM'); await exit; } }

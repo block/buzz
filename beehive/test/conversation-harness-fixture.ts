@@ -1,9 +1,10 @@
 /** Owned ACP harness fixture: exact session/model, bidirectional RPC, resistant child. */
 import { createInterface } from 'node:readline';
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, renameSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { publicKey } from '../src/protocol.ts';
+if (process.env.BUZZ_AGENT_SYSTEM_PROMPT) writeFileSync('received-system-instructions', process.env.BUZZ_AGENT_SYSTEM_PROMPT);
 const mode = readFileSync('mode', 'utf8');
 let tool: any; let configRejected = false;
 const sessionId = 'conversation-session'; let selected = ''; let prompt: number | undefined;
@@ -19,7 +20,14 @@ setTimeout(() => process.exit(0), 60000).unref();
 const send = (m: any) => process.stdout.write(JSON.stringify(m) + '\n');
 for await (const line of createInterface({ input: process.stdin })) {
   const m = JSON.parse(line); let result: any;
-  if (!m.method) { if (m.result?.ok) writeFileSync('reverse-rpc', 'ok'); continue; }
+  if (!m.method) {
+    if (m.result?.ok) {
+      // Readers wait for existence: publish complete bytes, not open/truncate before write.
+      const temporary = `reverse-rpc.${process.pid}.tmp`;
+      writeFileSync(temporary, 'ok'); renameSync(temporary, 'reverse-rpc');
+    }
+    continue;
+  }
   if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: 'buzz-agent' } };
   else if (m.method === 'session/new') { tool = m.params.mcpServers[0]; result = { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (m.method === 'session/load') { selected = ''; result = {}; }
@@ -36,6 +44,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     writeFileSync('cancel-observed', 'yes');
     if (prompt) send({ jsonrpc: '2.0', id: prompt, result: { stopReason: 'cancelled' } }); continue;
   } else if (m.method === 'session/prompt') {
+    appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
     if (selected !== process.env.BUZZ_AGENT_MODEL || m.params.sessionId !== sessionId) process.exit(8);
     writeFileSync('prompt-started', selected); prompt = m.id;
     send({ jsonrpc: '2.0', id: 'reverse', method: 'client/fixture', params: {} });

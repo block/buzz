@@ -1,3 +1,4 @@
+import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { existsSync, mkdirSync, realpathSync, rmdirSync } from 'node:fs';
@@ -137,7 +138,9 @@ async function main() {
   } else if (command === 'tui') {
     const secret = text(object(readPrivate(resolve(text(args[0])))).secret);
     const inventory = new Map<string,Message>();
+    const profiles = new Profiles();
     const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
+      profiles.receive(m);
       if (m.type === 'inventory') {
         const key = JSON.stringify([m.host, m.agent]);
         const prior = inventory.get(key);
@@ -149,8 +152,9 @@ async function main() {
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
+    let profileRows: Profile[] = [];
     try {
       for (;;) {
         const line = (await ui.question('beehive> ')).trim();
@@ -184,15 +188,50 @@ async function main() {
           if (matches.length !== 1) { console.log('Unknown or ambiguous host: use hosts and select its numbered host/agent row.'); continue; }
           selected = matches[0]![0]; console.log(`Selected ${matches[0]![1].host} agent ${matches[0]![1].agent}`); continue;
         }
+        if (line === 'profiles') {
+          profileRows = profiles.list();
+          profileRows.forEach((p, i) => console.log(`${i + 1}. ${p.name} | revision ${p.revision.slice(0, 12)} | parent ${p.parent?.slice(0, 12) ?? 'new'} | ${p.instructions}`));
+          for (const p of profiles.incomplete()) console.log(`INCOMPLETE ${p.name} @ ${p.revision.slice(0, 12)}: missing/conflicting lineage; cannot apply`);
+          console.log('Immutable versions; concurrent edits remain branches. Publishing never applies to agents. No destructive deletion; apply default explicitly to clear.'); continue;
+        }
+        if (line === 'profile-new' || line.startsWith('profile-edit ')) {
+          try {
+            const parent = line === 'profile-new' ? undefined : profileRows[Number(line.slice(13)) - 1];
+            if (line !== 'profile-new' && !parent) throw Error('Choose a profile version number from profiles');
+            const name = parent?.name ?? await ui.question('Profile name: ');
+            const instructions = await ui.question('Nonsecret behavior instructions (no provider/model/credentials): ');
+            const value = profile({ name, parent: parent?.revision ?? null, instructions, revision: profileRevision(name, parent?.revision ?? null, instructions) });
+            const affected = [...inventory.values()].filter(m => (m.body.selectedNext as any)?.behavior?.name === name);
+            for (const m of affected) console.log(`Association unchanged: ${m.host} agent ${m.agent}`);
+            console.log(`Publish ${name}: ${instructions}; ${affected.length} observed associations remain unchanged. Apply separately; no restart.`);
+            if (await ui.question('Publish immutable revision? [yes/no]: ') === 'yes') client.submit(message('profile', 'profiles', 'profiles', 0, value));
+          } catch (error) { console.log(error instanceof Error ? error.message : 'Publication failed'); }
+          continue;
+        }
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
-        if (line === 'show') { console.log(JSON.stringify(current,null,2)); continue; }
-        if (!['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
+        if (line === 'show') {
+          const next = current.body.selectedNext as any, actual = current.body.actualRun as any;
+          const label = (s: any) => s?.behavior ? `${s.behavior.name} @ ${s.behavior.revision.slice(0, 12)}` : 'upstream default';
+          console.log(`Agent ${current.agent} | host ${current.host} | assigned ${current.body.assignedHost}\nCurrent: ${actual ? label(actual.selection) : 'no actual run'}\nSelected next: ${label(next)} (explicit Restart to apply)\n${JSON.stringify(current,null,2)}`); continue; }
+        if (!line.startsWith('apply ') && !['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};
+        let action = line;
+        if (line.startsWith('apply ')) {
+          const choice = line.slice(6); const version = profileRows[Number(choice) - 1];
+          if (choice !== 'default' && !version) { console.log('Choose a profile version number from profiles, or default.'); continue; }
+          const next = current.body.selectedNext as Record<string, unknown>;
+          body = { model: next.model, workspace: next.workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
+          action = 'save';
+          console.log(`Apply selected-next to ${current.host} agent ${current.agent}: ${version?.name ?? 'default'} ${version?.revision.slice(0, 12) ?? ''}; actual run unchanged until Restart.`);
+        }
         if (line === 'save') {
           console.log(`Allowed models: ${JSON.stringify(current.body.models)}; workspaces: ${JSON.stringify(current.body.workspaces)}; behavior profiles: ${JSON.stringify(current.body.profiles)}`);
-          body = { model: await ui.question('Model: '), workspace: await ui.question('Workspace: '), profile: await ui.question('Behavior profile: ') };
+          const model = await ui.question('Model: '), workspace = await ui.question('Workspace: '), choice = await ui.question('Behavior profile: ');
+          const version = profileRows[Number(choice) - 1];
+          if (choice !== 'default' && !version) { console.log('Use default or a version number from profiles.'); continue; }
+          body = { model, workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
         }
         if (line === 'move') {
           const destinations = [...inventory.values()].filter(m => m.agent === current.agent && m.host !== current.host);
@@ -200,9 +239,9 @@ async function main() {
           const target = destinations[Number(await ui.question('Destination number: ')) - 1];
           if (!target || Date.now()-Number(target.body.observedAt) > 6000) { console.log('Destination unknown/stale; repair local key/setup/auth and host connection. No Move sent.'); continue; }
           if (await ui.question(`Move agent ${current.agent} from ${current.host} to ${target.host}, fresh execution, no workspace/session/credentials transferred; source cannot resume after grant. Confirm [yes/no]: `) !== 'yes') continue;
-          body = { target: target.host, targetRevision: target.revision, selection: target.body.selectedNext };
+          body = { target: target.host, targetRevision: target.revision, selection: { ...(target.body.selectedNext as object), profile: (current.body.selectedNext as any).profile, ...((current.body.selectedNext as any).behavior ? { behavior: (current.body.selectedNext as any).behavior } : { behavior: undefined }) } };
         }
-        const request = message(line as 'save' | 'start' | 'restart' | 'stop' | 'move',current.host,current.agent,current.revision,body);
+        const request = message(action as 'save' | 'start' | 'restart' | 'stop' | 'move',current.host,current.agent,current.revision,body);
         try { client.submit(request); } catch (error) { console.log(error instanceof Error ? error.message : 'Operation not submitted'); continue; }
         console.log(`Durably pending ${line}: ${operationLabel(request)}; publication is NOT host acceptance.`);
       }

@@ -250,4 +250,43 @@ retraction, ACP prerequisite model rejection preserving actual state, invalid St
 inertness and authorized Stop interrupting a delayed probe with no late revival.
 `slots.test.ts` now drives `restart` in the real TUI subprocess while both agents run,
 asserting X's new run and Y's byte-identical receipt/revision/run journal.
-No profile-instruction or installed-conversation Restart acceptance is claimed.
+This historical Restart-only increment had no profile-instruction acceptance; the
+continuation below adds it. Installed-conversation Restart remains unclaimed.
+
+## Behavior profiles and actual application (0aa71)
+
+- `profiles.test.ts`: canonical hash/field rejection, missing parents, explicit
+  concurrent branches and invalid references. Real relay/host ACP launch receives
+  revision A; publish B and Save leaves actual A unchanged; async Restart preflight
+  captures B while publication C and Save race it. Save conflicts, probe and actual
+  harness both receive B. Stop cancels a subsequent delayed Restart without revival.
+  Successful actual snapshots survive Restart and Stop in run history.
+- Same file loses the Restart receipt BEFORE actual relay storage, reopens the real
+  durable management client, recovers the host outbox and proves exactly two external
+  launches (original Start + Restart), unchanged journal and no third launch.
+- `slots.test.ts`: actual two-agent TUI creates/edits/publishes, selects A for X,
+  Start X, Start Y default, applies B while X runs, checks unchanged X actual and Y
+  complete journal, then Restart X with a new run/process and exact received B bytes.
+- `move.test.ts`: actual two-host TUI Move preserves source-selected profile to the
+  target despite its default configuration, records received target instructions,
+  and preserves sibling Y. The first new assertion initially ran before the fixture
+  recorded startup (spawn is not script readiness); it now awaits that explicit
+  external record before asserting bytes. No production readiness wait was weakened.
+- `installed-conversation.test.ts`: read-only installed buzz-acp/CLI and existing
+  deterministic ACP harness receive an explicit profile marker both in harness env
+  and in the runtime-generated actual ACP prompt. Three native signed replies still
+  obey owner/member/thread/model fences. This is not an installed Restart journey
+  or live model/provider proof; real Restart/profile application uses external ACP
+  and lifecycle fixtures above.
+
+Strict and installed-enabled default concurrent full-package results and exact source
+attribution are in CHECKPOINT. No test script, serial mode or containment assertion
+changes. Restart and profile deltas still need independent immutable review together.
+
+Final candidate iteration history: first default concurrent full 38/38 (29.78s).
+After run-history additions, default full 37/38 (29.53s): unchanged broker assertion
+read an existing but empty `reverse-rpc` marker. The fixture had open/truncate/write
+publication while the reader gated on existence. That marker now uses atomic
+write/rename; broker logic, timeout and assertions unchanged. Targeted broker 1/1;
+final exact executable strict + default installed-enabled full 38/38 (29.50s), natural
+exit. This captured failure does not classify the older unrecorded broker failure.

@@ -1,3 +1,4 @@
+import { Profiles } from './profiles.ts';
 import { accessSync, constants, existsSync, mkdirSync, rmdirSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -13,8 +14,9 @@ import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Eviden
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
 export type Setup = { host: string; ownerSecret: string; agentSecret: string; runner: string; args: string[]; workspace: string; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
-type Selection = { model: string; workspace: string; profile: string };
-type State = { assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | { selection: Selection; executableHash: string; run: string; evidence?: Evidence }; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
+type Selection = import('./handoff.ts').Selection;
+type ActualRun = { appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
+type State = { runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
   for (const key of ['host','ownerSecret','agentSecret','runner','workspace']) text(s[key]);
@@ -51,7 +53,7 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
   } finally { rmdirSync(lock); }
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m: Message) => void) {
+function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m: Message) => void, profiles: Profiles) {
   const agent = publicKey(setup.agentSecret);
   if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
   let state = readPrivate(path) as State;
@@ -73,10 +75,11 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
   function inventory() {
     return message('inventory',setup.host,agent,state.revision, {
+      runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
       ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
       movePreflight: preparationStage, catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
-      workspaces: [setup.workspace], profiles: ['default'], readiness: setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      workspaces: [setup.workspace], profiles: ['default', 'immutable relay revisions (use profiles)'], readiness: setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
@@ -107,7 +110,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
     }
     if (first && state.move && m.type === 'save' && m.revision === state.revision && state.assignment.assignedHost === setup.host && !Object.hasOwn(state.operations, m.id)) {
-      try { const v = selection(m.body); if (v.model === state.selected.model && v.workspace === setup.workspace && v.profile === 'default') retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
+      try { const v = selection(m.body); if (v.model === state.selected.model && v.workspace === setup.workspace && (v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
     }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
   }
@@ -125,13 +128,13 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
   }
   function prepareLocal(selected: Selection) {
     selection(selected);
-    if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || selected.workspace !== setup.workspace || selected.profile !== 'default') throw Error('Unsupported destination selection');
+    if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || selected.workspace !== setup.workspace) throw Error('Unsupported destination selection');
     try {
       if (hash(currentSetup()) !== hash(setup)) throw Error('changed');
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(setup.workspace) !== setup.workspace || !statSync(setup.workspace).isDirectory()) throw Error('Workspace changed');
-    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: selected.model };
+    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
     const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, setup.agentSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing
@@ -311,19 +314,23 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
         if (state.move && m.type === 'stop') { fields(m.body, []); finishMove('Move cancelled before grant by stop'); }
         if (m.type === 'move') {
           fields(m.body, ['target','targetRevision','selection']);
-          const target = text(m.body.target); selection(m.body.selection);
+          const target = text(m.body.target); const destination = selection(m.body.selection);
+          if (destination.profile !== state.selected.profile || hash(destination.behavior ?? null) !== hash(state.selected.behavior ?? null)) throw Error('Move must preserve source selected behavior');
           if (target === setup.host || !Number.isSafeInteger(m.body.targetRevision) || Number(m.body.targetRevision) < 0 || (state.assignment.chain?.length ?? 0) >= 24) throw Error('Invalid destination or chain limit');
+          // Reserve wire headroom for the successor, inventories and captured behavior.
+          if (Buffer.byteLength(JSON.stringify(state.assignment)) + 2 * Buffer.byteLength(JSON.stringify(m)) + 1024 > 16000) throw Error('Move lineage size limit; source unchanged');
           const prepare = message('prepare', target, agent, Number(m.body.targetRevision), { assignment: state.assignment, operation: m });
           state.move = { request: m, prepare }; save(); publish(prepare); publish(inventory()); return;
         } else if (m.type === 'save') {
-          fields(m.body,['model','workspace','profile']);
-          const selected = { model: text(m.body.model), workspace: text(m.body.workspace), profile: text(m.body.profile) };
-          if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || selected.workspace !== setup.workspace || selected.profile !== 'default') throw Error('Unsupported selection');
+          const selected = selection(m.body);
+          if (selected.behavior && hash(profiles.resolve(selected.profile)) !== hash(selected.behavior)) throw Error('Profile revision conflict');
+          if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || selected.workspace !== setup.workspace) throw Error('Unsupported selection');
           if (state.move) finishMove('Move cancelled before grant by save');
           state.selected = selected; result = 'saved; running configuration unchanged';
         } else if (m.type === 'start' || m.type === 'restart') {
           fields(m.body,[]);
           if (state.phase !== 'stopped' && !(m.type === 'restart' && state.phase === 'running')) throw Error('Already running');
+          if (Object.keys(state.runs ?? {}).length >= 1000) throw Error('Run history full; explicit local retention reconciliation needed');
           // A retracted admission never begins effects, including any spawn.
           if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
           const phaseBeforePreparation = state.phase;
@@ -351,10 +358,10 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
             if (closing || retracting(m.revision)) throw Error('Restart cancelled after Stop');
             if (prepareLocal(selected).token !== prepared.token) throw Error('Restart prepared inputs changed after Stop; assigned stopped');
           }
-          state.actual = { selection: selected, executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
+          state.actual = { selection: selected, preparedInputHash: prepared.token, appliedInstructions: { source: selected.behavior ? 'profile' : 'upstream-default', revision: selected.behavior?.revision ?? null, hash: selected.behavior ? digest(selected.behavior.instructions).toString('hex') : null }, executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
           state.phase = 'transitioning'; save();
           if (setup.mode === 'fixture') {
-            owned = spawnOwned(setup.runner, setup.args, state.actual.selection.workspace, { PATH: '/usr/bin:/bin', BEEHIVE_FIXTURE: '1' });
+            owned = spawnOwned(setup.runner, setup.args, state.actual.selection.workspace, { PATH: '/usr/bin:/bin', BEEHIVE_FIXTURE: '1', ...(selected.behavior ? { BUZZ_AGENT_SYSTEM_PROMPT: selected.behavior.instructions } : {}) });
             owned.child.stdout.resume(); owned.child.stderr.resume();
             try { await owned.ready; } catch (e) { await stopOwned(); state.phase = 'stopped'; state.actual = null; throw e; }
           } else if (setup.conversation) {
@@ -389,6 +396,7 @@ function slot(setup: Setup, path: string, currentSetup: () => Setup, publish: (m
             throw Error('Start cancelled by concurrent Stop');
           }
           state.phase = 'running';
+          state.runs ??= {}; state.runs[m.id] = structuredClone(state.actual);
         } else {
           fields(m.body,[]);
           if (state.phase !== 'stopped') {
@@ -431,6 +439,7 @@ export async function host(directory: string, url: string) {
   let client: ReturnType<typeof connect> | undefined;
   let initialized = false;
   const slots = new Map<string, ReturnType<typeof slot>>();
+  const profiles = new Profiles();
   const publish = (m: Message) => { try { client?.send(m); } catch { /* Slot outbox survives transport loss. */ } };
   try {
     const entries = installationSlots(directory);
@@ -439,14 +448,16 @@ export async function host(directory: string, url: string) {
         const current = installationSlots(directory).find(e => publicKey(e.setup.agentSecret) === publicKey(entry.setup.agentSecret));
         if (!current) throw Error('Key removed');
         return current.setup;
-      }, publish));
+      }, publish, profiles));
     }
     const setup = entries[0]!.setup;
     // Every slot is hydrated before dialing. Initial WS history may arrive in the
     // same event-loop turn as open, before the ready promise continuation.
     initialized = true;
     client = connect(url, setup.ownerSecret, m => {
-      if (!initialized || m.host !== setup.host) return;
+      if (!initialized) return;
+      profiles.receive(m);
+      if (m.host !== setup.host) return;
       const selected = slots.get(m.agent);
       if (selected) selected.receive(m);
       else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }

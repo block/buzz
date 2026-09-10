@@ -5,6 +5,88 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Behavior profiles 0aa71 — implemented application and durable actual evidence
+
+Started clean published `e6717541d4580541cd24816e062d893a49260bbc`. Candidate is
+this commit (`git rev-parse HEAD`); publication head is in the terminal result.
+Named nonsecret behavior profiles and explicit per-agent application are implemented,
+not another Restart-only prerequisite. No architecture/host/credential replacement.
+
+**Definition authority:** immutable owner-authenticated encrypted relay publications;
+`src/profiles.ts` alone owns canonical name/parent/instructions content addresses and
+lineage projection. UI and hosts replay that code, not writable prompt replicas.
+Concurrent children remain explicit branches; incomplete lineage is visible and not
+selectable. No timestamp/latest selection. Draft form → signed durable publication
+→ separate assigned-host Save/CAS acceptance → explicit Start/Restart. Current TUI
+commands: `profile-new`, `profiles`, `profile-edit <number>`, `apply <number|default>`.
+Numbered profile choices are captured from the displayed list; publishing shows
+observed affected host/agent associations and never changes them. No JSON/journal-ID
+editing, profile provider/model/credential fields or local profile admin commands.
+
+**Captured application:** selected-next contains the validated full immutable revision.
+The existing Start/Restart/Move preparation hash covers effective behavior. Launch
+never reads a mutable catalog head across awaits. Actual run retains full selection,
+profile revision, explicit instruction SHA256, prepared-input hash, executable/run
+and existing session evidence. Successful snapshots persist in per-agent `runs`,
+unmodified by later Save/Restart/Stop; inventory exposes recent hash/revision summaries.
+Old journals are not migrated or synthesized into historical proof. Default remains
+absence of an override (`upstream-default`, no invented text hash). `apply default`
+is explicit selected-next clearing. No destructive profile deletion is supported;
+immutable revisions/history remain resolvable. Bounds: 2 KiB instructions, 1,000
+versions/runs, 100 parent edges; full run history blocks Start/Restart, never Stop.
+Bounded wire/Move-lineage checks prevent oversized new grants consuming authority.
+
+**Actual external evidence:** captured instructions use established upstream
+BUZZ_AGENT_SYSTEM_PROMPT and installed BUZZ_ACP_SYSTEM_PROMPT, not a new broker prompt
+owner. Real two-agent TUI creates A, selects/starts X, starts Y default, publishes B,
+applies B while X runs (X actual A and complete Y journal unchanged), then Restart X
+with same identity/new run/process and external received B bytes. `profiles.test.ts`
+proves external ACP preflight and actual launch both receive B while publication C /
+Save races Restart; C Save conflicts, no mixed inputs. Stop cancels a later delayed
+Restart with no revival. Canonical/tampered hash, unexpected fields, missing lineage,
+branches, invalid references and stale selection tests pass. Old actual snapshot
+survives Restart/Stop. Real durable-client Restart receipt loss BEFORE relay storage
+recovers outbox on reopen, unchanged journal and exactly two launches (no extra one).
+
+Actual two-host TUI Move now preserves source-selected instructions despite target's
+default config; target external process records the same bytes, Y journal unchanged.
+Installed conversation acceptance passes the profile marker into both actual harness
+environment and the installed runtime-generated ACP prompt; three native signed
+replies still obey owner/member/thread/model fences. This is installed Start/runtime
+propagation, not installed-conversation Restart or live-model behavior proof. Actual
+Restart uses deterministic external lifecycle/ACP fixtures with new process/run;
+fixture session labels are process-scoped, not global session-uniqueness evidence.
+Instruction hash covers the profile override, not upstream orientation/memory/history.
+
+**Validation:** final strict + installed-enabled DEFAULT concurrent `npm test` **38/38**,
+zero skips/failures, natural exit **29.50s**. No serial mode/test-script changes.
+First full 38/38 29.78s; after history additions full 37/38 29.53s, exact failure
+`broker.test.ts:33`, existing-but-empty reverse-rpc marker (`'' !== 'ok'`). Fixture
+open/truncate/write vs existence-gated reader was corrected by atomic marker rename;
+broker assertion/timeout and production code unchanged. Targeted broker 1/1, then
+final full above. This does NOT classify the older unrecorded broker failure. New
+Move boundary assertion initially read before the external fixture recorded startup;
+now awaits explicit received-byte evidence before asserting, targeted 5/5. No owned
+exit/ESRCH assertion changed, no broad stress campaign. All retained logs/hashes:
+`/Users/loganj/.buzz/WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/PROFILES_0AA71/`.
+Installed runtime and CLI hashes freshly match prior pins; binary attribution remains
+separate from source. Standalone dependencies/lock unchanged. No owner private stores,
+provider/login/production operations, Rust/native changes, remote secrets or keys.
+
+**Review / next executable action:** independently review this published profile delta
+TOGETHER with predecessor Restart, especially publication/association separation,
+immutable captured inputs, history, Move behavior preservation and lost-receipt tests.
+Self-review performed; no independent new review or repo-wide/GitHub CI claimed.
+Prior CONVERSATION_MOVE review remains consumed, not reopened. Scoped live-anchor
+POSIX ownership and trusted non-cloned/non-rollback installation assumptions remain;
+no arbitrary escaped-tree/physical-host/partition/clone/rollback-safe claim.
+
+Remaining scope stays visible: local key/setup CRUD + small harness-specific wizard,
+named launch configurations and retention/history UI, Desktop harness/provider/preset/
+custom/mesh/compute parity, final real-TUI UX/live acceptance, production kind-40002/
+admission and normal service-user Databricks OAuth/live exact-model gate. Those are
+not completed or replaced by deterministic profile/Restart acceptance.
+
 ## Restart continuation dad771 — partial product handoff
 
 Started clean published `a235638e0a879c3b93bec39b8b27f415c03ab181`; candidate is
