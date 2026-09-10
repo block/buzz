@@ -40,6 +40,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aead"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
+dependencies = [
+ "crypto-common 0.2.2",
+ "inout 0.2.2",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -67,7 +77,7 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
 dependencies = [
- "aead",
+ "aead 0.5.2",
  "aes 0.8.4",
  "cipher 0.4.4",
  "ctr",
@@ -114,7 +124,7 @@ dependencies = [
  "piper",
  "polling",
  "regex-automata",
- "rustix 1.1.4",
+ "rustix",
  "rustix-openpty",
  "signal-hook 0.4.4",
  "unicode-width 0.2.2",
@@ -231,6 +241,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apple-native-keyring-store"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
+dependencies = [
+ "keyring-core",
+ "log",
+ "security-framework 3.7.0",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,14 +301,14 @@ dependencies = [
 
 [[package]]
 name = "argon2"
-version = "0.5.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
 dependencies = [
  "base64ct",
  "blake2",
- "cpufeatures 0.2.17",
- "password-hash",
+ "cpufeatures 0.3.0",
+ "password-hash 0.6.1",
 ]
 
 [[package]]
@@ -353,7 +374,7 @@ dependencies = [
  "futures-lite",
  "parking",
  "polling",
- "rustix 1.1.4",
+ "rustix",
  "slab",
  "windows-sys 0.61.2",
 ]
@@ -384,7 +405,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "event-listener",
  "futures-lite",
- "rustix 1.1.4",
+ "rustix",
 ]
 
 [[package]]
@@ -410,7 +431,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "futures-core",
  "futures-io",
- "rustix 1.1.4",
+ "rustix",
  "signal-hook-registry",
  "slab",
  "windows-sys 0.61.2",
@@ -746,6 +767,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -883,11 +910,11 @@ dependencies = [
 
 [[package]]
 name = "blake2"
-version = "0.10.6"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
 dependencies = [
- "digest 0.10.7",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -930,6 +957,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "block-padding"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "710f1dd022ef4e93f8a438b4ba958de7f64308434fa6a87104481645cc30068b"
+dependencies = [
+ "hybrid-array",
 ]
 
 [[package]]
@@ -1046,7 +1082,7 @@ dependencies = [
  "hex",
  "nix 0.31.3",
  "reqwest 0.13.4",
- "rmcp",
+ "rmcp 1.8.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1113,7 +1149,7 @@ dependencies = [
  "image",
  "infer",
  "iroh",
- "keyring",
+ "keyring 3.6.3",
  "libc",
  "mesh-llm-client",
  "mesh-llm-events",
@@ -1418,6 +1454,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cbc"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2dc9ee5f88d11e0beb842c88b33c8a5cf0d1329c4b19494af42b07dbfe8896"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1498,6 +1543,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
 dependencies = [
  "cfg-if 1.0.4",
+ "cipher 0.5.2",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
@@ -1508,11 +1554,23 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
 dependencies = [
- "aead",
+ "aead 0.5.2",
  "chacha20 0.9.1",
  "cipher 0.4.4",
- "poly1305",
+ "poly1305 0.8.0",
  "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead 0.6.1",
+ "chacha20 0.10.1",
+ "cipher 0.5.2",
+ "poly1305 0.9.1",
 ]
 
 [[package]]
@@ -1546,6 +1604,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
+ "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout 0.2.2",
 ]
@@ -1957,22 +2016,6 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crossterm"
-version = "0.28.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
-dependencies = [
- "bitflags 2.13.0",
- "crossterm_winapi",
- "mio",
- "parking_lot",
- "rustix 0.38.44",
- "signal-hook 0.3.18",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
@@ -1983,7 +2026,7 @@ dependencies = [
  "document-features",
  "mio",
  "parking_lot",
- "rustix 1.1.4",
+ "rustix",
  "signal-hook 0.3.18",
  "signal-hook-mio",
  "winapi",
@@ -2021,7 +2064,9 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
+ "getrandom 0.4.3",
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2030,7 +2075,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16182b4f39a82ec8a6851155cc4c0cda3065bb1db33651726a29e1951de0f009"
 dependencies = [
- "aead",
+ "aead 0.5.2",
  "crypto_secretbox",
  "curve25519-dalek 4.1.3",
  "salsa20",
@@ -2044,10 +2089,10 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d6cf87adf719ddf43a805e92c6870a531aedda35ff640442cbaf8674e141e1"
 dependencies = [
- "aead",
+ "aead 0.5.2",
  "cipher 0.4.4",
  "generic-array",
- "poly1305",
+ "poly1305 0.8.0",
  "salsa20",
  "subtle",
  "zeroize",
@@ -2174,9 +2219,9 @@ dependencies = [
 
 [[package]]
 name = "curve25519-dalek"
-version = "5.0.0-rc.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f359e08ca85e7bd759e1fd933ff2bccd81864c60a8fba0e259c7f822b0924bf"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
 dependencies = [
  "cfg-if 1.0.4",
  "cpufeatures 0.3.0",
@@ -2222,6 +2267,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+dependencies = [
+ "darling_core 0.24.1",
+ "darling_macro 0.24.1",
+]
+
+[[package]]
 name = "darling_core"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2249,6 +2304,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,6 +2336,17 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+dependencies = [
+ "darling_core 0.24.1",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2328,16 +2407,8 @@ version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "708b509edf7889e53d7efb0ffadd994cc6c2345ccb62f55cfd6b0682165e4fa6"
 dependencies = [
- "aes 0.8.4",
- "block-padding",
- "cbc",
  "dbus",
- "fastrand",
- "hkdf",
- "num",
- "once_cell",
  "openssl",
- "sha2 0.10.9",
  "zeroize",
 ]
 
@@ -2644,11 +2715,11 @@ dependencies = [
 
 [[package]]
 name = "ed25519-dalek"
-version = "3.0.0-rc.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b011170fe4f04665565b4110afef66774fe9ffff278f3eb5b81cc73d26e27d60"
+checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
 dependencies = [
- "curve25519-dalek 5.0.0-rc.0",
+ "curve25519-dalek 5.0.0",
  "ed25519",
  "rand_core 0.10.1",
  "serde",
@@ -2968,9 +3039,9 @@ dependencies = [
 
 [[package]]
 name = "flume"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -3316,7 +3387,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
- "rustix 1.1.4",
+ "rustix",
  "windows-link 0.2.1",
 ]
 
@@ -3659,6 +3730,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3674,11 +3747,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.10.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3850,11 +3923,11 @@ dependencies = [
 
 [[package]]
 name = "hkdf"
-version = "0.12.4"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
 dependencies = [
- "hmac 0.12.1",
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -4002,22 +4075,6 @@ dependencies = [
  "hyper-util",
  "pin-project-lite",
  "tokio",
- "tower-service",
-]
-
-[[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
  "tower-service",
 ]
 
@@ -4307,7 +4364,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "block-padding",
+ "block-padding 0.3.3",
  "generic-array",
 ]
 
@@ -4317,6 +4374,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
+ "block-padding 0.4.2",
  "hybrid-array",
 ]
 
@@ -4424,7 +4482,7 @@ version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6be73e16ee21c923aca9b3121aaa0db936f7c7ecc156ff47b8dac944c68d59a8"
 dependencies = [
- "curve25519-dalek 5.0.0-rc.0",
+ "curve25519-dalek 5.0.0",
  "data-encoding",
  "data-encoding-macro",
  "derive_more",
@@ -4745,11 +4803,31 @@ dependencies = [
  "dbus-secret-service",
  "log",
  "openssl",
- "secret-service",
  "security-framework 2.11.1",
  "security-framework 3.7.0",
  "windows-sys 0.60.2",
  "zeroize",
+]
+
+[[package]]
+name = "keyring"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2270074a3d26bcac93c1dc5d2845eb4c089e8d761ccf6e0ea266a16004640627"
+dependencies = [
+ "apple-native-keyring-store",
+ "keyring-core",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "keyring-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb1e621458ca9c51aa110bd0339d4751a056b9576bf1253aee1aa560dda0fc9d"
+dependencies = [
+ "log",
 ]
 
 [[package]]
@@ -4813,9 +4891,9 @@ checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libdbus-sys"
@@ -4839,9 +4917,9 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.8.9"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if 1.0.4",
  "windows-link 0.2.1",
@@ -4864,9 +4942,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.35.0"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4893,12 +4971,6 @@ name = "linktime-proc-macro"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c7b0a3383c2a1002d11349c92c85a666a5fb679e96c79d782cf0dbe557fd6ee"
-
-[[package]]
-name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -5140,9 +5212,9 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 
 [[package]]
 name = "mdns-sd"
-version = "0.19.2"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18148fee27e99e76dbf6e137f27727113d31f766e578d1b93a93c3615fca7081"
+checksum = "a63c9b854b5ad0812ac5969f8db92a59f28b45d0a5ae599b9a45b84c5c8a08e8"
 dependencies = [
  "fastrand",
  "flume",
@@ -5158,6 +5230,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memmem"
@@ -5176,8 +5257,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-api-client"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "hex",
  "mesh-llm-client",
@@ -5186,8 +5267,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-api-server"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "mesh-llm-api-client",
@@ -5197,17 +5278,17 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-build-info"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 
 [[package]]
 name = "mesh-llm-client"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "httparse",
  "iroh",
@@ -5229,8 +5310,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-config"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5238,15 +5319,15 @@ dependencies = [
  "semver",
  "serde",
  "skippy-protocol",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.25.12+spec-1.1.0",
  "url",
 ]
 
 [[package]]
 name = "mesh-llm-embedded-runtime"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "mesh-llm-host-runtime",
@@ -5255,13 +5336,13 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-events"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "crossterm 0.28.1",
+ "crossterm",
  "libc",
  "ratatui",
  "serde",
@@ -5272,8 +5353,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-gpu-bench"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "serde",
  "serde_json",
@@ -5282,8 +5363,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-guardrails"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "serde",
  "serde_json",
@@ -5291,8 +5372,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-hardware-profile"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "mesh-llm-native-runtime",
 ]
@@ -5328,19 +5409,19 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-host-runtime"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
- "chacha20poly1305",
+ "chacha20poly1305 0.11.0",
  "chrono",
  "clap",
- "crossterm 0.28.1",
+ "crossterm",
  "crypto_box",
  "dirs",
  "ed25519-dalek",
@@ -5351,7 +5432,7 @@ dependencies = [
  "http-body-util",
  "httparse",
  "iroh",
- "keyring",
+ "keyring 4.2.0",
  "libc",
  "mdns-sd",
  "mesh-llm-api-server",
@@ -5388,17 +5469,19 @@ dependencies = [
  "prost 0.14.4",
  "rand 0.10.2",
  "regex-lite",
- "reqwest 0.12.28",
- "rmcp",
+ "reqwest 0.13.4",
+ "rmcp 3.2.0",
  "rpassword",
  "rustls",
  "schemars 1.2.1",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "skippy-coordinator",
  "skippy-ffi",
+ "skippy-model",
+ "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
  "skippy-server",
@@ -5410,7 +5493,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5418,35 +5501,36 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",
- "zip 2.4.2",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "mesh-llm-identity"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
+ "apple-native-keyring-store",
  "argon2",
- "base64 0.22.1",
- "chacha20poly1305",
+ "base64 0.23.1",
+ "chacha20poly1305 0.11.0",
  "chrono",
  "crypto_box",
  "dirs",
  "ed25519-dalek",
  "hex",
- "keyring",
+ "keyring 4.2.0",
  "rand 0.10.2",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "zeroize",
 ]
 
 [[package]]
 name = "mesh-llm-log-store"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "chrono",
  "data-encoding",
@@ -5455,7 +5539,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "uuid",
  "windows-sys 0.61.2",
@@ -5463,19 +5547,20 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-native-runtime"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
+ "hex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "mesh-llm-node"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "mesh-llm-types",
@@ -5488,15 +5573,15 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-plugin"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "async-trait",
  "prost 0.14.4",
  "prost-build 0.14.4",
  "protoc-bin-vendored",
- "rmcp",
+ "rmcp 3.2.0",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -5505,49 +5590,50 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-plugin-manager"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "dirs",
  "flate2",
  "futures-util",
+ "hex",
  "mesh-llm-skills",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tar",
  "tempfile",
- "zip 2.4.2",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "mesh-llm-protocol"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "hex",
  "iroh",
  "prost 0.14.4",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "mesh-llm-release-footer"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "hex",
- "sha2 0.10.9",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "mesh-llm-routing"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "blake3",
  "iroh",
@@ -5557,8 +5643,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-runtime-install"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5568,10 +5654,10 @@ dependencies = [
  "mesh-llm-build-info",
  "mesh-llm-hardware-profile",
  "mesh-llm-native-runtime",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "skippy-ffi",
  "tar",
  "tempfile",
@@ -5580,23 +5666,23 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-sdk"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "mesh-llm-api-client",
  "mesh-llm-api-server",
  "mesh-llm-embedded-runtime",
  "mesh-llm-runtime-install",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "mesh-llm-skills"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5606,8 +5692,8 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-system"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5615,46 +5701,46 @@ dependencies = [
  "dirs",
  "hex",
  "libc",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "mesh-llm-build-info",
  "mesh-llm-gpu-bench",
  "mesh-llm-native-runtime",
  "mesh-llm-release-footer",
  "mesh-llm-runtime-install",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "skippy-runtime",
  "tracing",
- "zip 2.4.2",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "mesh-llm-types"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "hex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "mesh-llm-ui"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 
 [[package]]
 name = "mesh-mixture-of-agents"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "async-trait",
  "mesh-llm-guardrails",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -5663,16 +5749,16 @@ dependencies = [
 
 [[package]]
 name = "mesh-native-serving-plugin-api"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 
 [[package]]
 name = "mesh-native-serving-plugin-host"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "mesh-native-serving-plugin-api",
  "skippy-server",
  "skippy-tokenizer",
@@ -5770,8 +5856,8 @@ dependencies = [
 
 [[package]]
 name = "model-artifact"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5781,13 +5867,14 @@ dependencies = [
 
 [[package]]
 name = "model-hf"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "dirs",
+ "hex",
  "libc",
  "mesh-llm-hf-hub",
  "model-artifact",
@@ -5795,15 +5882,15 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "model-package"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5812,26 +5899,26 @@ dependencies = [
  "mesh-llm-hf-hub",
  "model-hf",
  "model-ref",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "model-ref"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "model-resolver"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "model-artifact",
@@ -5987,23 +6074,6 @@ dependencies = [
  "derive_more",
  "n0-error",
  "n0-future",
-]
-
-[[package]]
-name = "native-tls"
-version = "0.2.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe",
- "openssl-sys",
- "schannel",
- "security-framework 3.7.0",
- "security-framework-sys",
- "tempfile",
 ]
 
 [[package]]
@@ -6329,9 +6399,9 @@ dependencies = [
  "bech32 0.11.1",
  "bip39",
  "bitcoin_hashes 0.14.101",
- "cbc",
+ "cbc 0.1.2",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "getrandom 0.2.17",
  "hex",
  "instant",
@@ -6353,9 +6423,9 @@ dependencies = [
  "bech32 0.12.0",
  "bip39",
  "bitcoin_hashes 1.2.0",
- "cbc",
+ "cbc 0.1.2",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "faster-hex",
  "opaquerr",
  "rand 0.10.2",
@@ -6422,7 +6492,7 @@ dependencies = [
  "mac-notification-sys",
  "serde",
  "tauri-winrt-notification",
- "zbus 5.17.0",
+ "zbus",
 ]
 
 [[package]]
@@ -6550,7 +6620,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -6932,8 +7002,8 @@ dependencies = [
 
 [[package]]
 name = "openai-frontend"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "async-trait",
  "axum",
@@ -7271,6 +7341,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
+dependencies = [
+ "getrandom 0.4.3",
+ "phc",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7394,6 +7474,17 @@ checksum = "e9567389417feee6ce15dd6527a8a1ecac205ef62c2932bcf3d9f6fc5b78b414"
 dependencies = [
  "futures",
  "rustc_version",
+]
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
+dependencies = [
+ "base64ct",
+ "ctutils",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -7603,7 +7694,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi",
  "pin-project-lite",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -7615,7 +7706,17 @@ checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
- "universal-hash",
+ "universal-hash 0.5.1",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
+dependencies = [
+ "cpufeatures 0.3.0",
+ "universal-hash 0.6.1",
 ]
 
 [[package]]
@@ -7627,7 +7728,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "cpufeatures 0.2.17",
  "opaque-debug",
- "universal-hash",
+ "universal-hash 0.5.1",
 ]
 
 [[package]]
@@ -8344,7 +8445,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
 dependencies = [
  "cfg-if 1.0.4",
- "crossterm 0.29.0",
+ "crossterm",
  "instability",
  "ratatui-core",
 ]
@@ -8544,21 +8645,16 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "encoding_rs",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
- "mime",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -8569,7 +8665,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -8703,13 +8798,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "chrono",
+ "futures",
+ "pin-project-lite",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "rmcp"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "futures",
  "http",
  "http-body",
  "http-body-util",
+ "indexmap 2.14.0",
  "pastey",
  "pin-project-lite",
  "process-wrap",
@@ -8731,15 +8847,15 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "1.8.0"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
+checksum = "cdf1c49bd4d52014b94db0877410db273c2008f01628b0252a2e9460ad9b7fda"
 dependencies = [
- "darling 0.23.0",
+ "darling 0.24.1",
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 2.0.118",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -8767,6 +8883,16 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rsqlite-vfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -8803,9 +8929,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.37.0"
+version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",
@@ -8813,6 +8939,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -8891,19 +9018,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.13.0",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -8911,7 +9025,7 @@ dependencies = [
  "bitflags 2.13.0",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -8923,7 +9037,7 @@ checksum = "1de16c7c59892b870a6336f185dc10943517f1327447096bbb7bb32cd85e2393"
 dependencies = [
  "errno",
  "libc",
- "rustix 1.1.4",
+ "rustix",
 ]
 
 [[package]]
@@ -9041,6 +9155,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3944826ff8fa8093089aba3acb4ef44b9446a99a16f3bf4e74af3f77d340ab7d"
 
 [[package]]
+name = "safetensors"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79b079b829cb27a1c3c374341345ed2e8b2c0c839034522cee576c140bd7f846"
+dependencies = [
+ "hashbrown 0.16.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "salsa20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9150,7 +9277,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
 dependencies = [
- "password-hash",
+ "password-hash 0.5.0",
  "pbkdf2 0.12.2",
  "salsa20",
  "sha2 0.10.9",
@@ -9189,21 +9316,21 @@ dependencies = [
 
 [[package]]
 name = "secret-service"
-version = "4.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d35ad99a181be0a60ffcbe85d680d98f87bdc4d7644ade319b87076b9dbfd4"
+checksum = "5107b24b91445dd2aa449a258a1807b63240942157292354dc5bfdbeb8bc6db8"
 dependencies = [
- "aes 0.8.4",
- "cbc",
+ "aes 0.9.1",
+ "cbc 0.2.1",
  "futures-util",
- "generic-array",
+ "getrandom 0.4.3",
  "hkdf",
+ "hybrid-array",
  "num",
  "once_cell",
- "rand 0.8.6",
  "serde",
- "sha2 0.10.9",
- "zbus 4.4.0",
+ "sha2 0.11.0",
+ "zbus",
 ]
 
 [[package]]
@@ -9694,6 +9821,9 @@ name = "signature"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "simd-adler32"
@@ -9734,8 +9864,8 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skippy-cache"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "blake3",
@@ -9744,29 +9874,53 @@ dependencies = [
 
 [[package]]
 name = "skippy-coordinator"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "skippy-ffi"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.9.0",
 ]
 
 [[package]]
 name = "skippy-metrics"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
+
+[[package]]
+name = "skippy-model"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
+dependencies = [
+ "anyhow",
+ "clap",
+ "memmap2",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "skippy-package-format",
+]
+
+[[package]]
+name = "skippy-package-format"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
 
 [[package]]
 name = "skippy-protocol"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "prost 0.14.4",
  "prost-build 0.14.4",
@@ -9777,22 +9931,23 @@ dependencies = [
 
 [[package]]
 name = "skippy-runtime"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "anyhow",
  "libc",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "skippy-ffi",
+ "skippy-model",
  "tokio",
 ]
 
 [[package]]
 name = "skippy-scheduler"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "skippy-runtime",
  "thiserror 2.0.18",
@@ -9800,14 +9955,14 @@ dependencies = [
 
 [[package]]
 name = "skippy-server"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "ahash",
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "clap",
  "futures-util",
@@ -9819,7 +9974,7 @@ dependencies = [
  "opentelemetry-proto",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "skippy-cache",
  "skippy-metrics",
  "skippy-protocol",
@@ -9830,21 +9985,22 @@ dependencies = [
  "socket2",
  "tokio",
  "tonic",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "skippy-tokenizer"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "skippy-topology"
-version = "0.76.0-rc9"
-source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0-rc9#9f192c9d821991ba43d79bb15fd2f2f12e597571"
+version = "0.76.0"
+source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.76.0#557630fd0a543aecd2f2b8ef5232ec1829865115"
 dependencies = [
  "serde",
  "serde_json",
@@ -9864,13 +10020,13 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "socket-pktinfo"
-version = "0.3.2"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "927136cc2ae6a1b0e66ac6b1210902b75c3f726db004a73bc18686dcd0dcd22f"
+checksum = "612942246d0cc239cfd83af1dfd39be47f649208a3524e5e9da651910128e0ac"
 dependencies = [
  "libc",
  "socket2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9983,6 +10139,18 @@ dependencies = [
  "nom 7.1.3",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -10710,7 +10878,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "windows 0.61.3",
- "zbus 5.17.0",
+ "zbus",
 ]
 
 [[package]]
@@ -10736,7 +10904,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "windows-sys 0.60.2",
- "zbus 5.17.0",
+ "zbus",
 ]
 
 [[package]]
@@ -10907,7 +11075,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -10928,7 +11096,7 @@ checksum = "9048a889effe34a5cddee0af7f53285198b16dca3be510858d38dfdb3e62a04e"
 dependencies = [
  "bitflags 2.13.0",
  "parking_lot",
- "rustix 1.1.4",
+ "rustix",
  "signal-hook 0.3.18",
  "windows-sys 0.61.2",
 ]
@@ -11194,16 +11362,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]
@@ -11915,6 +12073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "universal-hash"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
+dependencies = [
+ "crypto-common 0.2.2",
+ "ctutils",
+]
+
+[[package]]
 name = "universal-time"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12251,7 +12419,7 @@ checksum = "016ccf01d1c58b6f8999612813e17c9b2390f7d70671428869913310f83f54b8"
 dependencies = [
  "cc",
  "downcast-rs",
- "rustix 1.1.4",
+ "rustix",
  "smallvec",
  "wayland-sys",
 ]
@@ -12263,7 +12431,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3c36a0f861ad76d0901f2800b46321410d9f73f2ea88aac0650d86c32688073"
 dependencies = [
  "bitflags 2.13.0",
- "rustix 1.1.4",
+ "rustix",
  "wayland-backend",
  "wayland-scanner",
 ]
@@ -12746,6 +12914,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
+name = "windows-native-keyring-store"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8"
+dependencies = [
+ "byteorder",
+ "keyring-core",
+ "regex",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "windows-numerics"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13205,7 +13386,7 @@ dependencies = [
  "libc",
  "log",
  "os_pipe",
- "rustix 1.1.4",
+ "rustix",
  "thiserror 2.0.18",
  "tree_magic_mini",
  "wayland-backend",
@@ -13326,7 +13507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9993aa5be5a26815fe2c3eacfc1fde061fc1a1f094bf1ad2a18bf9c495dd7414"
 dependencies = [
  "gethostname",
- "rustix 1.1.4",
+ "rustix",
  "x11rb-protocol",
 ]
 
@@ -13343,17 +13524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.4",
-]
-
-[[package]]
-name = "xdg-home"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec1cdab258fb55c0da61328dc52c8764709b249011b2cad0454c72f0bf10a1f6"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
+ "rustix",
 ]
 
 [[package]]
@@ -13547,38 +13718,6 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb97012beadd29e654708a0fdb4c84bc046f537aecfde2c3ee0a9e4b4d48c725"
-dependencies = [
- "async-broadcast",
- "async-process",
- "async-recursion",
- "async-trait",
- "enumflags2",
- "event-listener",
- "futures-core",
- "futures-sink",
- "futures-util",
- "hex",
- "nix 0.29.0",
- "ordered-stream",
- "rand 0.8.6",
- "serde",
- "serde_repr",
- "sha1 0.10.6",
- "static_assertions",
- "tracing",
- "uds_windows",
- "windows-sys 0.52.0",
- "xdg-home",
- "zbus_macros 4.4.0",
- "zbus_names 3.0.0",
- "zvariant 4.2.0",
-]
-
-[[package]]
-name = "zbus"
 version = "5.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28b97f866896a4be7aefd2b5a8e01bb6773d19a775d54ab28b4d094b9a4480e"
@@ -13599,7 +13738,7 @@ dependencies = [
  "hex",
  "libc",
  "ordered-stream",
- "rustix 1.1.4",
+ "rustix",
  "serde",
  "serde_repr",
  "tracing",
@@ -13607,22 +13746,20 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "winnow 1.0.3",
- "zbus_macros 5.17.0",
- "zbus_names 4.3.3",
- "zvariant 5.13.0",
+ "zbus_macros",
+ "zbus_names",
+ "zvariant",
 ]
 
 [[package]]
-name = "zbus_macros"
-version = "4.4.0"
+name = "zbus-secret-service-keyring-store"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "267db9407081e90bbfa46d841d3cbc60f59c0351838c4bc65199ecd79ab1983e"
+checksum = "74801d001b9e7729adb4f1825b67b398185fed424749aa3d8bacf70417137d9a"
 dependencies = [
- "proc-macro-crate 3.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.118",
- "zvariant_utils 2.1.0",
+ "keyring-core",
+ "secret-service",
+ "zbus",
 ]
 
 [[package]]
@@ -13635,20 +13772,9 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
- "zbus_names 4.3.3",
- "zvariant 5.13.0",
- "zvariant_utils 3.5.0",
-]
-
-[[package]]
-name = "zbus_names"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b9b1fef7d021261cc16cba64c351d291b715febe0fa10dc3a443ac5a5022e6c"
-dependencies = [
- "serde",
- "static_assertions",
- "zvariant 4.2.0",
+ "zbus_names",
+ "zvariant",
+ "zvariant_utils",
 ]
 
 [[package]]
@@ -13659,7 +13785,7 @@ checksum = "1039ca249fee9559680f3a9f05b55e0761fee51af4f6c1e7d8c1f31e549721d2"
 dependencies = [
  "serde",
  "winnow 1.0.3",
- "zvariant 5.13.0",
+ "zvariant",
 ]
 
 [[package]]
@@ -13754,23 +13880,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "zip"
-version = "2.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "displaydoc",
- "flate2",
- "indexmap 2.14.0",
- "memchr",
- "thiserror 2.0.18",
- "zopfli",
 ]
 
 [[package]]
@@ -13881,19 +13990,6 @@ dependencies = [
 
 [[package]]
 name = "zvariant"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2084290ab9a1c471c38fc524945837734fbf124487e105daec2bb57fd48c81fe"
-dependencies = [
- "endi",
- "enumflags2",
- "serde",
- "static_assertions",
- "zvariant_derive 4.2.0",
-]
-
-[[package]]
-name = "zvariant"
 version = "5.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cf057bb00bf5c9ad77abb6147b0ca4818236a1858416e9d988e40d6322fefa7"
@@ -13902,21 +13998,8 @@ dependencies = [
  "enumflags2",
  "serde",
  "winnow 1.0.3",
- "zvariant_derive 5.13.0",
- "zvariant_utils 3.5.0",
-]
-
-[[package]]
-name = "zvariant_derive"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73e2ba546bda683a90652bac4a279bc146adad1386f25379cf73200d2002c449"
-dependencies = [
- "proc-macro-crate 3.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.118",
- "zvariant_utils 2.1.0",
+ "zvariant_derive",
+ "zvariant_utils",
 ]
 
 [[package]]
@@ -13929,18 +14012,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
- "zvariant_utils 3.5.0",
-]
-
-[[package]]
-name = "zvariant_utils"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51bcff7cc3dbb5055396bcf774748c3dab426b4b8659046963523cee4808340"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
+ "zvariant_utils",
 ]
 
 [[package]]
