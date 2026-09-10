@@ -4,6 +4,10 @@ class _ComposeAuthorizationCancelled implements Exception {
   const _ComposeAuthorizationCancelled();
 }
 
+class _ComposeCommunityChanged implements Exception {
+  const _ComposeCommunityChanged();
+}
+
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
@@ -59,7 +63,7 @@ Future<void> _sendTextOnlyDraft({
     delivered = true;
   } on _ComposeAuthorizationCancelled {
     restoreClearedDraft();
-  } on StateError {
+  } on _ComposeCommunityChanged {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);
   } catch (error) {

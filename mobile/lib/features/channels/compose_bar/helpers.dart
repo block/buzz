@@ -1,5 +1,35 @@
 part of '../compose_bar.dart';
 
+void _reportComposeSendError(
+  BuildContext context,
+  Object error,
+  VoidCallback? checkPreparationCurrent,
+) {
+  var displayError = error;
+  var communityChanged = false;
+  // Failed awaits need the same scope/edit classification as success.
+  try {
+    checkPreparationCurrent?.call();
+    if (error is _ComposeAuthorizationCancelled) return;
+  } on _ComposeAuthorizationCancelled {
+    return;
+  } on _ComposeCommunityChanged {
+    communityChanged = true;
+  } on Exception catch (currentError) {
+    displayError = currentError;
+  }
+  if (context.mounted) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (communityChanged) {
+      _reportSendCancelledByCommunitySwitch(messenger);
+    } else {
+      messenger?.showSnackBar(
+        SnackBar(content: Text(_composeSendErrorMessage(displayError))),
+      );
+    }
+  }
+}
+
 String _composerDraftIdentity(WidgetRef ref) =>
     '${ref.watch(relayConfigProvider).baseUrl}'
     ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
@@ -450,6 +480,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   required bool canAddMembers,
   required VoidCallback ensureCurrent,
   required VoidCallback onAccepted,
+  required Future<bool> Function(String, String) authorizeWrite,
 }) async {
   final pending = [
     for (final pubkey in agentPubkeys) ([pubkey], 'bot'),
@@ -469,8 +500,10 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   final notAdded = <String>[];
   final errors = <String>[];
   for (final (pubkeys, role) in pending) {
+    ensureCurrent();
+    if (!await authorizeWrite(pubkeys.single, role)) continue;
+    ensureCurrent();
     try {
-      ensureCurrent();
       await channelActions.addMembers(
         channelId: channelId,
         pubkeys: pubkeys,
@@ -480,7 +513,10 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
       ensureCurrent();
     } on _ComposeAuthorizationCancelled {
       rethrow;
+    } on _ComposeCommunityChanged {
+      rethrow;
     } on StateError {
+      ensureCurrent();
       rethrow;
     } catch (error) {
       notAdded.addAll(
@@ -517,6 +553,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   required String channelId,
   required List<MentionCandidate> selectedMentions,
   required String? currentPubkey,
+  required Map<String, SelectedMentionAuthorization> evidence,
 }) async {
   final none = _NonMemberMentionScan(
     channelId: channelId,
@@ -533,9 +570,6 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   ).wait;
   final channel = channels.firstWhere((candidate) => candidate.id == channelId);
   if (channel.isDm) return none;
-  final memberPubkeys = {
-    for (final member in members) member.pubkey.toLowerCase(),
-  };
   String? selfRole;
   if (currentPubkey != null) {
     final self = currentPubkey.toLowerCase();
@@ -552,8 +586,9 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   final seen = <String>{};
   for (final candidate in selectedMentions) {
     final pubkey = candidate.pubkey.toLowerCase();
-    if (memberPubkeys.contains(pubkey) || !seen.add(pubkey)) continue;
-    if (candidate.isAgent) {
+    final fresh = evidence[pubkey]!;
+    if (fresh.isMember || !seen.add(pubkey)) continue;
+    if (fresh.invitationRole == 'bot') {
       agentPubkeys.add(pubkey);
     } else {
       humans.add(candidate);
@@ -621,8 +656,7 @@ class _OutgoingMentions {
       case _NonMemberMentionChoice.invite:
         _inviteAgents = true;
         _invitedHumanPubkeys = [
-          for (final candidate in nonMembers)
-            if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+          for (final candidate in nonMembers) candidate.pubkey.toLowerCase(),
         ];
       case _NonMemberMentionChoice.sendWithoutInviting:
         demote(nonMembers.map((candidate) => candidate.pubkey));
@@ -635,15 +669,19 @@ class _OutgoingMentions {
     required _NonMemberMentionScan scan,
     required ScaffoldMessengerState? messenger,
     required VoidCallback ensureCurrent,
+    required Future<bool> Function(String, String) authorizeWrite,
   }) async {
     final outcome = await _addMentionedNonMembers(
       channelActions,
       channelId: scan.channelId,
       agentPubkeys: _inviteAgents ? scan.agentPubkeys : const [],
-      humanPubkeys: _invitedHumanPubkeys,
+      humanPubkeys: _invitedHumanPubkeys
+          .where((key) => !scan.agentPubkeys.contains(key))
+          .toList(),
       canAddMembers: scan.canAddMembers,
       ensureCurrent: ensureCurrent,
       onAccepted: () => acceptedInvitations++,
+      authorizeWrite: authorizeWrite,
     );
     if (outcome.notAdded.isNotEmpty) {
       throw Exception('Message not sent. ${outcome.errors.join(' ')}');

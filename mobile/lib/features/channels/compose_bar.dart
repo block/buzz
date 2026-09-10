@@ -49,6 +49,7 @@ import 'voice_note_composer_recorder.dart';
 import 'voice_note_recording.dart';
 
 part 'compose_bar/helpers.dart';
+part 'compose_bar/selected_mention_preparation.dart';
 part 'compose_bar/agent_mention_labels.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/draft_lifecycle.dart';
