@@ -285,11 +285,15 @@ async fn real_pi_preserves_buzz_prompt_and_launch_skills_on_restore() {
     )
     .await
     .unwrap();
-    let map: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(home.join(".pi/pi-acp/session-map.json")).unwrap(),
-    )
-    .unwrap();
-    let transcript = map["sessions"][&id]["sessionFile"].as_str().unwrap();
+    let metadata = std::fs::read_dir(home.join(".pi/buzz-pi-acp/sessions"))
+        .unwrap()
+        .find_map(|entry| {
+            let contents = std::fs::read_to_string(entry.ok()?.path()).ok()?;
+            let metadata: serde_json::Value = serde_json::from_str(&contents).ok()?;
+            (metadata["session"]["sessionId"].as_str() == Some(id.as_str())).then_some(metadata)
+        })
+        .expect("adapter should persist metadata for the new session");
+    let transcript = metadata["session"]["sessionFile"].as_str().unwrap();
     let timestamp = "2026-01-01T00:00:00.000Z";
     std::fs::create_dir_all(std::path::Path::new(transcript).parent().unwrap()).unwrap();
     std::fs::write(transcript, format!("{}\n{}\n",
