@@ -356,6 +356,27 @@ test("setup distinguishes a missing CLI from an installed desktop app", async ({
   ).toHaveAttribute("data-onboarding-direction", "backward");
 });
 
+test("setup explains when an installed ACP adapter needs updating", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("codex", "adapter_outdated", { status: "unknown" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.getByTestId("onboarding-runtime-details-codex").click();
+  await expect(
+    page.getByTestId("onboarding-harness-setup-guide-card"),
+  ).toContainText("Codex needs an ACP adapter update.");
+});
+
 test("a ready harness opens its provider settings without an intermediate page", async ({
   page,
 }) => {

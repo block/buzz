@@ -30,6 +30,14 @@ export function runtimeSupportsConnectionMethod(
   ).has(runtimeId);
 }
 
+export function runtimeUnavailableDescription(
+  runtime: AcpRuntimeCatalogEntry,
+): string {
+  return runtime.availability === "adapter_outdated"
+    ? `${runtime.label} needs an ACP adapter update.`
+    : `${runtime.label} is not detected on this computer.`;
+}
+
 export function getRuntimesForConnectionMethod(
   runtimes: readonly AcpRuntimeCatalogEntry[],
   method: HarnessConnectionMethod,

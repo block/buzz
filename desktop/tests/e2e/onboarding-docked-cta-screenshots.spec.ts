@@ -17,7 +17,7 @@ const NCRYPTSEC =
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
-async function expectSharedCardGeometry(page: Page, expectedWidth = 800) {
+async function expectSharedCardGeometry(page: Page, expectedWidth = 610) {
   const geometry = await page
     .getByTestId("onboarding-content-card")
     .evaluate((element) => {

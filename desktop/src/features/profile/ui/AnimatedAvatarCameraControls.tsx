@@ -45,7 +45,8 @@ export function AnimatedAvatarCameraControls({
 }: AnimatedAvatarCameraControlsProps) {
   const showCameraAction = Boolean(onRetry || isLive);
   const usesAnimatedStack = stackCameraOptions && showCameraPicker && !helpText;
-  const cameraAction = showCameraAction ? (
+  const reserveCameraAction = !stackCameraOptions || showCameraAction;
+  const cameraAction = reserveCameraAction ? (
     <div className="h-14 pt-2">
       {onRetry ? (
         <Button
@@ -120,9 +121,7 @@ export function AnimatedAvatarCameraControls({
       {usesAnimatedStack ? (
         <div className="min-h-0 overflow-hidden">{cameraAction}</div>
       ) : null}
-      {!usesAnimatedStack && (!stackCameraOptions || showCameraAction)
-        ? cameraAction
-        : null}
+      {!usesAnimatedStack && reserveCameraAction ? cameraAction : null}
     </div>
   );
 }

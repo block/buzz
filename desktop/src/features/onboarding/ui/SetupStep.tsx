@@ -25,6 +25,7 @@ import {
 import {
   getRuntimesForConnectionMethod,
   type HarnessConnectionMethod,
+  runtimeUnavailableDescription,
 } from "./harnessConnectionOptions";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { useOnboardingCardLayout } from "./OnboardingCard";
@@ -36,7 +37,6 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import type { SetupStepActions, SetupStepState } from "./types";
-
 type SetupStepProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
@@ -893,7 +893,7 @@ function RuntimeSetupGuide({
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-foreground">{label}</p>
               <p className="mt-0.5 text-xs leading-5 text-foreground/70">
-                {label} is not detected on this computer.
+                {runtimeUnavailableDescription(runtime)}
               </p>
             </div>
             <Button
