@@ -23,8 +23,8 @@ test('v3 actual local wizard: immutable replacement, neutral normal conversion, 
   const directory = join(root, 'host'), file = join(root, 'credentials.json'), credentials = isolatedFileCredentials(file);
   const owner = newKey(), secret = newKey(), agent = publicKey(secret);
   const setup = validateSetup({ host: 'v3-local', ownerPublic: publicKey(owner), mode: 'goose', runner: realpathSync(process.execPath), args: ['acp'], workspace: root, serviceHome: root, configDirectory: root, gooseProvider: 'fixture', gooseModels: ['a'] });
-  async function cli(responses: [string, string, (() => void)?][], success = true) {
-    const child = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), 'src/cli.ts', 'local-setup', directory], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: file }, stdio: ['pipe', 'pipe', 'pipe'] });
+  async function cli(responses: [string, string, (() => void)?][], success = true, command = ['local-setup', directory]) {
+    const child = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), 'src/cli.ts', ...command], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: file }, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '', cursor = 0; child.stdout.on('data', b => output += b); child.stderr.on('data', b => output += b);
     const exited = new Promise(resolve => child.on('close', resolve));
     try {
@@ -48,6 +48,11 @@ test('v3 actual local wizard: immutable replacement, neutral normal conversion, 
     // A malformed synthetic credential file makes ANY read fail. Neutral wizard paths
     // must still work; the fixture loader prevents accidental native-store access.
     writeFileSync(file, 'invalid JSON');
+    const genesisFile = join(root, 'exported-genesis.json');
+    await cli([], true, ['assignment-export', directory, genesisFile, agent]);
+    assert.deepEqual(readPrivate(genesisFile), (readPrivate(journal) as any).assignment.genesis);
+    assert.match(await cli([], true, ['auth-info', directory]), /Goose/);
+    assert.match(await cli([], false, ['conversation-setup', directory]), /NEW reference/);
     await cli(normal('yes'));
     const entries = installationPublicSlots(directory), fingerprint = bindingFingerprint(entries[0]!.bindings.default!);
     assert.equal(entries[0]!.bindings.default!.conversation, undefined);

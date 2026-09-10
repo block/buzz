@@ -1,3 +1,4 @@
+import { installationPublicSlots } from './slots.ts';
 import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
 import { readHostIdentity } from './host-identity.ts';
 import { verifyHostRegistration } from './host-registration.ts';
@@ -247,7 +248,7 @@ async function main() {
     importSlotKey(dir, agent, secret);
     console.log(`Local key restored for ${agent}; retained assignment and history unchanged. Start still requires this host's assignment. No keys or sessions transferred.`);
   } else if (command === 'assignment-export') {
-    const entries = installationSlots(resolve(text(args[0])));
+    const entries = installationPublicSlots(resolve(text(args[0])));
     const entry = args[2] ? entries.find(e => e.agent === args[2]) : entries.length === 1 ? entries[0] : undefined;
     if (!entry) throw Error('Specify agent public key after export filename for multi-slot host');
     const state = object(readPrivate(entry.path));
@@ -266,6 +267,7 @@ async function main() {
     } finally { ui.close(); }
   } else if (command === 'conversation-setup') {
     const dir = resolve(text(args[0]));
+    if (object(readPrivate(join(dir, 'setup.json'))).version === 3) throw Error('Immutable public bindings cannot be rewritten: use local-setup action normal to create a NEW reference; identity credentials are not required');
     const lock = join(dir, 'host.lock');
     mkdirSync(lock, { mode: 0o700 }); // Same atomic exclusion as host startup; never remove a competing lock.
     try {
@@ -277,7 +279,7 @@ async function main() {
       throw Error('Immutable bindings cannot be rewritten: use migrate-slots first for a legacy installation, then local-setup action normal to convert the selected ACP binding to a NEW reference');
     } finally { rmdirSync(lock); }
   } else if (command === 'auth-info') {
-    const entries = installationSlots(resolve(text(args[0])));
+    const entries = installationPublicSlots(resolve(text(args[0])));
     const setup = args[1] ? entries[0]!.bindings[text(args[1])] : entries[0]!.setup;
     if (!setup) throw Error('Unknown local binding');
     if (setup.mode === 'diagnostic-acp') { console.log('Setup/diagnostic only: authentication unverified, no model/native profile contract. Configure locally as the service user; no login/probe was run.'); return; }
