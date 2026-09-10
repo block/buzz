@@ -11307,11 +11307,12 @@ function disconnectMockSocket(id: number) {
   sendWsClose(socket.handler);
 }
 
-export function maybeInstallE2eTauriMocks() {
+export function maybeInstallE2eTauriMocks(options?: { nativeSmoke?: boolean }) {
   if (installed) {
     return;
   }
 
+  const nativeSmoke = options?.nativeSmoke ?? false;
   const config = getConfig();
   if (!config) {
     return;
@@ -11384,10 +11385,25 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPendingEntityDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
-  if (config.mock?.windowLabel) {
+  // The installed Tauri runtime defines `window.isTauri` via
+  // `Object.defineProperty` (webview.rs), non-writable and non-configurable
+  // — assigning it under a native-smoke run would throw the same class of
+  // TypeError `mockWindows` below is guarded against. Not reachable with the
+  // current default e2e config (no `windowLabel` set), but any config that
+  // does set one must not touch it during a native-smoke run either.
+  if (!nativeSmoke && config.mock?.windowLabel) {
     (window as Window & { isTauri?: boolean }).isTauri = true;
   }
-  mockWindows(config.mock?.windowLabel ?? "main");
+  if (!nativeSmoke) {
+    // `mockWindows` assigns `window.__TAURI_INTERNALS__.metadata`. The
+    // installed Tauri runtime defines that same property via
+    // `Object.defineProperty` (webview.rs), non-writable and
+    // non-configurable, so calling this under a native-smoke run throws the
+    // same class of TypeError — and it would additionally replace the real
+    // native window/webview metadata with fake data. A native-smoke run
+    // keeps the real native metadata.
+    mockWindows(config.mock?.windowLabel ?? "main");
+  }
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
@@ -15119,23 +15135,36 @@ export function maybeInstallE2eTauriMocks() {
     handleMockCommand(command, payload ?? null);
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
-  mockIPC(handleMockCommand, { shouldMockEvents: true });
-  const tauriInternals = (
-    window as typeof window & {
-      __TAURI_INTERNALS__: {
-        listen?: (
-          event: string,
-          callback: () => void,
-        ) => Promise<() => Promise<void>>;
-      };
-    }
-  ).__TAURI_INTERNALS__;
-  // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
-  // so their listeners observe the same events emitted by application test seams.
-  tauriInternals.listen = async (event, callback) => {
-    const unlisten = await listen(event, () => callback());
-    return async () => unlisten();
-  };
+
+  // A real native smoke run must not call `mockIPC`: that helper replaces
+  // both invoke and callback/event machinery, and the invoke split for
+  // native-smoke (fourteen `plugin_*` commands and Tauri's
+  // `plugin:event|listen`/`emit`/`emit_to`/`unlisten` reach the real native
+  // invoke; every other command reaches `handleMockCommand` above) is
+  // already handled at the module level by `vite.config.ts`'s e2e-only
+  // alias of `@tauri-apps/api/core` to `tauriCoreNativeSmokeShim.ts` — see
+  // that file for why this can't be done by patching
+  // `window.__TAURI_INTERNALS__` at runtime. Native event dispatch is
+  // therefore left untouched here too.
+  if (!nativeSmoke) {
+    mockIPC(handleMockCommand, { shouldMockEvents: true });
+    const tauriInternals = (
+      window as typeof window & {
+        __TAURI_INTERNALS__: {
+          listen?: (
+            event: string,
+            callback: () => void,
+          ) => Promise<() => Promise<void>>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
+    // so their listeners observe the same events emitted by application test seams.
+    tauriInternals.listen = async (event, callback) => {
+      const unlisten = await listen(event, () => callback());
+      return async () => unlisten();
+    };
+  }
 
   installed = true;
 }

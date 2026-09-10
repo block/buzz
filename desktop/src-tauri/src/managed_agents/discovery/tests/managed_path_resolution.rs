@@ -133,8 +133,8 @@ fn cheap_discovery_never_spawns_login_shell_even_when_cold() {
     use std::fs;
     use tempfile::tempdir;
 
-    // Serialize with every other test that spawns a login shell: the spawn
-    // counter and the PATH/login-shell caches are process-global.
+    // Serialize with every other test that mutates the process-global PATH and
+    // login-shell caches. The spawn counter is scoped to this test thread.
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _registry = registry_test_lock();
 

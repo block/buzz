@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added browser plugins to Buzz Desktop on macOS. Users can install trusted native plugins, browse websites, and disable or uninstall plugins in Settings.
+
 ## v0.5.23
 
 ### Desktop and shared changes

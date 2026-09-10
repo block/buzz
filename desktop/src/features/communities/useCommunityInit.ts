@@ -42,6 +42,7 @@ import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useS
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
+import { closeActiveBrowserSession } from "@/features/plugins/useBrowserSession";
 
 import {
   initFirstCommunity,
@@ -61,6 +62,11 @@ async function resetCommunityState({
 }: {
   resetAvatarState: boolean;
 }): Promise<void> {
+  // A browser hook can't observe the next community id once App.tsx unmounts
+  // the keyed community subtree, so this closes first — before relay
+  // disconnect or any other reset — and propagates a failure so the next
+  // community waits rather than applying while a stale session is closing.
+  await closeActiveBrowserSession();
   relayClient.disconnect();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();

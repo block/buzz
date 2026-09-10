@@ -35,6 +35,8 @@ mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
 mod persona_catalog;
+/// Headless browser plugin package and session service.
+pub mod plugin_host;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
@@ -145,6 +147,30 @@ pub fn run() {
         )
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
+                .js_init_script(if plugin_host::commands::plugin_browser_smoke_enabled() {
+                    r#"(() => {
+                        const report = (message) => {
+                            window.__TAURI_INTERNALS__.invoke('plugin_browser_smoke_js_diagnostic',
+                                { message }).catch(() => {});
+                        };
+                        for (const level of ['log', 'warn', 'error']) {
+                            const original = console[level].bind(console);
+                            console[level] = (...values) => {
+                                original(...values);
+                                report(level + ': ' + values.map(String).join(' '));
+                            };
+                        }
+                        window.addEventListener('error', (event) =>
+                            report('error: ' + (event.error?.stack || event.message)));
+                        window.addEventListener('unhandledrejection', (event) =>
+                            report('unhandledrejection: ' + (event.reason?.stack || event.reason)));
+                        window.addEventListener('DOMContentLoaded', () =>
+                            report('DOMContentLoaded: ' + location.href));
+                        report('initialization: ' + location.href);
+                    })();"#
+                } else {
+                    ""
+                })
                 .on_webview_ready(|webview| {
                     if webview.label() != "main" {
                         return;
@@ -241,6 +267,9 @@ pub fn run() {
                 tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
+
+            app.manage(plugin_host::build_plugin_host(&app_handle)?);
+            app.manage(plugin_host::commands::LoadDeadlines::default());
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -872,6 +901,21 @@ pub fn run() {
             tray_menu::take_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
+            plugin_host::commands::plugin_pick_directory,
+            plugin_host::commands::plugin_install,
+            plugin_host::commands::plugin_list,
+            plugin_host::commands::plugin_set_enabled,
+            plugin_host::commands::plugin_uninstall,
+            plugin_host::commands::plugin_browser_open,
+            plugin_host::commands::plugin_browser_navigate,
+            plugin_host::commands::plugin_browser_back,
+            plugin_host::commands::plugin_browser_forward,
+            plugin_host::commands::plugin_browser_reload,
+            plugin_host::commands::plugin_browser_set_bounds,
+            plugin_host::commands::plugin_browser_set_visible,
+            plugin_host::commands::plugin_browser_close,
+            plugin_host::commands::plugin_browser_smoke_enabled,
+            plugin_host::commands::plugin_browser_smoke_js_diagnostic,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

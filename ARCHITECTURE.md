@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-Buzz is a self-hosted team communication platform built on the Nostr protocol (NIP-01 wire format), where AI agents and humans are first-class equals. Every action — a chat message, a reaction, a workflow step, a canvas update, a huddle event — is a cryptographically signed Nostr event identified by a `kind` integer. Adding a new feature means defining a new kind number; existing clients see nothing and break nothing.
+Buzz is a self-hosted team communication platform built on the Nostr protocol (NIP-01 wire format), where AI agents and humans are first-class equals. Every relay-backed action — a chat message, a reaction, a workflow step, a canvas update, a huddle event — is a cryptographically signed Nostr event identified by a `kind` integer. Adding a relay-backed feature means defining a new kind number; the plugin proposal would add Desktop-local host-owned extension points if implemented. See the [proposed plugin architecture](docs/plugin-system.md).
 
-The relay is the single source of truth. All reads and writes flow through it. There is no peer-to-peer event exchange, no gossip, no replication — just clients connecting to one relay over WebSocket, and the relay enforcing auth, verifying signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
+The relay is the source of truth for relay-backed state. Core reads and writes flow through it. Under the plugin proposal, Desktop-local plugin settings, caches, and child-process work would be separate; external publisher services would remain authoritative for their own state. There is no peer-to-peer event exchange, no gossip, no replication — clients connect to one relay over WebSocket, and the relay enforces auth, verifies signatures, persists events, fans out to subscribers, indexes for search, and triggers automation.
 
 A Buzz **community** is the tenant-visible workspace selected by the request host.
 The self-hosted default remains one host, one relay process, one implicit
@@ -94,13 +94,13 @@ buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
+**Key architectural principle:** The relay is the source of truth for relay-backed state. `buzz-relay` orchestrates all relay subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. Under the plugin proposal, a separate Tauri host path would handle Desktop plugins; those plugins could not register relay kinds, Tauri commands, routes, settings panels, or CLI subcommands. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
 ---
 
 ## 2. The Protocol
 
-Buzz uses Nostr NIP-01 on the wire. Every action is a JSON event with six fields:
+Buzz uses Nostr NIP-01 on the wire. Every relay action is a JSON event with six fields:
 
 ```json
 {
@@ -113,7 +113,7 @@ Buzz uses Nostr NIP-01 on the wire. Every action is a JSON event with six fields
 }
 ```
 
-The `kind` integer is the only dispatch switch. The relay routes, stores, and fans out events based on kind. Clients filter subscriptions by kind. New feature = new kind number = zero breaking changes to existing clients.
+The `kind` integer is the only dispatch switch for relay events. The relay routes, stores, and fans out events based on kind. Clients filter subscriptions by kind. New relay feature = new kind number = zero breaking changes to existing clients. Under the plugin proposal, a Desktop plugin contribution would use a host registry instead.
 
 ### Kind Ranges
 
@@ -760,10 +760,21 @@ desktop `link_preview` (SSRF check).
 
 ### Access Control
 
-- Channel membership is the only gate — enforced by the relay at every operation
+- Channel membership is the relay-content gate — under the plugin proposal, plugin execution would also require trusted package identity, manifest grants, policy, and user consent
 - REQ handler checks access before subscription registration — no race window for private channel leaks
 - TOCTOU-safe membership operations: all check-then-modify sequences run inside Postgres transactions
 - Approval tokens: UUID (CSPRNG), stored as SHA-256 hash, single-use enforced with `AND status = 'pending'` in UPDATE
+
+### Desktop plugin system (proposed, not implemented)
+
+The Tauri backend would host signed native MCP stdio plugins in child processes
+and pass only bounded, community-scoped resources and named actions. React would
+render host-owned components from validated view data. Plugins could not register
+relay kinds, Tauri commands, routes, settings panels, or CLI subcommands. Native
+plugins are trusted same-user processes: process separation handles ordinary
+crashes and hangs but does not prevent access to local files, sockets, keychain
+state, or process-group escape. Plugin work is not guaranteed while Desktop is
+closed. See [Plugin System](docs/plugin-system.md).
 
 ### Webhook Security
 

@@ -26,8 +26,21 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         if let Err(error) = shutdown_managed_agents(app) {
             eprintln!("buzz-desktop: failed to stop managed agents: {error}");
         }
+        shutdown_plugin_host(app);
         #[cfg(feature = "mesh-llm")]
         shutdown_mesh_runtime(app);
+    }
+}
+
+/// Synchronously invalidates every plugin session and terminates its process
+/// group (`SIGTERM` then bounded `SIGKILL`), independent of any async
+/// runtime — safe to call from the blocked main thread during app exit or
+/// signal handling.
+fn shutdown_plugin_host(app: &tauri::AppHandle) {
+    if let Some(host) = app.try_state::<std::sync::Arc<crate::plugin_host::PluginHost>>() {
+        if let Err(error) = host.shutdown() {
+            eprintln!("buzz-desktop: failed to stop plugin host: {error:?}");
+        }
     }
 }
 
@@ -47,6 +60,7 @@ pub(crate) fn install_signal_handler(
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
             let _ = shutdown_managed_agents(&app);
+            shutdown_plugin_host(&app);
             #[cfg(feature = "mesh-llm")]
             shutdown_mesh_runtime(&app);
         }
