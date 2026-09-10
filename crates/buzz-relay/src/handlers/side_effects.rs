@@ -1327,6 +1327,7 @@ async fn handle_put_user(
         )
         .await?;
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
+    state.invalidate_all_accessible_channels(tenant);
 
     let actor_hex = hex::encode(&actor_bytes);
     let target_hex = hex::encode(&target_pubkey);
@@ -1390,6 +1391,7 @@ async fn handle_remove_user(
         .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
         .await?;
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
+    state.invalidate_all_accessible_channels(tenant);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
 
@@ -1743,6 +1745,8 @@ async fn handle_delete_event_side_effect(
         warn!(target_event = %hex::encode(&target_id), "event already deleted or not found");
         return Ok(()); // No-op: skip system message to avoid false audit records.
     }
+
+    state.invalidate_all_accessible_channels(tenant);
 
     // Thread counters were decremented in the same transaction — push a fresh
     // relay-signed 39005 so live badge counts also count *down*.

@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "ES2022", "DOM", "DOM.Iterable"],
+    /* Node types are for the tests only — `src/shared/tokens/registry.test.ts`
+       reads `tokens.css` as text to assert the registry documents tokens that
+       actually exist. It cannot use Vite's `?raw`, which returns an empty
+       string for a `.css` file. No app code imports a Node module. */
+    "types": ["node", "vite/client"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "paths": { "@/*": ["./src/*"] },
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}

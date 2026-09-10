@@ -1531,11 +1531,22 @@ async fn repair_requested_channel_access(
             if accessible_channels.contains(&channel_id) {
                 continue;
             }
-            let is_member = state
+            let direct_member = state
                 .db
                 .is_member(tenant.community(), channel_id, pubkey_bytes)
                 .await
                 .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
+            let is_member = if direct_member {
+                true
+            } else {
+                state
+                    .db
+                    .has_session_parent_access(tenant.community(), channel_id, pubkey_bytes)
+                    .await
+                    .map_err(|e| {
+                        internal_error(&format!("Session parent access confirmation: {e}"))
+                    })?
+            };
             crate::handlers::req::resolve_request_local_access(
                 accessible_channels,
                 channel_id,

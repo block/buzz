@@ -1,0 +1,98 @@
+@layer components {
+  /**
+   * Inline chip — a reference to a person, agent, channel, message, or link,
+   * sitting in a line of text. Shared by the composer and the conversation, so
+   * the same reference looks identical whether it is being written or read.
+   *
+   * The design gives every kind one treatment: an accent tint behind primary
+   * text. Kinds are told apart by their trigger character and, where the label
+   * alone is ambiguous, a leading icon — not by colour. That is deliberate:
+   * five colours for five kinds would spend the whole palette on a distinction
+   * the sigil already makes.
+   */
+  .inline-chip {
+    display: inline-flex;
+    max-width: 16rem;
+    align-items: center;
+    gap: var(--space-chip-gap);
+    border: 0;
+    border-radius: var(--radius-chip);
+    padding-inline: var(--space-chip-inset);
+    background: var(--purple-3);
+    /* Primary text, not accent text. The tint is doing the colour work, so the
+       label stays the same weight as the sentence it sits in — a chip marks a
+       reference, it does not shout. */
+    color: var(--text-primary);
+    font: inherit;
+    /* Hugs the text it sits in rather than stretching the line. */
+    line-height: 1.35;
+    vertical-align: baseline;
+    /* A chip is an object: dragging or double-clicking must not select into
+       its label the way it would with text. */
+    user-select: none;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      color var(--duration-state) var(--easing-state);
+  }
+
+  button.inline-chip {
+    cursor: pointer;
+  }
+
+  button.inline-chip:hover,
+  html[data-keyboard-navigation] button.inline-chip:focus-visible,
+  button.inline-chip[data-popup-open] {
+    background: var(--purple-4);
+  }
+
+  html[data-keyboard-navigation] .inline-chip:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  /**
+   * Unresolvable reference. Neutral fill and lesser text: the chip is still a
+   * real reference, but there is no name to show and nothing to open, so it
+   * reads as inert rather than pretending to be actionable.
+   */
+  .inline-chip[data-state="unresolved"] {
+    background: var(--neutral-2);
+    color: var(--text-tertiary);
+  }
+
+  .inline-chip-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /**
+   * Kind icon, for the kinds whose label does not identify itself.
+   * A person and an agent carry `@`, a channel carries `#`; a message and a
+   * link have no sigil a reader would recognise, so they get a glyph.
+   *
+   * Sized in `em` so it tracks the surrounding text through the font-size
+   * preference and keyboard zoom rather than freezing at one size.
+   */
+  .inline-chip-icon {
+    width: 1.1em;
+    height: 1.1em;
+    flex: 0 0 auto;
+    /* Optically centred against lowercase text rather than the line box. */
+    margin-block-start: -0.05em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inline-chip {
+      transition-duration: 0ms;
+    }
+  }
+
+  /* The editor's wrapper around a chip node. Must not introduce its own box:
+     any padding or display change here shifts the caret target at the chip's
+     edges, which is the one boundary the browser already gets wrong. */
+  .chip-node-view {
+    display: inline;
+  }
+}

@@ -1,0 +1,82 @@
+/* Preserve the library's layout selectors and pointer behavior. Appearance is
+   supplied through its documented theme variables, scoped to this comparison. */
+@import "flexlayout-react/style/rounded.css" layer(flex-vendor);
+
+@layer components {
+  .flex-workspace-comparison {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-section-gap);
+    --flexlayout-font-family: var(--font-sans);
+    --flexlayout-font-size: var(--text-body);
+    --flexlayout-font-weight: 400;
+    --flexlayout-tab-button-radius: var(--radius-control);
+    --flexlayout-border-button-radius: var(--radius-control);
+    --flexlayout-color-text: var(--text-primary);
+    --flexlayout-color-background: transparent;
+    --flexlayout-color-base: var(--bg-panel);
+    --flexlayout-color-1: var(--neutral-2);
+    --flexlayout-color-2: var(--neutral-3);
+    --flexlayout-color-3: var(--neutral-4);
+    --flexlayout-color-4: var(--neutral-5);
+    --flexlayout-color-5: var(--neutral-6);
+    --flexlayout-color-6: var(--neutral-7);
+    --flexlayout-color-tabset-background: var(--bg-panel);
+    --flexlayout-color-tabset-background-selected: var(--bg-panel);
+    --flexlayout-color-tabset-background-maximized: var(--bg-panel);
+    --flexlayout-color-tabset-divider-line: var(--border-primary);
+    --flexlayout-color-tab-content: var(--bg-panel);
+    --flexlayout-color-tab-selected: var(--text-primary);
+    --flexlayout-color-tab-selected-background: var(--neutral-3);
+    --flexlayout-color-tab-unselected: var(--text-secondary);
+    --flexlayout-color-tab-unselected-background: transparent;
+    --flexlayout-color-icon: var(--text-secondary);
+    --flexlayout-color-overflow: var(--text-secondary);
+    --flexlayout-color-focus: var(--purple-8);
+    --flexlayout-color-splitter: transparent;
+    --flexlayout-color-splitter-hover: var(--neutral-4);
+    --flexlayout-color-splitter-drag: var(--purple-8);
+    --flexlayout-color-splitter-handle: var(--border-primary);
+    --flexlayout-color-toolbar-button-hover: var(--neutral-3);
+    --flexlayout-color-drag1: var(--purple-8);
+    --flexlayout-color-drag2: var(--purple-8);
+    --flexlayout-color-drag1-background: var(--purple-3);
+    --flexlayout-color-drag2-background: var(--purple-3);
+    --flexlayout-color-drag-rect-border: var(--border-primary);
+    --flexlayout-color-drag-rect-background: var(--bg-panel);
+    --flexlayout-color-drag-rect: var(--text-primary);
+    --flexlayout-color-edge-marker: var(--purple-3);
+    --flexlayout-color-edge-icon: var(--purple-11);
+    --flexlayout-color-popup-border: var(--border-primary);
+    --flexlayout-color-popup-unselected: var(--text-secondary);
+    --flexlayout-color-popup-unselected-background: var(--bg-panel);
+    --flexlayout-color-popup-selected: var(--text-primary);
+    --flexlayout-color-popup-selected-background: var(--neutral-3);
+  }
+
+  .flex-workspace-intro {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-section-gap);
+  }
+
+  .flex-workspace-intro p {
+    flex: 1 1 20rem;
+  }
+
+  .flex-workspace-stage {
+    display: grid;
+    height: min(42rem, 75svh);
+    min-height: 24rem;
+    padding: var(--space-workspace-inset);
+    background: var(--bg-app);
+    border-radius: var(--radius-panel);
+  }
+
+  .flex-workspace-host {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+  }
+}

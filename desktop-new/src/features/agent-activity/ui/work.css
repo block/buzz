@@ -1,0 +1,124 @@
+@layer components {
+  .agent-work-area {
+    min-width: 0;
+  }
+  .agent-work-identity {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .agent-work-privacy {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-inline-start: auto;
+  }
+  .agent-work-content {
+    padding-inline-start: calc(var(--space-6) + var(--space-2));
+    margin-top: var(--space-1);
+    min-width: 0;
+  }
+  .agent-work-content > p {
+    margin: var(--space-2) 0;
+  }
+  .work-steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .work-step {
+    display: grid;
+    grid-template-columns: var(--space-5) minmax(0, 1fr);
+    column-gap: var(--space-2);
+    min-width: 0;
+  }
+  .work-step-mark {
+    display: flex;
+    justify-content: center;
+    position: relative;
+    padding-top: var(--space-2);
+    color: var(--text-tertiary);
+  }
+  /* Berd's continuous work spine: one rail spans the expanded history and
+     recent steps. Icons mask it with the transcript's own surface. */
+  .work-sequence {
+    position: relative;
+  }
+  .work-sequence::before {
+    content: "";
+    position: absolute;
+    inset-block: var(--space-2) var(--space-4);
+    inset-inline-start: calc(var(--space-5) / 2);
+    border-inline-start: 1px solid var(--border-primary);
+  }
+  .work-sequence:has(> .work-history)::before {
+    inset-block-start: calc(var(--space-6) + var(--space-3));
+  }
+  .work-step-mark > svg {
+    position: relative;
+    background: var(--bg-panel);
+    box-shadow: 0 0 0 var(--space-1) var(--bg-panel);
+  }
+  .work-step[data-status="failed"] .work-step-mark {
+    color: var(--red-12);
+  }
+  .work-step[data-status="running"] .work-step-mark {
+    color: var(--purple-12);
+  }
+  .work-step-body {
+    min-width: 0;
+  }
+  .work-step-copy {
+    margin: 0;
+    padding-block: var(--space-2);
+  }
+  .work-tool-output {
+    padding: var(--space-3);
+    background: var(--bg-inset);
+    border-radius: var(--radius-row);
+    min-width: 0;
+  }
+  .work-tool-output-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .work-tool-output pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .work-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin-block: var(--space-3);
+    color: var(--text-secondary);
+  }
+  .work-notice > svg {
+    flex-shrink: 0;
+    margin-top: var(--space-1);
+  }
+  .work-notice p {
+    margin: 0;
+  }
+  .work-notice p + p {
+    margin-top: var(--space-1);
+  }
+  .work-notice-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+  .work-artifacts {
+    margin-top: var(--space-2);
+  }
+  @media (max-width: 40rem) {
+    .agent-work-content {
+      padding-inline-start: var(--space-2);
+    }
+  }
+}

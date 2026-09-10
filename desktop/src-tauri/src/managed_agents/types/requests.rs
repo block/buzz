@@ -144,6 +144,12 @@ pub struct CreateManagedAgentRequest {
     #[serde(default)]
     pub team_id: Option<String>,
     pub relay_url: Option<String>,
+    /// Active workspace relay captured by the caller before creation began.
+    #[serde(default)]
+    pub expected_relay_url: Option<String>,
+    /// Active owner identity captured by the caller before creation began.
+    #[serde(default)]
+    pub expected_signer_pubkey: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
     /// True when `agent_command` is a runtime command the user deliberately

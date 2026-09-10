@@ -136,7 +136,31 @@ pub async fn handle_count(
                         .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
                         .await
                     {
-                        Ok(member) => Some(member),
+                        Ok(direct_member) => {
+                            if direct_member {
+                                Some(true)
+                            } else {
+                                match state
+                                    .db
+                                    .has_session_parent_access(
+                                        conn.tenant.community(),
+                                        ch_id,
+                                        &pubkey_bytes,
+                                    )
+                                    .await
+                                {
+                                    Ok(inherited) => Some(inherited),
+                                    Err(e) => {
+                                        warn!(sub_id = %sub_id, "Session parent access confirmation failed: {e}");
+                                        conn.send(RelayMessage::closed(
+                                            &sub_id,
+                                            "error: database error",
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
                             conn.send(RelayMessage::closed(&sub_id, "error: database error"));

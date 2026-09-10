@@ -344,6 +344,12 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    crate::relay::assert_expected_relay_scope(
+        input.expected_relay_url.as_deref(),
+        &crate::relay::relay_ws_url_with_override(&state),
+    )?;
+    let active_owner = workspace_owner_hex(&state)?;
+    crate::relay::assert_expected_signer(input.expected_signer_pubkey.as_deref(), &active_owner)?;
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id

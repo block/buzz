@@ -159,7 +159,30 @@ pub async fn handle_req(
                     .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
                     .await
                 {
-                    Ok(member) => {
+                    Ok(direct_member) => {
+                        let member = if direct_member {
+                            true
+                        } else {
+                            match state
+                                .db
+                                .has_session_parent_access(
+                                    conn.tenant.community(),
+                                    ch_id,
+                                    &pubkey_bytes,
+                                )
+                                .await
+                            {
+                                Ok(inherited) => inherited,
+                                Err(e) => {
+                                    warn!(conn_id = %conn_id, "Session parent access confirmation failed: {e}");
+                                    conn.send(RelayMessage::closed(
+                                        &sub_id,
+                                        "error: database error",
+                                    ));
+                                    return;
+                                }
+                            }
+                        };
                         if let Some(state_snap) = trace_state.as_ref() {
                             crate::conformance::record_req_authcheck(
                                 &state.tracer,

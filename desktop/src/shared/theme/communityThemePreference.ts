@@ -16,12 +16,27 @@ export type CommunityThemePreference = {
 export const DEFAULT_COMMUNITY_THEME: CommunityThemePreference = Object.freeze({
   version: 1,
   theme: "buzz",
-  accent: "#3b82f6",
+  accent: "#2563eb",
   followSystem: true,
 });
 
 const THEME_NAMES = new Set<string>(SYNTAX_THEMES);
 const ACCENTS = new Set<string>(ACCENT_COLORS.map(({ value }) => value));
+
+/**
+ * Accent hexes that are no longer offered but are still sitting in people's
+ * stored preferences, mapped to their replacement.
+ *
+ * Without this, retiring a hex from `ACCENT_COLORS` makes every stored
+ * preference holding it fail validation — `parseCommunityThemePreference`
+ * returns null and the whole saved theme, including the chosen syntax theme and
+ * follow-system flag, is silently discarded. Migrating the one field preserves
+ * the rest.
+ */
+const RETIRED_ACCENTS = new Map<string, string>([
+  // Deepened so white label text is legible on it; see DESIGN.md § Contrast.
+  ["#3b82f6", "#2563eb"],
+]);
 
 export function communityThemeStorageKey(
   pubkey: string,
@@ -44,12 +59,16 @@ export function parseCommunityThemePreference(
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const accent =
+    typeof candidate.accent === "string"
+      ? (RETIRED_ACCENTS.get(candidate.accent) ?? candidate.accent)
+      : candidate.accent;
   if (
     candidate.version !== 1 ||
     typeof candidate.theme !== "string" ||
     !THEME_NAMES.has(candidate.theme) ||
-    typeof candidate.accent !== "string" ||
-    !ACCENTS.has(candidate.accent) ||
+    typeof accent !== "string" ||
+    !ACCENTS.has(accent) ||
     typeof candidate.followSystem !== "boolean"
   ) {
     return null;
@@ -57,7 +76,7 @@ export function parseCommunityThemePreference(
   return {
     version: 1,
     theme: candidate.theme as SyntaxThemeName,
-    accent: candidate.accent,
+    accent,
     followSystem: candidate.followSystem,
   };
 }

@@ -1,0 +1,43 @@
+@layer components {
+  .conversation-preview-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3) var(--space-5);
+  }
+  .conversation-preview {
+    min-width: 0;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    overflow: clip;
+  }
+  .conversation-preview-transcript {
+    padding: var(--space-6);
+  }
+  .conversation-date {
+    margin: 0 0 var(--space-6);
+    text-align: center;
+  }
+  .conversation-preview-footer {
+    padding: var(--space-4) var(--space-6);
+    border-top: 1px solid var(--border-primary);
+  }
+  .conversation-preview-footer > p {
+    margin: var(--space-3) 0 0;
+  }
+  .conversation-preview-transcript > .conversation-message {
+    margin-top: var(--space-6);
+  }
+  .work-area-specimen {
+    padding-block: var(--space-4);
+  }
+  @media (max-width: 40rem) {
+    .conversation-preview-transcript {
+      padding: var(--space-4);
+    }
+    .conversation-preview-footer {
+      padding: var(--space-4);
+    }
+  }
+}

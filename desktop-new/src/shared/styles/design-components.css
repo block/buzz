@@ -1,0 +1,314 @@
+@layer components {
+  /* Documentation stays quiet and paper-like. The navigation itself is a fixed
+     reading tool, not a product panel: Figma's reference is a 250px white rail
+     with a soft right shadow and no active-fill decoration. */
+  .design-system-shell {
+    display: flex;
+    min-height: 100vh;
+    background: var(--bg-panel);
+  }
+
+  .design-system-nav {
+    position: sticky;
+    top: 0;
+    display: flex;
+    width: 15.625rem;
+    height: 100vh;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: var(--space-6);
+    overflow-y: auto;
+    padding: 1.125rem 1.5rem;
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-float);
+  }
+
+  .design-system-nav-title {
+    text-decoration: none;
+  }
+
+  .design-system-nav-rule {
+    height: 1px;
+    background: var(--border-primary);
+  }
+
+  .design-system-nav-sections,
+  .design-system-nav-section,
+  .design-system-nav-items {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .design-system-nav-sections {
+    gap: var(--space-6);
+  }
+
+  .design-system-nav-section {
+    gap: var(--space-2);
+  }
+
+  .design-system-nav-section > h2 {
+    margin: 0;
+  }
+
+  .design-system-nav-items {
+    gap: var(--space-1);
+  }
+
+  .design-system-nav-child {
+    padding-left: var(--space-4);
+  }
+
+  .design-system-nav-link {
+    display: block;
+    border-radius: var(--radius-row);
+    padding: var(--space-1) var(--space-2);
+    text-decoration: none;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      color var(--duration-state) var(--easing-state);
+  }
+
+  .design-system-nav-link:hover,
+  .design-system-nav-link-active {
+    background: var(--neutral-3);
+  }
+
+  .design-system-content {
+    position: relative;
+    min-width: 0;
+    flex: 1;
+    padding: 2.5rem 4rem;
+  }
+
+  /* This is a page-level appearance control, not part of the reading column.
+     Fix it to the viewport so it remains available through a long document.
+     Two space steps leave room for the browser's own scrollbar without trying to
+     restyle or replace that platform control. */
+  .design-system-content > .buzz-button[data-icon-size="toolbar"] {
+    position: fixed;
+    z-index: 10;
+    top: var(--space-4);
+    right: calc(var(--space-4) + var(--space-4));
+  }
+
+  .design-system-reading-column {
+    max-width: 48rem;
+  }
+
+  .design-doc {
+    display: flex;
+    max-width: 44rem;
+    flex-direction: column;
+  }
+
+  .design-doc-title {
+    margin-bottom: var(--space-6);
+  }
+
+  .design-doc-heading {
+    margin: var(--space-6) 0 var(--space-2);
+  }
+
+  .design-doc-paragraph {
+    margin: 0 0 var(--space-4);
+  }
+
+  .design-doc-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-4);
+    padding-left: 1.25rem;
+  }
+
+  .design-doc code {
+    border-radius: var(--radius-row);
+    padding: 0.0625rem var(--space-1);
+    background: var(--neutral-2);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+  }
+
+  .design-doc strong {
+    color: var(--text-primary);
+    font-weight: var(--type-weight-semibold);
+  }
+
+  /* Glass is meaningful only with a scene behind it. These documentation
+     canvases deliberately use the first paired backdrop, so the same specimen
+     reveals Sky field in light mode and Night garden in dark mode. */
+  .glass-scene {
+    background: var(--gradient-1);
+  }
+
+  .component-page-heading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-bottom: var(--space-6);
+  }
+
+  .component-specimen-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+
+  .component-specimen-group {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .component-specimen-group > h2 {
+    margin: 0;
+  }
+
+  .activity-page-specimen {
+    padding: var(--space-3);
+  }
+
+  .component-specimen-frame {
+    display: flex;
+    min-width: 0;
+    min-height: 7rem;
+    align-items: center;
+    overflow-x: auto;
+    padding: var(--space-6);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-panel);
+  }
+
+  .component-specimen-frame[data-backdrop] {
+    border-color: transparent;
+    background: var(--bg-app);
+  }
+
+  .component-specimen-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  .component-specimen {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .component-specimen-prop {
+    white-space: nowrap;
+  }
+
+  .component-single-surface-demo {
+    width: 100%;
+    height: 16rem;
+    padding: var(--space-workspace-inset);
+    border-radius: var(--radius-panel);
+    background: var(--bg-app);
+  }
+
+  .component-single-surface-demo .panel {
+    height: 100%;
+  }
+
+  .component-field-demo,
+  .component-navigation-section-demo {
+    width: min(100%, var(--size-navigator));
+  }
+
+  .component-navigation-section-demo {
+    padding: var(--space-2);
+    border-radius: var(--radius-control);
+    background: var(--bg-panel);
+  }
+
+  .component-overview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-6);
+  }
+
+  .component-overview-item {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .component-overview-preview {
+    height: 13rem;
+    overflow: hidden;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-panel);
+  }
+
+  .component-overview-preview > .component-specimen-stack {
+    width: 180%;
+    transform: scale(0.55);
+    transform-origin: top left;
+  }
+
+  .component-overview-preview .component-specimen-frame {
+    min-height: 8rem;
+    border-color: transparent;
+  }
+
+  .component-overview-item > a {
+    align-self: flex-start;
+    text-decoration: none;
+  }
+
+  @media (max-width: 63.999rem) {
+    .design-system-shell {
+      flex-direction: column;
+    }
+
+    .design-system-nav {
+      position: static;
+      width: 100%;
+      height: auto;
+      gap: var(--space-4);
+      padding: var(--space-4);
+      box-shadow: none;
+    }
+
+    .design-system-nav-sections {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+      gap: var(--space-5);
+    }
+
+    .design-system-content {
+      padding: var(--space-6) var(--space-4);
+    }
+
+    .component-overview-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+@layer components {
+  .composer-playground-stage {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    min-width: 0;
+    height: min(24rem, 65vh);
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+  }
+  .composer-playground-stage > .message-composer {
+    flex: 0 0 auto;
+  }
+}

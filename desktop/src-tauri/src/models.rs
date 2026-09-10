@@ -133,7 +133,7 @@ pub struct ChannelInfo {
     pub ttl_deadline: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelDetailInfo {
     pub id: String,
     pub name: String,

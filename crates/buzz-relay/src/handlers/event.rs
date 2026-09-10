@@ -212,7 +212,17 @@ pub async fn filter_fanout_by_access(
             .await
         {
             Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
+            Ok(false) => match state
+                .db
+                .has_session_parent_access(community_id, channel_id, &pubkey)
+                .await
+            {
+                Ok(true) => allowed.push((conn_id, sub_id)),
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(%channel_id, "fan-out access filter: Session parent lookup failed: {e}");
+                }
+            },
             Err(e) => {
                 warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
             }

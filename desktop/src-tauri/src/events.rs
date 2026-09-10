@@ -452,6 +452,29 @@ pub fn build_profile(
     Ok(EventBuilder::new(Kind::Custom(0), content))
 }
 
+// ── Sessions ─────────────────────────────────────────────────────────────────
+
+/// Build a durable parent-channel link to an ordinary private Session channel.
+pub fn build_session_link(
+    parent_channel_id: &str,
+    session_channel_id: &str,
+) -> Result<EventBuilder, String> {
+    validate_channel_id(parent_channel_id)?;
+    validate_channel_id(session_channel_id)?;
+    if parent_channel_id == session_channel_id {
+        return Err("a Session cannot be its own parent channel".into());
+    }
+    let tags = vec![tag(vec!["h", parent_channel_id])?];
+    let content = serde_json::json!({
+        "session_channel_id": session_channel_id,
+    });
+    Ok(EventBuilder::new(
+        Kind::Custom(buzz_core_pkg::kind::KIND_SESSION_LINK as u16),
+        content.to_string(),
+    )
+    .tags(tags))
+}
+
 // ── Huddles ──────────────────────────────────────────────────────────────────
 
 /// Validate that a string is a valid UUID (defense-in-depth for `&str` channel IDs).

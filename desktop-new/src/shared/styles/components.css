@@ -1,0 +1,850 @@
+@layer components {
+  .buzz-button {
+    display: inline-flex;
+    min-width: 0;
+    height: var(--size-control);
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-row-gap);
+    border: 0;
+    border-radius: var(--radius-control);
+    padding: 0 var(--space-control-inset);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+    transition:
+      color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state),
+      opacity var(--duration-fast) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
+  }
+
+  .buzz-button[data-size="compact"] {
+    height: var(--size-row);
+    border-radius: var(--radius-row);
+    padding-inline: var(--space-control-inset);
+  }
+
+  .buzz-button[data-variant="primary"] {
+    background: var(--purple-9);
+    color: var(--text-on-accent);
+  }
+
+  /* The accent's own hover step, not a fade. `opacity: 0.9` lightened the label
+     along with the fill and composited an unnamed colour nothing could measure —
+     the move check-color.mjs rejects everywhere else. */
+  .buzz-button[data-variant="primary"]:hover:not([data-disabled]) {
+    background: var(--purple-10);
+  }
+
+  .buzz-button[data-variant="quiet"] {
+    background: var(--neutral-2);
+    color: var(--text-primary);
+  }
+
+  /* Scoped with `:not([data-icon-variant])` because IconButton passes
+     `variant="ghost"` down to Button and carries its real appearance in
+     `data-icon-variant`. Both selectors match, and this one is more specific
+     (two pseudo-classes), so an unscoped neutral hover repainted a solid accent
+     IconButton light grey while its text stayed white — Lc 13, invisible. An
+     icon button's hover belongs to its icon variant; see below. */
+  .buzz-button[data-variant="quiet"]:hover:not([data-disabled]),
+  .buzz-button[data-variant="ghost"]:not(
+    [data-icon-variant],
+    [data-navigation-item]
+  ):hover:not([data-disabled]) {
+    background: var(--neutral-4);
+  }
+
+  .buzz-button[data-disabled] {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+
+  .buzz-button[data-icon-variant] {
+    width: var(--size-control);
+    flex: 0 0 auto;
+    padding: 0;
+  }
+
+  .buzz-button[data-icon-size="compact"] {
+    width: var(--size-row);
+    height: var(--size-row);
+    border-radius: var(--radius-row);
+  }
+
+  /* Toolbars need a less dense hit area than navigator-row actions while
+     keeping the same 16px icon artwork. */
+  .buzz-button[data-icon-size="toolbar"] {
+    width: 2rem;
+    height: 2rem;
+    border-radius: var(--radius-row);
+  }
+
+  .buzz-button[data-icon-size="large"] {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: var(--radius-pill);
+  }
+
+  .buzz-button[data-icon-shape="round"] {
+    border-radius: var(--radius-pill);
+  }
+
+  /* Every icon variant states its own hover. The one that did not —
+     `solid` — fell through to the neutral ghost hover and lost its accent. */
+  .buzz-button[data-icon-variant="quiet"] {
+    background: var(--neutral-2);
+  }
+
+  .buzz-button[data-icon-variant="quiet"]:hover:not([data-disabled]),
+  .buzz-button[data-icon-variant="ghost"]:hover:not([data-disabled]) {
+    background: var(--neutral-4);
+  }
+
+  .buzz-button[data-icon-variant="solid"] {
+    background: var(--purple-9);
+    color: var(--text-on-accent);
+  }
+
+  .buzz-button[data-icon-variant="solid"]:hover:not([data-disabled]) {
+    background: var(--purple-10);
+  }
+
+  /* A gentle acknowledgement/submit action on a quiet surface. This cannot be
+     the primary fill: its job is available without pulling focus from writing. */
+  .buzz-button[data-icon-variant="tint"] {
+    background: var(--purple-3);
+    color: var(--purple-12);
+  }
+
+  .buzz-button[data-icon-variant="tint"]:hover:not([data-disabled]) {
+    background: var(--purple-4);
+  }
+
+  /* Chrome sits on the backdrop and is clickable, so it takes the interactive
+     material whole — fill, blur, rim, and hover in one line. It used to spell
+     out three of those four and get the hover from a separate rule. */
+  .buzz-button[data-icon-variant="chrome"] {
+    @apply glass-primary-interactive;
+  }
+
+  /* Disabled owns the foreground across icon variants, independently of source
+     order. Accent fills also yield to neutral so unavailability cannot look
+     like an available send/stop action. Shape never changes state semantics. */
+  .buzz-button[data-icon-variant][data-disabled] {
+    color: var(--text-disabled);
+  }
+
+  .buzz-button:is(
+    [data-icon-variant="tint"],
+    [data-icon-variant="solid"]
+  )[data-disabled] {
+    background: var(--neutral-3);
+  }
+
+  /* A preview is supplemental context, never a second interactive surface.
+     It is portal-rendered by Base UI so a clipped parent cannot hide it. */
+  .buzz-preview-card {
+    z-index: 1000;
+    display: grid;
+    width: max-content;
+    max-width: min(18rem, 75vw);
+    gap: var(--space-1);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-sm);
+    pointer-events: none;
+    transform-origin: var(--transform-origin);
+    transition:
+      opacity var(--duration-state) var(--easing-state),
+      transform var(--duration-state) var(--easing-state);
+  }
+
+  .buzz-preview-card[data-starting-style],
+  .buzz-preview-card[data-ending-style] {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+
+  .buzz-preview-card-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .buzz-preview-card-example {
+    border: 0;
+    border-bottom: 1px solid var(--purple-8);
+    padding: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  html[data-keyboard-navigation] .buzz-preview-card-example:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  .buzz-avatar {
+    position: relative;
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    flex: 0 0 auto;
+    place-items: center;
+    overflow: hidden;
+    border-radius: var(--radius-pill);
+    background: var(--neutral-2);
+    color: var(--text-secondary);
+  }
+
+  .buzz-avatar[data-size="small"] {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  .buzz-avatar[data-size="large"] {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+
+  .buzz-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  /* A panel is the default opaque reading surface over the atmospheric
+     backdrop. Its border and threshold shadow arrive together: taking only
+     bg-panel would lose the boundary that lets it sit above the gradient. */
+  /* One set of declarations, two selectors.
+
+     A dockview group *is* a Panel — it is the movable, independently legible
+     surface on the backdrop — but dockview creates that element itself, so no
+     React component can wrap it in `<Panel>`. Adding its selector here is what
+     keeps Panel the single owner of the panel surface: restating the fill,
+     border, radius, and shadow in the workspace stylesheet would be a second
+     definition that drifts the first time one of them changes.
+
+     `:where()` keeps the vendor selector at zero specificity, so a Panel
+     variant can still override it without an escalation. */
+  .panel,
+  :where(.bento-workspace .dv-groupview) {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-xs);
+  }
+
+  /* ============================================================
+     Tabs — two surfaces, one control.
+
+     `data-variant="chrome"` is the glass pill for the app gradient.
+     `data-variant="panel"` is an underline for a plain surface.
+
+     The split exists because the chrome version failed on a white panel in a
+     way nothing could catch: its container is `glass-2`, which over a white
+     panel composites to pure white, and its selected pill is `neutral-1`,
+     also pure white. Container and selection became the same colour and only
+     a shadow separated them. That was not a wrong token value — retinting
+     `bg-chrome-selected` would only move the collision — it was a component
+     with no way to say which background it expects.
+
+     What is shared sits in the unprefixed rules: geometry, the tab box, the
+     Base UI wiring. What differs is only how a surface and a selection are
+     drawn.
+     ============================================================ */
+
+  /* --- Shared ------------------------------------------------ */
+
+  .buzz-tabs-list {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* Geometry only. **Colour is not here, deliberately.**
+
+     Each variant states all three of its states — unselected, hover, selected —
+     in full, rather than inheriting a colour from here and overriding some of it.
+     That is more lines and it is the right trade: when a shared rule and a
+     variant rule both set the same property, which one wins depends on how
+     specific each selector is, not on which is written later. A variant rule is
+     always more specific, so it silently beat the shared `[data-selected]` rule
+     and repainted the *selected* tab as unselected — a state that just stopped
+     working, with no error.
+
+     Each variant owning its own states means no two rules ever set the colour of
+     the same tab, so there is nothing to resolve and no `:not()` exceptions to
+     reason about. Read one variant block and you know every colour it uses. */
+  .buzz-tabs-tab {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    border: 0;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  /* Base UI drives both indicators from the same four custom properties
+     (`--active-tab-left`, `--active-tab-width`, and their siblings), so the
+     travelling animation is one implementation and the two surfaces only
+     differ in what travels. */
+  .buzz-tabs-indicator {
+    position: absolute;
+    left: 0;
+    width: var(--active-tab-width);
+    transform: translateX(var(--active-tab-left));
+    transition:
+      width var(--duration-settle) var(--easing-settle),
+      transform var(--duration-settle) var(--easing-settle);
+  }
+
+  /* --- chrome: a glass pill on the gradient ------------------ */
+
+  /* This was the one chrome surface carrying an outer `shadow-xs` on top of the
+     rim where the other three carried none. Nothing justified the difference —
+     same height, same backdrop, same depth — so it takes the same material and
+     the odd shadow is gone. */
+  .buzz-tabs[data-variant="chrome"] {
+    @apply glass-primary;
+
+    display: inline-flex;
+    height: 2.5rem;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    border-radius: var(--radius-pill);
+  }
+
+  .buzz-tabs[data-variant="chrome"] .buzz-tabs-list {
+    height: 2rem;
+    gap: var(--space-1);
+  }
+
+  .buzz-tabs[data-variant="chrome"] .buzz-tabs-tab {
+    height: 2rem;
+    border-radius: var(--radius-pill);
+    padding: 0 var(--space-4);
+    color: var(--text-secondary);
+  }
+
+  /* A hover *inside* a glass surface, which is not itself a material: no blur,
+     because the parent already blurs what is behind both of them, and a second
+     backdrop-filter here would blur an already-blurred layer.
+
+     So this is a fill only, taking the hover step of the material it sits on.
+     Note it composites: glass-3 over the parent's glass-2 lands near 0.82
+     rather than at 0.62. That is the intended direction — an item under the
+     cursor should read as more solid, per DESIGN.md § Surface and depth — but it
+     is why a hover inside glass cannot simply reuse a whole material. */
+  /* `:not([data-selected])` because hover and selected can both be true at once —
+     a cursor can sit on the selected tab — and DESIGN.md § State says a selected
+     item in a toggle group is not interactive, so it must not react. These two
+     selectors score identical specificity, so without the exclusion only source
+     order would keep it right, and reordering them would silently give the
+     selected tab a hover fill. This is the case `:not()` is *for*: stating that a
+     state is irrelevant, not defending a rule from another rule. */
+  .buzz-tabs[data-variant="chrome"] .buzz-tabs-tab:hover:not([data-selected]) {
+    background: var(--bg-glass-primary-hover);
+    color: var(--text-primary);
+  }
+
+  .buzz-tabs[data-variant="chrome"] .buzz-tabs-tab[data-selected] {
+    color: var(--text-primary);
+  }
+
+  .buzz-tabs[data-variant="chrome"] .buzz-tabs-indicator {
+    top: var(--space-1);
+    bottom: var(--space-1);
+    border-radius: var(--radius-pill);
+    background: var(--bg-chrome-selected);
+    box-shadow: var(--shadow-xs);
+  }
+
+  /* --- panel: an underline on a plain surface ---------------- */
+
+  /* No container fill and no border: on a panel the tabs are text, and the only
+     drawn element is the bar. That is what keeps this legible where the glass
+     pill was not — there is no second surface to collide with the first. */
+  .buzz-tabs[data-variant="panel"] {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .buzz-tabs[data-variant="panel"] .buzz-tabs-list {
+    gap: var(--space-5);
+  }
+
+  /* The three states, in full. Same size in every one — selection is carried by
+     colour and the bar, never by weight, because a weight change reflows the row
+     and makes the tabs shift as the selection moves.
+
+     Tertiary at rest, where chrome uses secondary: on glass the container groups
+     the tabs so a small step reads, but here the bar is the only mark and the
+     text carries more of the work. Tertiary is a meta role at the Lc 45 target
+     and measures 60.6 light / 52.5 dark on these surfaces. */
+  .buzz-tabs[data-variant="panel"] .buzz-tabs-tab {
+    height: 2.25rem;
+    padding: 0;
+    color: var(--text-tertiary);
+  }
+
+  /* Excluded for the same reason as the chrome variant above. */
+  .buzz-tabs[data-variant="panel"] .buzz-tabs-tab:hover:not([data-selected]) {
+    color: var(--text-primary);
+  }
+
+  .buzz-tabs[data-variant="panel"] .buzz-tabs-tab[data-selected] {
+    color: var(--text-primary);
+  }
+
+  /* Sits on the container's bottom edge and spans the tab exactly. `height` is
+     the hairline; the indicator inherits its horizontal travel from the shared
+     rule above. */
+  .buzz-tabs[data-variant="panel"] .buzz-tabs-indicator {
+    bottom: 0;
+    height: 2px;
+    border-radius: var(--radius-pill);
+    background: var(--text-primary);
+  }
+
+  .panel-header {
+    position: relative;
+    display: flex;
+    min-height: var(--size-panel-header);
+    width: 100%;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    padding-block: var(--space-2);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: 0 var(--space-panel-inset);
+  }
+
+  .panel-header::after {
+    position: absolute;
+    right: var(--space-panel-inset);
+    bottom: 0;
+    left: var(--space-panel-inset);
+    height: 1px;
+    background: var(--border-primary);
+    content: "";
+    pointer-events: none;
+  }
+
+  .panel-header[data-variant="compact"] {
+    min-height: 3rem;
+  }
+
+  .panel-header-title,
+  .panel-header-actions {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-row-gap);
+  }
+
+  .panel-header-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .panel-header-actions {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    margin-inline-start: auto;
+  }
+
+  .panel-header-title > h2 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Conversation identity composes PanelHeader; only its inner content lives here. */
+  .conversation-header-identity,
+  .conversation-header-title-row {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+  }
+
+  .conversation-header-identity {
+    flex: 1;
+    gap: var(--space-row-gap);
+  }
+
+  .conversation-header-icon {
+    display: flex;
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+  }
+
+  .conversation-header-title-block {
+    min-width: 0;
+  }
+
+  .conversation-header-title-row {
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .conversation-header-title-row > h1,
+  .conversation-header-context {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conversation-header-metadata {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+  }
+
+  .conversation-header-context {
+    margin-top: var(--space-1);
+  }
+
+  .search-field {
+    display: flex;
+    width: 100%;
+    height: var(--size-control);
+    align-items: center;
+    gap: var(--space-row-gap);
+    border-radius: var(--radius-control);
+    padding: 0 var(--space-control-inset);
+    background: var(--neutral-2);
+    color: var(--text-tertiary);
+  }
+
+  .search-field[data-variant="navigator"] {
+    border-radius: var(--radius-panel);
+  }
+
+  .search-field input {
+    min-width: 0;
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+  }
+
+  html[data-keyboard-navigation] .search-field input:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  .search-field input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .search-field input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  .navigation-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* The section owns its own separation rather than asking every consumer to
+     remember a gap. Rows inside a section sit 1px apart; sections sit
+     `--space-section-gap` apart, and that difference is the entire signal for
+     where one group ends and the next begins. Expressed as an adjacent-sibling
+     margin so a section stacked anywhere gets it, with no wrapper required. */
+  .navigation-section + .navigation-section {
+    margin-top: var(--space-section-gap);
+  }
+
+  .navigation-section-heading {
+    display: flex;
+    min-height: var(--size-row);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-row-gap);
+    padding: 0 var(--space-control-inset);
+  }
+
+  .navigation-section-label {
+    margin: 0;
+  }
+
+  .navigation-section-heading .buzz-button[data-icon-size="compact"] {
+    margin-right: calc(var(--space-control-inset) * -1);
+  }
+
+  .navigation-section-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  /* NavigationItem owns its complete visual treatment, although it shares
+     Base UI Button's native button behavior. It does not compose Buzz Button:
+     a navigation destination is not an ordinary action button, and sharing the
+     styling made the generic ghost hover compete with navigation's own states. */
+  .navigation-item {
+    display: inline-flex;
+    width: 100%;
+    min-width: 0;
+    height: var(--size-row);
+    align-items: center;
+    gap: var(--space-row-gap);
+    overflow: hidden;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: 0 var(--space-control-inset);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state);
+  }
+
+  /* Hover is the lightest acknowledgement; selection is a persistent, one-step
+     stronger statement. Keeping them separate prevents a selected destination
+     from becoming indistinguishable the moment a pointer passes over it. */
+  .navigation-item:hover:not([data-selected]) {
+    background: var(--neutral-2);
+    color: var(--text-primary);
+  }
+
+  .navigation-item[data-selected] {
+    background: var(--neutral-3);
+    color: var(--text-primary);
+  }
+
+  .navigation-item[data-inset] {
+    padding-left: calc(var(--space-control-inset) + var(--space-4));
+  }
+
+  .navigation-item-label {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .navigation-item-trailing {
+    flex: 0 0 auto;
+    color: var(--text-tertiary);
+  }
+
+  html[data-keyboard-navigation] .buzz-button:focus-visible,
+  html[data-keyboard-navigation] .navigation-item:focus-visible,
+  html[data-keyboard-navigation] .buzz-tabs-tab:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-button,
+    .navigation-item,
+    .buzz-tabs-indicator {
+      transition-duration: 0ms;
+    }
+  }
+}
+
+@layer components {
+  .buzz-select {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+  }
+  .buzz-select-popup {
+    min-width: var(--anchor-width);
+    max-width: calc(100vw - var(--space-6));
+    max-height: var(--available-height);
+    overflow-y: auto;
+    padding: var(--space-1);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    background: var(--bg-float);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+    z-index: 1000;
+  }
+  .buzz-select-group-label {
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+  .buzz-select-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-control);
+    cursor: default;
+  }
+  .buzz-select-option[data-highlighted] {
+    background: var(--neutral-4);
+    outline: none;
+  }
+  .buzz-select-option[data-selected] {
+    color: var(--text-primary);
+  }
+}
+
+@layer components {
+  .buzz-accordion {
+    min-width: 0;
+    margin-block: var(--space-4);
+  }
+  .buzz-accordion-heading {
+    margin: 0;
+  }
+  .buzz-accordion-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: var(--space-2);
+    background: transparent;
+    color: var(--text-primary);
+    text-align: start;
+    cursor: pointer;
+  }
+  .buzz-accordion:not([data-variant="activity"]) .buzz-accordion-trigger:hover {
+    background: var(--neutral-3);
+  }
+  .buzz-accordion-trigger:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+  .buzz-accordion-trigger[aria-expanded="true"] > svg {
+    transform: rotate(180deg);
+  }
+  .buzz-accordion-panel {
+    padding: var(--space-2);
+  }
+  .buzz-accordion[data-variant="navigation"] {
+    margin: 0;
+  }
+  .buzz-accordion[data-variant="navigation"] .buzz-accordion-trigger {
+    padding: var(--space-1) var(--space-2);
+  }
+  .buzz-accordion[data-variant="navigation"] .buzz-accordion-panel {
+    padding: var(--space-1) 0 var(--space-1) var(--space-4);
+  }
+}
+
+@layer components {
+  .buzz-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .buzz-switch-control {
+    display: inline-flex;
+    width: 2.25rem;
+    height: 1.25rem;
+    align-items: center;
+    padding: 0.125rem;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-pill);
+    background: var(--neutral-4);
+    cursor: pointer;
+    transition:
+      background-color var(--duration-state) var(--easing-state),
+      border-color var(--duration-state) var(--easing-state);
+  }
+  .buzz-switch-control[data-checked] {
+    border-color: var(--purple-8);
+    background: var(--purple-8);
+  }
+  .buzz-switch-thumb {
+    display: block;
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: var(--radius-pill);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-xs);
+    transform: translateX(0);
+    transition: transform var(--duration-settle) var(--easing-settle);
+  }
+  .buzz-switch-control[data-checked] .buzz-switch-thumb {
+    transform: translateX(1rem);
+  }
+  .buzz-switch-control[data-disabled] {
+    cursor: not-allowed;
+    background: var(--neutral-3);
+  }
+  .buzz-switch-control[data-disabled] .buzz-switch-thumb {
+    background: var(--neutral-5);
+    box-shadow: none;
+  }
+  .buzz-switch:has(.buzz-switch-control[data-disabled]) {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  html[data-keyboard-navigation] .buzz-switch-control:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .buzz-accordion[data-variant="activity"] {
+    margin: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger {
+    justify-content: flex-start;
+    padding: var(--space-2) 0;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+    flex-shrink: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-panel {
+    padding: 0;
+    height: var(--accordion-panel-height);
+    overflow: clip;
+    transition: height var(--duration-settle) var(--easing-settle);
+  }
+  .buzz-accordion[data-variant="activity"]
+    .buzz-accordion-panel:is([data-starting-style], [data-ending-style]) {
+    height: 0;
+  }
+  .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+    transition: transform var(--duration-settle) var(--easing-settle);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-accordion[data-variant="activity"] .buzz-accordion-panel,
+    .buzz-accordion[data-variant="activity"] .buzz-accordion-trigger > svg {
+      transition: none;
+    }
+  }
+}

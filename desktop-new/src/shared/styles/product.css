@@ -1,0 +1,932 @@
+@layer components {
+  .app-loading {
+    display: grid;
+    min-height: 100svh;
+    place-items: center;
+    background: var(--bg-app);
+  }
+
+  .workspace-shell {
+    min-height: 100svh;
+    overflow: hidden;
+    background: var(--bg-app);
+  }
+
+  .workspace-shell::before {
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(
+      var(--texture-dots-color) 1px,
+      transparent 1.2px
+    );
+    background-size: var(--texture-dots-size) var(--texture-dots-size);
+    content: "";
+    pointer-events: none;
+  }
+
+  .workspace-topbar {
+    position: fixed;
+    z-index: 100;
+    top: 0;
+    left: 0;
+    display: grid;
+    width: 100%;
+    height: 3.25rem;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 0 1.25rem;
+    pointer-events: none;
+  }
+
+  .destination-tabs {
+    display: flex;
+    grid-column: 1;
+    gap: 0.5rem;
+    pointer-events: auto;
+  }
+
+  .destination-tabs button,
+  .topbar-icon-button {
+    @apply glass-primary-interactive;
+
+    height: 1.75rem;
+    border: 0;
+    border-radius: 0.5625rem;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .destination-tabs button {
+    padding: 0 0.75rem;
+  }
+
+  /* The material carries the hover fill; this only carries the text colour,
+     which is not part of a surface material. */
+  .destination-tabs button:hover,
+  .topbar-icon-button:hover {
+    color: var(--text-primary);
+  }
+
+  .destination-tabs button[data-selected] {
+    background: var(--neutral-11);
+    color: var(--neutral-1);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .workspace-identity {
+    display: flex;
+    grid-column: 3;
+    align-items: center;
+    justify-self: end;
+    gap: 0.75rem;
+    pointer-events: auto;
+  }
+
+  .topbar-icon-button {
+    display: grid;
+    width: 1.75rem;
+    place-items: center;
+    padding: 0;
+  }
+
+  .workspace-stage {
+    position: relative;
+    height: 100svh;
+    padding: 3.25rem 1.25rem 1.25rem;
+  }
+
+  .buzz-dockview {
+    --dv-background-color: transparent;
+    --dv-tabs-and-actions-container-background-color: transparent;
+    /* Dockview's own theme sets this to a literal `white`. `DockWorkspace` now
+       passes a per-mode theme (`dockTheme`), so the vendor no longer paints an
+       opaque white sheet behind our glass in dark mode — but every dockview
+       surface this variable feeds is overridden to transparent below anyway, so
+       resetting it here keeps the leak closed regardless of vendor theme. */
+    --dv-group-view-background-color: transparent;
+    --dv-tab-active-background-color: var(--bg-chrome-selected);
+    --dv-tab-active-color: var(--text-primary);
+    --dv-tab-inactive-color: var(--text-secondary);
+    --dv-separator-border: transparent;
+    --dv-drag-over-background-color: var(--purple-3);
+    --dv-drag-over-border-color: var(--purple-8);
+    height: 100%;
+  }
+
+  .buzz-dockview .dv-grid-view,
+  .buzz-dockview .dv-groupview,
+  .buzz-dockview .dv-content-container,
+  .buzz-dockview .dv-view-container,
+  .buzz-dockview .dv-tabs-and-actions-container {
+    background: transparent;
+  }
+
+  /* No padding. The air between panels is the theme's `gap`, which dockview
+     applies as a splitview margin — so the gutter is real layout with the
+     resize seam inside it, rather than inset padding that only looked like a
+     gutter and left nothing to grab. */
+
+  .buzz-dockview .dv-tabs-and-actions-container {
+    min-height: 1.875rem;
+    border: 0;
+  }
+
+  .buzz-dockview .dv-tab {
+    height: 1.625rem;
+    border-radius: 0.5rem;
+    color: var(--text-secondary);
+    font: inherit;
+  }
+
+  .buzz-dockview .dv-active-tab {
+    color: var(--text-primary);
+    box-shadow: var(--shadow-xs);
+  }
+
+  /* Dockview arranges detached panels. The visible sash is a real workspace
+     gutter, so every Panel inside it keeps its complete rounded silhouette.
+
+     A future zero-gap docked group will own one shared outer frame, clipping,
+     and its internal resize seam. Do not make individual panels infer or remove
+     corners from their position: a drag can create a split, a tab group, or a
+     separated panel, and only the workspace topology knows which it is. */
+  .buzz-dockview .dv-content-container {
+    overflow: hidden;
+  }
+
+  /* The resize seam. Dockview gives the sash 4px and positions it — in JS, as
+     an inline offset — so that its 4px is centred on the boundary. Our hit
+     target is wider than that, and wider than the gutter, so growing it must be
+     paid for on both sides: the offset is half the growth, measured from
+     dockview's own width rather than from the gutter. Measured against the
+     gutter it lands 2px off centre, which is the kind of thing that reads as
+     sloppy without being obviously wrong.
+
+     `--dv-sash-size` is not a dockview variable — the vendor writes 4px
+     literally, so this names the number we are compensating for instead of
+     burying it inside an expression.
+
+     A transparent handle costs nothing on screen, and the width is what makes
+     the seam findable: there is no visible divider to aim at, unlike a zero-gap
+     dock where the border itself is the target.
+
+     Dockview sets the axis cursor per orientation (`ew-resize` / `ns-resize`),
+     so this must not restate one — the previous hardcoded `col-resize` was
+     wrong on every horizontal seam, and never applied anyway. */
+  .buzz-dockview .dv-sash {
+    --dv-sash-size: 4px;
+
+    background: transparent;
+  }
+
+  .buzz-dockview .dv-horizontal > .dv-sash-container > .dv-sash {
+    width: var(--size-resize-seam);
+    margin-left: calc((var(--dv-sash-size) - var(--size-resize-seam)) / 2);
+  }
+
+  .buzz-dockview .dv-vertical > .dv-sash-container > .dv-sash {
+    height: var(--size-resize-seam);
+    margin-top: calc((var(--dv-sash-size) - var(--size-resize-seam)) / 2);
+  }
+
+  /* A hairline in the gutter on hover, centred in the seam rather than filling
+     it — the handle is deliberately wider than the line it shows. */
+  .buzz-dockview .dv-sash::after {
+    position: absolute;
+    background: var(--border-primary);
+    content: "";
+    opacity: 0;
+    transition: opacity var(--duration-state);
+  }
+
+  .buzz-dockview .dv-sash:hover::after,
+  .buzz-dockview .dv-sash:active::after {
+    opacity: 1;
+  }
+
+  .buzz-dockview .dv-horizontal > .dv-sash-container > .dv-sash::after {
+    top: 0;
+    bottom: 0;
+    left: calc(50% - 0.5px);
+    width: 1px;
+  }
+
+  .buzz-dockview .dv-vertical > .dv-sash-container > .dv-sash::after {
+    top: calc(50% - 0.5px);
+    right: 0;
+    left: 0;
+    height: 1px;
+  }
+
+  /* ============================================================
+     Dragging a panel.
+
+     Two costs to hold down, both from this app's own surfaces rather than from
+     dockview. Neither is a micro-optimisation: each one is a whole-screen
+     repaint per frame, and DESIGN.md § Motion already rules out the same cost
+     when it arrives as an animated blur.
+
+     1. Every panel is `backdrop-filter`. While a ghost and an overlay move
+        across the screen, each frame can force every blurred surface to
+        re-composite. During a drag the blur is dropped and the fill is made
+        opaque: `bg-panel` is what the blur was approximating anyway, so the
+        panels hold their place while the cost goes away. It returns on drop.
+     2. Panel content is isolated with `contain`, so a drop overlay resizing
+        over a panel cannot force that panel's subtree to re-layout. */
+  .buzz-dockview .dv-content-container {
+    contain: layout paint;
+  }
+
+  .buzz-dockview[data-dragging] .panel {
+    backdrop-filter: none;
+    background: var(--bg-panel);
+  }
+
+  /* A drag must not select the text it passes over — DESIGN.md § Motion. */
+  .buzz-dockview[data-dragging],
+  .buzz-dockview:has(.dv-tab.dv-tab-dragging) {
+    user-select: none;
+  }
+
+  /* The drop target. Dockview mounts this on the component root (the theme's
+     `dndOverlayMounting: 'absolute'`), so it can span the gutter. It states
+     where the panel will land, so it takes the panel's own silhouette rather
+     than a vendor rectangle. */
+  .buzz-dockview .dv-drop-target-anchor {
+    border: 1px solid var(--purple-8);
+    border-radius: var(--radius-panel);
+    background: var(--purple-3);
+  }
+
+  /* The overlay moves between drop zones as the cursor crosses them, and
+     dockview's own duration for that is 300ms when the overlay is mounted on
+     the component root. That is slow enough that the target visibly trails the
+     pointer — the exact reading of lag, from a transition rather than from work
+     per frame. The overlay is not direct manipulation (it snaps between
+     discrete zones, so easing carries the information that it moved), but it
+     has to keep up: `duration-fast` is the shortest step we have. */
+  .buzz-dockview .dv-drop-target-container,
+  .buzz-dockview .dv-drop-target {
+    --dv-transition-duration: var(--duration-fast);
+  }
+
+  /* No background. These fill `.dv-content-container` edge to edge — measured at
+     610x551 inside 612x553, the two pixels being its border — and that container
+     is already primary glass.
+
+     They each set the same `glass-2` fill with no blur of their own, so the two
+     identical translucent layers composited: 0.52 over 0.52 is **0.77**, landing
+     between glass-4 and glass-5. The panels read as nearly solid, which is why
+     the backdrop barely showed through a surface that was supposed to be the
+     most translucent one in the system. Nothing declared 0.77 and no token holds
+     it — it was the arithmetic of a redundant fill.
+
+     A region that exactly covers a glass surface does not need its own. If one
+     of these later needs to sit apart from its container, it takes a whole
+     material rather than a bare fill. */
+  .workspace-navigator,
+  .session-view,
+  .new-session-view,
+  .empty-workspace-panel {
+    height: 100%;
+    min-width: 0;
+  }
+
+  .workspace-navigator,
+  .session-view,
+  .new-session-view {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-heading,
+  .session-header,
+  .new-session-header {
+    display: flex;
+    min-height: 4rem;
+    align-items: center;
+    padding: 0 1.25rem;
+    border-bottom: 1px solid var(--border-primary);
+  }
+
+  /* The navigator is a quiet scan surface: its search field and first section
+     are separated by space, not a boundary line. PanelHeader owns dividers for
+     titled work surfaces; this local composition deliberately does not use it. */
+  .navigator-heading {
+    min-height: 0;
+    padding: var(--space-2);
+    border-bottom: 0;
+  }
+
+  .navigator-list {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-2);
+  }
+
+  .channel-cluster {
+    position: relative;
+  }
+
+  /* A Room and its Session action are one visual row. The action remains a
+     separate button for keyboard and pointer users, but it is positioned over
+     the Room item rather than reserving a second grid column that would cut the
+     selected/hover treatment short. */
+  .channel-main-row {
+    position: relative;
+  }
+
+  .channel-main-row .navigation-item {
+    padding-right: calc(var(--size-row) + var(--space-control-inset));
+  }
+
+  .channel-main-row .buzz-button[data-icon-size="compact"] {
+    position: absolute;
+    top: 0;
+    right: 0;
+    opacity: 0;
+  }
+
+  .channel-main-row:hover .buzz-button[data-icon-size="compact"],
+  .channel-main-row .buzz-button[data-icon-size="compact"]:focus-visible {
+    opacity: 1;
+  }
+
+  .session-children {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding-left: var(--space-3);
+  }
+
+  /* This connector expresses the channel → Session relationship and therefore
+     stays in the Messages composition. The selectable Session itself is the
+     shared NavigationItem. */
+  .session-child {
+    position: relative;
+  }
+
+  .session-child::before {
+    position: absolute;
+    top: 0;
+    bottom: 50%;
+    left: calc(var(--space-3) * -0.5);
+    width: calc(var(--space-3) * 0.5);
+    border-bottom: 1px solid var(--border-primary);
+    border-left: 1px solid var(--border-primary);
+    border-bottom-left-radius: var(--radius-row);
+    content: "";
+    pointer-events: none;
+  }
+
+  /* Rooms do not carry unread treatment yet. Sessions do: the dot is a compact
+     status signal inside the child row, not a second kind of navigation item. */
+  .session-unread-indicator {
+    display: block;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: var(--radius-pill);
+    background: var(--purple-8);
+  }
+
+  .empty-workspace-panel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 2rem;
+    text-align: center;
+  }
+
+  .session-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-2);
+  }
+
+  .session-title-block {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .session-title-block > div {
+    min-width: 0;
+  }
+
+  .session-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .session-header-actions > :first-child {
+    color: var(--text-secondary);
+  }
+
+  .session-scroll {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .conversation-column {
+    width: min(100%, 47rem);
+    margin: 0 auto;
+    padding: 1.75rem 2rem;
+  }
+
+  .message-row {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.625rem 0;
+  }
+
+  .message-avatar {
+    display: grid;
+    width: 1.875rem;
+    height: 1.875rem;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--neutral-2);
+    color: var(--text-secondary);
+  }
+
+  .message-avatar[data-agent] {
+    background: var(--purple-3);
+    color: var(--purple-12);
+  }
+
+  .message-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  .message-content {
+    margin: 0.125rem 0 0;
+    white-space: pre-wrap;
+  }
+
+  /* Content grows the dock. Activity occupies a permanently reserved row and
+     never changes the space taken from the conversation. */
+  .conversation-composer-dock {
+    display: grid;
+    flex: 0 0 auto;
+    grid-template-rows: auto auto;
+    min-width: 0;
+    gap: var(--space-1);
+    padding: 0 1.5rem 1.5rem;
+    background: var(--bg-panel);
+  }
+
+  .conversation-composer-activity-slot {
+    min-width: 0;
+    min-height: 1lh;
+  }
+
+  .agent-activity-rail {
+    display: flex;
+    width: min(100%, 47rem);
+    gap: var(--space-2);
+    margin: 0 auto;
+    overflow-x: auto;
+  }
+
+  .agent-activity-rail-status {
+    min-width: max-content;
+    color: var(--text-secondary);
+  }
+
+  /* The base text is always painted. The pseudo-element is only a clipped
+     highlight travelling over it, which makes shimmer additive rather than a
+     replacement for legibility. */
+  .buzz-shimmer-text {
+    position: relative;
+    display: inline-block;
+  }
+
+  .buzz-shimmer-text::after {
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(
+      100deg,
+      transparent calc(50% - var(--shimmer-spread)),
+      var(--text-primary) 50%,
+      transparent calc(50% + var(--shimmer-spread))
+    );
+    background-position: 130% center;
+    background-size: 250% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    content: attr(data-shimmer-text);
+    pointer-events: none;
+    animation: agent-activity-shimmer 2.2s linear 0.35s infinite;
+  }
+
+  @keyframes agent-activity-shimmer {
+    from {
+      background-position: 130% center;
+    }
+    to {
+      background-position: -30% center;
+    }
+  }
+
+  /* An authoring surface is inset into the conversation panel, not another
+     floating panel. The boundary is a real input boundary, hence the one
+     shared border role; focus moves it to the palette's focus step. */
+  .message-composer {
+    display: grid;
+    box-sizing: border-box;
+    width: min(100%, 47rem);
+    min-height: 0;
+    grid-template-rows: auto auto;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+    margin: 0 auto;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-panel);
+    transition:
+      border-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
+  }
+
+  .message-composer[data-state="failed"] {
+    border-color: var(--red-8);
+  }
+
+  .message-composer[data-state="disabled"] {
+    background: var(--neutral-3);
+  }
+
+  .message-composer-input {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .message-composer-editor {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 1.5lh;
+    max-height: min(10rem, 30vh);
+    overflow-y: auto;
+    padding: 0.375rem 0;
+    outline: 0;
+    color: var(--text-primary);
+  }
+
+  .message-composer-editor p {
+    margin: 0;
+  }
+  .message-composer-editor p + p {
+    margin-top: var(--space-1);
+  }
+  .message-composer-editor ul,
+  .message-composer-editor ol,
+  .message-composer-editor blockquote {
+    margin: 0;
+    padding-inline-start: var(--space-5);
+  }
+  .message-composer-editor blockquote {
+    border-inline-start: 2px solid var(--border-primary);
+  }
+  html[data-keyboard-navigation] .message-composer-editor.ProseMirror-focused {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+  .message-composer-editor p.is-editor-empty:first-child::before {
+    color: var(--text-tertiary);
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .message-composer-feedback {
+    margin: 0.25rem 0.5rem 0;
+  }
+
+  .message-composer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding-top: var(--space-1);
+  }
+
+  .message-composer-actions-start,
+  .message-composer-actions-end {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .message-composer-actions-end {
+    flex-shrink: 0;
+  }
+
+  .composer-toolbar-presence {
+    display: grid;
+    min-width: 0;
+    align-items: center;
+  }
+
+  .composer-toolbar-presence > * {
+    grid-area: 1 / 1;
+  }
+
+  .composer-toolbar-enter {
+    animation: composer-toolbar-enter var(--duration-settle)
+      var(--easing-settle) both;
+  }
+  .composer-toolbar-exit {
+    animation: composer-toolbar-exit var(--duration-settle) var(--easing-settle)
+      both;
+  }
+
+  @keyframes composer-toolbar-enter {
+    from {
+      opacity: 0;
+      transform: translateX(-0.5rem) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+  }
+  @keyframes composer-toolbar-exit {
+    from {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: translateX(0.5rem) scale(0.96);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .composer-toolbar-enter,
+    .composer-toolbar-exit {
+      animation: none;
+    }
+  }
+
+  .composer-formatting-bar {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .composer-formatting-divider {
+    align-self: stretch;
+    border-inline-start: 1px solid var(--border-primary);
+    margin-block: var(--space-2);
+  }
+
+  .composer-expression-picker {
+    width: min(22rem, calc(100vw - var(--space-6)));
+    max-height: min(32rem, var(--available-height));
+    overflow: auto;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-sm);
+    transform-origin: var(--transform-origin);
+  }
+  .composer-expression-picker .buzz-tabs {
+    padding: var(--space-2) var(--space-3) 0;
+  }
+  .composer-emoji-content,
+  .composer-gif-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3);
+  }
+  .composer-emoji-content section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .composer-emoji-content h3 {
+    margin: 0;
+  }
+  .composer-expression-search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding-inline: var(--space-2);
+    color: var(--text-secondary);
+  }
+  .composer-expression-search input {
+    min-width: 0;
+    height: var(--size-control);
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .composer-emoji-categories {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+  .composer-emoji-categories button {
+    display: grid;
+    width: var(--size-control);
+    height: var(--size-control);
+    flex: 0 0 auto;
+    place-items: center;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+  }
+  .composer-emoji-categories button:hover,
+  .composer-emoji-categories button[aria-selected="true"] {
+    background: var(--neutral-3);
+    color: var(--text-primary);
+  }
+  .composer-emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: var(--space-1);
+  }
+  .composer-emoji-choice {
+    display: grid;
+    min-width: 0;
+    min-height: 2rem;
+    place-items: center;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+  }
+  .composer-emoji-choice:hover {
+    background: var(--neutral-3);
+  }
+  .composer-emoji-choice img {
+    width: 1.25rem;
+    height: 1.25rem;
+    object-fit: contain;
+  }
+  .composer-emoji-preview {
+    display: flex;
+    min-height: 3.5rem;
+    align-items: center;
+    gap: var(--space-3);
+    border-top: 1px solid var(--border-primary);
+    padding-top: var(--space-3);
+  }
+  .composer-emoji-preview img,
+  .composer-emoji-preview-glyph {
+    width: var(--text-body-lg);
+    height: var(--text-body-lg);
+    flex: 0 0 auto;
+    object-fit: contain;
+    @apply text-body-lg;
+    line-height: 1;
+  }
+  .composer-emoji-preview-glyph {
+    display: grid;
+    place-items: center;
+  }
+  .composer-emoji-preview div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+  .composer-gif-grid {
+    columns: 2;
+    column-gap: var(--space-1);
+  }
+  .composer-gif-grid button {
+    display: block;
+    width: 100%;
+    break-inside: avoid;
+    margin-bottom: var(--space-1);
+    overflow: hidden;
+    border: 0;
+    border-radius: var(--radius-row);
+    padding: 0;
+    background: var(--neutral-3);
+  }
+  .composer-gif-grid img {
+    display: block;
+    width: 100%;
+  }
+  @media (max-width: 48rem) {
+    .conversation-composer-dock {
+      padding: 0 0.75rem 0.75rem;
+    }
+
+    .message-composer {
+      gap: var(--space-1);
+      padding: var(--space-1);
+    }
+
+    .workspace-topbar {
+      padding: 0 0.75rem;
+    }
+
+    .workspace-stage {
+      padding: 3.25rem 0.5rem 0.5rem;
+    }
+
+    .workspace-identity > span {
+      display: none;
+    }
+
+    .session-header {
+      min-height: auto;
+      align-items: start;
+      padding-block: var(--space-2);
+    }
+
+    .session-header-actions {
+      padding-top: 0.125rem;
+    }
+
+    .session-header-actions > :first-child span {
+      display: none;
+    }
+
+    .conversation-column {
+      padding-right: 1rem;
+      padding-left: 1rem;
+    }
+  }
+}
+
+@layer components {
+  .composer-link-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--neutral-8);
+  }
+  .composer-link-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: min(24rem, calc(100vw - var(--space-6)));
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-5);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-panel);
+    background: var(--bg-float);
+    box-shadow: var(--shadow-float);
+  }
+  .composer-link-dialog form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .composer-link-dialog label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .composer-link-dialog input {
+    height: var(--size-control);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: 0 var(--space-control-inset);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .composer-link-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+}
