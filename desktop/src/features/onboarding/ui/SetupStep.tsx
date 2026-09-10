@@ -1,6 +1,6 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Info } from "lucide-react";
+import { Info } from "lucide-react";
 
 import {
   useAcpAuthMethodsQuery,
@@ -9,15 +9,10 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
-import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Card } from "@/shared/ui/card";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
-import { Spinner } from "@/shared/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
@@ -26,7 +21,13 @@ import {
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
 import { OnboardingFooter } from "./OnboardingFooter";
-import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
+import {
+  SetupRuntimeAction,
+  SetupRuntimeCardPresentation,
+  SetupRuntimeCheckingStatus,
+  SetupRuntimeInstallingStatus,
+  SetupRuntimeReadyStatus,
+} from "./SetupRuntimeCard";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -40,6 +41,7 @@ type SetupStepProps = {
 };
 
 type SetupStepContentProps = SetupStepProps & {
+  renderRuntimeCard?: (runtime: AcpRuntimeCatalogEntry) => React.ReactNode;
   state: SetupStepState;
 };
 
@@ -64,32 +66,6 @@ function useSetupStepState(): SetupStepState {
       items,
     },
   };
-}
-
-function RuntimeReadinessIndicator({
-  runtime,
-  ready,
-}: {
-  runtime: AcpRuntimeCatalogEntry;
-  ready: boolean;
-}) {
-  // Checkmark temporarily hidden; flip to true to restore it.
-  const showReadinessCheckmark = false;
-  if (!ready || !showReadinessCheckmark) return null;
-
-  return (
-    <span
-      aria-hidden="true"
-      className="pointer-events-none absolute right-8 top-8 flex h-8 w-8 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-[var(--buzz-welcome-chartreuse)]"
-      data-testid={`onboarding-runtime-check-${runtime.id}`}
-    >
-      <Check
-        className="h-4 w-4 text-foreground"
-        data-testid={`onboarding-runtime-checkmark-${runtime.id}`}
-        strokeWidth={3}
-      />
-    </span>
-  );
 }
 
 function RuntimeStatus({
@@ -153,10 +129,8 @@ function RuntimeStatus({
   if (shouldSignIn) {
     return (
       <div className="flex flex-col items-center gap-1.5">
-        <Button
-          aria-label={`Sign in to ${runtime.label}`}
-          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
-          data-testid={`onboarding-runtime-instructions-${runtime.id}`}
+        <SetupRuntimeAction
+          ariaLabel={`Sign in to ${runtime.label}`}
           onClick={() => {
             if (didSignInCheckTimeOut) {
               setDidSignInCheckTimeOut(false);
@@ -178,15 +152,14 @@ function RuntimeStatus({
               },
             );
           }}
-          type="button"
-          variant="ghost"
+          testId={`onboarding-runtime-instructions-${runtime.id}`}
         >
           {isWaitingForSignIn
             ? "CHECKING…"
             : didSignInCheckTimeOut
               ? "CHECK AGAIN"
               : "SIGN IN"}
-        </Button>
+        </SetupRuntimeAction>
         {methodsQuery.error instanceof Error ? (
           <RuntimeErrorTooltip
             className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
@@ -206,16 +179,7 @@ function RuntimeStatus({
   }
 
   if (isInstalling) {
-    return (
-      <div
-        aria-label={`Installing ${runtime.label}`}
-        className="flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono text-badge font-normal uppercase text-foreground"
-        role="status"
-      >
-        <Spinner className="h-3 w-3 border-2 text-foreground" />
-        INSTALLING
-      </div>
-    );
+    return <SetupRuntimeInstallingStatus runtime={runtime} />;
   }
 
   if (runtimeIsReadyForOnboarding(runtime)) {
@@ -227,50 +191,20 @@ function RuntimeStatus({
     // both clear and READY returns. Next stays gated by isChecking/errorMessage
     // in SetupStepContent, so this only governs the per-card claim.
     if (runtimesQuery.isFetching) {
-      return (
-        <div
-          aria-label={`Rechecking ${runtime.label}`}
-          className="flex h-5 items-center gap-2 rounded-full bg-[#EBEFEF] px-2.5 font-mono text-badge font-normal uppercase text-foreground"
-          data-testid={`onboarding-runtime-rechecking-${runtime.id}`}
-          role="status"
-        >
-          <Spinner className="h-3 w-3 border-2 text-foreground" />
-          CHECKING…
-        </div>
-      );
+      return <SetupRuntimeCheckingStatus runtime={runtime} />;
     }
     if (runtimesQuery.isError) {
       return (
-        <Button
-          aria-label={`Check ${runtime.label} again`}
-          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
-          data-testid={`onboarding-runtime-recheck-${runtime.id}`}
+        <SetupRuntimeAction
+          ariaLabel={`Check ${runtime.label} again`}
           onClick={() => void runtimesQuery.forceRefresh()}
-          type="button"
-          variant="ghost"
+          testId={`onboarding-runtime-recheck-${runtime.id}`}
         >
           CHECK AGAIN
-        </Button>
+        </SetupRuntimeAction>
       );
     }
-    return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className="inline-flex h-5 cursor-default items-center rounded-full bg-[#EBEFEF] px-2.5 font-mono text-badge font-normal uppercase text-foreground"
-            data-testid={`onboarding-runtime-ready-${runtime.id}`}
-          >
-            READY
-          </span>
-        </TooltipTrigger>
-        <TooltipContent
-          className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
-          side="top"
-        >
-          <RuntimeDetails runtime={runtime} />
-        </TooltipContent>
-      </Tooltip>
-    );
+    return <SetupRuntimeReadyStatus runtime={runtime} />;
   }
 
   if (
@@ -278,158 +212,38 @@ function RuntimeStatus({
     runtime.authStatus.status === "unknown"
   ) {
     return (
-      <Button
-        aria-label={`Check ${runtime.label} again`}
-        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+      <SetupRuntimeAction
+        ariaLabel={`Check ${runtime.label} again`}
         disabled={runtimesQuery.isFetching}
         onClick={() => void runtimesQuery.forceRefresh()}
-        type="button"
-        variant="ghost"
       >
         {runtimesQuery.isFetching ? "CHECKING…" : "CHECK AGAIN"}
-      </Button>
+      </SetupRuntimeAction>
     );
   }
 
   const installLabel = installError ? "RETRY INSTALL" : "INSTALL";
   if (runtime.canAutoInstall) {
     return (
-      <Button
-        aria-label={`${installError ? "Retry installing" : "Install"} ${runtime.label}`}
-        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
-        data-testid={`onboarding-runtime-install-${runtime.id}`}
+      <SetupRuntimeAction
+        ariaLabel={`${installError ? "Retry installing" : "Install"} ${runtime.label}`}
         onClick={onInstall}
-        type="button"
-        variant="ghost"
+        testId={`onboarding-runtime-install-${runtime.id}`}
       >
         {installLabel}
-      </Button>
+      </SetupRuntimeAction>
     );
   }
 
   return (
-    <Button
-      aria-label={`View ${runtime.label} install instructions`}
-      className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
-      data-testid={`onboarding-runtime-instructions-${runtime.id}`}
+    <SetupRuntimeAction
+      ariaLabel={`View ${runtime.label} install instructions`}
       onClick={() => void openUrl(runtime.installInstructionsUrl)}
-      type="button"
-      variant="ghost"
+      testId={`onboarding-runtime-instructions-${runtime.id}`}
     >
       INSTALL
-    </Button>
+    </SetupRuntimeAction>
   );
-}
-
-function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  if (
-    runtime.availability === "available" &&
-    runtime.command &&
-    runtime.binaryPath
-  ) {
-    const description = describeResolvedCommand(
-      runtime.command,
-      runtime.binaryPath,
-    );
-    return (
-      <>
-        <p className="text-xs leading-4 text-white">
-          {description.charAt(0).toUpperCase() + description.slice(1)}
-        </p>
-        {runtime.defaultArgs.length > 0 ? (
-          <p className="mt-1 text-xs leading-4 text-white">
-            Args:{" "}
-            <code className="font-mono">{runtime.defaultArgs.join(", ")}</code>
-          </p>
-        ) : null}
-      </>
-    );
-  }
-
-  if (runtime.availability === "adapter_missing") {
-    return (
-      <>
-        <p className="text-xs leading-4 text-white">
-          CLI detected; ACP adapter missing.
-        </p>
-        <p className="mt-1 text-xs leading-4 text-white">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  if (runtime.availability === "adapter_outdated") {
-    return (
-      <>
-        <p className="text-xs leading-4 text-white">
-          ACP adapter detected but outdated — reinstall required.
-        </p>
-        <p className="mt-1 text-xs leading-4 text-white">
-          This updates the machine-global{" "}
-          <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
-            codex-acp
-          </code>{" "}
-          adapter. Older Buzz releases using the legacy adapter contract may
-          lose community access until{" "}
-          <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
-            @zed-industries/codex-acp@0.16.0
-          </code>{" "}
-          is restored.
-        </p>
-        <p className="mt-1 text-xs leading-4 text-white">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  if (runtime.availability === "cli_missing") {
-    return (
-      <>
-        <p className="text-xs leading-4 text-white">
-          ACP adapter detected; CLI missing.
-        </p>
-        <p className="mt-1 text-xs leading-4 text-white">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <p className="text-xs leading-4 text-white">Not installed yet.</p>
-      <p className="mt-1 text-xs leading-4 text-white">{runtime.installHint}</p>
-    </>
-  );
-}
-
-function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
-  if (
-    runtime.availability === "available" &&
-    runtime.command &&
-    runtime.binaryPath
-  ) {
-    const description = describeResolvedCommand(
-      runtime.command,
-      runtime.binaryPath,
-    );
-    return description.charAt(0).toUpperCase() + description.slice(1);
-  }
-  if (runtime.availability === "adapter_missing") {
-    return "CLI detected; ACP adapter missing.";
-  }
-  if (runtime.availability === "adapter_outdated") {
-    return "ACP adapter detected but outdated — reinstall required.";
-  }
-  if (
-    runtime.availability === "cli_missing" ||
-    runtime.availability === "not_installed"
-  ) {
-    return "CLI not detected.";
-  }
-  return "";
 }
 
 function isSupportedOnboardingAuthMethod(
@@ -523,8 +337,6 @@ function RuntimeCard({
   const installError = installResults[runtime.id]?.error ?? null;
   const isInstalling = installMutation.isPending;
   const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
-  const isAvailable = runtime.availability === "available";
-  const isReady = runtimeIsReadyForOnboarding(runtime);
 
   function handleInstall() {
     onInstallResultsChange((current) => ({
@@ -557,66 +369,33 @@ function RuntimeCard({
   }
 
   return (
-    <Card
-      className={cn(
-        "group h-[224px] w-full max-w-[288px] select-none items-center px-3 py-1.5 text-center",
-        installError && "ring-1 ring-destructive/40",
-        isReady && "brightness-[0.98]",
-      )}
-      data-ready={isReady ? "true" : "false"}
-      data-testid={`onboarding-runtime-${runtime.id}`}
-      variant="textured"
-    >
-      <RuntimeReadinessIndicator ready={isReady} runtime={runtime} />
-
-      <div className="flex min-w-0 flex-col items-center gap-2.5">
-        <div className="flex min-w-0 items-center justify-center gap-3">
-          <RuntimeIcon className="h-7 w-7" runtime={runtime} />
-          <h2 className="truncate text-sm font-normal leading-5 text-foreground">
-            {getRuntimeDisplayLabel(runtime)}
-          </h2>
-        </div>
+    <SetupRuntimeCardPresentation
+      footer={
+        installError ? (
+          <RuntimeErrorTooltip
+            className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+            detail={installError}
+            label="Installation failed"
+            showIcon
+            testId={`onboarding-runtime-error-${runtime.id}`}
+          />
+        ) : (
+          <RuntimeAuthError runtime={runtime} />
+        )
+      }
+      installError={installError}
+      installOutputLine={installOutputLine}
+      isInstalling={isInstalling}
+      runtime={runtime}
+      status={
         <RuntimeStatus
           installError={installError}
           isInstalling={isInstalling}
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {isInstalling && installOutputLine ? (
-          // Takes the detail text's slot rather than adding a row: the card is
-          // fixed-height, and during an install the live line is the more
-          // useful of the two.
-          <p
-            aria-live="polite"
-            className="max-w-[13rem] truncate font-mono text-2xs leading-4 text-muted-foreground"
-            data-testid={`onboarding-runtime-install-output-${runtime.id}`}
-          >
-            {installOutputLine}
-          </p>
-        ) : !isAvailable && runtimeDetailText(runtime) ? (
-          <p
-            aria-hidden={installError ? "true" : undefined}
-            className={cn(
-              "max-w-[13rem] text-2xs leading-4 text-muted-foreground",
-              installError && "invisible",
-            )}
-          >
-            {runtimeDetailText(runtime)}
-          </p>
-        ) : null}
-      </div>
-      {installError ? (
-        <RuntimeErrorTooltip
-          className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-          detail={installError}
-          label="Installation failed"
-          showIcon
-          testId={`onboarding-runtime-error-${runtime.id}`}
-        />
-      ) : (
-        <RuntimeAuthError runtime={runtime} />
-      )}
-    </Card>
+      }
+    />
   );
 }
 
@@ -642,6 +421,7 @@ function RuntimeProvidersSection({
   installResults,
   navigateToAgentSettings,
   onInstallResultsChange,
+  renderRuntimeCard,
   runtimeProviders,
 }: {
   installResults: InstallResultsState;
@@ -649,6 +429,7 @@ function RuntimeProvidersSection({
   onInstallResultsChange: React.Dispatch<
     React.SetStateAction<InstallResultsState>
   >;
+  renderRuntimeCard?: (runtime: AcpRuntimeCatalogEntry) => React.ReactNode;
   runtimeProviders: SetupStepState["runtimeProviders"];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
@@ -669,14 +450,20 @@ function RuntimeProvidersSection({
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         {orderedItems.length > 0 ? (
           <div className="grid min-w-0 w-full max-w-[1200px] grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {orderedItems.map((runtime) => (
-              <RuntimeCard
-                installResults={installResults}
-                key={runtime.id}
-                onInstallResultsChange={onInstallResultsChange}
-                runtime={runtime}
-              />
-            ))}
+            {orderedItems.map((runtime) =>
+              renderRuntimeCard ? (
+                <React.Fragment key={runtime.id}>
+                  {renderRuntimeCard(runtime)}
+                </React.Fragment>
+              ) : (
+                <RuntimeCard
+                  installResults={installResults}
+                  key={runtime.id}
+                  onInstallResultsChange={onInstallResultsChange}
+                  runtime={runtime}
+                />
+              ),
+            )}
           </div>
         ) : isChecking ? (
           <RuntimeProvidersLoadingState />
@@ -723,10 +510,11 @@ function RuntimeProvidersSection({
   );
 }
 
-function SetupStepContent({
+export function SetupStepContent({
   actions,
   direction,
   onReadyRuntimeIdsChange,
+  renderRuntimeCard,
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
@@ -758,6 +546,7 @@ function SetupStepContent({
         installResults={installResults}
         navigateToAgentSettings={actions.navigateToAgentSettings}
         onInstallResultsChange={setInstallResults}
+        renderRuntimeCard={renderRuntimeCard}
         runtimeProviders={runtimeProviders}
       />
 

@@ -70,9 +70,17 @@ const EMOJI_MART_SHADOW_CSS = `
     width: 100%;
   }
 
+  :host([data-buzz-theme="light"]) #root {
+    color-scheme: light;
+    --em-rgb-background: var(--buzz-emoji-picker-rgb-background, 245, 245, 245);
+    --em-rgb-color: var(--buzz-emoji-picker-rgb-color, 23, 23, 23);
+    --em-rgb-input: var(--buzz-emoji-picker-rgb-input, 255, 255, 255);
+    --em-color-border: rgba(var(--buzz-emoji-picker-rgb-color, 23, 23, 23), 0.08);
+    --em-color-border-over: rgba(var(--buzz-emoji-picker-rgb-color, 23, 23, 23), 0.14);
+  }
+
   #root {
     --padding: var(--buzz-emoji-picker-padding, 16px);
-    --buzz-emoji-picker-search-control-height: 48px;
     --sidebar-width: 0px;
     display: flex;
     flex-direction: column;
@@ -128,6 +136,23 @@ const EMOJI_MART_SHADOW_CSS = `
     display: none;
   }
 
+  :host([data-buzz-category-labels]) .category .sticky {
+    background-color: rgb(var(--em-rgb-background));
+    display: block;
+  }
+
+  :host([data-buzz-category-labels]) #root > .padding-lr:not(.scroll) {
+    background-color: rgb(var(--em-rgb-background));
+    padding-bottom: 8px;
+    padding-top: 8px;
+    position: relative;
+    z-index: 4;
+  }
+
+  :host([data-buzz-category-labels]) .scroll {
+    padding-top: 0;
+  }
+
   /* Match the app's member-search controls: a distinct resting surface and
    * border make both the emoji search and its adjacent skin-tone control easy
    * to find before either receives focus. */
@@ -139,7 +164,7 @@ const EMOJI_MART_SHADOW_CSS = `
 
   .search input[type="search"] {
     border-radius: 12px;
-    height: var(--buzz-emoji-picker-search-control-height);
+    height: var(--buzz-emoji-picker-search-control-height, 48px);
     padding-bottom: 0;
     padding-top: 0;
   }
@@ -151,9 +176,9 @@ const EMOJI_MART_SHADOW_CSS = `
   .search + .flex {
     border-radius: 12px;
     flex: 0 0 auto;
-    height: var(--buzz-emoji-picker-search-control-height) !important;
+    height: var(--buzz-emoji-picker-search-control-height, 48px) !important;
     margin-left: 8px;
-    width: var(--buzz-emoji-picker-search-control-height) !important;
+    width: var(--buzz-emoji-picker-search-control-height, 48px) !important;
   }
 
   .skin-tone-button {
@@ -161,8 +186,30 @@ const EMOJI_MART_SHADOW_CSS = `
     border: 0 !important;
     border-radius: 8px;
     box-shadow: none !important;
-    height: calc(var(--buzz-emoji-picker-search-control-height) - 8px) !important;
-    width: calc(var(--buzz-emoji-picker-search-control-height) - 8px) !important;
+    height: calc(var(--buzz-emoji-picker-search-control-height, 48px) - 8px) !important;
+    width: calc(var(--buzz-emoji-picker-search-control-height, 48px) - 8px) !important;
+  }
+
+  :host([data-buzz-onboarding-inline]) #root > .padding-lr {
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    background-color: rgba(var(--em-rgb-background), 0.82);
+    padding-bottom: 8px;
+    padding-top: 4px;
+    position: relative;
+    z-index: 4;
+  }
+
+  :host([data-buzz-onboarding-inline])
+    #root
+    > .padding-lr
+    > div
+    > .spacer {
+    display: none;
+  }
+
+  :host([data-buzz-onboarding-inline]) #nav {
+    display: none;
   }
 
   .skin-tone-button[aria-selected] {
@@ -588,6 +635,9 @@ function installEmojiMartWheelScroll(shadowRoot: ShadowRoot) {
 export function useEmojiMartStyles(
   containerRef: React.RefObject<HTMLDivElement | null>,
   enabled: boolean,
+  onboardingInline = false,
+  themeOverride: "light" | null = null,
+  showCategoryLabels = false,
 ) {
   React.useEffect(() => {
     if (!enabled) {
@@ -596,6 +646,7 @@ export function useEmojiMartStyles(
 
     let animationFrame = 0;
     let removeWheelScroll: (() => void) | null = null;
+    let styledHost: Element | null = null;
 
     const installEmojiMartStyles = () => {
       const host = containerRef.current?.querySelector("em-emoji-picker");
@@ -606,12 +657,24 @@ export function useEmojiMartStyles(
         return;
       }
 
-      if (!shadowRoot.querySelector("#buzz-emoji-mart-style")) {
-        const style = document.createElement("style");
+      styledHost = host;
+      host.toggleAttribute("data-buzz-onboarding-inline", onboardingInline);
+      host.toggleAttribute("data-buzz-category-labels", showCategoryLabels);
+      if (themeOverride) {
+        host.setAttribute("data-buzz-theme", themeOverride);
+      } else {
+        host.removeAttribute("data-buzz-theme");
+      }
+
+      let style = shadowRoot.querySelector<HTMLStyleElement>(
+        "#buzz-emoji-mart-style",
+      );
+      if (!style) {
+        style = document.createElement("style");
         style.id = "buzz-emoji-mart-style";
-        style.textContent = EMOJI_MART_SHADOW_CSS;
         shadowRoot.appendChild(style);
       }
+      style.textContent = EMOJI_MART_SHADOW_CSS;
 
       removeWheelScroll ??= installEmojiMartWheelScroll(shadowRoot);
     };
@@ -621,8 +684,17 @@ export function useEmojiMartStyles(
     return () => {
       window.cancelAnimationFrame(animationFrame);
       removeWheelScroll?.();
+      styledHost?.removeAttribute("data-buzz-onboarding-inline");
+      styledHost?.removeAttribute("data-buzz-category-labels");
+      styledHost?.removeAttribute("data-buzz-theme");
     };
-  }, [containerRef, enabled]);
+  }, [
+    containerRef,
+    enabled,
+    onboardingInline,
+    showCategoryLabels,
+    themeOverride,
+  ]);
 }
 
 export function useEmojiMartThemeVars() {

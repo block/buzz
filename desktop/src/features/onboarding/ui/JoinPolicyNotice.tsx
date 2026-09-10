@@ -2,6 +2,7 @@ import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { joinPolicyDocumentUrl, type JoinPolicy } from "@/shared/api/invites";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 
@@ -13,25 +14,31 @@ type JoinPolicyNoticeProps = {
   policy: JoinPolicy;
   /** Relay hosting the policy documents the links below point at. */
   relayWsUrl: string;
+  /** Optional safe host for surfaces that must not open external documents. */
+  onOpenDocument?: (document: "terms" | "privacy") => void;
+  /** Use primary page text where a surface needs stronger consent contrast. */
+  textTone?: "muted" | "foreground";
 };
 
 /**
  * Join-policy consent block shown on every join surface.
  *
- * The Terms/Privacy links open the relay-hosted document pages
- * (`/api/join-policy/terms|privacy`) in the system browser via the OS
- * opener. They must NOT navigate or render in-app: these surfaces exist
- * before onboarding completes, where the router (required by the message
- * Markdown component) is not mounted — an in-app render tears down the
- * whole React tree.
+ * The Terms/Privacy links normally open the relay-hosted document pages
+ * (`/api/join-policy/terms|privacy`) in the system browser via the OS opener.
+ * A non-networked host may intercept those actions. They must NOT navigate or
+ * render in-app: these surfaces exist before onboarding completes, where the
+ * router (required by the message Markdown component) is not mounted — an
+ * in-app render tears down the whole React tree.
  */
 export function JoinPolicyNotice({
   ageConfirmed,
   agreementConfirmed,
   onAgeConfirmedChange,
   onAgreementConfirmedChange,
+  onOpenDocument,
   policy,
   relayWsUrl,
+  textTone = "muted",
 }: JoinPolicyNoticeProps) {
   const ageConfirmationId = React.useId();
   const agreementConfirmationId = React.useId();
@@ -49,7 +56,12 @@ export function JoinPolicyNotice({
             }
           />
           <label
-            className="cursor-pointer text-xs leading-5 text-muted-foreground"
+            className={cn(
+              "cursor-pointer text-xs leading-5",
+              textTone === "foreground"
+                ? "text-foreground"
+                : "text-muted-foreground",
+            )}
             htmlFor={ageConfirmationId}
           >
             I am 18 years of age or older.
@@ -68,16 +80,30 @@ export function JoinPolicyNotice({
             }
           />
           <label
-            className="cursor-pointer text-xs leading-5 text-muted-foreground"
+            className={cn(
+              "cursor-pointer text-xs leading-5",
+              textTone === "foreground"
+                ? "text-foreground"
+                : "text-muted-foreground",
+            )}
             htmlFor={agreementConfirmationId}
           >
             I agree to the Buzz{" "}
             {policy.termsMarkdown ? (
               <Button
-                className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
+                className={cn(
+                  "h-auto p-0 align-baseline text-xs",
+                  textTone === "foreground"
+                    ? "font-medium text-foreground underline hover:underline focus-visible:underline"
+                    : "no-underline hover:underline focus-visible:no-underline",
+                )}
                 onClick={(event) => {
                   event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
+                  if (onOpenDocument) {
+                    onOpenDocument("terms");
+                  } else {
+                    void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
+                  }
                 }}
                 type="button"
                 variant="link"
@@ -88,10 +114,19 @@ export function JoinPolicyNotice({
             {policy.termsMarkdown && policy.privacyMarkdown ? " and " : null}
             {policy.privacyMarkdown ? (
               <Button
-                className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
+                className={cn(
+                  "h-auto p-0 align-baseline text-xs",
+                  textTone === "foreground"
+                    ? "font-medium text-foreground underline hover:underline focus-visible:underline"
+                    : "no-underline hover:underline focus-visible:no-underline",
+                )}
                 onClick={(event) => {
                   event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
+                  if (onOpenDocument) {
+                    onOpenDocument("privacy");
+                  } else {
+                    void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
+                  }
                 }}
                 type="button"
                 variant="link"

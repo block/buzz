@@ -12,6 +12,7 @@ import {
   isJoinPolicyDiscoveryCandidate,
   type JoinPolicy,
 } from "@/shared/api/invites";
+import { relayRequiresMembership } from "@/shared/api/relayMembers";
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -25,6 +26,9 @@ import {
 } from "./NsecMaskedDisplay";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingPreviewInput } from "./OnboardingPreviewInput";
+import { useOnboardingPreviewCardLayout } from "./OnboardingPreviewShell";
+import { ONBOARDING_PREVIEW_CARD_INPUT_CLASS } from "./onboardingPreviewCardStyles";
 
 const POLICY_DISCOVERY_DELAY_MS = 250;
 const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
@@ -55,8 +59,11 @@ type InviteRedeemFormProps = {
   isRedeeming: boolean;
   onCancel: () => void;
   onConnect?: (relayWsUrl: string) => void;
+  onMembershipRequirementChange?: (required: boolean) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
   placeholder?: string;
+  /** Render the production form without discovery or relay requests. */
+  previewMode?: boolean;
   variant?: "add-community" | "default" | "onboarding-spotlight";
 };
 
@@ -67,10 +74,13 @@ export function InviteRedeemForm({
   isRedeeming,
   onCancel,
   onConnect,
+  onMembershipRequirementChange,
   onRedeem,
   placeholder,
+  previewMode = false,
   variant = "default",
 }: InviteRedeemFormProps) {
+  const cardLayout = useOnboardingPreviewCardLayout();
   const formId = React.useId();
   const [inviteInput, setInviteInput] = React.useState(initialValue);
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
@@ -104,6 +114,7 @@ export function InviteRedeemForm({
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
 
   React.useEffect(() => {
+    if (previewMode) return;
     const relayWsUrl = normalizedRelayUrl
       ? normalizedRelayUrl
       : parsedInvite && hasInviteRelay(parsedInvite)
@@ -135,9 +146,46 @@ export function InviteRedeemForm({
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [bareCodeRelayUrl, normalizedRelayUrl, parsedInvite]);
+  }, [bareCodeRelayUrl, normalizedRelayUrl, parsedInvite, previewMode]);
+
+  React.useEffect(() => {
+    if (!onMembershipRequirementChange) return;
+
+    onMembershipRequirementChange(false);
+    if (!normalizedRelayUrl || parsedInvite?.code) return;
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (previewMode) {
+        // The workshop preview stays offline while still demonstrating the
+        // conditional state a membership-gated community would produce.
+        if (!cancelled) onMembershipRequirementChange(true);
+        return;
+      }
+
+      void relayRequiresMembership(normalizedRelayUrl)
+        .then((required) => {
+          if (!cancelled) onMembershipRequirementChange(required);
+        })
+        .catch(() => {
+          // Discovery is best-effort. The connection flow remains the
+          // authoritative fallback when relay information is unavailable.
+        });
+    }, POLICY_DISCOVERY_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    normalizedRelayUrl,
+    onMembershipRequirementChange,
+    parsedInvite?.code,
+    previewMode,
+  ]);
 
   const canSubmit =
+    previewMode ||
     (parsedInvite !== null &&
       ("relayWsUrl" in parsedInvite ||
         (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
@@ -150,6 +198,10 @@ export function InviteRedeemForm({
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
+      if (previewMode) {
+        onConnect?.(normalizedRelayUrl ?? "wss://preview.invalid");
+        return;
+      }
       if (normalizedRelayUrl) {
         setPolicyError(null);
         setIsLoadingPolicy(true);
@@ -257,6 +309,7 @@ export function InviteRedeemForm({
       onRedeem,
       parsedInvite,
       policyTarget,
+      previewMode,
     ],
   );
 
@@ -264,6 +317,7 @@ export function InviteRedeemForm({
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
     setInviteInput(event.target.value);
+    onMembershipRequirementChange?.(false);
     setJoinPolicy(null);
     setPolicyTarget(null);
     setAgeConfirmed(false);
@@ -275,6 +329,7 @@ export function InviteRedeemForm({
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
     setBareCodeRelayUrl(event.target.value);
+    onMembershipRequirementChange?.(false);
     setJoinPolicy(null);
     setPolicyTarget(null);
     setAgeConfirmed(false);
@@ -348,7 +403,9 @@ export function InviteRedeemForm({
       className={cn(
         "flex w-full flex-col",
         isOnboardingSpotlight
-          ? "relative items-center"
+          ? cardLayout
+            ? "relative items-stretch"
+            : "relative items-center"
           : isAddCommunity
             ? "gap-4"
             : "gap-3",
@@ -357,41 +414,69 @@ export function InviteRedeemForm({
       onSubmit={handleSubmit}
     >
       {isOnboardingSpotlight ? (
-        <Card
-          className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
-          data-testid="invite-redeem-input-frame"
-          variant="textured"
-        >
+        cardLayout ? (
           <div
-            className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
-            style={SPOTLIGHT_OVERFLOW_FADE}
+            className="w-full text-left"
+            data-testid="invite-redeem-input-frame"
           >
-            <label className="block w-full" htmlFor="invite-input">
-              <span className="sr-only">Invite link or code</span>
-              <span className={ONBOARDING_KEY_ROW_CLASS}>
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  className={cn(
-                    ONBOARDING_KEY_TEXT_CLASS,
-                    "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-                  )}
-                  data-testid="invite-redeem-input"
-                  disabled={isRedeeming}
-                  id="invite-input"
-                  onChange={handleInviteInputChange}
-                  placeholder={
-                    placeholder ?? "https://relay.example.com/invite/abc123"
-                  }
-                  spellCheck={false}
-                  type="text"
-                  value={inviteInput}
-                />
-              </span>
+            <label
+              className="mb-2 block text-sm font-medium text-foreground"
+              htmlFor="invite-input"
+            >
+              Community URL or invite link
             </label>
+            <OnboardingPreviewInput
+              autoComplete="off"
+              autoCorrect="off"
+              autoFocus
+              className={ONBOARDING_PREVIEW_CARD_INPUT_CLASS}
+              data-testid="invite-redeem-input"
+              disabled={isRedeeming}
+              id="invite-input"
+              onChange={handleInviteInputChange}
+              placeholder={placeholder ?? "Invite link or community URL"}
+              spellCheck={false}
+              type="text"
+              value={inviteInput}
+            />
           </div>
-        </Card>
+        ) : (
+          <Card
+            className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
+            data-testid="invite-redeem-input-frame"
+            variant="textured"
+          >
+            <div
+              className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
+              style={SPOTLIGHT_OVERFLOW_FADE}
+            >
+              <label className="block w-full" htmlFor="invite-input">
+                <span className="sr-only">Invite link or code</span>
+                <span className={ONBOARDING_KEY_ROW_CLASS}>
+                  <input
+                    autoCapitalize="none"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    className={cn(
+                      ONBOARDING_KEY_TEXT_CLASS,
+                      "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                    )}
+                    data-testid="invite-redeem-input"
+                    disabled={isRedeeming}
+                    id="invite-input"
+                    onChange={handleInviteInputChange}
+                    placeholder={
+                      placeholder ?? "https://relay.example.com/invite/abc123"
+                    }
+                    spellCheck={false}
+                    type="text"
+                    value={inviteInput}
+                  />
+                </span>
+              </label>
+            </div>
+          </Card>
+        )
       ) : (
         <div className="space-y-1.5 text-left">
           <label
@@ -432,7 +517,10 @@ export function InviteRedeemForm({
           aria-hidden={!showInvalidInviteTip}
           aria-live="polite"
           className={cn(
-            "absolute top-[calc(100%+2rem)] mt-4 min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
+            "mt-4 min-h-5 w-full max-w-4xl text-sm text-[#717106] transition-opacity duration-150 ease-out",
+            cardLayout
+              ? "relative text-left"
+              : "absolute top-[calc(100%+2rem)] text-center",
             showInvalidInviteTip ? "opacity-100" : "opacity-0",
           )}
           data-testid="invalid-invite-tip"

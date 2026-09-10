@@ -9,6 +9,7 @@ type SegmentOption<Value extends string> = {
 };
 
 type SegmentedControlSize = "compact" | "default" | "wide";
+type SegmentedControlAppearance = "default" | "onboarding-inline";
 
 const SIZE_CLASSES: Record<SegmentedControlSize, string> = {
   compact: "w-48",
@@ -18,6 +19,7 @@ const SIZE_CLASSES: Record<SegmentedControlSize, string> = {
 
 /** A mutually exclusive control with equal-width, optionally scrubbable options. */
 export function SegmentedControl<Value extends string>({
+  appearance = "default",
   className,
   disabled = false,
   indicatorTestId,
@@ -30,6 +32,7 @@ export function SegmentedControl<Value extends string>({
   testId,
   value,
 }: {
+  appearance?: SegmentedControlAppearance;
   className?: string;
   disabled?: boolean;
   indicatorTestId?: string;
@@ -44,16 +47,44 @@ export function SegmentedControl<Value extends string>({
 }) {
   const [previewValue, setPreviewValue] = React.useState<Value | null>(null);
   const controlRef = React.useRef<HTMLFieldSetElement | null>(null);
+  const optionRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const [inlineIndicator, setInlineIndicator] = React.useState({
+    left: 3,
+    width: 0,
+  });
   const activePointerIdRef = React.useRef<number | null>(null);
   const pointerStartXRef = React.useRef<number | null>(null);
   const pointerStartValueRef = React.useRef<Value | null>(null);
   const scrubValueRef = React.useRef<Value | null>(null);
   const skipPointerClickRef = React.useRef(false);
   const displayedValue = previewValue ?? value;
+  const isOnboardingInline = appearance === "onboarding-inline";
   const selectedIndex = Math.max(
     0,
     options.findIndex((option) => option.value === displayedValue),
   );
+
+  React.useLayoutEffect(() => {
+    if (!isOnboardingInline) return;
+    const control = controlRef.current;
+    const selectedOption = optionRefs.current[selectedIndex];
+    if (!control || !selectedOption) return;
+
+    const updateIndicator = () => {
+      const controlBounds = control.getBoundingClientRect();
+      const optionBounds = selectedOption.getBoundingClientRect();
+      setInlineIndicator({
+        left: optionBounds.left - controlBounds.left,
+        width: optionBounds.width,
+      });
+    };
+
+    updateIndicator();
+    const observer = new ResizeObserver(updateIndicator);
+    observer.observe(control);
+    observer.observe(selectedOption);
+    return () => observer.disconnect();
+  }, [isOnboardingInline, selectedIndex]);
 
   const getValueAtPointer = React.useCallback(
     (element: HTMLFieldSetElement, clientX: number): Value => {
@@ -160,7 +191,10 @@ export function SegmentedControl<Value extends string>({
   return (
     <fieldset
       className={cn(
-        "relative isolate h-8 max-w-full shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
+        "relative isolate max-w-full shrink-0 overflow-hidden",
+        isOnboardingInline
+          ? "h-9 rounded-full border border-[#d4d4d4] bg-[#e2e2e2]/30 p-[3px] text-[#0f0f0f]"
+          : "h-8 rounded-md bg-muted/45 p-0.5",
         SIZE_CLASSES[size],
         onPreviewChange && "touch-none select-none cursor-ew-resize",
         "disabled:pointer-events-none disabled:opacity-50",
@@ -180,26 +214,44 @@ export function SegmentedControl<Value extends string>({
       <div
         aria-hidden="true"
         className={cn(
-          "absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform duration-200 ease-in-out motion-reduce:transition-none",
+          "absolute z-0 transition-[transform,width] duration-200 ease-in-out motion-reduce:transition-none",
+          isOnboardingInline
+            ? "bottom-[3px] left-0 top-[3px] rounded-full bg-[#e2e2e2]"
+            : "bottom-0.5 left-0.5 top-0.5 rounded-md bg-background shadow-sm",
           previewValue && "duration-0",
         )}
         data-testid={indicatorTestId ?? `${testId}-indicator`}
         style={{
-          transform: `translateX(${selectedIndex * 100}%)`,
-          width: `calc((100% - 0.25rem) / ${options.length})`,
+          transform: isOnboardingInline
+            ? `translateX(${inlineIndicator.left}px)`
+            : `translateX(${selectedIndex * 100}%)`,
+          width: isOnboardingInline
+            ? inlineIndicator.width
+            : `calc((100% - 0.25rem) / ${options.length})`,
         }}
       />
       {/* Legends escape grid/flex layout on a fieldset, so the columns live
           on an inner wrapper the legend is not part of. */}
-      <div className="grid h-full auto-cols-fr grid-flow-col">
-        {options.map(({ value: optionValue, label, Icon }) => (
+      <div
+        className={cn(
+          "h-full",
+          isOnboardingInline
+            ? "flex w-fit gap-0.5"
+            : "grid auto-cols-fr grid-flow-col",
+        )}
+      >
+        {options.map(({ value: optionValue, label, Icon }, optionIndex) => (
           <button
             aria-pressed={value === optionValue}
             className={cn(
-              "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-              displayedValue === optionValue
-                ? "text-foreground"
-                : "text-muted-foreground hover:text-foreground",
+              "relative z-10 flex h-full items-center justify-center gap-1.5 bg-transparent font-medium transition-colors duration-150 ease-out focus-visible:outline-hidden motion-reduce:transition-none",
+              isOnboardingInline
+                ? "rounded-full px-4 py-1 text-sm text-[#0f0f0f] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#0f0f0f]"
+                : "rounded-md px-2.5 text-xs focus-visible:ring-2 focus-visible:ring-ring",
+              !isOnboardingInline &&
+                (displayedValue === optionValue
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground"),
             )}
             data-testid={`${optionTestIdPrefix}-${optionValue}`}
             key={optionValue}
@@ -209,6 +261,9 @@ export function SegmentedControl<Value extends string>({
                 return;
               }
               onValueChange(optionValue);
+            }}
+            ref={(element) => {
+              optionRefs.current[optionIndex] = element;
             }}
             type="button"
           >

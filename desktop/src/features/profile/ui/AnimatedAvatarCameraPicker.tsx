@@ -6,6 +6,7 @@ import { cn } from "@/shared/lib/cn";
 type AnimatedAvatarCameraPickerProps = {
   activeCameraSource: CameraSource | null;
   computerDisabled: boolean;
+  dense?: boolean;
   disabled?: boolean;
   iphoneDisabled: boolean;
   onSelectSource: (source: CameraSource) => void;
@@ -15,6 +16,7 @@ type AnimatedAvatarCameraPickerProps = {
 export function AnimatedAvatarCameraPicker({
   activeCameraSource,
   computerDisabled,
+  dense = false,
   disabled = false,
   iphoneDisabled,
   onSelectSource,
@@ -44,6 +46,7 @@ export function AnimatedAvatarCameraPicker({
             aria-pressed={isSelected}
             className={cn(
               "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,color,opacity] duration-[250ms] ease-out hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              dense && "h-32 flex-col gap-3 rounded-xl px-4",
               isSelected &&
                 "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
               isDisabled && "cursor-not-allowed opacity-45 hover:bg-muted",
@@ -58,6 +61,7 @@ export function AnimatedAvatarCameraPicker({
               aria-hidden="true"
               className={cn(
                 "h-5 w-5 text-foreground transition-colors duration-[250ms] ease-out",
+                dense && "h-5 w-5 shrink-0",
                 isSelected && "text-primary",
               )}
             />

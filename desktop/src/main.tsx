@@ -13,7 +13,12 @@ import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communitie
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
-import { ThemeProvider } from "@/shared/theme/ThemeProvider";
+import { onboardingPreviewRequested } from "@/features/onboarding/onboardingPreview";
+import { OnboardingPreviewApp } from "@/features/onboarding/ui/OnboardingPreviewApp";
+import {
+  NonPersistentThemeProvider,
+  ThemeProvider,
+} from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
@@ -108,6 +113,18 @@ function renderApp() {
   );
 }
 
+function renderOnboardingPreview() {
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <RootErrorBoundary>
+        <NonPersistentThemeProvider>
+          <OnboardingPreviewApp />
+        </NonPersistentThemeProvider>
+      </RootErrorBoundary>
+    </React.StrictMode>,
+  );
+}
+
 async function installE2eBridgeIfConfigured() {
   // The mock bridge is compiled only into dev and explicit E2E builds. A
   // pre-bootstrap global alone must never activate mock IPC in production.
@@ -123,6 +140,13 @@ async function installE2eBridgeIfConfigured() {
 }
 
 async function bootstrap() {
+  if (onboardingPreviewRequested()) {
+    // Preview mounts before storage migration, community state, the normal app,
+    // or any native-backed onboarding action. Its state lives only in React.
+    renderOnboardingPreview();
+    return;
+  }
+
   resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();

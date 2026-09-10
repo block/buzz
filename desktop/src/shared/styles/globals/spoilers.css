@@ -95,6 +95,26 @@
   opacity: 0;
 }
 
+/* The onboarding key spoiler sits on a white security card even when the
+   surrounding workshop uses the dark theme. Keep the standard dark particles
+   visible and the local surface seamless. */
+.buzz-onboarding-private-key-spoiler .buzz-spoiler {
+  --buzz-spoiler-accent: #333;
+
+  background: transparent;
+}
+
+.buzz-onboarding-private-key-spoiler .buzz-spoiler[data-revealed="true"],
+.buzz-onboarding-private-key-spoiler .buzz-spoiler:hover,
+.buzz-onboarding-private-key-spoiler .buzz-spoiler:focus-visible {
+  background: transparent;
+}
+
+.buzz-onboarding-private-key-spoiler .buzz-spoiler:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
 .ProseMirror .buzz-spoiler {
   background: transparent;
   color: transparent;

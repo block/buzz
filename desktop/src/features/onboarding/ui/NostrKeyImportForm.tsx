@@ -21,6 +21,9 @@ import {
   BackupPasswordTimeline,
 } from "./BackupPasswordTimeline";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingPreviewInput } from "./OnboardingPreviewInput";
+import { useOnboardingPreviewCardLayout } from "./OnboardingPreviewShell";
+import { ONBOARDING_PREVIEW_CARD_INPUT_CLASS } from "./onboardingPreviewCardStyles";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
 
@@ -45,6 +48,8 @@ type NostrKeyImportFormProps = {
   footerMode?: "onboarding" | "inline";
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
+  /** Use fixed in-memory presentation data and bypass credential parsing. */
+  previewMode?: boolean;
 };
 
 /**
@@ -67,7 +72,9 @@ export function NostrKeyImportForm({
   mode = "key",
   footerMode = "onboarding",
   variant = "default",
+  previewMode = false,
 }: NostrKeyImportFormProps) {
+  const cardLayout = useOnboardingPreviewCardLayout();
   const [nsecInput, setNsecInput] = React.useState("");
   const [passphrase, setPassphrase] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
@@ -101,7 +108,7 @@ export function NostrKeyImportForm({
       setPassphrase("");
     }
   }, [isPasswordStage]);
-  const isValid = keyImportSubmitEnabled(nsecInput, passphrase);
+  const isValid = previewMode || keyImportSubmitEnabled(nsecInput, passphrase);
   const isInteractionDisabled = disabled || isImporting;
   const showInvalidHint =
     hasInput &&
@@ -217,7 +224,10 @@ export function NostrKeyImportForm({
     setImportError(null);
 
     try {
-      await onImport(trimmedInput, isPasswordStage ? passphrase : undefined);
+      await onImport(
+        previewMode ? "" : trimmedInput,
+        isPasswordStage ? passphrase : undefined,
+      );
     } catch (error) {
       setImportError(
         error instanceof Error ? error.message : "Couldn't import this key.",
@@ -235,6 +245,7 @@ export function NostrKeyImportForm({
     onImport,
     onImportingChange,
     passphrase,
+    previewMode,
     trimmedInput,
   ]);
 
@@ -275,41 +286,40 @@ export function NostrKeyImportForm({
       }}
     >
       {!isPasswordStage && mode === "key" ? (
-        <div className="space-y-1.5 text-left">
+        <div className={cn("text-left", !cardLayout && "space-y-1.5")}>
           <label
             className={cn(
               "text-sm font-medium text-foreground",
-              variant === "spotlight" && "sr-only",
+              cardLayout && "mb-2 block",
+              variant === "spotlight" && !cardLayout && "sr-only",
             )}
             htmlFor="nostr-private-key"
           >
             Private key
           </label>
           {variant === "spotlight" ? (
-            <Card
-              className="w-full px-8 py-12"
-              data-testid="nostr-import-card"
-              variant="textured"
-            >
+            cardLayout ? (
               <div className="relative w-full">
-                <Input
+                <OnboardingPreviewInput
                   autoComplete="off"
                   autoCorrect="off"
-                  // Symmetric px reserves the absolutely positioned toggle's
-                  // footprint on BOTH sides, so the centered key text never
-                  // runs under the eye control and stays optically centered.
-                  className="h-[3.6875rem] rounded-none border-0 bg-transparent px-10 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
+                  className={cn(
+                    ONBOARDING_PREVIEW_CARD_INPUT_CLASS,
+                    "pr-12 font-mono",
+                  )}
                   data-testid="nostr-import-nsec-input"
                   id="nostr-private-key"
                   onChange={(event) => {
+                    if (previewMode) return;
                     setNsecInput(event.target.value);
                     setImportError(null);
                   }}
                   placeholder="Enter your key here"
+                  readOnly={previewMode}
                   ref={inputRef}
                   spellCheck={false}
                   type={isRevealed ? "text" : "password"}
-                  value={nsecInput}
+                  value={previewMode ? `nsec1${"•".repeat(24)}` : nsecInput}
                 />
                 {/* Absolutely positioned so appearing/disappearing never resizes
                   the input or shifts its centered text; fades with hasInput. */}
@@ -319,7 +329,7 @@ export function NostrKeyImportForm({
                     isRevealed ? "Hide private key" : "Reveal private key"
                   }
                   className={cn(
-                    "absolute right-8 top-1/2 h-10 w-10 -translate-y-1/2 text-muted-foreground transition-opacity duration-300 hover:bg-foreground/10 hover:text-foreground motion-reduce:transition-none",
+                    "absolute right-2 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground transition-opacity duration-300 hover:bg-foreground/10 hover:text-foreground motion-reduce:transition-none",
                     hasInput ? "opacity-100" : "pointer-events-none opacity-0",
                   )}
                   data-testid="nostr-import-reveal-toggle"
@@ -330,13 +340,66 @@ export function NostrKeyImportForm({
                   variant="ghost"
                 >
                   {isRevealed ? (
-                    <EyeOff aria-hidden="true" className="h-6 w-6" />
+                    <EyeOff aria-hidden="true" className="h-4 w-4" />
                   ) : (
-                    <Eye aria-hidden="true" className="h-6 w-6" />
+                    <Eye aria-hidden="true" className="h-4 w-4" />
                   )}
                 </Button>
               </div>
-            </Card>
+            ) : (
+              <Card
+                className="w-full px-8 py-12"
+                data-testid="nostr-import-card"
+                variant="textured"
+              >
+                <div className="relative w-full">
+                  <Input
+                    autoComplete="off"
+                    autoCorrect="off"
+                    // Symmetric px reserves the absolutely positioned toggle's
+                    // footprint so the key text never runs under the eye control.
+                    className="h-[3.6875rem] rounded-none border-0 bg-transparent px-10 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
+                    data-testid="nostr-import-nsec-input"
+                    id="nostr-private-key"
+                    onChange={(event) => {
+                      if (previewMode) return;
+                      setNsecInput(event.target.value);
+                      setImportError(null);
+                    }}
+                    placeholder="Enter your key here"
+                    readOnly={previewMode}
+                    ref={inputRef}
+                    spellCheck={false}
+                    type={isRevealed ? "text" : "password"}
+                    value={previewMode ? `nsec1${"•".repeat(24)}` : nsecInput}
+                  />
+                  <Button
+                    aria-hidden={!hasInput}
+                    aria-label={
+                      isRevealed ? "Hide private key" : "Reveal private key"
+                    }
+                    className={cn(
+                      "absolute right-8 top-1/2 h-10 w-10 -translate-y-1/2 text-muted-foreground transition-opacity duration-300 hover:bg-foreground/10 hover:text-foreground motion-reduce:transition-none",
+                      hasInput
+                        ? "opacity-100"
+                        : "pointer-events-none opacity-0",
+                    )}
+                    data-testid="nostr-import-reveal-toggle"
+                    onClick={() => setIsRevealed((current) => !current)}
+                    size="icon"
+                    tabIndex={hasInput ? 0 : -1}
+                    type="button"
+                    variant="ghost"
+                  >
+                    {isRevealed ? (
+                      <EyeOff aria-hidden="true" className="h-6 w-6" />
+                    ) : (
+                      <Eye aria-hidden="true" className="h-6 w-6" />
+                    )}
+                  </Button>
+                </div>
+              </Card>
+            )
           ) : (
             <Input
               autoComplete="off"
@@ -535,7 +598,8 @@ export function NostrKeyImportForm({
         <div
           className={cn(
             "min-h-8",
-            variant === "spotlight" && "mt-6 text-center",
+            variant === "spotlight" &&
+              (cardLayout ? "mt-6 text-left" : "mt-6 text-center"),
           )}
           data-testid="nostr-import-feedback"
         >
@@ -547,7 +611,12 @@ export function NostrKeyImportForm({
                 className="space-y-1 text-sm"
                 data-testid="nostr-import-npub-preview"
               >
-                <p className="flex items-center justify-center gap-1.5 text-foreground">
+                <p
+                  className={cn(
+                    "flex items-center gap-1.5 text-foreground",
+                    cardLayout ? "justify-start" : "justify-center",
+                  )}
+                >
                   <Check aria-hidden="true" className="h-4 w-4 shrink-0" />
                   Nostr identity found
                 </p>

@@ -1122,11 +1122,15 @@ test("first-community choices route join, create, owner, and member intents", as
       "true",
     );
   }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(page, undefined, {
-    relayWsUrl: "ws://localhost:3000",
-    skipOnboardingSeed: true,
-    skipCommunitySeed: true,
-  });
+  await installMockBridge(
+    page,
+    { relayRequiresMembership: true },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
   await page.goto("/");
 
   await expect(
@@ -1173,12 +1177,23 @@ test("first-community choices route join, create, owner, and member intents", as
   await expect(
     page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
-  await expect(page.getByText("Joining a private community?")).toBeVisible();
+  const accessRequiredHeading = page.getByText(
+    "You’ll need to request access to this community",
+  );
+  await expect(accessRequiredHeading).toHaveCount(0);
+  await accessInput.fill("https://default.example.com");
+  await expect(accessRequiredHeading).toBeVisible();
+  await expect(
+    page.getByText(
+      "This community requires an admin to add you before you can join. Copy your public ID and send it to them.",
+    ),
+  ).toBeVisible();
   await expect(page.getByTestId("welcome-join-npub")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Copy public ID" }),
   ).toBeVisible();
   await accessInput.fill("https://default.example.com/invite/abc123");
+  await expect(accessRequiredHeading).toHaveCount(0);
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
 });
 

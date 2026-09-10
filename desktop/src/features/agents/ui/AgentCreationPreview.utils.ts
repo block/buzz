@@ -9,7 +9,7 @@ export const AVATAR_APPLY_MOTION_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-export type AvatarTab = "image" | "emoji";
+export type AvatarTab = "image" | "emoji" | "animated";
 
 export type EmojiMartEmoji = {
   native?: string;

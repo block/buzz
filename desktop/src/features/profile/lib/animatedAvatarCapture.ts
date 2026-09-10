@@ -228,12 +228,13 @@ export function preloadAvatarSegmenter(): void {
 export async function recordAnimatedAvatarFrames(
   video: HTMLVideoElement,
   options: {
+    removeBackground?: boolean;
     signal?: AbortSignal;
     onProgress?: (fraction: number) => void;
   } = {},
 ): Promise<AnimatedAvatarRecording> {
-  const { onProgress, signal } = options;
-  const handle = await loadSegmenter();
+  const { onProgress, removeBackground = true, signal } = options;
+  const handle = removeBackground ? await loadSegmenter() : null;
 
   const canvas = document.createElement("canvas");
   canvas.width = ANIMATED_AVATAR_CAPTURE_SIZE;

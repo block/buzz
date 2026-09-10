@@ -15,14 +15,19 @@ export function SpoilerInline({
   block = false,
   children,
   interactive = true,
+  revealOnHover = false,
 }: {
   block?: boolean;
   children?: React.ReactNode;
   interactive?: boolean;
+  /** Temporarily reveal for mouse/trackpad hover while preserving click and keyboard access. */
+  revealOnHover?: boolean;
 }) {
   const [revealed, setRevealed] = React.useState(false);
+  const [hovered, setHovered] = React.useState(false);
   const contentRef = React.useRef<HTMLElement | null>(null);
   const isBlock = block || hasBlockMedia(React.Children.toArray(children));
+  const visuallyRevealed = revealed || hovered;
 
   const setContentElement = React.useCallback((node: HTMLElement | null) => {
     contentRef.current = node;
@@ -34,28 +39,33 @@ export function SpoilerInline({
 
   const handlePointerDownCapture = React.useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
-      if (revealed) return;
+      if (visuallyRevealed) return;
       event.stopPropagation();
     },
-    [revealed],
+    [visuallyRevealed],
   );
 
   const handleClickCapture = React.useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
-      if (revealed) return;
+      if (visuallyRevealed) return;
       event.preventDefault();
       event.stopPropagation();
       toggleRevealed();
     },
-    [revealed, toggleRevealed],
+    [toggleRevealed, visuallyRevealed],
   );
 
   const handleClick = React.useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
-      if (revealed && isBlock && event.target !== event.currentTarget) return;
+      // Hover is a temporary reveal: clicking or selecting while the pointer
+      // is inside must not pin the spoiler open after the pointer leaves.
+      // Touch and keyboard still toggle `revealed` because they have no hover.
+      if (revealOnHover && hovered) return;
+      if (visuallyRevealed && isBlock && event.target !== event.currentTarget)
+        return;
       toggleRevealed();
     },
-    [isBlock, revealed, toggleRevealed],
+    [hovered, isBlock, revealOnHover, toggleRevealed, visuallyRevealed],
   );
 
   const handleKeyDown = React.useCallback(
@@ -67,12 +77,25 @@ export function SpoilerInline({
     [toggleRevealed],
   );
 
+  const handlePointerEnter = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (revealOnHover && event.pointerType === "mouse") setHovered(true);
+    },
+    [revealOnHover],
+  );
+
+  const handlePointerLeave = React.useCallback(() => {
+    if (revealOnHover) setHovered(false);
+  }, [revealOnHover]);
+
   const revealProps = {
     "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
     "aria-pressed": revealed,
     onClick: handleClick,
     onClickCapture: handleClickCapture,
     onKeyDown: handleKeyDown,
+    onPointerEnter: handlePointerEnter,
+    onPointerLeave: handlePointerLeave,
     onPointerDownCapture: handlePointerDownCapture,
     role: "button",
     tabIndex: 0,
@@ -117,12 +140,12 @@ export function SpoilerInline({
       <div
         {...revealProps}
         className="buzz-spoiler buzz-spoiler--block"
-        data-revealed={revealed ? "true" : "false"}
+        data-revealed={visuallyRevealed ? "true" : "false"}
         data-spoiler=""
       >
-        <SpoilerParticles active={!revealed} contentRef={contentRef} />
+        <SpoilerParticles active={!visuallyRevealed} contentRef={contentRef} />
         <div className="buzz-spoiler__content" ref={setContentElement}>
-          <SpoilerHiddenContext.Provider value={!revealed}>
+          <SpoilerHiddenContext.Provider value={!visuallyRevealed}>
             {children}
           </SpoilerHiddenContext.Provider>
         </div>
@@ -134,12 +157,12 @@ export function SpoilerInline({
     <span
       {...revealProps}
       className="buzz-spoiler"
-      data-revealed={revealed ? "true" : "false"}
+      data-revealed={visuallyRevealed ? "true" : "false"}
       data-spoiler=""
     >
-      <SpoilerParticles active={!revealed} contentRef={contentRef} />
+      <SpoilerParticles active={!visuallyRevealed} contentRef={contentRef} />
       <span className="buzz-spoiler__content" ref={setContentElement}>
-        <SpoilerHiddenContext.Provider value={!revealed}>
+        <SpoilerHiddenContext.Provider value={!visuallyRevealed}>
           {children}
         </SpoilerHiddenContext.Provider>
       </span>
