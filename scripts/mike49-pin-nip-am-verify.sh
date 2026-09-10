@@ -67,7 +67,12 @@ if [ -e "${PINNED_DIR}" ]; then
   # happened to collide.
   PINNED_COMMON_DIR="$(git -C "${PINNED_DIR}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")"
   AUDITOR_COMMON_DIR="$(git -C "${BUZZ_AUDITOR_SRC}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")"
-  if [ -z "${PINNED_COMMON_DIR}" ] || [ "$(realpath_dir "$(dirname "${PINNED_COMMON_DIR}")")" != "$(realpath_dir "$(dirname "${AUDITOR_COMMON_DIR}")")" ]; then
+  # Compare the full canonical common-dir paths directly. Comparing only
+  # their parent directories is not sufficient: two unrelated repos whose
+  # .git storage happens to sit as siblings under one shared parent (a
+  # worktree pool, a CI checkout cache) would wrongly compare equal even
+  # though PINNED_DIR belongs to a different repo entirely.
+  if [ -z "${PINNED_COMMON_DIR}" ] || [ "$(realpath_dir "${PINNED_COMMON_DIR}")" != "$(realpath_dir "${AUDITOR_COMMON_DIR}")" ]; then
     echo "mike49-pin-nip-am-verify: ${PINNED_DIR} already exists and is not a worktree of ${BUZZ_AUDITOR_SRC}" >&2
     echo "  refusing to touch it -- move or remove it yourself, then re-run this script" >&2
     exit 1
@@ -104,18 +109,40 @@ if [ ! -d "${PINNED_DIR}/tools/nip-am-verify" ]; then
   exit 1
 fi
 
-# Prove Cargo's own resolved dependency path is this pinned worktree, not a
-# stale relative path left over from a different checkout layout.
-CARGO_DEP_LINE="$(grep -E '^nip-am-verify = ' "${CARGO_TOML}" || true)"
-if [ -z "${CARGO_DEP_LINE}" ]; then
-  echo "mike49-pin-nip-am-verify: no nip-am-verify path dependency found in ${CARGO_TOML}" >&2
+# Prove Cargo's OWN dependency resolution points at this pinned worktree --
+# not merely that Cargo.toml's "path = ..." field, read with grep/sed,
+# parses to it. Manifest-text parsing can't see what Cargo itself would
+# actually resolve (workspace-level [patch]/[replace], a stale Cargo.lock,
+# multiple candidate manifests). `cargo metadata` is Cargo's own resolver,
+# so this checks the same thing `cargo build` would use.
+PINNED_NIP_AM_VERIFY_ABS="$(realpath_dir "${PINNED_DIR}/tools/nip-am-verify")"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "mike49-pin-nip-am-verify: cargo not on PATH -- cannot verify Cargo's resolved nip-am-verify path" >&2
+  echo "  activate this repo's Hermit toolchain first: . ./bin/activate-hermit" >&2
   exit 1
 fi
-CARGO_DEP_PATH="$(printf '%s' "${CARGO_DEP_LINE}" | sed -E 's/.*path = "([^"]+)".*/\1/')"
-CARGO_DEP_ABS="$(cd "$(dirname "${CARGO_TOML}")" && realpath_dir "${CARGO_DEP_PATH}")"
-PINNED_NIP_AM_VERIFY_ABS="$(realpath_dir "${PINNED_DIR}/tools/nip-am-verify")"
-if [ "${CARGO_DEP_ABS}" != "${PINNED_NIP_AM_VERIFY_ABS}" ]; then
-  echo "mike49-pin-nip-am-verify: Cargo.toml's nip-am-verify path resolves to ${CARGO_DEP_ABS}, not the pinned worktree at ${PINNED_NIP_AM_VERIFY_ABS}" >&2
+if ! command -v jq >/dev/null 2>&1; then
+  echo "mike49-pin-nip-am-verify: jq not on PATH -- cannot parse 'cargo metadata' output" >&2
+  exit 1
+fi
+
+CARGO_METADATA_STDERR_FILE="$(mktemp)"
+if ! CARGO_METADATA_JSON="$(cargo metadata --format-version=1 --manifest-path "${CARGO_TOML}" 2>"${CARGO_METADATA_STDERR_FILE}")"; then
+  echo "mike49-pin-nip-am-verify: cargo metadata failed to resolve ${CARGO_TOML}:" >&2
+  cat "${CARGO_METADATA_STDERR_FILE}" >&2
+  rm -f "${CARGO_METADATA_STDERR_FILE}"
+  exit 1
+fi
+rm -f "${CARGO_METADATA_STDERR_FILE}"
+RESOLVED_MANIFEST_PATH="$(printf '%s' "${CARGO_METADATA_JSON}" | jq -r '[.packages[] | select(.name == "nip-am-verify")] | .[0].manifest_path // empty')"
+if [ -z "${RESOLVED_MANIFEST_PATH}" ]; then
+  echo "mike49-pin-nip-am-verify: cargo metadata did not resolve a 'nip-am-verify' package from ${CARGO_TOML}" >&2
+  exit 1
+fi
+CARGO_RESOLVED_ABS="$(realpath_dir "$(dirname "${RESOLVED_MANIFEST_PATH}")")"
+if [ "${CARGO_RESOLVED_ABS}" != "${PINNED_NIP_AM_VERIFY_ABS}" ]; then
+  echo "mike49-pin-nip-am-verify: Cargo resolves nip-am-verify to ${CARGO_RESOLVED_ABS}, not the pinned worktree at ${PINNED_NIP_AM_VERIFY_ABS}" >&2
   exit 1
 fi
 
