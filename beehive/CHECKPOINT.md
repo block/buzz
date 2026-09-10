@@ -1992,3 +1992,34 @@ COMPLETE, causes UNCLASSIFIED, not classified by this suite or actively assigned
 Next bounded gate work: instrument actual admission control replay/receipt latency
 at existing owners using this preserved raw failure; do not rerun-to-green or
 attribute storage/event-loop delays without distinguishing observations.
+
+## Admission latency reconciliation 0bea — bounded unresolved result
+
+Verified dd97d91405 executable == f8556d157c executable (latter docs-only).
+Read original raw failure first: 2572ms is aggregate replay + legitimate Start +
+wrong-agent rejection + subsequent valid Stop/owned exit + receipt observation,
+not rejection latency alone. Unknown-agent rejection routes outside the slot queue
+and precedes Start receipt in durable order. Original 682ms rename-to-directory
+hook gap is before directory fsync, not its duration; missing owner/batch/completion
+stamps prevent original causal attribution.
+
+One isolated env-gated instrumented immutable dd97d91405 export, strict PASS,
+FULL DEFAULT concurrent installed capture **106/106**, natural **160.932s**, no
+skips/cancellations. Wrong-authority 1744ms, later four controls pass. Captured
+unknown-agent route-to-rejection-seal 0.022ms, shared fixture event-loop blocking
+(max tick lateness 303.671ms), synchronous journal spans and valid owned Stop
+530.798ms (500ms supervisor containment policy). Those observations classify this
+non-failing execution, not the original failure. No production/test semantics,
+authority fences, durability, reconnect policy, assertions or deadlines changed.
+No subsequent focused/full rerun, retry-until-failure, serial mask or signals.
+Actual launch chain and export-scoped children absent after natural completion.
+
+Original **105/106 gate remains OPEN; cause UNRESOLVED**, no historical closure.
+No speculative governing fix is warranted. Next discriminator is event-associated
+owner timing at failure, separating signed rejection/relay durability/client
+observation from legitimate Start and owned Stop, not another blind full suite.
+No new owner input is implied. Full report: ADMISSION_LATENCY_0BEA.md. Evidence,
+raw traces, source/binary pins, complete instrumentation patch/hash and cleanup:
+workspace WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/ADMISSION_0BEA. Publication is docs-only;
+unchanged installed hashes separately verified, Logan Johnson + DCO. No repo CI,
+provider/production/native/Rust/client changes or full-product acceptance claim.
