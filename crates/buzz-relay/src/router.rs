@@ -415,7 +415,10 @@ async fn public_readiness_handler(State(state): State<Arc<AppState>>) -> impl In
         return readiness_response(ReadinessEvaluation::shutting_down(), false);
     }
 
-    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
+    let evaluation = state
+        .readiness
+        .evaluate(&state.db, &state.redis_pool, state.partition_serving_safe())
+        .await;
     let evaluation = state.readiness.finish_public_evaluation(evaluation);
     readiness_response(evaluation, false)
 }
@@ -427,7 +430,10 @@ async fn kubernetes_readiness_handler(State(state): State<Arc<AppState>>) -> imp
         return readiness_response(ReadinessEvaluation::shutting_down(), true);
     };
 
-    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
+    let evaluation = state
+        .readiness
+        .evaluate(&state.db, &state.redis_pool, state.partition_serving_safe())
+        .await;
     let evaluation = state.readiness.finish_probe(ticket, evaluation);
     readiness_response(evaluation, true)
 }
@@ -447,6 +453,7 @@ fn readiness_response(
     let pg_ok = evaluation.postgres_ready();
     let redis_ok = evaluation.redis_ready();
     let deletion_catalog_ok = evaluation.deletion_catalog_ready();
+    let partition_catalog_ok = evaluation.partition_catalog_ready();
 
     if evaluation.is_ready() {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
@@ -455,7 +462,8 @@ fn readiness_response(
             "status": "not_ready",
             "postgres": pg_ok,
             "redis": redis_ok,
-            "deletion_catalog": deletion_catalog_ok
+            "deletion_catalog": deletion_catalog_ok,
+            "partition_catalog": partition_catalog_ok
         });
         if include_reason {
             payload["reason"] = json!(evaluation.reason.label());
@@ -743,6 +751,10 @@ mod tests {
             media_storage,
         );
         state.set_readiness_evaluator(evaluator);
+        state.record_partition_audit(buzz_db::partition::PartitionAudit {
+            audited_at: chrono::Utc::now(),
+            tables: Vec::new(),
+        });
         Arc::new(state)
     }
 
@@ -878,7 +890,8 @@ mod tests {
                             "status": "not_ready",
                             "postgres": true,
                             "redis": false,
-                            "deletion_catalog": true
+                            "deletion_catalog": true,
+                            "partition_catalog": true
                         })
                     )
                 );
@@ -946,9 +959,24 @@ mod tests {
                     assert_eq!(payload["reason"], json!(evaluation.reason.label()));
                 }
 
+                *state
+                    .partition_audit
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                evaluator.push(ready_evaluation());
+                let (status, payload) = readiness_request(health.clone()).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(payload["reason"], json!("partition_catalog_unsafe"));
+
                 let before_shutdown = handle.render();
-                let histogram_counts_before = ["overall", "postgres", "redis", "deletion_catalog"]
-                    .map(|check| {
+                let histogram_counts_before = [
+                    "overall",
+                    "postgres",
+                    "redis",
+                    "deletion_catalog",
+                    "partition_catalog",
+                ]
+                .map(|check| {
                         metric_value(
                             &before_shutdown,
                             &format!(
@@ -977,8 +1005,14 @@ mod tests {
                     )
                 );
                 let final_scrape = handle.render();
-                let histogram_counts_after = ["overall", "postgres", "redis", "deletion_catalog"]
-                    .map(|check| {
+                let histogram_counts_after = [
+                    "overall",
+                    "postgres",
+                    "redis",
+                    "deletion_catalog",
+                    "partition_catalog",
+                ]
+                .map(|check| {
                         metric_value(
                             &final_scrape,
                             &format!(
@@ -1011,7 +1045,7 @@ mod tests {
                 assert_eq!(
                     readiness_metric_lines(&final_scrape).len(),
                     readiness::READINESS_RAW_SERIES_PER_POD,
-                    "readiness series contract must stay at or below its 99-series cap"
+                    "readiness series contract must stay at or below its 121-series cap"
                 );
             });
         });
