@@ -115,6 +115,7 @@
    * progressive enhancement.
    */
   .avatar-sdr-clamp {
+    /* biome-ignore lint/correctness/noUnknownProperty: emerging CSS property (Chromium 133+, WebKit/Safari 26+); intentional progressive enhancement */
     dynamic-range-limit: standard;
   }
 }

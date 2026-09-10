@@ -207,9 +207,15 @@ test("keeps an open status draft when the saved status expires", async ({
   await page.getByTestId("profile-popover-set-status").click();
   const dialog = page.getByTestId("set-status-dialog");
   await dialog.getByTestId("set-status-input").fill("Unsaved draft");
-  await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0, {
-    timeout: 5_000,
+  // Advance Date.now() past the 2-second expiresAt, then sweep the query cache.
+  // The sweep triggers a re-render of the dialog (via its parent's status props),
+  // which re-evaluates expirationIsFuture with the new Date.now() value — fully
+  // deterministic; no wall-clock wait on the 2-second timer.
+  await page.clock.install({ time: Date.now() + 3_000 });
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EXPIRE_USER_STATUS_QUERIES__?.();
   });
+  await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0);
 
   await expect(dialog.getByTestId("set-status-input")).toHaveValue(
     "Unsaved draft",
