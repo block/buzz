@@ -1,3 +1,4 @@
+import { CODEX_ADAPTER, codexModels } from './codex.ts';
 import { CLAUDE_ADAPTER, claudeModels } from './claude.ts';
 import { gooseModels } from './acp.ts';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -164,7 +165,7 @@ export class ConversationSession {
     });
     const injected = new Map<string, { original: RPC; session: string }>();
     let sequence = 0;
-    let claudeNative = false;
+    let claudeNative = false; let codexNative = false;
     const send = (target: NodeJS.WritableStream, msg: RPC) => {
       if (this.failed) return;
       if (!target.write(JSON.stringify(msg) + '\n')) this.fail('ACP transport backpressure limit');
@@ -178,6 +179,16 @@ export class ConversationSession {
       } else if (msg.id === undefined || (Object.hasOwn(msg, 'result') === Object.hasOwn(msg, 'error'))) throw Error();
       if (!fromHarness && msg.method) {
         const p = msg.params;
+        if (this.prepared.plan.harness === 'codex') {
+          if (msg.method === 'initialize') p.protocolVersion = 2;
+          if (['session/load', 'session/resume', 'session/set_model', 'session/set_config_option'].includes(msg.method)) throw Error('Codex requires fresh session/Restart');
+          if (msg.method === 'session/new') {
+            if (!codexNative) throw Error('Codex protocol 2 native profile capability unavailable');
+            delete p.systemPrompt;
+            if (p._meta?.systemPrompt !== undefined) throw Error('Codex does not support Claude append');
+            if (this.prepared.plan.instructions !== undefined) p.systemPrompt = this.prepared.plan.instructions;
+          }
+        }
         if (this.prepared.plan.harness === 'claude') {
           if (['session/load', 'session/resume', 'session/set_model', 'session/set_config_option'].includes(msg.method)) throw Error('Claude requires fresh session/Restart; native settings unsupported');
           if (msg.method === 'session/new') {
@@ -222,6 +233,10 @@ export class ConversationSession {
         const request = pending.get(msg.id);
         if (!request) throw Error();
         pending.delete(msg.id);
+        if (request.method === 'initialize' && this.prepared.plan.harness === 'codex') {
+          if (msg.result?.protocolVersion !== 2 || msg.result?.agentInfo?.name !== CODEX_ADAPTER) throw Error('Codex native profile capability unavailable');
+          codexNative = true;
+        }
         if (request.method === 'initialize' && this.prepared.plan.harness === 'claude') {
           if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== CLAUDE_ADAPTER) throw Error('Claude native profile capability unavailable');
           claudeNative = true;
@@ -240,6 +255,10 @@ export class ConversationSession {
           }
           if (modelConfigs.size > 128) throw Error();
           sessions.delete(session);
+          if (this.prepared.plan.harness === 'codex') {
+            codexModels(msg.result, this.prepared.plan.model);
+            sessions.add(session); send(socket, msg); return;
+          }
           if (this.prepared.plan.harness === 'claude') {
             claudeModels(msg.result, this.prepared.plan.model);
             sessions.add(session); send(socket, msg); return;

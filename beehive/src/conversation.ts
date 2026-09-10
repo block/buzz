@@ -44,7 +44,7 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
       ...(input.authTag === undefined ? {} : { BUZZ_AUTH_TAG: input.authTag }),
       BUZZ_ACP_AGENT_COMMAND: prepared.plan.executable,
       BUZZ_ACP_AGENT_ARGS: prepared.plan.args.join(','),
-      ...(prepared.plan.harness === 'claude' ? {} : { BUZZ_ACP_MODEL: prepared.plan.model }),
+      ...((prepared.plan.harness === 'claude' || prepared.plan.harness === 'codex') ? {} : { BUZZ_ACP_MODEL: prepared.plan.model }),
       ...(prepared.plan.instructions === undefined ? {} : { BUZZ_ACP_SYSTEM_PROMPT: prepared.plan.instructions }),
       BUZZ_ACP_MCP_COMMAND: '',
       BUZZ_ACP_AGENTS: '1',

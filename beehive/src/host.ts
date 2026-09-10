@@ -1,3 +1,4 @@
+import { validateCodex, type CodexSetup } from './codex.ts';
 import { validateClaude, type ClaudeSetup } from './claude.ts';
 import { configurations, configure, materializeMove, type Configurations } from './configurations.ts';
 import { Profiles } from './profiles.ts';
@@ -15,7 +16,7 @@ import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude'; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 /** Definition-only fingerprint: common host authority and agent key are excluded. */
 export function bindingFingerprint(setup: Setup): string {
   const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
@@ -25,16 +26,20 @@ type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
 type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 /** Operator-approved compatible models, not an authenticated provider catalog. */
-export function setupModels(s: Setup): string[] { return s.mode === 'claude' ? [...s.claude!.models] : s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
+export function setupModels(s: Setup): string[] { return s.mode === 'codex' ? [...s.codex!.models] : s.mode === 'claude' ? [...s.claude!.models] : s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
   for (const key of ['host','ownerSecret','runner','workspace']) text(s[key]);
   if (s.allowedWorkspaces !== undefined && (!Array.isArray(s.allowedWorkspaces) || s.allowedWorkspaces.length > 32 || s.allowedWorkspaces.some(w => typeof w !== 'string' || !isAbsolute(w)))) throw Error('Invalid allowed workspaces');
   publicKey(String(s.ownerSecret));
   if (s.agentSecret !== undefined) publicKey(String(s.agentSecret));
-  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['fixture','buzz-agent-databricks-v2','goose','claude'].includes(String(s.mode))) throw Error('Invalid local setup');
+  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['fixture','buzz-agent-databricks-v2','goose','claude','codex'].includes(String(s.mode))) throw Error('Invalid local setup');
   if (s.mode === 'goose' && (typeof s.gooseProvider !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(s.gooseProvider) || !Array.isArray(s.gooseModels) || !s.gooseModels.length || s.gooseModels.length > 100 || s.gooseModels.some(m => typeof m !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(m)))) throw Error('Invalid local Goose provider/models');
   if (s.mode === 'goose' && (JSON.stringify(s.args) !== '["acp"]' || typeof s.serviceHome !== 'string' || !isAbsolute(s.serviceHome) || s.configDirectory !== s.serviceHome || s.databricksHost !== undefined)) throw Error('Goose requires acp args and its own service HOME, not Buzz Agent auth fields');
+  if (s.mode === 'codex') {
+    validateCodex(s.codex as CodexSetup);
+    if (s.args.length || typeof s.serviceHome !== 'string' || !isAbsolute(s.serviceHome) || typeof s.configDirectory !== 'string' || !isAbsolute(s.configDirectory) || s.configDirectory === s.serviceHome || s.databricksHost !== undefined || s.gooseProvider !== undefined || s.claude !== undefined) throw Error('Codex requires zero adapter args and dedicated HOME/CODEX_HOME, not another auth context');
+  }
   if (s.mode === 'claude') {
     validateClaude(s.claude as ClaudeSetup);
     if (s.args.length || typeof s.serviceHome !== 'string' || !isAbsolute(s.serviceHome) || s.configDirectory !== s.serviceHome || s.databricksHost !== undefined || s.gooseProvider !== undefined) throw Error('Claude requires zero adapter args and its own service HOME, not another provider auth context');
@@ -186,7 +191,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
-    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' ? '' : text(setup.databricksHost), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
+    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
     const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, executionSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing

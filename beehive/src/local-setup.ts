@@ -1,3 +1,4 @@
+import { codexGuidance } from './codex.ts';
 import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -21,7 +22,7 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
     for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)}`);
     for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
-    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / add-binding / add-goose / add-claude / normal / cancel]: ');
+    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
     if (action === 'cancel') return;
     if (action === 'normal') {
       const agent = await ui.question('Existing agent public key: ');
@@ -58,7 +59,7 @@ export async function localSetup(directory: string): Promise<void> {
       console.log(`Restored local key for ${agent}; no assignment or history reset, no Start permission added.`);
       return;
     }
-    if (!['new-agent', 'add-binding', 'add-goose', 'add-claude', 'import-standby'].includes(action)) throw Error('Unsupported local action');
+    if (!['new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
     const id = await ui.question('Existing binding ID to reuse: ');
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
@@ -72,6 +73,21 @@ export async function localSetup(directory: string): Promise<void> {
       if (publicKey(secret) !== genesis.agent) throw Error('Imported key does not match public genesis');
       addSlot(directory, secret, genesis, id, fingerprint);
       console.log(`Standby ${genesis.agent} saved using ${id}; key possession grants no Start. No key/session/workspace transfer.`);
+      return;
+    }
+    if (action === 'add-codex') {
+      console.log(codexGuidance);
+      const nextId = text(await ui.question('NEW immutable Codex binding ID: '));
+      const runner = realpathSync(text(await ui.question('Absolute installed codex-acp adapter: ')));
+      const cli = realpathSync(text(await ui.question('Absolute installed codex CLI: ')));
+      const apiKeyFile = text(await ui.question('Absolute owner-only local OPENAI_API_KEY file (contents never relayed): '));
+      const models = text(await ui.question('Operator-approved compatible exact Codex model IDs (comma-separated): ')).split(',').map(m => m.trim());
+      const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
+      const serviceHome = realpathSync(text(await ui.question('Existing dedicated Codex service HOME (not another harness HOME): ')));
+      const configDirectory = realpathSync(text(await ui.question('Existing dedicated CODEX_HOME (not HOME): ')));
+      if (await ui.question('Save NEW Codex binding only (no identity/selection/restart)? [yes/no]: ') !== 'yes') return;
+      addHarnessBinding(directory, nextId, { mode: 'codex', runner, args: [], workspace, allowedWorkspaces: [workspace], serviceHome, configDirectory, codex: { cli, apiKeyFile, models }, ...(setup.conversation ? { conversation: setup.conversation } : {}) }, { id, fingerprint });
+      console.log(`Codex binding ${nextId} saved; identity/key/history unchanged. Select remotely then explicit Restart. Authentication unverified.`);
       return;
     }
     if (action === 'add-claude') {
