@@ -48,12 +48,32 @@ export async function host(directory: string, url: string) {
   let closing = false;
   let queue = Promise.resolve();
   let initialized = false;
+  // Exact-fenced Stop retractions received ahead of their serialized handling, keyed
+  // by that Stop's operation ID. One invariant covers every not-yet-committed Start
+  // admission at the retracted revision, independent of callback/microtask timing:
+  // a still-queued admission observes the retraction before any effect, and an
+  // executing admission is interrupted below and re-checked before the running
+  // commit. FIFO queue order confines each retraction to Starts received before its
+  // Stop; that Stop's own serialized processing resolves it, so unseen future
+  // Starts and already-committed runs are never cancelled by it.
+  const queuedOperations = new Set<string>();
+  const retracted = new Map<string, number>();
+  const retracting = (revision: number) => { for (const target of retracted.values()) if (target === revision) return true; return false; };
   let client: ReturnType<typeof connect>;
   try { client = connect(url,setup.ownerSecret,m => {
     if (!initialized) return;
     // Cancellation is signalled outside the serialized mutation queue. Admission is
     // still exact-authority/revision and never bypasses durable receipt processing.
-    if (!closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && m.revision === state.revision && state.phase === 'transitioning' && state.actual && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) acp?.cancel();
+    const operation = m.host === setup.host && ['save','start','stop'].includes(m.type);
+    const first = operation && !queuedOperations.has(m.id);
+    if (operation) queuedOperations.add(m.id);
+    // Reserve receive order too: a conflicting queued ID is not a Stop authority.
+    if (first && !closing && m.type === 'stop' && m.host === setup.host && m.agent === agent && m.revision === state.revision && !Object.hasOwn(state.operations, m.id) && Object.keys(m.body).length === 0) {
+      retracted.set(m.id,m.revision);
+      // Only an executing admission has a session to interrupt; queued admissions
+      // and the pre-commit recheck consume the retraction inside handle().
+      if (state.phase === 'transitioning' && state.actual) acp?.cancel();
+    }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
   }, () => {
     if (closing || !initialized) return;
@@ -69,7 +89,10 @@ export async function host(directory: string, url: string) {
     await owned.stop(); owned = undefined; acp = undefined;
   }
   async function handle(m: Message) {
+    if (m.host === setup.host && ['save','start','stop'].includes(m.type)) queuedOperations.delete(m.id);
     if (closing || m.host !== setup.host || !['inspect','save','start','stop'].includes(m.type)) return;
+    // Serialized Stop processing durably resolves that Stop's own retraction.
+    if (m.type === 'stop') retracted.delete(m.id);
     if (m.type === 'inspect') { publish(inventory()); return; }
     const fingerprint = digest(JSON.stringify(m)).toString('hex');
     const previous = Object.hasOwn(state.operations,m.id) ? state.operations[m.id] : undefined;
@@ -93,6 +116,8 @@ export async function host(directory: string, url: string) {
         } else if (m.type === 'start') {
           fields(m.body,[]);
           if (state.phase !== 'stopped') throw Error('Already running');
+          // A retracted admission never begins effects, including any spawn.
+          if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
           accessSync(setup.runner,constants.X_OK);
           if (realpathSync(setup.workspace) !== setup.workspace || !statSync(setup.workspace).isDirectory()) throw Error('Workspace changed');
           const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: state.selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: text(setup.databricksHost), model: state.selected.model };
@@ -115,6 +140,7 @@ export async function host(directory: string, url: string) {
               if (!session.healthy) throw Error('Conversation failed before running commit');
             } catch (e) {
               await stopOwned(); state.phase = 'stopped'; state.actual = null;
+              if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
               throw e;
             }
           } else {
@@ -127,8 +153,15 @@ export async function host(directory: string, url: string) {
             } catch (e) {
               catalog = { state: 'failed', authentication: 'unverified' };
               await stopOwned(); state.phase = 'stopped'; state.actual = null;
+              if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
               throw e;
             }
+          }
+          // The retraction may also arrive while this admission executes: verified
+          // teardown must precede the running commit, mirroring the queued path.
+          if (retracting(m.revision)) {
+            await stopOwned(); state.phase = 'stopped'; state.actual = null;
+            throw Error('Start cancelled by concurrent Stop');
           }
           state.phase = 'running';
         } else {

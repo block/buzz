@@ -5,6 +5,35 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Continuation 4341 — R1 reconciliation
+
+Recovered d12ed7b4e08501e2e5829da80689c9759b32bd49 plus the prior worker's
+uncommitted host/TESTING/admission-cancel changes. Fresh substantive review found
+an additional pending-ID gap: a same-batch Stop reusing the queued Start's ID
+could retract admission although its own eventual receipt was operation-id-conflict.
+Receive-order reservations now fence that early authority, alongside durable IDs,
+agent/host/revision/body checks. Added conflicting-ID and invalid-body batch controls.
+Executing ACP cancellation may surface `ACP session unavailable`; after verified
+teardown the receipt now consistently names concurrent Stop cancellation. No sleeps,
+replay exception, stale-revision bypass or changed command preconditions.
+FIFO Stop handling clears its retraction before future Starts; terminal historical
+IDs cannot retract again. Close drops not-yet-handled messages (UNKNOWN, replayable)
+and awaits executing admission/owned teardown; no new close semantics claimed.
+
+Fresh strict TypeScript and full installed-enabled package suite **18/18** passed
+on this candidate (Node24.15.0). Exact log:
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CONTINUATION_4341_EVIDENCE/r1-full.log`.
+One initial targeted run exposed the cancellation wording variation above, corrected
+before this full run. Source R1 checkpoint is the commit containing this section;
+publication/head will be recorded in the next UX checkpoint.
+
+Completed independent `INTENT_TUI_REVIEW_D12ED7B4.md` is consumed: strict16/16,
+36-file byte match, seven receipt negatives, real PTY lost-Start recovery and safe
+Quit; no additional blocking journal correctness defect in trusted non-cloned /
+non-rollback scope. U1 is a concrete policy-correction recovery UX gate, NOT pending
+review: implement supported reconcile and explicit unchanged retry next. Earlier
+pending-review/future-recovery notes below are historical, superseded here.
+
 ## Local management-client journal continuation 90950bdd
 
 Started verified published HEAD `6f893f51d20d93ff25770b66f3b52b50bcff151e`.

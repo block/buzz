@@ -52,6 +52,17 @@ local storage/power loss or a polished manual recovery UX. See current CHECKPOIN
   rather than wait for the response; interrupted Start cannot commit running.
   Wrong-agent/revision/body Stop cannot interrupt. D3 malformed completion tail
   fails at the host seam as well as AgentSession.
+- `admission-cancel.test.ts`: a Stop published beside a still-pending Start (live
+  same-batch and through disconnected relay-history replay, in ACP and fixture
+  host modes) cancels that admission before any run commits: the Start receipt is
+  non-accepted/cancelled, the Stop is accepted at the same revision, the journal
+  ends stopped with no actual run and no live-run inventory, and the verified stop
+  releases the ownership lock. Controls keep the fence exact: a wrong-authority
+  Stop in the same batch cannot cancel, a Stop published before its Start cannot
+  cancel that later Start, replaying the already-terminal batch after another
+  disconnect neither reruns nor recancels, and a fresh stale-revision Stop stays
+  a conflict. This is the R1 replay-batch cancellation fix from the independent
+  `TOOLS_RECONNECT_REVIEW_6F893F51.md` review.
 - D1 `slice.test.ts` variants: resistant orphan descendants observe TERM but stay
   alive, then are removed by bounded live-anchor KILL escalation through both
   remote Stop and host close. `disconnect.test.ts` verifies parent IPC loss during
@@ -87,7 +98,7 @@ local storage/power loss or a polished manual recovery UX. See current CHECKPOIN
   CLI error (returned without killing the session) all clean up the shim and any TERM-resistant in-group descendants.
 
 Tests never open existing owner keys/profiles/cache, production services or native
-client resources. With installed opt-in: 14/14 pass; without: 13 pass/1 explicit
+client resources. With installed opt-in: 18/18 pass; without: 17 pass/1 explicit
 skip. The installed fixture relay does not establish actual community admission,
 current relay compatibility, provider/model attestation. Multi-thread delivery is isolated legacy-binary evidence only.
 
@@ -99,8 +110,13 @@ Prior c4f30176 broker independently passed strict/11 tests and installed replay 
 `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BROKER_REVIEW_C4F30176.md`. Its B1 optional-config
 finding is fixed with production regressions here. Independent `TOOL_REVIEW_023C9274.md` found no new blocking defect in the
 predecessor MCP delta and independently confirmed B1 resolved (strict/full12/12,
-original/extended B1 probes and signed installed replay). The new ordinary-CLI
-multi-conversation delta has not yet received independent review. The generic ACP fixture and signed/encrypted WS
+original/extended B1 probes and signed installed replay). Independent
+`TOOLS_RECONNECT_REVIEW_6F893F51.md` then covered the ordinary-CLI and reconnect
+deltas (strict/full 14/14 installed plus its own probes; no new tool-authority
+expansion) and is now consumed: its single R1 medium finding, a replayed
+same-batch Start+Stop leaving the agent running, is fixed here with
+`admission-cancel.test.ts` production regressions; its receipt-loss, backoff,
+duplicate/fingerprint and CLI-option probes remain reusable evidence. The generic ACP fixture and signed/encrypted WS
 management protocol are different seams; passing them does not prove current
 Buzz relay auth/member/owner semantics.
 
