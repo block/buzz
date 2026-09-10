@@ -6,14 +6,16 @@ import { object, publicKey, text } from './protocol.ts';
 import { semanticHash } from './handoff.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { credentialReference, createCredential, readCredential, type CredentialBackend, type CredentialReference, systemCredentials } from './credential-store.ts';
+import type { ConversationSetup } from './conversation.ts';
 import type { SlotEntry } from './slots.ts';
 
 type Harness = Omit<Setup, 'host' | 'ownerSecret' | 'ownerPublic' | 'agentSecret'>;
-type Manifest = { version: 3; host: string; ownerPublic: string; setups: Record<string, Harness>; agents: Record<string, { key: CredentialReference; setup: string }> };
+type Manifest = { retiredBindings?: Record<string, string>; conversation?: ConversationSetup; version: 3; host: string; ownerPublic: string; setups: Record<string, Harness>; agents: Record<string, { key: CredentialReference; setup: string }> };
 const manifestPath = (directory: string) => join(directory, 'setup.json');
 const journalPath = (directory: string, agent: string) => join(directory, 'agents', agent, 'journal.json');
 
-function readManifest(directory: string): Manifest {
+/** Validate only public installation metadata and retained journals, never credentials. */
+export function readCredentialManifest(directory: string): Manifest {
   const raw = object(readPrivate(manifestPath(directory)));
   if (raw.version !== 3 || Object.hasOwn(raw, 'ownerSecret')) throw Error('Public credential installation required; no automatic plaintext migration');
   const manifest = raw as Manifest;
@@ -24,6 +26,15 @@ function readManifest(directory: string): Manifest {
     const value = object(harness);
     if (['host', 'ownerPublic', 'ownerSecret', 'agentSecret'].some(key => Object.hasOwn(value, key))) throw Error('Binding cannot carry identity');
     validateSetup({ ...value, host: manifest.host, ownerPublic: manifest.ownerPublic });
+  }
+  if (manifest.retiredBindings !== undefined) {
+    for (const [id, fingerprint] of Object.entries(object(manifest.retiredBindings))) {
+      if (!Object.hasOwn(manifest.setups, id) || fingerprint !== semanticHash(manifest.setups[id])) throw Error('Invalid retired binding definition');
+    }
+  }
+  const common = manifest.conversation ?? manifest.setups.default?.conversation;
+  for (const harness of Object.values(manifest.setups)) {
+    if (harness.conversation && semanticHash(harness.conversation) !== semanticHash(common ?? null)) throw Error('Binding cannot change conversation authority');
   }
   for (const [agent, value] of agents) {
     const entry = object(value);
@@ -40,12 +51,12 @@ function readManifest(directory: string): Manifest {
 /** Read OS entries anew on every load. Missing means public-only, never regeneration;
  * locked/denied/unavailable errors propagate, rather than masquerading as absence. */
 export function credentialSlots(directory: string, backend: CredentialBackend = systemCredentials): SlotEntry[] {
-  const manifest = readManifest(directory);
+  const manifest = readCredentialManifest(directory);
   return Object.entries(manifest.agents).map(([agent, entry]) => {
     const present = backend.read(entry.key) !== null;
     const secret = present ? readCredential(entry.key, backend) : undefined;
     const bindings = Object.fromEntries(Object.entries(manifest.setups).map(([id, harness]) => [id, validateSetup({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic, ...(secret ? { agentSecret: secret } : {}) })]));
-    return { agent, path: journalPath(directory, agent), setupId: entry.setup, setup: bindings[entry.setup]!, bindings, keyPresent: present };
+    return { retiredBindings: manifest.retiredBindings, agent, path: journalPath(directory, agent), setupId: entry.setup, setup: bindings[entry.setup]!, bindings, keyPresent: present };
   });
 }
 
@@ -53,14 +64,14 @@ export function credentialSlots(directory: string, backend: CredentialBackend = 
  * no secret result can hydrate a changed manifest or bypass a removed key. */
 export async function credentialSlotsAsync(directory: string, backend: CredentialBackend, signal?: AbortSignal): Promise<SlotEntry[]> {
   signal?.throwIfAborted();
-  const manifest = readManifest(directory);
+  const manifest = readCredentialManifest(directory);
   const snapshot = JSON.stringify(manifest);
   const secrets = new Map<string, string | null>();
   for (const entry of Object.values(manifest.agents)) {
     signal?.throwIfAborted();
     const secret = backend.readAsync ? await backend.readAsync(entry.key, signal) : backend.read(entry.key);
     signal?.throwIfAborted();
-    if (JSON.stringify(readManifest(directory)) !== snapshot) throw Error('Credential manifest changed during read');
+    if (JSON.stringify(readCredentialManifest(directory)) !== snapshot) throw Error('Credential manifest changed during read');
     if (secret !== null && publicKey(secret) !== entry.key.publicKey) throw Error('Credential identity mismatch');
     secrets.set(entry.key.publicKey, secret);
   }
@@ -100,7 +111,7 @@ export function provisionCredentialSlot(directory: string, setup: Setup, secret:
  * A retry after successful deletion verifies absence; it never recreates a credential. */
 export function removeCredentialSlotKey(directory: string, agent: string, backend: CredentialBackend = systemCredentials): void {
   locked(directory, () => {
-    const manifest = readManifest(directory), entry = manifest.agents[agent];
+    const manifest = readCredentialManifest(directory), entry = manifest.agents[agent];
     if (!entry) throw Error('Unknown retained public slot');
     const state = loadSlotState({ ...manifest.setups[entry.setup]!, host: manifest.host, ownerPublic: manifest.ownerPublic }, journalPath(directory, agent), agent);
     if (state.phase !== 'stopped' || state.actual !== null) throw Error('Key removal requires a stopped slot with no actual run');
@@ -113,7 +124,7 @@ export function removeCredentialSlotKey(directory: string, agent: string, backen
 export function importCredentialSlotKey(directory: string, agent: string, secret: string, backend: CredentialBackend = systemCredentials): void {
   if (publicKey(secret) !== agent) throw Error('Imported key does not match the selected public identity');
   locked(directory, () => {
-    const manifest = readManifest(directory), entry = manifest.agents[agent];
+    const manifest = readCredentialManifest(directory), entry = manifest.agents[agent];
     if (!entry) throw Error('Unknown retained public slot');
     const state = loadSlotState({ ...manifest.setups[entry.setup]!, host: manifest.host, ownerPublic: manifest.ownerPublic }, journalPath(directory, agent), agent);
     if (state.phase !== 'stopped' || state.actual !== null) throw Error('Key import requires a stopped slot with no actual run');
@@ -149,8 +160,9 @@ export function reconcileCredentialProvision(directory: string, setup: Setup, se
  * prefixes retain an inert journal for explicit reconciliation, never overwrite. */
 export function addCredentialSlot(directory: string, secret: string, root: Genesis, setupId = 'default', expectedFingerprint: string | undefined, backend: CredentialBackend = systemCredentials): void {
   locked(directory, () => {
-    const manifest = readManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
+    const manifest = readCredentialManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
     if (manifest.agents[agent] || Object.keys(manifest.agents).length >= 32) throw Error('Slot exists or installation full; retained keys require explicit import');
+    if (manifest.retiredBindings?.[setupId]) throw Error('Binding retired');
     const harness = manifest.setups[setupId];
     if (!harness) throw Error('Unknown host harness setup');
     if (expectedFingerprint !== undefined && bindingFingerprint({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');
@@ -171,7 +183,7 @@ export function addCredentialSlot(directory: string, secret: string, root: Genes
  * are already-public. Candidate bindings are derived from the journal's retained
  * selection, never defaulted: a definition change or corrupt state fails closed. */
 export function orphanCredentialSlots(directory: string): { host: string; ownerPublic: string; orphans: { agent: string; genesis: Genesis; candidates: { setupId: string; fingerprint: string }[] }[] } {
-  const manifest = readManifest(directory);
+  const manifest = readCredentialManifest(directory);
   const orphans: { agent: string; genesis: Genesis; candidates: { setupId: string; fingerprint: string }[] }[] = [];
   const agentsDirectory = join(directory, 'agents');
   if (!existsSync(agentsDirectory)) return { host: manifest.host, ownerPublic: manifest.ownerPublic, orphans };
@@ -200,9 +212,10 @@ export function orphanCredentialSlots(directory: string): { host: string; ownerP
  * enter here; wrong or foreign inputs leave every retained byte inert. */
 export function reconcileCredentialSlot(directory: string, setupId: string, secret: string, root: Genesis, expectedFingerprint: string | undefined, backend: CredentialBackend = systemCredentials): void {
   locked(directory, () => {
-    const manifest = readManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
+    const manifest = readCredentialManifest(directory), agent = publicKey(secret), genesis = validateGenesis(root);
     if (manifest.agents[agent]) throw Error('Retained slot exists; use explicit import-agent-key');
     if (Object.keys(manifest.agents).length >= 32) throw Error('Installation full; retained keys require explicit import');
+    if (manifest.retiredBindings?.[setupId]) throw Error('Binding retired');
     const harness = manifest.setups[setupId];
     if (!harness) throw Error('Unknown host harness setup');
     if (expectedFingerprint !== undefined && bindingFingerprint({ ...harness, host: manifest.host, ownerPublic: manifest.ownerPublic }) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');

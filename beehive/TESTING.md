@@ -577,3 +577,15 @@ additional actual local replacement before explicit remote selection: installed
 buzz-acp/CLI still produce four signed replies, including explicit Restart with
 same identity/profile and unchanged sibling/history. Provider adapters remain
 source-shaped TypeScript fixtures, not live Goose/Claude/Codex.
+
+## Owner-public v3 immutable bindings (7fdd)
+
+`v3-bindings.test.ts` binds the existing CLI wizard, public preview/hash/lock,
+replacement/retirement, neutral conversion, actual A -> selected-next B -> Restart,
+removed-key Save/Stop and failed-preflight survival. A deliberately invalid JSON
+synthetic credential backend proves neutral wizard actions never query it. The
+host errno test checks receipt sanitization, not inventory workspace suppression.
+`catalog-tui.test.ts` adds v3 conversion through the actual local wizard and private
+owner TUI before the installed ACP/Buzz CLI signed-reply journey. Other provider
+journeys are unchanged; no provider parity expansion, OS-store or live enrollment
+proof. Workspace V3_BINDINGS_7FDD records exact execution/failures.

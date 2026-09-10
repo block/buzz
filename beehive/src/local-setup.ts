@@ -6,8 +6,10 @@ import { codexGuidance } from './codex.ts';
 import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { join } from 'node:path';
+import { object } from './protocol.ts';
 import { realpathSync } from 'node:fs';
-import { installationSlots, bindingPreview, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
+import { installationPublicSlots, installationSlots, bindingPreview, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
 import { bindingFingerprint } from './host.ts';
 import { newKey, publicKey, text } from './protocol.ts';
 import { readPrivate } from './storage.ts';
@@ -20,20 +22,22 @@ import { readAgentSecret } from './key-input.ts';
  * Binding revisions are new IDs; existing definitions/history are not edited/deleted.
  */
 export async function localSetup(directory: string): Promise<void> {
-  const entries = installationSlots(directory), first = entries[0]!;
+  const publicOnly = object(readPrivate(join(directory, 'setup.json'))).version === 3;
+  const entries = publicOnly ? installationPublicSlots(directory) : installationSlots(directory), first = entries[0]!;
   const ui = createInterface({ input: stdin, output: stdout });
   try {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
     for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)} | ${first.retiredBindings?.[id] ? 'retired' : 'available'}`);
-    for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
+    for (const entry of entries) console.log(`Agent ${entry.agent}: ${publicOnly ? 'credential reference retained; availability checked only on explicit key action or Start' : entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
     const action = await ui.question('Local action [presets / add-preset / add-custom / reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / add-buzz-provider / normal / cancel]: ');
     if (action === 'cancel') return;
     if (action === 'presets') { showPresets(); return; }
     if (action === 'normal') {
       const agent = await ui.question('Existing agent public key: ');
       const entry = entries.find(e => e.agent === agent);
-      if (!entry?.keyPresent) throw Error('Retained local key required; use explicit restore-key');
-      const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } } };
+      if (!entry || (!publicOnly && !entry.keyPresent)) throw Error('Retained local key required; use explicit restore-key');
+      const preview = bindingPreview(directory);
+      const state = preview.entries.find(e => e.agent === agent)!.state as { selected: { harnessSetup?: { id: string } } };
       const id = state.selected.harnessSetup?.id ?? entry.setupId;
       const setup = entry.bindings[id];
       if (!setup || setup.mode === 'fixture' || setup.mode === 'diagnostic-acp') throw Error('Select an ACP binding remotely first; fixture cannot become a conversation harness');
@@ -44,7 +48,7 @@ export async function localSetup(directory: string): Promise<void> {
       if (common) console.log(`Reusing pinned installation conversation runtime/relay/trust; Buzz CLI tool ${common.replyTool ? 'enabled' : 'disabled (legacy authority; not silently widened)'}. No authority change.`);
       const conversation = common ?? await conversationInput(ui);
       if (await ui.question('Save NEW normal binding under installation lock; preserve every selection/key/history? [yes/no]: ') !== 'yes') return;
-      addConversationBinding(directory, agent, { id, fingerprint }, nextId, conversation);
+      addConversationBinding(directory, agent, { id, fingerprint, confirmation: preview.confirmation }, nextId, conversation);
       console.log(`Normal binding ${nextId} saved from selected ${id}. In remote TUI select this exact host/agent, binding ${nextId}, then explicit Start/Restart. Save uses public revision CAS; other agents remain unchanged. Provider sign-in and relay admission remain unverified.`);
       return;
     }
@@ -53,11 +57,11 @@ export async function localSetup(directory: string): Promise<void> {
       const entry = entries.find(e => e.agent === agent);
       if (!entry) throw Error('Unknown retained agent; cannot invent assignment');
       if (action === 'reuse') {
-        if (!entry.keyPresent) throw Error('Local key missing; use restore-key explicitly');
+        if (!publicOnly && !entry.keyPresent) throw Error('Local key missing; use restore-key explicitly');
         console.log(`Reuse ${agent}; no local mutation. In remote TUI select this host/agent, choose binding/configuration, Save then explicitly Restart. Assignment still gates Start.`);
         return;
       }
-      if (entry.keyPresent) throw Error('Local key already present; choose reuse');
+      if (!publicOnly && entry.keyPresent) throw Error('Local key already present; choose reuse');
       if (await ui.question('Restore exact retained key only, preserving assignment/history? [yes/no]: ') !== 'yes') return;
       ui.close(); // Secret reader owns terminal echo; never overlap readline owners.
       importSlotKey(directory, agent, await readAgentSecret());

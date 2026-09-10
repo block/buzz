@@ -28,3 +28,14 @@ Owner chose ordinary **direct relay membership** (delegator steering event `ada7
 Workspace evidence: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CREDENTIAL_3C24/`.
 Bridge source vet: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/KEYCHAIN_BRIDGE_VET_73100E59.md`.
 Original failures retained: first strict compile after making owner private identity optional; first installed journey incorrectly asserted `actual.model` rather than the existing `actual.selection.model`. No production behavior/deadline was changed to conceal either failure. Initial two strict invocations used discovered Homebrew Node 26.8.1, then were repeated with the required resolved Node 24.15.0; only pinned runs are gate evidence.
+
+## V3 immutable-binding continuation (7fdd)
+
+V3 added-agent recovery was published at 6caa4150. Existing local-setup now uses
+public-only identity inventory and supports immutable binding add/replacement,
+retirement and normal conversation conversion without identity-key hydration.
+A normal binding is configuration, not proof of key availability, placement or
+provider admission. Conversion retains original diagnostic references and every
+journal; owner-public manifests are never silently converted from v2. Provider
+credentials retain their existing independent local contract. Actual native OS
+verification and direct-membership integration remain separate pending gates.

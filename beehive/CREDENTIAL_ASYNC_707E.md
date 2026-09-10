@@ -100,3 +100,30 @@ After these changes strict and the focused assignment/Move/Restart/helper set pa
 12/12, default concurrency. No deadline increase, serialized suite, forced exit,
 or second full rerun-to-green. **The repaired source has not passed a full suite.**
 The full run did pass the installed owner-public v3 TUI signed-reply journey.
+
+## V3 binding/wizard continuation (7fdd)
+
+The existing binding add/replacement/retirement and normal-conversion owners now
+accept validated v3 public manifests. Retirement is fingerprint-bound eligibility,
+not deletion: every definition and journal remains. Public wizard inventory and
+locked preview/confirmation do not query identity credentials or infer availability.
+Normal conversion creates a new reference and validates local runtime/provider
+inputs without reading an identity key; Start still re-reads that key through the
+cancellation-fenced execution owner. Existing v2 conversion stays explicit; this
+is not plaintext identity/provider migration or a silent manifest-version upgrade.
+
+`v3-bindings.test.ts` covers actual wizard refusal/confirmation/replacement and
+changed preview, neutral inventory with an unreadable synthetic store, retained
+history, selected-next B versus actual A, explicit Restart, failed preflight old
+actual survival, removed-key neutral Save/Stop and launch refusal. The additional
+`catalog-tui.test.ts` v3-conversion case reuses the installed signed-reply journey:
+actual local wizard -> private owner TUI binding selection -> installed ACP/CLI
+signed reply -> Stop/replay/removal refusal. Source-shaped TS provider only.
+
+Independent `CREDENTIAL_ASYNC_REVIEW_2F3D4755.md` found the unchanged async core
+sound within its stated boundary, with one Low pre-spawn filesystem-path leak.
+The receipt now sanitizes non-missing filesystem errno failures separately from
+native missing/denied/timeout; the v3 host test injects EACCES and checks the
+receipt. That review does not cover this wizard delta or the 6caa recovery delta.
+Exact candidate execution and iteration failures are recorded in workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/V3_BINDINGS_7FDD/` and its report.

@@ -47,8 +47,10 @@ test('catalog verifies owner/signature/relay/expiry; labels cannot spoof identit
   assert.throws(() => productionAdmission.admit({ relay, publicKey: publicKey(a), transport: 'nip42-nip59', ownerDelegation: false }), /pending/);
 });
 
-for (const installed of [false, true]) test(`actual owner TUI owner-public credential slots Start/Stop via private transport (${installed ? 'installed signed reply' : 'external runner'})`, { skip: installed && !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-catalog-tui-')));
+for (const scenario of ['external', 'installed', 'v3-conversion']) {
+const installed = scenario !== 'external', converting = scenario === 'v3-conversion';
+test(`actual owner TUI owner-public credential slots Start/Stop via private transport (${scenario})`, { skip: installed && !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-catalog-tui-')));
   const owner = newKey(), a = newKey(), b = newKey(), agent = newKey();
   const members = new Set([owner, a, b].map(publicKey));
   const relay = await nostrFixture(publicKey(owner), members);
@@ -58,8 +60,24 @@ for (const installed of [false, true]) test(`actual owner TUI owner-public crede
   const directory = join(root, 'host'); mkdirSync(directory);
   const credentials = memoryCredentials();
   const conversation = installed ? await conversationRelayFixture(root, owner, publicKey(agent)) : undefined;
-  provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
+  provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', ...(!converting ? { conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
   const journalPath = join(directory, 'agents', publicKey(agent), 'journal.json');
+  if (converting) {
+    const original = readFileSync(journalPath);
+    const wizard = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), 'src/cli.ts', 'local-setup', directory], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: join(root, 'unused-credentials.json') }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = ''; wizard.stdout.on('data', b => output += b); wizard.stderr.on('data', b => output += b);
+    const exited = new Promise(resolve => wizard.on('close', resolve));
+    try {
+      for (const [prompt, answer] of [['Local action [', 'normal'], ['Existing agent public key:', publicKey(agent)], ['NEW immutable normal binding ID:', 'normal'], ['Absolute installed buzz-acp executable:', realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!)], ['Buzz CONVERSATION relay URL', conversation!.url], ['Absolute installed buzz CLI executable:', realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz'))], ['Save NEW normal binding under installation lock', 'yes']]) {
+        for (let n = 0; n < 400 && !output.includes(prompt!); n++) { if (wizard.exitCode !== null) break; await delay(20); }
+        assert.ok(output.includes(prompt!), output); wizard.stdin.write(`${answer}\n`);
+      }
+      assert.equal(await exited, 0, output);
+    } finally { if (wizard.exitCode === null && wizard.signalCode === null) wizard.kill('SIGKILL'); await exited; }
+    assert.deepEqual(readFileSync(journalPath), original);
+    assert.equal(installationSlots(directory, credentials)[0]!.setup.conversation, undefined);
+    assert.ok(installationSlots(directory, credentials)[0]!.bindings.normal!.conversation);
+  }
   const manifest = readFileSync(join(directory, 'setup.json'), 'utf8');
   assert.ok(!manifest.includes(owner) && !manifest.includes(agent));
   const running = await host(directory, relay.url, undefined, privateHostTransport(one, a, admission), credentials);
@@ -85,6 +103,14 @@ for (const installed of [false, true]) test(`actual owner TUI owner-public crede
     assert.ok(rows.includes(publicKey(a))); assert.ok(rows.includes(publicKey(b)));
     assert.match(rows, /recent host report/);
     await command(`select ${publicKey(a)}`);
+    if (converting) {
+      await command('binding normal');
+      let selected = '';
+      for (let n = 0; n < 80; n++) { selected = await command('show'); if (selected.includes('"revision": 1')) break; await delay(25); }
+      assert.match(selected, /"revision": 1/);
+      const saved = JSON.parse(readFileSync(journalPath, 'utf8'));
+      assert.equal(saved.selected.harnessSetup.id, 'normal'); assert.equal(saved.actual, null);
+    }
     await command('start');
     await wait(() => output.includes('completed | accepted'));
     let shown = '';
@@ -124,20 +150,20 @@ for (const installed of [false, true]) test(`actual owner TUI owner-public crede
       assert.ok(!shown.includes('FORGED'));
       assert.match(shown, /"phase": "stopped"/);
       assert.equal(readFileSync(journalPath, 'utf8'), beforeReplay);
-      assert.equal(Object.keys(journal.operations).length, 2);
+      assert.equal(Object.keys(journal.operations).length, converting ? 3 : 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
     const state = JSON.parse(readFileSync(journalPath, 'utf8'));
-    assert.equal(state.phase, 'stopped'); assert.equal(state.revision, 2);
+    assert.equal(state.phase, 'stopped'); assert.equal(state.revision, converting ? 3 : 2);
     // Simulate deliberate OS deletion while the host still has its old hydrated
     // setup in memory: the production pre-spawn re-read must refuse that cache.
     const reference = JSON.parse(manifest).agents[publicKey(agent)].key;
     credentials.remove(reference);
     const runs = JSON.stringify(state.runs);
     await command('start');
-    await wait(() => Object.keys(JSON.parse(readFileSync(journalPath, 'utf8')).operations).length === 3);
+    await wait(() => Object.keys(JSON.parse(readFileSync(journalPath, 'utf8')).operations).length === (converting ? 4 : 3));
     const refused = JSON.parse(readFileSync(journalPath, 'utf8'));
     assert.equal(refused.phase, 'stopped'); assert.equal(refused.actual, null);
     assert.equal(JSON.stringify(refused.runs), runs);
@@ -153,3 +179,5 @@ for (const installed of [false, true]) test(`actual owner TUI owner-public crede
     foreign.close(); await running.close(); await conversation?.close(); await relay.close(); rmSync(root, { recursive: true, force: true });
   }
 });
+
+}

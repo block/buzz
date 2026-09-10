@@ -1,4 +1,4 @@
-import { credentialSlots, credentialSlotsAsync, addCredentialSlot, removeCredentialSlotKey, importCredentialSlotKey, reconcileCredentialSlot } from './credential-slots.ts';
+import { readCredentialManifest, credentialSlots, credentialSlotsAsync, addCredentialSlot, removeCredentialSlotKey, importCredentialSlotKey, reconcileCredentialSlot } from './credential-slots.ts';
 import { systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { setupOwner } from './host.ts';
 import { prepareAgent } from './acp.ts';
@@ -8,7 +8,7 @@ import { validateSetup, initialState, loadSlotState, setupModels, bindingFingerp
 import { readPrivate, writePrivate } from './storage.ts';
 import { object, publicKey, text } from './protocol.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
-import { prepareConversation, type ConversationSetup } from './conversation.ts';
+import { prepareConversationBinding, prepareConversation, type ConversationSetup } from './conversation.ts';
 import { semanticHash } from './handoff.ts';
 
 type Harness = Omit<Setup, 'host' | 'ownerSecret' | 'ownerPublic' | 'agentSecret'>;
@@ -57,6 +57,16 @@ function readInstallation(directory: string): Installation {
     }
   }
   return i;
+}
+/** Public v3 inventory deliberately does not establish local key availability. */
+export function installationPublicSlots(directory: string): SlotEntry[] {
+  return installationSlots(directory, { read: () => null, create() { throw Error('Read only'); }, remove() { throw Error('Read only'); } });
+}
+function readBindingInstallation(directory: string) {
+  return object(readPrivate(join(directory, 'setup.json'))).version === 3 ? readCredentialManifest(directory) : readInstallation(directory);
+}
+function installationOwner(i: ReturnType<typeof readBindingInstallation>) {
+  return i.version === 3 ? { ownerPublic: i.ownerPublic } : { ownerSecret: i.ownerSecret };
 }
 /** Live-host loading never performs synchronous native credential reads. */
 export async function installationSlotsAsync(directory: string, backend: CredentialBackend, signal?: AbortSignal): Promise<SlotEntry[]> {
@@ -193,7 +203,7 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || ['constructor', 'prototype', '__proto__'].includes(id)) throw Error('Invalid binding ID');
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
-    const i = readInstallation(directory);
+    const i = readBindingInstallation(directory);
     if (Object.hasOwn(i.setups, id) || Object.keys(i.setups).length >= 32) throw Error('Binding exists or inventory full');
     if (source && (!Object.hasOwn(i.setups, source.id) || semanticHash(i.setups[source.id]) !== source.fingerprint)) throw Error('Binding definition changed; reopen local setup');
     if (source && i.retiredBindings?.[source.id]) throw Error('Binding retired');
@@ -204,7 +214,7 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
     }
     const raw = object(value);
     if (['host', 'ownerSecret', 'ownerPublic', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
-    const setup = validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
+    const setup = validateSetup({ ...raw, host: i.host, ...installationOwner(i) });
     if (setup.custom?.contract === 'goose-native') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'goose', provider: setup.gooseProvider, custom: setup.custom, model: setupModels(setup)[0]! });
     if (setup.mode === 'codex') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
     // Conversation authority is installation-owned, not a binding selector.
@@ -220,28 +230,30 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
  * Old diagnostic references retain their exact meaning. Common authority is pinned
  * once; this action cannot retarget another normal binding's runtime/tool/trust.
  */
-export function addConversationBinding(directory: string, agent: string, source: { id: string; fingerprint: string }, id: string, conversation: ConversationSetup): void {
+export function addConversationBinding(directory: string, agent: string, source: { id: string; fingerprint: string; confirmation?: string }, id: string, conversation: ConversationSetup): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || ['constructor', 'prototype', '__proto__'].includes(id)) throw Error('Invalid binding ID');
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
-    const i = readInstallation(directory), entries = installationSlots(directory);
+    const i = readBindingInstallation(directory), entries = i.version === 3 ? installationPublicSlots(directory) : installationSlots(directory);
+    if (source.confirmation !== undefined && source.confirmation !== bindingConfirmation(directory)) throw Error('Affected choices changed; reopen local setup');
     for (const entry of entries) {
       const state = loadSlotState(entry.setup, entry.path, entry.agent);
       if (state.phase !== 'stopped' || state.actual !== null) throw Error('Conversation conversion requires every slot stopped');
     }
     if (i.retiredBindings?.[source.id]) throw Error('Binding retired');
     const entry = entries.find(e => e.agent === agent), setup = entry?.bindings[source.id];
-    if (!entry?.keyPresent || !setup?.agentSecret) throw Error('Retained agent key required; no key recreation');
+    if (!entry || !setup || (i.version !== 3 && (!entry.keyPresent || !setup.agentSecret))) throw Error('Retained agent key required; no key recreation');
     if (bindingFingerprint(setup) !== source.fingerprint) throw Error('Binding definition changed; reopen local setup');
     if (setup.mode === 'fixture' || setup.mode === 'diagnostic-acp') throw Error('Choose a compatible ACP contract; fixture/diagnostic-only cannot become normal');
     if (Object.hasOwn(i.setups, id) || Object.keys(i.setups).length >= 32) throw Error('Binding exists or inventory full');
     const common = i.conversation ?? i.setups.default?.conversation;
     if (common && semanticHash(common) !== semanticHash(conversation)) throw Error('Installation conversation authority already pinned; cannot retarget it');
-    prepareConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace,
+    const validateConversation = i.version === 3 ? prepareConversationBinding : prepareConversation;
+    validateConversation(conversation, { executable: setup.runner, args: setup.args, workspace: setup.workspace,
       home: text(setup.serviceHome), configDirectory: text(setup.configDirectory),
       ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost),
       ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: setupModels(setup)[0]!
-    }, setup.agentSecret, setupOwner(setup));
+    }, i.version === 3 ? agent : setup.agentSecret!, setupOwner(setup));
     i.conversation = structuredClone(conversation);
     i.setups[id] = { ...i.setups[source.id]!, conversation: structuredClone(conversation) };
     // Single fsynced manifest rename activates authority and new definition together.
@@ -251,7 +263,7 @@ export function addConversationBinding(directory: string, agent: string, source:
 }
 
 function requireStoppedBindings(directory: string): void {
-  for (const entry of installationSlots(directory)) {
+  for (const entry of installationPublicSlots(directory)) {
     const state = loadSlotState(entry.setup, entry.path, entry.agent);
     if (state.phase !== 'stopped' || state.actual !== null) throw Error('Binding retirement requires every slot stopped');
   }
@@ -262,7 +274,7 @@ function requireStoppedBindings(directory: string): void {
 export function retireHarnessBinding(directory: string, source: { id: string; fingerprint: string; confirmation?: string }): void {
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
-    const i = readInstallation(directory);
+    const i = readBindingInstallation(directory);
     if (!Object.hasOwn(i.setups, source.id) || semanticHash(i.setups[source.id]) !== source.fingerprint) throw Error('Binding definition changed; reopen local setup');
     if (i.retiredBindings?.[source.id]) throw Error('Binding already retired');
     if (source.confirmation !== undefined && source.confirmation !== bindingConfirmation(directory)) throw Error('Affected choices changed; reopen local setup');
@@ -273,7 +285,7 @@ export function retireHarnessBinding(directory: string, source: { id: string; fi
 }
 
 function bindingSnapshot(directory: string) {
-  return installationSlots(directory).map(entry => ({ agent: entry.agent, setupId: entry.setupId, state: readPrivate(entry.path) }));
+  return installationPublicSlots(directory).map(entry => ({ agent: entry.agent, setupId: entry.setupId, state: readPrivate(entry.path) }));
 }
 
 /** Capture preview and fence together under the mutation lock, never during human input. */

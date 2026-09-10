@@ -230,6 +230,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       // Keep the existing missing-setup receipt contract without hiding a native
       // unavailable/denied/timeout result as an absent key. Never relay FS paths.
       if (['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException)?.code))) throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment');
+      if (typeof (error as NodeJS.ErrnoException)?.code === 'string') throw Error('Local credential/setup unreadable; repair permissions/resources locally without resetting assignment');
       throw error;
     } finally { if (credentialRead === controller) credentialRead = undefined; }
     accessSync(setup.runner, constants.X_OK);

@@ -16,8 +16,15 @@ export type ConversationPlan = ReturnType<typeof prepareConversation>;
  * A NIP-OA tag is an opaque host-local credential; only upstream verifies it.
  */
 export function prepareConversation(input: ConversationSetup, agent: AgentLaunch, agentSecret: string, owner: string) {
+  const binding = prepareConversationBinding(input, agent, publicKey(agentSecret), owner);
+  return Object.freeze({ ...binding, env: Object.freeze<Record<string, string>>({ ...binding.env, BUZZ_PRIVATE_KEY: agentSecret }) });
+}
+
+/** Validate local runtime/provider binding without reading an identity credential.
+ * This public plan cannot launch: prepareConversation supplies the execution key. */
+export function prepareConversationBinding(input: ConversationSetup, agent: AgentLaunch, agentPublicKey: string, owner: string) {
   const prepared = prepareAgent(agent);
-  const agentPublicKey = publicKey(agentSecret);
+  if (!/^[a-f0-9]{64}$/.test(agentPublicKey)) throw Error('Invalid conversation agent public key');
   if (!/^[a-f0-9]{64}$/.test(owner)) throw Error('Invalid conversation owner public key');
   if (!isAbsolute(input.executable) || realpathSync(input.executable) !== input.executable) throw Error('Conversation executable must be a canonical absolute path');
   accessSync(input.executable, constants.X_OK);
@@ -39,7 +46,6 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
     agentExecutableHash: prepared.executableHash,
     // Authoritative identity/transport applied after provider env; no arbitrary env input.
     env: Object.freeze<Record<string, string>>({ ...prepared.env,
-      BUZZ_PRIVATE_KEY: agentSecret,
       BUZZ_RELAY_URL: url.href,
       BUZZ_ACP_AGENT_OWNER: owner,
       ...(input.authTag === undefined ? {} : { BUZZ_AUTH_TAG: input.authTag }),
