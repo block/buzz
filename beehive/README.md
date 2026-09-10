@@ -10,6 +10,34 @@ can close while the host/runner continues. No direct-host HTTP API or controller
 service exists. This package intentionally lives alongside, not inside, the
 native clients: it is a separately authorized product experiment.
 
+## Offline standalone host enrollment (partial, no network)
+
+`node src/cli.ts setup <directory>` without an identity file opens Beehive's
+own enrollment interface. No Buzz Desktop is needed. Use **create** on a fresh
+host directory: enter its label, relay URL and your existing owner **public** key.
+The host generates its durable independent key and exports a private pairing file.
+Compare the full displayed fingerprint in your owner context.
+
+Run the same command in your separate owner context and choose **approve**. Read
+the pairing file, verify the host/key/label/relay/fingerprint, confirm registration,
+choose an expiration and a new approval file, then enter your existing owner key
+through hidden local input. Do not run owner approval on a host you do not trust
+with that input. No new controller key is created and the owner key is not saved.
+Transfer the approval privately back to the host and choose **import**. **export**
+can repeat pairing-file export without replacing the retained host key.
+
+Files must be owner-only regular files; transfer them privately and retain mode
+0600. Registration is domain-separated from agent NIP-OA, binds this exact pairing
+request, and grants neither agent placement nor owner account permissions.
+Registration expiration is checked locally; offline verification cannot discover
+remote revocation, prove a physical machine, or erase a copied key.
+
+**This milestone stops at registered/pending/no-network.** Narrow relay admission,
+private host inventory in the TUI, and Start/reply/Move/reply over the new transport
+are not implemented. Broad NIP-OA cannot enroll a host. The legacy diagnostic
+workflow below remains separate and stores a shared owner key; do not use it for
+real host enrollment. Existing a8 OA identity files are rejected, not migrated.
+
 ## Run an isolated fixture
 
 Requires Node >=22.18 (tested with Hermit 24.15.0), POSIX process groups and

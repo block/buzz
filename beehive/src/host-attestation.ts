@@ -1,7 +1,10 @@
 import { schnorr } from '@noble/curves/secp256k1';
 import { digest, publicKey } from './protocol.ts';
 
-/** NIP-OA tag as consumed by Buzz 051c3a2 nip_oa.rs. No owner secret is needed to verify/import. */
+/** Historical source-contract fixture only: NIP-OA as consumed by Buzz 051c3a2.
+ * NOT infrastructure enrollment. AUTH ignores kind clauses and may establish an
+ * agent-owner relationship. Production host registration must never use this tag.
+ */
 export type HostAttestation = ['auth', string, string, string];
 function clauses(conditions: string): string[] {
   if (conditions.length > 1024) throw Error('Attestation conditions too long');

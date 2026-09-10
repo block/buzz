@@ -1,3 +1,4 @@
+import { registerHost, verifyHostRegistration } from '../src/host-registration.ts';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import assert from 'node:assert/strict';
@@ -68,20 +69,29 @@ test('durable owner-public-only pending bootstrap, genuine enrollment and instal
   const directory = mkdtempSync(join(tmpdir(), 'beehive-host-key-'));
   try {
     const owner = generateSecretKey();
-    const identity = bootstrapHostIdentity(directory, 'desktop', getPublicKey(owner));
-    assert.equal(identity.attestation, null);
+    const identity = bootstrapHostIdentity(directory, 'desktop', getPublicKey(owner), 'wss://example.invalid');
+    assert.equal(identity.registration, null);
     assert.notEqual(identity.secret, hex(owner));
     assert.throws(() => requireHostEnrollment(identity));
     assert.equal(statSync(join(directory, 'host-identity.json')).mode & 0o777, 0o600);
     assert.deepEqual(readHostIdentity(directory), identity);
-    assert.throws(() => bootstrapHostIdentity(directory, 'other', identity.owner));
+    assert.throws(() => bootstrapHostIdentity(directory, 'other', identity.pairing.owner, 'wss://example.invalid'));
     const tag = attestHost(hex(owner), getPublicKey(Buffer.from(identity.secret, 'hex')), 'kind=1059');
     mkdirSync(join(directory, 'host.lock'));
     assert.throws(() => enrollHostIdentity(directory, tag));
     rmdirSync(join(directory, 'host.lock'));
     assert.throws(() => enrollHostIdentity(directory, attestHost(hex(generateSecretKey()), getPublicKey(Buffer.from(identity.secret, 'hex')), '')));
-    enrollHostIdentity(directory, tag);
-    assert.deepEqual(requireHostEnrollment(readHostIdentity(directory)), tag);
+    assert.throws(() => enrollHostIdentity(directory, tag), 'broad OA must never enroll infrastructure');
+    const registration = registerHost(identity.pairing, hex(owner), Math.floor(Date.now() / 1000) + 60);
+    for (const key of ['host', 'owner', 'label', 'relay', 'nonce'] as const) {
+      const changed = { ...identity.pairing, [key]: key === 'label' ? 'other' : key === 'relay' ? 'wss://other.invalid' : hex(generateSecretKey()) };
+      assert.throws(() => verifyHostRegistration(registration, changed));
+    }
+    assert.throws(() => verifyHostRegistration({ ...registration, expires: registration.expires + 1 }, identity.pairing));
+    assert.throws(() => verifyHostRegistration(registration, identity.pairing, registration.expires));
+    enrollHostIdentity(directory, registration);
+    assert.deepEqual(readHostIdentity(directory).registration, registration);
+    assert.throws(() => requireHostEnrollment(readHostIdentity(directory)), /relay admission pending/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -7,6 +7,7 @@ import { claudeGuidance } from './claude.ts';
 import { readAgentSecret } from './key-input.ts';
 import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
+import { enrollmentInput } from './enrollment-input.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -26,7 +27,8 @@ const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
-  setup <host-directory> [identity-file]     New host or existing local wizard
+  setup <host-directory>                     Offline host pairing/owner approval/import
+  setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
@@ -54,6 +56,9 @@ async function main() {
     showPresets();
   } else if (command === 'setup') {
     const dir = resolve(text(args[0]));
+    if (args.length === 1 && !existsSync(join(dir, 'setup.json'))) {
+      await enrollmentInput(dir); return;
+    }
     if (existsSync(dir)) {
       if (args.length !== 1) throw Error('Existing setup: supply host directory only; retained owner cannot be replaced');
       await localSetup(dir); return;
