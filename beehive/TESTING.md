@@ -545,3 +545,16 @@ buzz-acp/Buzz CLI four-signed-reply path. Private env is checked inside the fixt
 private inputs absent from public inventory/output, wrong model/native/auth failures
 preserve actual; missing credential does not block Stop. No Codex acceptance is
 claimed. See CLAUDE_SOURCE_6F8D.md for precise source contract and limitations.
+
+## Codex conditional native path (29c7)
+
+`codex.test.ts` exercises the production owned ACP boundary with explicit JSON
+model overrides, dedicated HOME/CODEX_HOME, key-file prerequisite and exact native
+protocol2/profile/model report, before-prompt refusal and later drift. Vendor CLI
+is a Node placeholder, not Codex. `normal-conversation.test.ts` includes both Codex
+initial and selected-B conversion journeys with four signed installed CLI replies,
+Restart and preserved identity/history/Y, wrong protocol/model/auth/native negatives,
+actual local key removal/service reopen, no missing-key spawn/recreation and neutral
+Stop. These use the existing installed opt-in and unchanged default concurrent runner.
+Source contract and limitations: `CODEX_SOURCE_29C7.md`; exact logs/hashes are in the
+workspace evidence directory named there. No provider or current relay approval.

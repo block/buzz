@@ -1,3 +1,4 @@
+import { prepareAgent } from './acp.ts';
 import { codexGuidance } from './codex.ts';
 import { claudeGuidance } from './claude.ts';
 import { readAgentSecret } from './key-input.ts';
@@ -94,6 +95,7 @@ async function main() {
       const setup = validateSetup({ host: name, ownerSecret: secret, agentSecret, runner, args: mode === '1' ? [resolve(extra)] : mode === '3' ? ['acp'] : [], workspace, allowedWorkspaces, mode: mode === '1' ? 'fixture' : mode === '5' ? 'codex' : mode === '4' ? 'claude' : mode === '3' ? 'goose' : 'buzz-agent-databricks-v2', ...(codex ? { codex, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(claude ? { claude, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(mode === '3' ? { gooseProvider, gooseModels, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'service-home') } : {}), ...(databricksHost ? { databricksHost, serviceHome: join(dir,'service-home'), configDirectory: join(dir,'agent-config') } : {}), ...(conversation ? { conversation } : {}) });
       const lock = join(dir, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
       try {
+        if (setup.mode === 'codex') prepareAgent({ executable: runner, args: [], workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
         if (conversation) prepareConversation(conversation, { executable: runner, args: setup.args, workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider } : {}), model: setupModels(setup)[0]! }, agentSecret, publicKey(secret));
         provision(dir, setup, genesis);
       } finally { rmdirSync(lock); }

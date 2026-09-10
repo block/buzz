@@ -3,7 +3,7 @@ import { dirname, isAbsolute } from 'node:path';
 
 /** Pinned Buzz 051c3a2 pool.rs:295–320: Codex native systemPrompt requires protocol 2. */
 export const CODEX_ADAPTER = 'codex-acp';
-/** Local-only Codex API-key binding. Subscription/Bedrock/Vertex modes are not inferred. */
+/** Local-only Codex API-key binding. ChatGPT subscription login caches and custom providers are not inferred. */
 export type CodexSetup = { cli: string; apiKeyFile: string; models: string[] };
 /** Validate private inputs without reading a credential during offline setup. */
 export function validateCodex(value: CodexSetup): void {

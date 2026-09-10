@@ -1,3 +1,4 @@
+import { prepareAgent } from './acp.ts';
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateSetup, initialState, loadSlotState, setupModels, bindingFingerprint, type Setup } from './host.ts';
@@ -167,7 +168,8 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
     if (source && (!Object.hasOwn(i.setups, source.id) || semanticHash(i.setups[source.id]) !== source.fingerprint)) throw Error('Binding definition changed; reopen local setup');
     const raw = object(value);
     if (['host', 'ownerSecret', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
-    validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
+    const setup = validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
+    if (setup.mode === 'codex') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
     // Conversation authority is installation-owned, not a binding selector.
     if (value.conversation && semanticHash(value.conversation) !== semanticHash(i.conversation ?? i.setups.default?.conversation ?? null)) throw Error('Binding cannot change conversation authority');
     i.setups[id] = structuredClone(value);

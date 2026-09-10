@@ -76,6 +76,7 @@ export class AgentSession {
   private bytes = 0;
   private failed = false;
   private session = '';
+  private codexModelVerified = false;
   private response = '';
   private prompting = false;
   private timeoutMs: number;
@@ -182,7 +183,11 @@ export class AgentSession {
     if (init.protocolVersion !== (this.prepared.plan.harness === 'codex' ? 2 : 1) || record(init.agentInfo).name !== (this.prepared.plan.harness === 'codex' ? CODEX_ADAPTER : this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
     const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...(this.prepared.plan.harness === 'codex' && this.prepared.plan.instructions !== undefined ? { systemPrompt: this.prepared.plan.instructions } : {}), ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
     this.session = identifier(created.sessionId);
-    if (this.prepared.plan.harness === 'codex') return { state: 'reported', models: codexModels(created, this.prepared.plan.model), authentication: 'unverified' };
+    if (this.prepared.plan.harness === 'codex') {
+      const models = codexModels(created, this.prepared.plan.model);
+      this.codexModelVerified = true;
+      return { state: 'reported', models, authentication: 'unverified' };
+    }
     if (this.prepared.plan.harness === 'claude') return { state: 'reported', models: claudeModels(created, this.prepared.plan.model), authentication: 'unverified' };
     if (this.prepared.plan.harness === 'goose') return { state: 'reported', models: gooseModels(created, this.prepared.plan.model), authentication: 'unverified' };
     const models = record(created.models);
@@ -194,6 +199,7 @@ export class AgentSession {
   /** Require explicit exact-model acknowledgement, then a response in the SAME session/process. */
   async verify(): Promise<Evidence> {
     if (!this.session) throw Error('Create ACP session first');
+    if (this.prepared.plan.harness === 'codex' && !this.codexModelVerified) throw Error('Codex exact fresh model evidence required before prompts');
     const model = this.prepared.plan.model;
     if (!this.prepared.plan.harness) {
     const ack = record(await this.request('session/set_model', { sessionId: this.session, modelId: model }));

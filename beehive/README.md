@@ -754,3 +754,18 @@ no real Claude/provider login or inference has been tested. Codex remains unfini
 as do other providers/presets/custom/mesh/compute and production current-kind40002
 admission/full-product acceptance. This is a coherent Claude subset, not both-harness
 or full provider parity.
+
+## Codex: conditional protocol-2 API-key subset
+
+`setup` option **5 Codex** supports normal/default or explicit diagnostic purpose;
+`local-setup` → `add-codex` adds a new immutable binding, and `normal` converts the
+selected diagnostic binding to a NEW normal reference. Neither selects nor starts
+it: select the binding/model/workspace remotely and explicitly Start/Restart.
+Supply separately installed codex-acp and codex, an owner-only OPENAI_API_KEY file,
+and dedicated service HOME/CODEX_HOME. CODEX_HOME/config.toml is TOML;
+CODEX_CONFIG is the host's closed JSON model override, not a path. No installation,
+login, owner-cache reading or ChatGPT subscription parity. Missing credentials,
+protocol-2 native profile capability or fresh exact session model evidence fails
+closed before prompting. Save/Stop are credential-neutral. See
+`CODEX_SOURCE_29C7.md` for exact source, fixture/installed evidence and support limits;
+older statements above about entirely unimplemented Codex are historical.
