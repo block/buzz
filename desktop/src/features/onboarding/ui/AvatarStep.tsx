@@ -173,7 +173,7 @@ function AvatarStepActions({
               // Error-recovery path: exits onboarding entirely when there is no
               // saved display name to fall back on.
               <Button
-                className="h-10 text-muted-foreground hover:text-accent-foreground"
+                className="h-10 rounded-full text-muted-foreground hover:text-accent-foreground"
                 data-testid="onboarding-skip"
                 disabled={areNavigationActionsDisabled}
                 onClick={onSkipForNow}
@@ -185,7 +185,7 @@ function AvatarStepActions({
             ) : showAlwaysSkip && !saveRecovery.errorMessage ? (
               // Normal path: advances to the theme step without saving an avatar.
               <Button
-                className="h-10 text-muted-foreground hover:text-accent-foreground"
+                className="h-10 rounded-full text-muted-foreground hover:text-accent-foreground"
                 data-testid="onboarding-skip"
                 disabled={areNavigationActionsDisabled}
                 onClick={onContinueWithoutSaving}

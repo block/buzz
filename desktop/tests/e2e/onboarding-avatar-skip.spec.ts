@@ -52,6 +52,16 @@ test("avatar step always shows Skip for now button without an error", async ({
   await expect(skipBtn).toBeVisible();
   await expect(skipBtn).toBeEnabled();
   await expect(skipBtn).toHaveText("Skip for now");
+  const nextBtn = page.getByTestId("onboarding-next");
+  const [skipRadius, nextRadius] = await Promise.all([
+    skipBtn.evaluate(
+      (element) => window.getComputedStyle(element).borderRadius,
+    ),
+    nextBtn.evaluate(
+      (element) => window.getComputedStyle(element).borderRadius,
+    ),
+  ]);
+  expect(skipRadius).toBe(nextRadius);
 
   // Capture the whole viewport: the Skip/Next/Back CTAs are portaled into the
   // docked footer (a sibling of the step subtree), so a section-scoped shot
@@ -235,13 +245,20 @@ test("avatar step keeps a stable card and compact horizontal navigation", async 
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
+  const card = page.getByTestId("onboarding-content-card");
+  await expect(card).toBeVisible();
+  const profileCardWidth = await card.evaluate(
+    (element) => element.clientWidth,
+  );
+  expect(profileCardWidth).toBe(610);
+
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
-  const card = page.getByTestId("onboarding-content-card");
   const modeShell = page.getByTestId("onboarding-avatar-mode-content-shell");
   const cardWidths = [await card.evaluate((element) => element.clientWidth)];
+  expect(cardWidths[0]).toBeGreaterThan(profileCardWidth);
   const skipBox = await page.getByTestId("onboarding-skip").boundingBox();
   const nextBox = await page.getByTestId("onboarding-next").boundingBox();
   if (!skipBox || !nextBox) throw new Error("Avatar navigation is missing.");
