@@ -9,7 +9,7 @@ export type AgentLaunch = Readonly<{ executable: string; args: readonly string[]
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
-export type Evidence = { session: string; model: string; responseHash: string; stopReason: 'end_turn'; source: 'external-acp-session'; executableHash: string };
+export type Evidence = { session: string; model: string; responseHash: string; stopReason: 'end_turn'; source: 'external-acp-session' | 'external-buzz-conversation'; executableHash: string; agentPublicKey?: string; runtimeExecutableHash?: string };
 const hash = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
 const record = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw Error('Invalid ACP response');

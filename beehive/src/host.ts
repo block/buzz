@@ -4,9 +4,10 @@ import { createHash } from 'node:crypto';
 import { connect, validateRelayURL } from './client.ts';
 import { digest, fields, message, object, publicKey, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
+import { ConversationSession } from './broker.ts';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
-import { prepareConversation, requireConversationContainment, conversationSummary, type ConversationSetup } from './conversation.ts';
+import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
 export type Setup = { host: string; ownerSecret: string; agentSecret: string; runner: string; args: string[]; workspace: string; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 type Selection = { model: string; workspace: string; profile: string };
@@ -33,15 +34,15 @@ export async function host(directory: string, url: string) {
   if (state.phase !== 'stopped') state.phase = 'quarantined';
   const save = () => writePrivate(path,state);
   try { save(); } catch (e) { rmdirSync(lock); throw e; }
-  let owned: OwnedProcess | undefined;
-  let acp: AgentSession | undefined;
+  let owned: OwnedProcess | ConversationSession | undefined;
+  let acp: AgentSession | ConversationSession | undefined;
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
   function inventory() {
     return message('inventory',setup.host,agent,state.revision, {
       assignedHost: setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
       ...(setup.conversation ? { conversation: conversationSummary(setup.conversation) } : {}),
       catalog, setup: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'],
-      workspaces: [setup.workspace], profiles: ['default'], readiness: setup.conversation ? 'Conversation Start blocked: host-owned ACP subtree containment required; relay/auth/model unverified' : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
+      workspaces: [setup.workspace], profiles: ['default'], readiness: setup.conversation ? (state.actual?.evidence ? 'Conversation session model acknowledged and response completed; relay delivery unverified' : 'Waiting for an admitted conversation and local provider sign-in; no synthetic prompt') : setup.mode === 'fixture' ? 'fixture-only' : (state.phase === 'running' && state.actual?.evidence ? 'ACP model acknowledged + same-session response (not provider attestation or Buzz relay agent)' : 'unverified: Start runs an ACP greeting probe; sign in locally as host service user if required'), observedAt: Date.now(),
     });
   }
   let closing = false;
@@ -72,7 +73,7 @@ export async function host(directory: string, url: string) {
     let result = 'accepted';
     if (m.agent !== agent) result = 'not-authority';
     else if (m.revision !== state.revision) result = 'revision-conflict';
-    else if ((state.phase === 'quarantined' || state.phase === 'transitioning') && !(m.type === 'stop' && owned?.child.connected)) result = 'quarantined';
+    else if ((state.phase === 'quarantined' || state.phase === 'transitioning') && !(m.type === 'stop' && (owned instanceof ConversationSession ? owned.connected : owned?.child.connected))) result = 'quarantined';
     else {
       // Reserve operation before any spawn/kill; interrupted admission never retries effects.
       const pending = message('receipt',setup.host,agent,state.revision,{ operation: m.id, result: 'interrupted-reconcile-locally' });
@@ -93,7 +94,6 @@ export async function host(directory: string, url: string) {
           if (setup.conversation) {
             if (!launch) throw Error('Conversation requires a Buzz Agent harness setup');
             prepareConversation(setup.conversation, launch, setup.agentSecret, state.binding.owner);
-            requireConversationContainment(); // Fail before journaling a run or spawning anything.
           }
           state.actual = { selection: structuredClone(state.selected), executableHash: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), run: m.id };
           state.phase = 'transitioning'; save();
@@ -101,6 +101,16 @@ export async function host(directory: string, url: string) {
             owned = spawnOwned(setup.runner, setup.args, state.actual.selection.workspace, { PATH: '/usr/bin:/bin', BEEHIVE_FIXTURE: '1' });
             owned.child.stdout.resume(); owned.child.stderr.resume();
             await owned.ready;
+          } else if (setup.conversation) {
+            const session = new ConversationSession(setup.conversation, launch!, setup.agentSecret, state.binding.owner);
+            acp = session; owned = session;
+            try {
+              state.actual.evidence = await session.verify();
+              if (!session.healthy) throw Error('Conversation failed before running commit');
+            } catch (e) {
+              await stopOwned(); state.phase = 'stopped'; state.actual = null;
+              throw e;
+            }
           } else {
             const session = new AgentSession(launch!); acp = session;
             owned = session.owned;

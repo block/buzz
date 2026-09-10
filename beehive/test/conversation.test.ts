@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -47,10 +47,13 @@ test('external buzz-acp launch contract preserves identity and rejects lossy/uns
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('real management WS rejects unsafe conversation Start before spawn; Save/Stop and key binding survive', async () => {
+test('real management WS runs identity-bearing external conversation through escaped shim and owned harness; Save/Stop preserve keys', async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-conversation-host-')));
   const ownerSecret = newKey(); const agentSecret = newKey(); const key = publicKey(agentSecret);
-  const setup = { host: 'conversation-host', ownerSecret, agentSecret, runner: executable, args: agent(dir).args, workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid', conversation: { executable, relay: 'wss://conversation.invalid', authTag: 'fixture-attestation' } };
+  const runtime = join(dir, 'runtime');
+  writeFileSync(runtime, `#!/bin/sh\nexec '${executable}' '${resolve('test/conversation-runtime-fixture.ts')}'\n`, { mode: 0o700 });
+  writeFileSync(join(dir, 'mode'), 'ok');
+  const setup = { host: 'conversation-host', ownerSecret, agentSecret, runner: executable, args: [resolve('test/conversation-harness-fixture.ts')], workspace: dir, mode: 'buzz-agent-databricks-v2', serviceHome: dir, configDirectory: dir, databricksHost: 'https://fixture.invalid', conversation: { executable: runtime, relay: 'wss://conversation.invalid', authTag: 'fixture-attestation' } };
   writePrivate(join(dir, 'setup.json'), setup);
   const server = await relay(0, publicKey(ownerSecret), join(dir, 'relay.json'));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -68,14 +71,22 @@ test('real management WS rejects unsafe conversation Start before spawn; Save/St
   }
   try {
     const start = await request('start', 0);
-    assert.match(String(start.body.result), /Conversation Start unavailable.*No process started/);
+    assert.equal(start.body.result, 'accepted');
     const state = JSON.parse(readFileSync(join(dir, 'journal.json'), 'utf8'));
-    assert.equal(state.phase, 'stopped'); assert.equal(state.actual, null); assert.equal(state.revision, 0);
-    assert.equal((await request('save', 0, { model, workspace: dir, profile: 'default' })).body.result, 'saved; running configuration unchanged');
-    assert.equal((await request('stop', 1)).body.result, 'accepted');
+    assert.equal(state.phase, 'running'); assert.equal(state.actual.evidence.session, 'conversation-session'); assert.equal(state.actual.evidence.model, model); assert.equal(state.revision, 1);
+    assert.equal(readFileSync(join(dir, 'runtime-identity'), 'utf8'), key);
+    assert.equal(readFileSync(join(dir, 'harness-identity'), 'utf8'), key);
+    assert.equal(readFileSync(join(dir, 'runtime-completed'), 'utf8'), 'end_turn');
+    assert.equal((await request('save', 1, { model, workspace: dir, profile: 'default' })).body.result, 'saved; running configuration unchanged');
+    assert.equal((await request('stop', 2)).body.result, 'accepted');
     assert.equal(JSON.parse(readFileSync(join(dir, 'setup.json'), 'utf8')).agentSecret, agentSecret);
     assert.ok(!JSON.stringify(seen).includes('fixture-attestation'));
     assert.ok(!JSON.stringify(seen).includes(agentSecret));
+    assert.ok(!JSON.stringify(seen).includes('Private conversation fixture response'));
+    for (const file of ['runtime-pid', 'shim-pid', 'harness-pid', 'descendant-pid']) {
+      const pid = Number(readFileSync(join(dir, file), 'utf8'));
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    }
     const cli = spawnSync(process.execPath, ['src/cli.ts', 'conversation-setup', dir], { encoding: 'utf8', timeout: 3000 });
     assert.notEqual(cli.status, 0); assert.ok(existsSync(join(dir, 'host.lock')));
   } finally {

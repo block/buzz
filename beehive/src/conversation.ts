@@ -52,16 +52,7 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
   });
 }
 
-/**
- * Do not regress owned Stop: upstream AcpClient::spawn uses process_group(0),
- * escaping the existing outer group anchor. A host-owned ACP stdio broker must
- * supervise the actual adapter before this plan is safe to execute.
- */
-export function requireConversationContainment(): never {
-  throw Error('Conversation Start unavailable: external buzz-acp creates a separate ACP process group; host-owned ACP bridge containment is not implemented. No process started.');
-}
-
 /** Safe remote summary. Credentials and executable paths are never included. */
 export function conversationSummary(_setup: ConversationSetup) {
-  return { transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'blocked: ACP subtree containment required' };
+  return { transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'host-owned ACP broker; awaiting conversation evidence' };
 }

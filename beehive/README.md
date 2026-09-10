@@ -135,7 +135,7 @@ until Stop. Auth/protocol failures do not become accepted Start.
 
 **This is an ACP integration probe, NOT yet a conversational Buzz relay agent.**
 The persistent Beehive agent key binds host authority but is not supplied to this
-stdio-only probe, and there is no relay prompt/conversation bridge yet. Model
+stdio-only probe, and this unconfigured path does not use the conversation broker. Model
 acknowledgement is the trusted external executable's claim, not cryptographic
 provider/model attestation. Only deterministic external ACP fixtures have passed;
 no credentialed Databricks response, live account or installed binary ACP
@@ -158,27 +158,34 @@ seam remains missing in the external protocol; do not relabel it authenticated.
 An empty/filtered catalog does not prevent trying an explicitly saved exact model;
 only same-session acknowledgement plus completed response establishes probe evidence.
 
-## External conversation setup (launch blocked)
+## External conversation setup (broker wired; delivery incomplete)
 
 `node src/cli.ts conversation-setup /absolute/existing-host-directory` attaches
-an installed **buzz-acp** executable and separate Buzz conversation relay URL to
-an existing Buzz Agent setup. It never generates/replaces the provisioned agent
-identity, reads OAuth or initiates a connection. Close the host first; setup uses
-the same atomic exclusion lock and leaves the key/auth context unchanged.
+an installed **buzz-acp** and separate conversation relay to the SAME existing
+agent key. Close the host first; setup uses its exclusion lock. It never reads
+owner profiles, performs sign-in or regenerates an identity.
 
-**This does not enable a conversation yet.** A configured conversation Start is
-rejected before spawn; inventory explains why. Upstream `AcpClient::spawn` calls
-`process_group(0)`, so putting buzz-acp inside the existing outer supervisor would
-let its ACP adapter escape owned Stop. `apply_model_switch` can also proceed on
-a default model after rejection. A host-owned TS ACP stdio broker must retain
-adapter ownership and observe exact-model/session completions in actual Buzz
-conversations before this gate can be removed. Buzz-acp—not Beehive—will continue
-to own Nostr auth, membership, author gates, mentions, replies and delivery.
+Start now uses a private per-run TypeScript ACP broker. External buzz-acp owns
+Buzz authentication, membership, mentions and dispatch; its detached childless
+stdio shim cannot choose executables/env/keys. The host separately owns the actual
+harness process group. The proxy enforces exact-model acknowledgement at each
+conversation session boundary and hashes the actual completed response, never a
+separate greeting. Start waits up to 30 seconds for a real inbound conversation;
+missing relay admission or local sign-in fails Start. Stop tears down all retained
+runtime/harness groups and confirms shim exit. No raw text or credentials enter
+management observations. This is not provider attestation or delivery proof.
 
-The launch plan supplies the existing agent key, explicit owner, optional local
-NIP-OA attestation and authoritative relay/model env. None has been exercised
-against a real conversation relay. Community admission and host-service-user OAuth
-remain explicit operator actions; this package has not performed them.
+Both external process-contract fixtures and the installed buzz-acp have exercised
+this broker. The installed-binary test uses fresh fixture identities and an
+isolated NIP-42/NIP-29 relay fixture, not a real community or provider. That binary
+subscribes to legacy kind 9; this is not current Buzz relay compatibility evidence.
+**No signed threaded agent reply was observed.** Current setup disables MCP tools;
+locally provisioned, fixed-authority tool launch and reply delivery remain required.
+Untrusted shim-supplied MCP executables/env are rejected rather than executed.
+See CHECKPOINT.md for exact evidence and next executable action.
+
+Community admission/attestation and normal OAuth in the named host-service context
+remain explicit local/operator actions. No live Databricks request has occurred.
 
 ## Supported / remaining parity
 
@@ -188,7 +195,7 @@ remain explicit operator actions; this package has not performed them.
 | Host inventory | Real relay, fixed authority, freshness | multiple setups/agents, service install, reconnect/reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
 | Lifecycle | fixture Start/Stop, UI-independent host | strict real launch, Restart, host-owned irreversible Move |
-| Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, full conversation bridge and diagnostic catalog provenance |
+| Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | fixed-authority tool/reply delivery, live OAuth/model proof and catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
 | Ten presets / custom ACP | Not implemented | explicit executable/env trust, preset-specific capability grounding |

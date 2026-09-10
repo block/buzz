@@ -41,16 +41,26 @@ strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
   remote Stop and host close. `disconnect.test.ts` verifies parent IPC loss during
   runner life uses the same ownership-preserving teardown, including closed-IPC
   notification handling. Fixtures self-expire to bound failed regression runs.
-- `conversation.test.ts`: exact local external buzz-acp launch contract, preserved
-  provisioned identity, authoritative owner/relay/model env, no ambient provider
-  token, rejected lossy args and unsafe URLs, sanitized remote summary. Real
-  management WS refuses unsafe conversation Start before any process/run state,
-  preserves Save/Stop and keys, and exercises CLI exclusion-lock cleanup.
+- `conversation.test.ts`: persistent identity and exact external env, plus real
+  management WS Start -> external runtime fixture -> escaping detached shim ->
+  separately anchored harness, same-session completion and Stop absence checks.
+- `broker.test.ts`: exact-model rejection/conflict, malformed coalesced completion,
+  cancellation, reverse RPC, session/load, forbidden workspace/MCP provisioning,
+  and teardown including TERM-resistant descendants.
+- `cancellation.test.ts` also exercises the conversation replacement path for
+  admitted Stop, host close, non-authority attempts and malformed completions.
+- `installed-conversation.test.ts`: opt-in with
+  `BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp npm test`.
+  Uses fresh fixture identities/dirs and an isolated NIP-42/REST/NIP-29 relay
+  fixture. Verifies actual installed executable AUTH signatures, membership,
+  owner mention dispatch, and exact-model same-conversation ACP completion through
+  the broker. Its actual kind-9 subscription is respected. No provider is called.
+  Signed threaded reply is **not** observed; tools remain disabled/unprovisioned.
 
-Tests use isolated keys/directories/ports/processes only. Generic external ACP
-fixtures are **not** Buzz conversation relay protocol fixtures. There is no
-end-to-end identity-bearing Buzz conversation test yet. No real OAuth/model call,
-owner credential store, production relay, native service or old app is touched.
+Tests never open existing owner keys/profiles/cache, production services or native
+client resources. With installed opt-in: 11/11 pass; without: 10 pass/1 explicit
+skip. The installed fixture relay does not establish actual community admission,
+current relay compatibility, provider/model attestation or working reply delivery.
 
 ## Independent evidence and limits
 
@@ -65,4 +75,4 @@ No full repo `just ci`, multi-host Move, arbitrary escaped descendant containmen
 strong OS sandbox, hostile journal, log-full/reconnect/ACK, rollback, host SIGKILL
 recovery or real provider proof. Genuine ownership loss retains quarantine/lock;
 no stale numeric PID grants cleanup authority. See CHECKPOINT.md for exact next
-executable action and the intentionally blocked external conversation topology.
+executable action and the wired broker and remaining fixed-authority tool/delivery gap.

@@ -1,91 +1,93 @@
 # Beehive executable checkpoint
 
 Worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440`, branch `beehive/cbfd9440`.
-Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; previous reviewed milestone
-`6bd859479503832a331cb9f8eb0a495082c8f9d8`. This continuation is the commit
-containing this checkpoint (`git rev-parse HEAD`). No push/PR/merge/release.
+Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; this continuation starts at
+`9ff9c6cf16f8c5d7cae0b95e4c01cb3820ff833e`. Candidate is the commit containing
+this checkpoint (`git rev-parse HEAD`). No push/PR/merge/release.
 
-## Outcome and exact remaining critical gap
+## Implemented conversation boundary — not full delivery
 
-**The requested identity-bearing relay conversation is NOT delivered.** The
-existing executable path is still a retained anonymous ACP greeting probe.
-Do not call its evidence a Buzz conversation, provider attestation or live-model
-proof. New `conversation-setup <existing-host-dir>` provisions the external
-buzz-acp contract onto the SAME existing key, atomically under the host exclusion
-lock. It does not create a key, initiate auth or connect to any conversation relay.
-Configured conversation Start fails BEFORE spawning or committing actual-run state.
-Inventory and CLI explicitly say blocked; Save/Stop remain credential-neutral.
+**The host-owned TypeScript ACP broker is implemented and host Start is wired.**
+`conversation-setup` still attaches to the existing persistent agent identity,
+never regenerating keys or initiating OAuth. External buzz-acp receives that key,
+explicit owner, separate conversation relay, optional local attestation and model.
+It retains all Buzz authentication/member/mention/dispatch/reply/tool semantics.
+There is no second Buzz chat runtime or remotely callable host API.
 
-`src/conversation.ts` validates and snapshots the external executable, selected
-Buzz Agent launch, conversation relay, exact existing agent secret, owner pubkey,
-optional host-local opaque NIP-OA tag, exact model, owner-only inbound gate and
-local default permission mode. Env is allowlisted; identity and relay are
-explicitly authoritative. No owner secret, arbitrary env or remote paths/argv are
-accepted. Upstream comma-delimited args reject lossy comma/NUL/empty elements.
-Remote summary contains no credential/executable path. This is a tested launch
-PLAN, not a launched identity-bearing session. CLI currently asks no attestation;
-community operator must admit the public key and owner to intended channels, or
-locally provision a valid NIP-OA tag. Neither that action nor live OAuth occurred.
+`src/broker.ts` opens a fresh private temporary directory/Unix socket with a random
+per-run capability. buzz-acp launches `acp-shim.ts` with that capability; the shim
+is childless and only transports stdio. The actual harness is launched by the
+host via existing `spawnOwned`, NOT by the escaping upstream process group.
+Capabilities cannot cross runs or supply executable/argv/env/key choices. Session
+workspace is fixed; nonempty MCP provisioning is rejected (see delivery gap).
+Socket authentication deadlines, connection/process/session/request/frame bounds
+and write-pressure failure prevent unbounded buffering. No raw diagnostics,
+response text, keys, attestation or capability enter management observations.
 
-## Source-grounded runtime decision (not a second agent runtime)
+The proxy forwards bidirectional requests/responses/notifications, including
+cancellation, reverse client RPC and session/new/load/resume. Before releasing a
+created/loaded/resumed session, it injects `session/set_model` and requires exact
+session/model response. It rejects conflicting/rejected/unconfirmed model changes,
+including model config choices, and re-verifies after config changes. Prompts
+require a confirmed session; evidence hashes actual same-session response chunks
+and requires uncancelled `end_turn`. Evidence identifies agent pubkey, harness and
+external runtime executable hashes, session and model. This is trusted-executable
+protocol evidence, NOT provider attestation or relay delivery confirmation.
 
-Pinned upstream `051c3a2`:
-- `desktop/src-tauri/src/managed_agents/runtime.rs::spawn_agent_child` passes
-  BUZZ_PRIVATE_KEY, BUZZ_RELAY_URL, BUZZ_AUTH_TAG, external agent command/args,
-  model/provider/effort. No BUZZ_ACP_REQUIRED_MODEL contract exists here.
-- `crates/buzz-acp/src/config.rs::CliArgs` defines these external env/CLI inputs.
-- `crates/buzz-acp/src/lib.rs::resolve_agent_owner` verifies NIP-OA against the
-  agent pubkey or falls back to explicit owner. Startup uses HarnessRelay::connect
-  with that key/auth tag, then the actual inbound author/member gate.
-- `crates/buzz-acp/src/pool.rs::apply_model_switch` treats application rejection
-  as Rejected and proceeds with the default. Model env alone is insufficient.
-- **Critical containment seam:** `crates/buzz-acp/src/acp.rs::AcpClient::spawn`
-  calls `cmd.process_group(0)` on Unix. Replacing the probe with buzz-acp under
-  the current outer anchor would let the ACP subtree escape owned Stop (F1).
+Start waits up to 30 seconds for an actual inbound conversation and completed
+response; it never manufactures a greeting on this path. Save stays selected-next;
+Stop/config remain credential-neutral. Missing admission/sign-in yields a bounded
+Start failure, not a running agent claim. Generic non-conversation setups still
+run the explicitly labelled old anonymous ACP probe.
 
-Reuse existing buzz-acp for all Nostr/owner/membership/mention/reply/delivery
-semantics. Do not invent a chat protocol or second Buzz dispatcher. Smallest
-coherent next implementation: host-owned TypeScript ACP stdio broker/proxy so the
-actual adapter is spawned under a host-retained live anchor, not as an escaping
-buzz-acp descendant; the buzz-acp-launched TS shim only forwards stdio. Bound and
-close every shim/broker session on Stop, retain adapter ownership after parent
-exit, enforce session/model acknowledgement, and capture prompt completion on
-THAT identity-bearing conversation session. This broker is NOT implemented yet.
-The current guard deliberately prevents unsafe direct launch in the meantime.
+## Owned teardown and review regressions
 
-Management transport remains the dedicated loopback TypeScript ciphertext WS
-protocol, NOT a Nostr/Buzz conversation relay. No existing clients or Rust changed.
+Stop/cancel/failed Start closes sockets (escaping childless shims exit on EOF),
+then stops runtime and every harness through retained live group anchors. Shim
+PID checks are absence observations only, NEVER kill authority. Failure to confirm
+any group/shim exit fails closed. Existing supervisor retains ownership through
+500ms TERM -> own-group KILL, including host IPC loss; numeric journal PIDs grant
+no takeover/kill authority. Arbitrary executables that deliberately escape their
+owned group remain outside this POSIX containment claim.
 
-## Independent review integrated
+D1 resistant descendants remain tested. D2 replacement host conversation path now
+shares exact-authority/revision/body-admitted cancellation outside the mutation
+queue; wrong agent/revision/body cannot cancel. Host close interrupts Start. D3
+coalesced completion plus malformed tail cannot commit readiness. These regressions
+are exercised for both old probe and new conversation broker paths. No independent
+review of this delta has occurred; prior independent frozen-9ff9c6cf work was not
+used as approval of this new implementation.
 
-Read `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/EXECUTABLE_REVIEW_6BD85947.md`.
-Earlier F1/F2/F3 remain covered. This continuation addresses its D1–D3:
-- D1: live supervisor ignores its own TERM, remains through a 500 ms graceful
-  interval, then sends KILL to its OWN still-owned group. Host only polls absence;
-  transient EPERM is not success and is retried within the same bounded wait.
-  IPC disconnect/send failure invokes the same cleanup rather than killing the
-  anchor prematurely. Resistant orphan descendants covered through remote Stop,
-  host close and parent IPC loss. Genuine anchor loss still fails closed.
-- D2: exact-authority/current-revision/body-valid Stop signals ACP cancellation
-  outside the serialized mutation queue. Close cancels before waiting. Cancelled
-  Start fails; queued Stop retains ordinary receipt/admission handling. Delayed
-  responses cannot commit evidence after failure. Wrong agent/revision/body does
-  not cancel. No blanket stale-revision bypass or recovered-PID kill added.
-- D3: request promise commit and evidence commit recheck session health; host
-  rechecks before running. Coalesced completed-response + malformed-tail regression
-  fails at both ACP and host production seams, rather than accepting then waiting
-  for heartbeat quarantine.
+## Actual executable evidence and precise remaining gap
 
-This candidate has NOT received independent delta re-review. Report fixtures
-remain independent; no review artifacts modified.
+Automated host -> external runtime fixture -> detached/process_group(0)-style
+shim -> owned ACP harness passes using persistent identity, exact model, same
+conversation completion, bidirectional RPC, session loading, cancellation and
+complete runtime/shim/harness/TERM-resistant-descendant absence after Stop. The
+external runtime fixture models the process/ACP contract, not a Buzz relay.
 
-## Dependency route and validation
+Also exercised installed `/Applications/Buzz.app/Contents/MacOS/buzz-acp`, SHA256
+`10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`, against an
+isolated NIP-42/REST/NIP-29 fixture relay and the owned ACP fixture harness. It
+signed verified AUTH with a fresh fixture agent key, discovered fixture membership,
+subscribed, consumed a signed owner mention, and completed the exact-model same
+conversation through the production broker. **Installed executable subscribes to
+kind 9 (plus 46010/40007), not kind 40002**; the fixture follows its actual kind 9
+subscription. This is evidence for that installed binary, not current Buzz relay
+compatibility/admission. Test never touches owner keys/cache/profile or providers.
 
-Read and applied `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/DEPENDENCY_INSTALLATION.md`.
-Public npm registry is host-policy blocked; approved Block mirror is the supported
-route, not a policy bypass. Borrowed ignored modules removed. A standalone
-registry-agnostic `pnpm-lock.yaml` now pins all seven packages with integrity.
-No global/user npm/Git config or machine-path dependency committed. Use:
+**No signed threaded response publication was observed.** ACP text completion is
+not automatic Buzz message delivery here. The current launch plan explicitly sets
+`BUZZ_ACP_MCP_COMMAND=''`; no locally authorized MCP/tool executable plan is
+provisioned. The broker deliberately rejects shim-supplied MCP commands/env rather
+than permitting arbitrary executable injection. Tool-backed conversation delivery
+therefore remains a concrete required engineering step, not just an OAuth gate.
+Do not claim the whole conversation/delivery slice or owner build is complete.
+
+## Validation / dependencies / next action
+
+Hermit Node24.15.0 / pinned pnpm11.4.0. Standalone registry-agnostic lockfile unchanged;
+no new dependencies or borrowed modules. Approved install route remains:
 
 ```
 . ./bin/activate-hermit
@@ -93,32 +95,27 @@ cd beehive
 pnpm install --ignore-workspace --frozen-lockfile --ignore-scripts \
   --registry https://global.block-artifacts.com/artifactory/api/npm/square-npm/
 npm run check
-npm test
+BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp npm test
 ```
 
-Fresh empty node_modules + fresh temporary pnpm store fetched all seven packages
-successfully on pnpm 11.4.0 / Node 24.15.0. Strict TypeScript check passes;
-**npm test: 9/9 top-level tests pass** (13.2 seconds). Tests include original
-ACP/WS/TUI regressions, D1–D3, and blocked conversation setup/launch contract.
-`git diff --check` passes. Local commit uses configured Logan Johnson
-<loganj@squareup.com> author/committer and DCO; no persistent Git config edits.
-No real Databricks OAuth, model call, conversation relay admission or external
-buzz-acp network session was exercised. Generic ACP fixtures are NOT Buzz relay
-parity. No repo-wide `just ci` or production readiness claim.
+Full suite with installed opt-in: **11/11 top-level tests pass**. Without opt-in:
+10 pass, installed test explicitly skipped. Strict TS and `git diff --check` pass.
+No repo-wide `just ci`, production service, owner OAuth or live provider call.
+Commit uses configured Logan Johnson <loganj@squareup.com> author/committer/DCO,
+without persistent config/signing changes. No independent broker review yet.
 
-## Next executable action / full scope
+**ONE next executable action:** implement a locally provisioned, fixed-authority
+MCP/Buzz-tool launch plan (including service-local tool executable discovery and
+owned teardown), then extend the installed isolated-relay test to require an actual
+signed threaded agent reply. Do not loosen the broker to accept shim executable/env
+provisioning or invent an alternate Buzz dispatcher. Request independent broker
+review against this usable artifact before broadening the launch surface.
 
-**Implement the host-owned ACP stdio broker described above, then remove the
-conversation Start gate only when adapter/shim teardown and exact-model real
-conversation correlation pass tests.** Do not spend another run rediscovering
-upstream routing. Preserve the provisioned agent key and the two-relay distinction.
-
-Still open: actual Buzz-relay conversation/owner admission, live provider proof,
-catalog auth ambiguity, reconnect/ACKs and durable TUI intents, crash recovery and
-strong OS containment, multiple agents/hosts/setups, profiles/instructions/metadata,
-key import/revocation, Restart/Move, other Desktop harnesses/presets/providers,
-relay-mesh and compute. S1 two-host same identity is unproven. Source setup is one
-user-facing object but initial key setup is still coupled to first harness setup;
-conversation attachment now independently preserves keys. No remaining scope row
-is an owner-approved exclusion. Hash-to-spawn TOCTOU, hostile journals, rollback/
-clone protection and outbox pruning remain explicitly outside current evidence.
+Still open: actual community admission/attestation and named-service-user normal
+Databricks v2 OAuth/live `databricks-claude-haiku-4-5` proof; catalog auth ambiguity;
+reconnect/ACKs and durable TUI intents; crash recovery/strong OS containment;
+multiple hosts/agents/setups, profiles, key import/revocation, Restart/Move; remaining
+Desktop harnesses/presets/providers/mesh/compute. S1 two-host identity unproven.
+Selected-next != actual-run; stopped identity remains assigned. Move must never
+transfer credentials/workspace/session or permit unreachable takeover. Hash/spawn
+TOCTOU, hostile journals, rollback/clones and outbox pruning remain outside evidence.
