@@ -111,11 +111,13 @@ impl RedisSubscriptionRuntime {
         }
     }
 
-    /// Cancel and await every owned task within one shared deadline.
+    /// Cancel and await every owned task within one shared graceful deadline.
+    /// Tasks that miss it are aborted and joined before shutdown reports completion.
     pub async fn shutdown(mut self, timeout: Duration) {
         self.cancel.cancel();
         let deadline = tokio::time::Instant::now() + timeout;
-        for task in &mut self.tasks {
+        let mut timed_out = Vec::new();
+        for mut task in self.tasks.drain(..) {
             if tokio::time::timeout_at(deadline, &mut task.handle)
                 .await
                 .is_err()
@@ -123,8 +125,14 @@ impl RedisSubscriptionRuntime {
                 task.handle.abort();
                 self.health
                     .failed(task.path, SubscriptionTransitionReason::ShutdownTimeout);
+                timed_out.push(task);
             }
         }
+
+        for task in timed_out {
+            let _ = task.handle.await;
+        }
+
         for path in SubscriptionPath::ALL {
             self.health.stopped(path);
         }
@@ -258,6 +266,15 @@ async fn run_control_consumer(
 mod tests {
     use super::*;
     use buzz_pubsub::health::SubscriptionPathState;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[tokio::test]
     async fn production_runtime_owns_both_halves_and_attaches_consumers_first() {
@@ -330,6 +347,75 @@ mod tests {
         );
 
         task.handle.await.expect("task join");
+        assert_eq!(
+            health.snapshot(SubscriptionPath::Cache).state,
+            SubscriptionPathState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_every_task_after_aborting_timed_out_work() {
+        let cancel = CancellationToken::new();
+        let health = Arc::new(SubscriptionHealth::new());
+        let event_dropped = Arc::new(AtomicBool::new(false));
+        let cache_dropped = Arc::new(AtomicBool::new(false));
+
+        let (event_started_tx, event_started_rx) = tokio::sync::oneshot::channel();
+        let event_flag = Arc::clone(&event_dropped);
+        let event_task = spawn_owned(
+            SubscriptionPath::Event,
+            TaskKind::Network,
+            Arc::clone(&health),
+            cancel.clone(),
+            async move {
+                let _drop_flag = DropFlag(event_flag);
+                event_started_tx
+                    .send(())
+                    .expect("signal event task started");
+                std::future::pending::<()>().await;
+            },
+        );
+
+        let (cache_started_tx, cache_started_rx) = tokio::sync::oneshot::channel();
+        let cache_flag = Arc::clone(&cache_dropped);
+        let cache_task = spawn_owned(
+            SubscriptionPath::Cache,
+            TaskKind::Consumer,
+            Arc::clone(&health),
+            cancel.clone(),
+            async move {
+                let _drop_flag = DropFlag(cache_flag);
+                cache_started_tx
+                    .send(())
+                    .expect("signal cache task started");
+                std::future::pending::<()>().await;
+            },
+        );
+
+        event_started_rx.await.expect("event task started");
+        cache_started_rx.await.expect("cache task started");
+
+        RedisSubscriptionRuntime {
+            cancel,
+            health: Arc::clone(&health),
+            tasks: vec![event_task, cache_task],
+            shutdown_complete: false,
+        }
+        .shutdown(Duration::ZERO)
+        .await;
+
+        assert!(
+            event_dropped.load(Ordering::SeqCst),
+            "event resource must be released before shutdown returns"
+        );
+        assert!(
+            cache_dropped.load(Ordering::SeqCst),
+            "cache resource must be released before shutdown returns"
+        );
+        assert_eq!(
+            health.snapshot(SubscriptionPath::Event).state,
+            SubscriptionPathState::Failed
+        );
         assert_eq!(
             health.snapshot(SubscriptionPath::Cache).state,
             SubscriptionPathState::Failed
