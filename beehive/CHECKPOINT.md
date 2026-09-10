@@ -2076,3 +2076,21 @@ fails. No authority, queue, durability or timing-assertion semantic changes. Str
 passes. ONE final FULL DEFAULT concurrent installed-enabled suite is next, with
 trace mode/source/installed hashes in PROVIDER_16B4. Original 105/106 gate remains
 OPEN and original cause UNRESOLVED; no diagnostic full rerun or speculative fix.
+
+## Provider 16b4 — final full outcome, gate OPEN
+
+Executable `36e2eaca0`: strict PASS; exactly ONE FULL DEFAULT concurrent installed-
+enabled run **111/112**, zero skips/cancellations, natural 223.753s. All ten normal
+installed journeys PASS, including three new provider contracts and wrong private
+credential controls. Admission recurrence: conflicting-id aggregate 2612ms vs
+unchanged <2500ms, after wrong-authority passed at 1712ms. No rerun or policy fix.
+Durable 472-stamp failure trace (zero dropped) identifies 582.982ms synchronous
+journal region during legitimate Start, only 38.171ms of which are measured fsync
+calls; async relay await overlaps this blocking and is not disk-duration proof.
+Valid owned Stop contributes 531.869ms. Exact event decomposition, source/binary
+hashes and all failures retained in PROVIDER_16B4_RESULT.md and workspace evidence.
+Underlying scheduling/I/O cause remains unresolved; original 105/106 also remains
+UNRESOLVED independently. Next step: consume captured failure at actual owners,
+not retry-to-green. Three API-key providers delivered, Databricks token/richer OAuth
+and executed new local-add/conversion journeys remain incomplete. Mesh/compute,
+live admission and real vendor inference separate. This follow-up is docs-only.
