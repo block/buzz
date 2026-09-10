@@ -221,7 +221,7 @@ async fn fixture_impl(
                                 .and_then(|v| v.as_str())
                                 .map(str::to_owned)
                         });
-                    let profile = author
+                    author
                         .filter(|key| valid.contains(key))
                         .map(|key| {
                             let agent = nostr::PublicKey::from_hex(&key).unwrap();
@@ -241,8 +241,7 @@ async fn fixture_impl(
                             };
                             serde_json::json!([{"pubkey": key, "tags": [auth]}])
                         })
-                        .unwrap_or_else(|| serde_json::json!([]));
-                    profile
+                        .unwrap_or_else(|| serde_json::json!([]))
                 }
             } else {
                 serde_json::json!({})
