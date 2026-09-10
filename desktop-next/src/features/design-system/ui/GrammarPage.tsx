@@ -1,5 +1,4 @@
 import { Table } from "@buzz/ui";
-import { useEffect } from "react";
 import { foundationGrammar } from "../grammar/foundations";
 import { typographyGrammar } from "../grammar/typography";
 import { compositionGrammar } from "../grammar/composition";
@@ -15,19 +14,6 @@ const sections = [
 
 /** Cited BlockUI reference guidance, separate from Buzz's active token contract. */
 export function GrammarPage() {
-  useEffect(() => {
-    const revealTopic = () => {
-      const topic = document.getElementById(window.location.hash.slice(1));
-      if (topic instanceof HTMLDetailsElement) {
-        topic.open = true;
-        topic.scrollIntoView({ block: "start" });
-      }
-    };
-    revealTopic();
-    window.addEventListener("hashchange", revealTopic);
-    return () => window.removeEventListener("hashchange", revealTopic);
-  }, []);
-
   return (
     <article className="grammar-page">
       <PageHeader title="Logic & grammar" />
@@ -43,59 +29,45 @@ export function GrammarPage() {
           <a
             key={section.id}
             href={`#${section.id}`}
-            onClick={() => {
-              const topic = document.getElementById(section.id);
-              if (topic instanceof HTMLDetailsElement) topic.open = true;
-            }}
             className="text-caption text-accent underline"
           >
             {section.title}
           </a>
         ))}
       </nav>
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-10">
         {sections.map((section) => (
-          <details
+          <section
             key={section.id}
             id={section.id}
-            className="grammar-section rounded-control bg-inset p-4"
-            open={section.id === "role-resolution"}
+            className="grammar-section"
+            aria-labelledby={`${section.id}-heading`}
           >
-            <summary className="cursor-pointer text-subheading text-primary">
+            <h2
+              id={`${section.id}-heading`}
+              className="text-heading text-primary"
+            >
               {section.title}
-            </summary>
-            <div className="hidden sm:block">
-              <Table className="grammar-table mt-5">
-                <caption className="bui-sr-only">{section.title}</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Choice</th>
-                    <th scope="col">Use</th>
-                    <th scope="col">Boundary</th>
+            </h2>
+            <Table className="grammar-table mt-5 min-w-xl" tabIndex={0}>
+              <caption className="bui-sr-only">{section.title}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Choice</th>
+                  <th scope="col">Use</th>
+                  <th scope="col">Boundary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {section.rows.map(([choice, use, boundary]) => (
+                  <tr key={choice}>
+                    <th scope="row">{choice}</th>
+                    <td>{use}</td>
+                    <td>{boundary}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {section.rows.map(([choice, use, boundary]) => (
-                    <tr key={choice}>
-                      <th scope="row">{choice}</th>
-                      <td>{use}</td>
-                      <td>{boundary}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            </div>
-            <dl className="sm:hidden mt-4 flex flex-col gap-5">
-              {section.rows.map(([choice, use, boundary]) => (
-                <div key={choice} className="flex flex-col gap-2">
-                  <dt className="text-label text-primary break-words">
-                    {choice}
-                  </dt>
-                  <dd className="text-body text-primary">{use}</dd>
-                  <dd className="text-caption text-secondary">{boundary}</dd>
-                </div>
-              ))}
-            </dl>
+                ))}
+              </tbody>
+            </Table>
             <div className="flex flex-wrap gap-x-4 gap-y-2 mt-4">
               {section.sources.map((source) => (
                 <a
@@ -107,7 +79,7 @@ export function GrammarPage() {
                 </a>
               ))}
             </div>
-          </details>
+          </section>
         ))}
       </div>
     </article>

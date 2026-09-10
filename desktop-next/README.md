@@ -30,9 +30,9 @@ are shared.
 
 ## Logic & grammar
 
-`/design/grammar` is a compact BlockUI reference under System. Expand a topic to
-read its selection rules, usage boundaries, and links to the verified upstream
-snapshot. Topic links support direct loading and refresh. It covers foundations,
+`/design/grammar` is a BlockUI reference under System. Every topic is displayed
+as a flat table of selection rules and usage boundaries, with links to the
+verified upstream snapshot. Tables scroll horizontally on narrow screens. Topic links support direct loading and refresh. It covers foundations,
 component contracts, applet composition, and generation constraints; the final
 topic records differences from Buzz's active token contract and upstream gaps.
 Source links require Block access, but the page has no private runtime dependency.

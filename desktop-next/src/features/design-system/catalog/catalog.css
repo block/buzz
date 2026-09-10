@@ -57,6 +57,10 @@
 .grammar-table {
   table-layout: fixed;
 }
+.grammar-table:focus-visible {
+  outline: 2px solid var(--ring-focus);
+  outline-offset: -2px;
+}
 .grammar-table th,
 .grammar-table td {
   white-space: normal;
