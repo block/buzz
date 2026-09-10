@@ -77,19 +77,6 @@ async function addProjectToSidebar(
   await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
 }
 
-async function openProjectRepository(
-  page: import("@playwright/test").Page,
-  repositoryId: string,
-) {
-  await expect(page).toHaveURL(/\/projects\//);
-  const target = await page.evaluate((id) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("repositoryId", id);
-    return `${url.pathname}${url.search}`;
-  }, repositoryId);
-  await page.goto(target, { waitUntil: "domcontentloaded" });
-}
-
 function pullRequestRowByAuthor(
   page: import("@playwright/test").Page,
   author: string,
@@ -1494,7 +1481,15 @@ test("channels tab opens the latest matching conversation without leaving the pr
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        displayName: "reviewer agent",
+        isAgent: true,
+        pubkey: REVIEWER_AGENT_PUBKEY,
+      },
+    ],
+  });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
   await waitForMockLiveSubscription(page, "general");
@@ -1502,26 +1497,27 @@ test("channels tab opens the latest matching conversation without leaving the pr
   const olderContent = "Older matching conversation for channels tab";
   const latestContent = "Latest matching conversation for channels tab";
   await page.evaluate(
-    ({ author, latestContent, olderContent, repoToken }) => {
+    ({ latestAuthor, latestContent, olderAuthor, olderContent, repoToken }) => {
       const now = Math.floor(Date.now() / 1_000);
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `${olderContent} ${repoToken}`,
         createdAt: now - 1,
         kind: 9,
-        pubkey: author,
+        pubkey: olderAuthor,
       });
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `${latestContent} ${repoToken}`,
         createdAt: now,
         kind: 9,
-        pubkey: author,
+        pubkey: latestAuthor,
       });
     },
     {
-      author: TEST_IDENTITIES.alice.pubkey,
+      latestAuthor: REVIEWER_AGENT_PUBKEY,
       latestContent,
+      olderAuthor: TEST_IDENTITIES.alice.pubkey,
       olderContent,
       repoToken: `${DEFAULT_MOCK_PUBKEY} buzz`,
     },
@@ -1540,6 +1536,32 @@ test("channels tab opens the latest matching conversation without leaving the pr
   await page.getByRole("tab", { name: "Channels", exact: true }).click();
   const channelRow = page.getByTestId("project-channel-row").first();
   await expect(channelRow).toBeVisible({ timeout: 10_000 });
+
+  const discussedAgent = channelRow.getByRole("button", {
+    name: "View reviewer agent's profile",
+  });
+  const discussedHuman = channelRow.getByRole("button", {
+    name: "View alice's profile",
+  });
+  await expect(discussedAgent).toBeVisible();
+  await expect(discussedHuman).toBeVisible();
+  await discussedAgent.focus();
+  await expect(discussedAgent).toBeFocused();
+  await expect(discussedAgent).toHaveCSS("clip-path", "none");
+  await expect(discussedAgent).not.toHaveClass(/rounded-squircle/);
+  await expect(
+    discussedAgent.locator("[data-avatar-shape='squircle']"),
+  ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
+  const [agentBox, humanBox] = await Promise.all([
+    discussedAgent.boundingBox(),
+    discussedHuman.boundingBox(),
+  ]);
+  expect(agentBox).not.toBeNull();
+  expect(humanBox).not.toBeNull();
+  expect((humanBox?.x ?? 0) - (agentBox?.x ?? 0)).toBeLessThan(
+    agentBox?.width ?? 0,
+  );
+
   await channelRow.click();
 
   const panel = page.getByTestId("project-conversation-panel");

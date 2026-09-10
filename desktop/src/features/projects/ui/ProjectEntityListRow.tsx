@@ -55,18 +55,14 @@ export function ProjectEntityFacepile({
           <UserProfilePopover
             key={pubkey}
             pubkey={pubkey}
+            triggerClassName={cn(
+              "rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              index > 0 && "-ml-1.5",
+            )}
             triggerElement="span"
+            triggerAriaLabel={`View ${label}'s profile`}
           >
-            <button
-              className={cn(
-                profiles?.[pubkey]?.isAgent
-                  ? "rounded-squircle"
-                  : "rounded-full",
-                index > 0 && "-ml-1.5",
-              )}
-              title={label}
-              type="button"
-            >
+            <span title={label}>
               <UserAvatar
                 avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
                 className="ring-2 ring-background"
@@ -74,7 +70,7 @@ export function ProjectEntityFacepile({
                 shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
                 size="xs"
               />
-            </button>
+            </span>
           </UserProfilePopover>
         );
       })}

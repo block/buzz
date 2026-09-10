@@ -247,8 +247,7 @@ export function IssueAssigneesRow({
                 <button
                   aria-label={`Unassign ${label}`}
                   className={cn(
-                    "group relative inline-flex",
-                    profile?.isAgent ? "rounded-squircle" : "rounded-full",
+                    "group relative inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                   )}
                   data-testid={`${testIdPrefix}-unassign-${normalizePubkey(pubkey)}`}
                   disabled={unassignMutation.isPending}

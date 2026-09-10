@@ -36,6 +36,7 @@ const UNNAMED_MEMBER_V5_PUBKEY =
   "0000000000000000000000000000000000000000000000000000000000000005";
 const UNNAMED_MEMBER_V24_PUBKEY =
   "0000000000000000000000000000000000000000000000000000000000000018";
+const NEW_DM_AGENT_PUBKEY = "f".repeat(64);
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -607,6 +608,22 @@ test("shows presence in sidebar, DM header, and member list", async ({
 });
 
 test("start a new direct message from the sidebar", async ({ page }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        name: "Squircle Agent",
+        status: "stopped",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        displayName: "Squircle Agent",
+        isAgent: true,
+      },
+    ],
+  });
   await page.goto("/");
 
   await openNewMessagePage(page);
@@ -651,11 +668,27 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
+  await page.getByTestId("new-dm-search").fill("squircle agent");
+  await page.getByTestId(`new-dm-result-${NEW_DM_AGENT_PUBKEY}`).click();
+  const selectedAgent = page.getByTestId(
+    `new-dm-selected-${NEW_DM_AGENT_PUBKEY}`,
+  );
+  await expect(selectedAgent).toBeVisible();
+  await selectedAgent.focus();
+  await expect(selectedAgent).toBeFocused();
+  await expect(selectedAgent).toHaveCSS("clip-path", "none");
+  await expect(selectedAgent).not.toHaveClass(/rounded-squircle/);
+  await expect(
+    selectedAgent.locator("span.absolute[data-avatar-shape='squircle']"),
+  ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
+
   await page.getByTestId("message-input").fill("Hello charlie");
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
-  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("chat-title")).toHaveText(
+    "charlie, Squircle Agent",
+  );
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
@@ -3984,6 +4017,17 @@ test("Inbox keeps the unread boundary for replies from multiple agents", async (
 
   const firstUnreadRow = page.getByTestId(`home-inbox-item-${replyIds[0]}`);
   await expect(firstUnreadRow).toBeVisible();
+
+  const inboxAvatar = page.getByTestId(`home-inbox-avatar-${replyIds[0]}`);
+  await expect(inboxAvatar).toBeVisible();
+  await inboxAvatar.focus();
+  await expect(inboxAvatar).toBeFocused();
+  await expect(inboxAvatar).toHaveCSS("clip-path", "none");
+  await expect(inboxAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(inboxAvatar.locator("[data-avatar-shape='squircle']")).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
   await firstUnreadRow.click();
 
   const detail = page.getByTestId("home-inbox-detail");
