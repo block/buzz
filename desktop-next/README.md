@@ -28,6 +28,15 @@ Direct links and refreshes work with the same SPA fallback as the rest of the
 site; unknown component IDs have a recovery link. Theme and density preferences
 are shared.
 
+## Logic & grammar
+
+`/design/grammar` is a BlockUI reference under System. Every topic is displayed
+as a flat table of selection rules and usage boundaries, with links to the
+verified upstream snapshot. Tables scroll horizontally on narrow screens. Topic links support direct loading and refresh. It covers foundations,
+component contracts, applet composition, and generation constraints; the final
+topic records differences from Buzz's active token contract and upstream gaps.
+Source links require Block access, but the page has no private runtime dependency.
+
 ## Appearance
 
 The navigation contains independent theme and Normal / Compact controls. Density
