@@ -1,0 +1,30 @@
+# Owner-public credential slots and installed private-wire reply checkpoint
+
+## Implemented
+
+- `Setup.ownerPublic` resolves execution authority without an owner private key. Legacy diagnostic manifests remain readable explicitly; normal `provision-agent` does not copy an owner private key.
+- `credential-slots.ts` v3 persists owner public identity, per-agent Beehive credential references and local harness definitions. Explicit provisioning writes an inert public journal, creates the OS entry, verifies read-back, then activates the public manifest. It refuses existing/partial state rather than resetting genesis.
+- `installationSlots`, remove/import commands and the host pre-spawn revalidation resolve v3 keys through the credential backend. Removal validates preserved stopped state first, removes the OS entry and verifies absence. Public reference and every journal byte remain; deletion retry is idempotent. Missing keys are public-only; locked/denied/unavailable errors are not absence. Explicit import restores only the matching retained identity, without assignment changes.
+- `provision-agent <host-directory> <binding-file> <genesis-file>` requires the retained owner-signed host registration. Binding files contain harness/provider configuration, never identity fields; matching agent key input is hidden. It provisions STOPPED and performs no relay admission or Start. This is the first-agent fresh v3 path, not an automatic legacy migration or complete multi-agent wizard.
+- Vetted exact dependency `@napi-rs/keyring@2.0.0`, installed with pnpm 11.4.0 / Node 24.15.0 using only the approved mirror and `--ignore-scripts`. The adapter uses `Entry('beehive', '<role>:<pubkey>')`, never enumeration, Buzz services, shared blobs, secret argv or a plaintext fallback. Per-key entries avoid shared-blob lost updates. Entries are local to the OS account: deleting a reference also affects other local installations referencing that exact role/public key.
+- Actual owner CLI/TUI private Nostr catalog Start/running/Stop/stopped now exercises v3 owner-public slots with the installed Buzz ACP and real Buzz CLI plus synthetic TS provider. Reply signature, agent author, channel and parent thread are checked. Independent host B receives nothing. Forged inventory/unauthorized Start stay inert, rewrapped original Start after Stop leaves the stopped revision-2 journal unchanged. Deletion directly from the synthetic store while the host retains a hydrated setup causes a new Start to refuse before creating a run; explicit same-key import after host close restores identity.
+
+## OS verification boundary
+
+The bridge's prebuilt loads on Node 24.15.0. This is **not** OS credential-store verification. Its API has no suppression of OS unlock/ACL prompts; neither sync catch nor AsyncEntry cancellation prevents a blocking native prompt. Therefore no OS entry was constructed, queried, created, enumerated or deleted in validation, even in a test namespace. The owner must explicitly run a fresh synthetic-only OS round trip in an interactive session if they want real OS availability verified. Do not blindly automate that test. No existing owner/Buzz/production credentials were accessed.
+
+Native adapter contract tests inject an Entry implementation; lifecycle tests inject memory or explicit isolated file fixtures. Those are not OS evidence. Generic native errors remain distinct from missing/null and are sanitized (no original potentially sensitive native error text/cause). Native backend does not regenerate missing identity or recover from cached secret material.
+
+## Crash boundaries and unfinished work
+
+Filesystem and OS credential store are not one transaction. Failure before credential write can leave an inert journal; failure after credential write/read-back but before manifest activation can leave an orphan OS entry. The journal contains the public agent identity from which its Beehive reference is derived; retry refuses partial provisioning. There is not yet a guided partial-provision reconciliation command. No automatic cleanup/migration is performed, and a deliberate removal is never re-created on recovery.
+
+V3 first-agent provisioning/load/remove/import is integrated. V3 add-agent, immutable binding addition/retirement/conversion and full normal setup wizard integration still need implementation; legacy versions retain existing functionality rather than silently upgrading. Private profile distribution and cross-host Move/reconnect remain subsequent work; the new-wire signed-reply journey uses upstream-default profile, not a new profile-distribution claim. Existing native protocol/model/session fences remain in the execution owner and separate installed tests.
+
+Owner chose ordinary **direct relay membership** (delegator steering event `ada74a703ef1fb7d4ff2197fd24914077f2f3972301edd51cdfe6e904b553fdc`), not a new management-only permission feature. Production dialing remains closed pending verified enrollment. Relay admin operation at this source: `buzz-admin add-member --pubkey <host-public-key> --role member`; requires relay operator DB/Redis configuration and relay signing key to publish kind 13534. Do not put a relay signing key on a Beehive host. Registration, direct membership and agent placement are distinct. Open-relay AUTH alone is not proof of membership. Direct membership has ordinary broad member permissions, not 1059-only least privilege, and existing connections retain rights until closed. No production operation was performed.
+
+## Evidence
+
+Workspace evidence: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/CREDENTIAL_3C24/`.
+Bridge source vet: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/KEYCHAIN_BRIDGE_VET_73100E59.md`.
+Original failures retained: first strict compile after making owner private identity optional; first installed journey incorrectly asserted `actual.model` rather than the existing `actual.selection.model`. No production behavior/deadline was changed to conceal either failure. Initial two strict invocations used discovered Homebrew Node 26.8.1, then were repeated with the required resolved Node 24.15.0; only pinned runs are gate evidence.

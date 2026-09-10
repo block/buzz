@@ -1,3 +1,6 @@
+import { credentialSlots, removeCredentialSlotKey, importCredentialSlotKey } from './credential-slots.ts';
+import { systemCredentials, type CredentialBackend } from './credential-store.ts';
+import { setupOwner } from './host.ts';
 import { prepareAgent } from './acp.ts';
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,7 +11,7 @@ import { validateGenesis, type Genesis } from './assignment.ts';
 import { prepareConversation, type ConversationSetup } from './conversation.ts';
 import { semanticHash } from './handoff.ts';
 
-type Harness = Omit<Setup, 'host' | 'ownerSecret' | 'agentSecret'>;
+type Harness = Omit<Setup, 'host' | 'ownerSecret' | 'ownerPublic' | 'agentSecret'>;
 /** A removed local key copy leaves a public-only slot: `secret: null` retains identity. */
 type AgentEntry = { secret: string | null; setup: string; legacy?: true };
 type Installation = { retiredBindings?: Record<string, string>; conversation?: ConversationSetup; version: 2; host: string; ownerSecret: string; setups: Record<string, Harness>; agents: Record<string, AgentEntry> };
@@ -56,8 +59,9 @@ function readInstallation(directory: string): Installation {
   return i;
 }
 /** Resolve shared local harness inventory without copying agent keys into setups. */
-export function installationSlots(directory: string): SlotEntry[] {
+export function installationSlots(directory: string, backend: CredentialBackend = systemCredentials): SlotEntry[] {
   const raw = object(readPrivate(join(directory, 'setup.json')));
+  if (raw.version === 3) return credentialSlots(directory, backend);
   if (raw.version !== 2) {
     const setup = validateSetup(raw);
     if (setup.agentSecret === undefined) throw Error('Legacy setup requires its agent key; explicit migrate-slots first');
@@ -85,9 +89,9 @@ export function migrateSlots(directory: string): void {
     const state = object(readPrivate(join(directory, 'journal.json')));
     const binding = object(state.binding); const assignment = object(state.assignment);
     const genesis = validateGenesis(assignment.genesis);
-    if (state.phase !== 'stopped' || state.actual !== null || binding.host !== s.host || binding.owner !== publicKey(s.ownerSecret) || binding.agent !== publicKey(s.agentSecret) || genesis.owner !== binding.owner || genesis.agent !== binding.agent || assignment.assignedHost !== genesis.initialHost) throw Error('Slot migration requires matching stopped assignment');
+    if (state.phase !== 'stopped' || state.actual !== null || binding.host !== s.host || binding.owner !== setupOwner(s) || binding.agent !== publicKey(s.agentSecret) || genesis.owner !== binding.owner || genesis.agent !== binding.agent || assignment.assignedHost !== genesis.initialHost) throw Error('Slot migration requires matching stopped assignment');
     const { host, ownerSecret, agentSecret, ...harness } = s;
-    const i: Installation = { ...(harness.conversation ? { conversation: structuredClone(harness.conversation) } : {}), version: 2, host, ownerSecret, setups: { default: harness }, agents: { [publicKey(agentSecret)]: { secret: agentSecret, setup: 'default', legacy: true } } };
+    const i: Installation = { ...(harness.conversation ? { conversation: structuredClone(harness.conversation) } : {}), version: 2, host, ownerSecret: text(ownerSecret), setups: { default: harness }, agents: { [publicKey(agentSecret)]: { secret: agentSecret, setup: 'default', legacy: true } } };
     writePrivate(join(directory, 'setup.json'), i);
   } finally { rmdirSync(lock); }
 }
@@ -115,7 +119,7 @@ export function addSlot(directory: string, secret: string, genesis: Genesis, set
 function provisionSlotJournal(directory: string, setup: Setup, root: Genesis) {
   const genesis = validateGenesis(root);
   if (setup.agentSecret === undefined) throw Error('Slot enrollment requires its agent key');
-  if (genesis.owner !== publicKey(setup.ownerSecret) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
+  if (genesis.owner !== setupOwner(setup) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
   writePrivate(join(directory, 'journal.json'), initialState(setup, genesis), true);
 }
 /**
@@ -126,7 +130,8 @@ function provisionSlotJournal(directory: string, setup: Setup, root: Genesis) {
  * remote operation recreates it. Requires the installation lock (refuses a running host
  * or an unclean exit without any PID or stale-lock removal) and a stopped slot.
  */
-export function removeSlotKey(directory: string, agentKey: string): void {
+export function removeSlotKey(directory: string, agentKey: string, backend: CredentialBackend = systemCredentials): void {
+  if (object(readPrivate(join(directory, 'setup.json'))).version === 3) return removeCredentialSlotKey(directory, agentKey, backend);
   if (!/^[0-9a-f]{64}$/.test(agentKey)) throw Error('Invalid agent public key');
   const lock = join(directory, 'host.lock');
   if (existsSync(lock)) throw Error('Installation lock present (running host or unclean exit); local key removal refuses without PID or stale-lock removal');
@@ -148,7 +153,8 @@ export function removeSlotKey(directory: string, agentKey: string): void {
 
 /** Explicit local restoration of a retained public identity, never enrollment or
  * assignment repair. Importing on standby/consumed source grants no execution. */
-export function importSlotKey(directory: string, agentKey: string, secret: string): void {
+export function importSlotKey(directory: string, agentKey: string, secret: string, backend: CredentialBackend = systemCredentials): void {
+  if (object(readPrivate(join(directory, 'setup.json'))).version === 3) return importCredentialSlotKey(directory, agentKey, secret, backend);
   if (!/^[0-9a-f]{64}$/.test(agentKey) || publicKey(secret) !== agentKey) throw Error('Imported key does not match the selected public identity');
   const lock = join(directory, 'host.lock');
   mkdirSync(lock, { mode: 0o700 });
@@ -181,7 +187,7 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
       requireStoppedBindings(directory);
     }
     const raw = object(value);
-    if (['host', 'ownerSecret', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
+    if (['host', 'ownerSecret', 'ownerPublic', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
     const setup = validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
     if (setup.custom?.contract === 'goose-native') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'goose', provider: setup.gooseProvider, custom: setup.custom, model: setupModels(setup)[0]! });
     if (setup.mode === 'codex') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
@@ -219,7 +225,7 @@ export function addConversationBinding(directory: string, agent: string, source:
       home: text(setup.serviceHome), configDirectory: text(setup.configDirectory),
       ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost),
       ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: setupModels(setup)[0]!
-    }, setup.agentSecret, publicKey(setup.ownerSecret));
+    }, setup.agentSecret, setupOwner(setup));
     i.conversation = structuredClone(conversation);
     i.setups[id] = { ...i.setups[source.id]!, conversation: structuredClone(conversation) };
     // Single fsynced manifest rename activates authority and new definition together.

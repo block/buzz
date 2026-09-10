@@ -1,3 +1,4 @@
+import { systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { trace } from './latency-trace.ts';
 import { validateBuzzProvider, type BuzzProvider } from './buzz-provider.ts';
 import { validateCustom, diagnosticReason, type CustomAcp } from './custom-acp.ts';
@@ -19,22 +20,32 @@ import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; custom?: CustomAcp; buzzProvider?: BuzzProvider; mode: 'buzz-agent-api-key' | 'diagnostic-acp' | 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+export type Setup = { host: string; ownerSecret?: string; ownerPublic?: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; custom?: CustomAcp; buzzProvider?: BuzzProvider; mode: 'buzz-agent-api-key' | 'diagnostic-acp' | 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 /** Definition-only fingerprint: common host authority and agent key are excluded. */
 export function bindingFingerprint(setup: Setup): string {
-  const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
+  const { host: _host, ownerSecret: _owner, ownerPublic: _ownerPublic, agentSecret: _agent, ...harness } = setup;
   return semanticHash(harness);
 }
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
 type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
+/** Resolve owner authority without requiring a private owner identity on a host.
+ * Legacy diagnostic manifests remain readable; contradictory identities refuse. */
+export function setupOwner(setup: Pick<Setup, 'ownerPublic' | 'ownerSecret'>): string {
+  const derived = setup.ownerSecret === undefined ? undefined : publicKey(setup.ownerSecret);
+  if (setup.ownerPublic !== undefined && !/^[0-9a-f]{64}$/.test(setup.ownerPublic)) throw Error('Invalid owner public key');
+  if (derived && setup.ownerPublic && derived !== setup.ownerPublic) throw Error('Conflicting owner identity');
+  const owner = setup.ownerPublic ?? derived;
+  if (!owner) throw Error('Owner public identity required');
+  return owner;
+}
 /** Operator-approved compatible models, not an authenticated provider catalog. */
 export function setupModels(s: Setup): string[] { return s.mode === 'buzz-agent-api-key' ? [...s.buzzProvider!.models] : s.mode === 'diagnostic-acp' ? [] : s.mode === 'codex' ? [...s.codex!.models] : s.mode === 'claude' ? [...s.claude!.models] : s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
-  for (const key of ['host','ownerSecret','runner','workspace']) text(s[key]);
+  for (const key of ['host','runner','workspace']) text(s[key]);
   if (s.allowedWorkspaces !== undefined && (!Array.isArray(s.allowedWorkspaces) || s.allowedWorkspaces.length > 32 || s.allowedWorkspaces.some(w => typeof w !== 'string' || !isAbsolute(w)))) throw Error('Invalid allowed workspaces');
-  publicKey(String(s.ownerSecret));
+  setupOwner(s as Setup);
   if (s.agentSecret !== undefined) publicKey(String(s.agentSecret));
   if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['buzz-agent-api-key','diagnostic-acp','fixture','buzz-agent-databricks-v2','goose','claude','codex'].includes(String(s.mode))) throw Error('Invalid local setup');
   if (s.buzzProvider !== undefined && s.mode !== 'buzz-agent-api-key') throw Error('Buzz provider belongs only to Buzz Agent API-key bindings');
@@ -63,7 +74,7 @@ export function validateSetup(value: unknown): Setup {
 export function provision(directory: string, value: Setup, root: Genesis): void {
   const setup = validateSetup(value); const genesis = validateGenesis(root);
   if (setup.agentSecret === undefined) throw Error('Provisioning requires a new agent key');
-  if (genesis.owner !== publicKey(setup.ownerSecret) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
+  if (genesis.owner !== setupOwner(setup) || genesis.agent !== publicKey(setup.agentSecret)) throw Error('Genesis ownership mismatch');
   if (existsSync(join(directory, 'setup.json')) || existsSync(join(directory, 'journal.json'))) throw Error('Existing installation; cannot reset authority');
   writePrivate(join(directory, 'setup.json'), setup, true);
   writePrivate(join(directory, 'journal.json'), initialState(setup, genesis), true);
@@ -73,7 +84,7 @@ export function initialState(setup: Setup, genesis: Genesis): State {
   if (setup.agentSecret === undefined) throw Error('Initial state requires the provisioned agent key');
   return {
     assignment: { genesis, assignedHost: genesis.initialHost },
-    binding: { host: setup.host, owner: publicKey(setup.ownerSecret), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setupModels(setup)[0]!, workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
+    binding: { host: setup.host, owner: setupOwner(setup), agent: publicKey(setup.agentSecret) }, revision: 0, phase: 'stopped', selected: { model: setupModels(setup)[0]!, workspace: setup.workspace, profile: 'default' }, actual: null, operations: {}, outbox: [],
   };
 }
 /** Explicit offline legacy enrollment; never repairs missing journals or lost keys. */
@@ -85,7 +96,7 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
     const state = readPrivate(join(directory, 'journal.json')) as State;
     validateGenesis(genesis);
     if (state.assignment) throw Error('Assignment already pinned; cannot replace');
-    if (state.phase !== 'stopped' || state.actual !== null || state.binding.host !== setup.host || state.binding.agent !== publicKey(setup.agentSecret) || state.binding.owner !== publicKey(setup.ownerSecret) || genesis.agent !== state.binding.agent || genesis.owner !== state.binding.owner || genesis.initialHost !== setup.host) throw Error('Legacy migration requires matching stopped ownership');
+    if (state.phase !== 'stopped' || state.actual !== null || state.binding.host !== setup.host || state.binding.agent !== publicKey(setup.agentSecret) || state.binding.owner !== setupOwner(setup) || genesis.agent !== state.binding.agent || genesis.owner !== state.binding.owner || genesis.initialHost !== setup.host) throw Error('Legacy migration requires matching stopped ownership');
     state.assignment = { genesis, assignedHost: genesis.initialHost };
     writePrivate(join(directory, 'journal.json'), state);
   } finally { rmdirSync(lock); }
@@ -95,7 +106,7 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
 export function loadSlotState(setup: Setup, path: string, agent: string): State {
   if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
   const state = readPrivate(path) as State;
-  if (state.binding.host !== setup.host || state.binding.owner !== publicKey(setup.ownerSecret) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
+  if (state.binding.host !== setup.host || state.binding.owner !== setupOwner(setup) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
   if (!state.assignment) throw Error('Legacy assignment requires explicit local migrate-assignment while stopped');
   const genesis = validateGenesis(state.assignment.genesis);
   if (genesis.owner !== state.binding.owner || genesis.agent !== agent) throw Error('Saved assignment mismatch');
@@ -217,7 +228,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     // script inputs and directory identity so replacement invalidates preparation.
     const scripts = setup.args.filter(a => isAbsolute(a) && existsSync(a)).map(a => createHash('sha256').update(readFileSync(a)).digest('hex'));
     const workspace = statSync(selected.workspace);
-    const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
+    const { host: _host, ownerSecret: _owner, ownerPublic: _ownerPublic, agentSecret: _agent, ...harness } = setup;
     return { setup, launch, credential: executionSecret, harnessSetup: { id, fingerprint: semanticHash(harness) }, token: semanticHash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
   }
   /** Identity-free executable contract check, never conversation admission evidence. */
@@ -532,7 +543,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
 }
 
 /** One installation owns every slot, lock and management transport. */
-export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }) {
+export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }, credentials: CredentialBackend = systemCredentials) {
   signal?.throwIfAborted();
   (transport?.validate ?? validateRelayURL)(url);
   const lock = join(directory, 'host.lock');
@@ -555,11 +566,11 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
   const abort = () => { void close().catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    const entries = installationSlots(directory);
+    const entries = installationSlots(directory, credentials);
     for (const entry of entries) {
-      if (transport && (entry.setup.host !== transport.binding.host || publicKey(entry.setup.ownerSecret) !== transport.binding.owner)) throw Error('Private transport differs from retained host/agent authority');
+      if (transport && (entry.setup.host !== transport.binding.host || setupOwner(entry.setup) !== transport.binding.owner)) throw Error('Private transport differs from retained host/agent authority');
       slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, (id) => {
-        const current = installationSlots(directory).find(e => e.agent === entry.agent);
+        const current = installationSlots(directory, credentials).find(e => e.agent === entry.agent);
         if (!current) throw Error('Key removed');
         const value = current.bindings[id];
         if (!value) throw Error('Binding removed');
@@ -571,7 +582,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
     // Every slot is hydrated before dialing. Initial WS history may arrive in the
     // same event-loop turn as open, before the ready promise continuation.
     initialized = true;
-    client = (transport ? transport.connect.bind(transport) : connect)(url, setup.ownerSecret, m => {
+    client = (transport ? transport.connect.bind(transport) : connect)(url, transport ? '' : text(setup.ownerSecret), m => {
       if (!initialized) return;
       profiles.receive(m);
       if (m.host !== setup.host) return;

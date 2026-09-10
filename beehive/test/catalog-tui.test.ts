@@ -1,3 +1,5 @@
+import { importSlotKey, installationSlots } from '../src/slots.ts';
+import { conversationRelayFixture } from './conversation-relay-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,7 +13,9 @@ import { verifyHostCatalog, catalogResponse, HostInventory } from '../src/host-c
 import { privateHostTransport } from '../src/host-transport.ts';
 import { host } from '../src/host.ts';
 import { writePrivate } from '../src/storage.ts';
-import { provisionSetup } from './provision.ts';
+import { provisionCredentialSlot } from '../src/credential-slots.ts';
+import { createGenesis } from '../src/assignment.ts';
+import { memoryCredentials } from './credential-fixture.ts';
 import { nostrFixture } from './nostr-fixture.ts';
 import { connectNostr } from '../src/nostr-client.ts';
 import { productionAdmission, type ScopedRelayAdmission } from '../src/relay-admission.ts';
@@ -43,7 +47,7 @@ test('catalog verifies owner/signature/relay/expiry; labels cannot spoof identit
   assert.throws(() => productionAdmission.admit({ relay, publicKey: publicKey(a), transport: 'nip42-nip59', ownerDelegation: false }), /pending/);
 });
 
-test('actual owner TUI private inventory and Start/Stop use existing host executor with independent no-OA fixture admission', { timeout: 30000 }, async () => {
+for (const installed of [false, true]) test(`actual owner TUI owner-public credential slots Start/Stop via private transport (${installed ? 'installed signed reply' : 'external runner'})`, { skip: installed && !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-catalog-tui-')));
   const owner = newKey(), a = newKey(), b = newKey(), agent = newKey();
   const members = new Set([owner, a, b].map(publicKey));
@@ -52,8 +56,13 @@ test('actual owner TUI private inventory and Start/Stop use existing host execut
   const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: [one, two] }, publicKey(owner), relay.url);
   const admission: ScopedRelayAdmission = { admit(scope) { assert.equal(scope.relay, relay.url); assert.equal(scope.ownerDelegation, false); assert.ok(members.has(scope.publicKey)); } };
   const directory = join(root, 'host'); mkdirSync(directory);
-  provisionSetup(join(directory, 'setup.json'), { host: publicKey(a), ownerSecret: owner, agentSecret: agent, runner: process.execPath, args: [resolve('test/runner.ts')], workspace: root, mode: 'fixture' });
-  const running = await host(directory, relay.url, undefined, privateHostTransport(one, a, admission));
+  const credentials = memoryCredentials();
+  const conversation = installed ? await conversationRelayFixture(root, owner, publicKey(agent)) : undefined;
+  provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
+  const journalPath = join(directory, 'agents', publicKey(agent), 'journal.json');
+  const manifest = readFileSync(join(directory, 'setup.json'), 'utf8');
+  assert.ok(!manifest.includes(owner) && !manifest.includes(agent));
+  const running = await host(directory, relay.url, undefined, privateHostTransport(one, a, admission), credentials);
   const foreignMessages: unknown[] = [];
   const foreign = connectNostr(relay.url, Buffer.from(b, 'hex'), undefined, m => foreignMessages.push(m), () => {});
   await foreign.ready;
@@ -65,7 +74,7 @@ test('actual owner TUI private inventory and Start/Stop use existing host execut
   const child = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'tui', path, relay.url], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', b => output += b.toString()); child.stderr.on('data', b => output += b.toString());
   const exit = new Promise<number | null>((done, reject) => { child.on('exit', done); child.on('error', reject); });
-  async function wait(predicate: () => boolean) { for (let n = 0; n < 400; n++) { if (predicate()) return; if (child.exitCode !== null) throw Error(output); await delay(20); } throw Error(`TUI observation timeout: ${output}`); }
+  async function wait(predicate: () => boolean) { for (let n = 0; n < (installed ? 3000 : 400); n++) { if (predicate()) return; if (child.exitCode !== null) throw Error(output); await delay(20); } throw Error(`TUI observation timeout: ${output}`); }
   async function command(line: string) { const start = output.length; child.stdin.write(`${line}\n`); await wait(() => output.slice(start).includes('beehive> ')); return output.slice(start); }
   try {
     await wait(() => output.includes('Owner private key'));
@@ -82,12 +91,20 @@ test('actual owner TUI private inventory and Start/Stop use existing host execut
     for (let n = 0; n < 80; n++) { shown = await command('show'); if (shown.includes('"phase": "running"')) break; await delay(25); }
     assert.match(shown, /"phase": "running"/);
     assert.ok(shown.includes(publicKey(agent)));
+    if (conversation) {
+      await wait(() => conversation.replies.length > 0);
+      const actual = JSON.parse(readFileSync(journalPath, 'utf8')).actual;
+      assert.equal(actual.evidence.agentPublicKey, publicKey(agent));
+      assert.equal(actual.evidence.session, 'conversation-session');
+      assert.equal(actual.selection.model, 'databricks-claude-haiku-4-5');
+      console.log('New private management transport installed signed agent reply:', conversation.replies[0]!.id);
+    }
     const stopAt = output.length;
     await command('stop');
     await wait(() => output.slice(stopAt).includes('accepted'));
     for (let n = 0; n < 80; n++) { shown = await command('show'); if (shown.includes('"phase": "stopped"')) break; await delay(25); }
     assert.match(shown, /"phase": "stopped"/);
-    const beforeReplay = readFileSync(join(directory, 'journal.json'), 'utf8');
+    const beforeReplay = readFileSync(journalPath, 'utf8');
     await foreign.publish(message('start', publicKey(a), publicKey(agent), 2), publicKey(a));
     await foreign.publish(message('inventory', publicKey(a), publicKey(agent), 999, { phase: 'FORGED', observedAt: Date.now() + 500 }), publicKey(owner));
     const ownerWire = connectNostr(relay.url, Buffer.from(owner, 'hex'), undefined, () => {}, () => {});
@@ -106,17 +123,33 @@ test('actual owner TUI private inventory and Start/Stop use existing host execut
       shown = await command('show');
       assert.ok(!shown.includes('FORGED'));
       assert.match(shown, /"phase": "stopped"/);
-      assert.equal(readFileSync(join(directory, 'journal.json'), 'utf8'), beforeReplay);
+      assert.equal(readFileSync(journalPath, 'utf8'), beforeReplay);
       assert.equal(Object.keys(journal.operations).length, 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
-    child.stdin.write('quit\n'); assert.equal(await exit, 0, output);
-    const state = JSON.parse(readFileSync(join(directory, 'journal.json'), 'utf8'));
+    const state = JSON.parse(readFileSync(journalPath, 'utf8'));
     assert.equal(state.phase, 'stopped'); assert.equal(state.revision, 2);
+    // Simulate deliberate OS deletion while the host still has its old hydrated
+    // setup in memory: the production pre-spawn re-read must refuse that cache.
+    const reference = JSON.parse(manifest).agents[publicKey(agent)].key;
+    credentials.remove(reference);
+    const runs = JSON.stringify(state.runs);
+    await command('start');
+    await wait(() => Object.keys(JSON.parse(readFileSync(journalPath, 'utf8')).operations).length === 3);
+    const refused = JSON.parse(readFileSync(journalPath, 'utf8'));
+    assert.equal(refused.phase, 'stopped'); assert.equal(refused.actual, null);
+    assert.equal(JSON.stringify(refused.runs), runs);
+    assert.equal(installationSlots(directory, credentials)[0]!.keyPresent, false);
+    await running.close();
+    importSlotKey(directory, publicKey(agent), agent, credentials);
+    assert.equal(installationSlots(directory, credentials)[0]!.setup.agentSecret, agent);
+    assert.equal(readFileSync(join(directory, 'setup.json'), 'utf8'), manifest);
+    child.stdin.write('quit\n'); assert.equal(await exit, 0, output);
+
   } finally {
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exit; }
-    foreign.close(); await running.close(); await relay.close(); rmSync(root, { recursive: true, force: true });
+    foreign.close(); await running.close(); await conversation?.close(); await relay.close(); rmSync(root, { recursive: true, force: true });
   }
 });

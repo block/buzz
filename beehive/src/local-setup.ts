@@ -1,3 +1,4 @@
+import { setupOwner } from './host.ts';
 import { buzzProviderInput, databricksOAuthGuidance } from './buzz-provider.ts';
 import { customBindingInput } from './custom-input.ts';
 import { showPresets } from './presets.ts';
@@ -93,7 +94,7 @@ export async function localSetup(directory: string): Promise<void> {
     }
     if (action === 'import-standby') {
       const genesis = validateGenesis(readPrivate(realpathSync(text(await ui.question('Local public genesis file (no key): ')))));
-      if (genesis.owner !== publicKey(setup.ownerSecret) || genesis.initialHost === setup.host) throw Error('Standby import requires matching owner and another initial host');
+      if (genesis.owner !== setupOwner(setup) || genesis.initialHost === setup.host) throw Error('Standby import requires matching owner and another initial host');
       if (entries.some(e => e.agent === genesis.agent)) throw Error('Retained identity exists; choose reuse or explicit restore-key');
       if (await ui.question(`Import exact ${genesis.agent} as standby on ${id}; Start remains assigned to ${genesis.initialHost}? [yes/no]: `) !== 'yes') return;
       ui.close();
@@ -161,7 +162,7 @@ export async function localSetup(directory: string): Promise<void> {
     if (action === 'new-agent') {
       if (await ui.question(`Create NEW independent identity using ${id}? [yes/no]: `) !== 'yes') return;
       const secret = newKey();
-      addSlot(directory, secret, createGenesis(publicKey(setup.ownerSecret), publicKey(secret), setup.host), id, fingerprint);
+      addSlot(directory, secret, createGenesis(setupOwner(setup), publicKey(secret), setup.host), id, fingerprint);
       console.log(`Added ${publicKey(secret)} using ${id}; configure and start remotely. Existing keys/history unchanged.`);
       return;
     }
@@ -169,7 +170,7 @@ export async function localSetup(directory: string): Promise<void> {
     const runner = realpathSync(text(await ui.question('Absolute compatible executable: ')));
     const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
     const args = setup.mode === 'fixture' ? [realpathSync(text(await ui.question('Absolute fixture TypeScript script: ')))] : setup.args;
-    const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
+    const { host: _host, ownerSecret: _owner, ownerPublic: _ownerPublic, agentSecret: _agent, ...harness } = setup;
     console.log(`Create ${nextId} from ${id}; same ${setup.mode} contract and local service auth context. This does not add a provider or change conversation relay/authority. No authentication tested. Old binding remains immutable; no definition edit/deletion. Replacement retires the source for new execution and selection.`);
     if (action === 'replace-binding' && await ui.question(`Retire ${id} and replace with ${nextId}, without selecting it? [yes/no]: `) !== 'yes') return;
     if (await ui.question('Save NEW binding only (no selection, key change or restart)? [yes/no]: ') !== 'yes') return;

@@ -1,3 +1,7 @@
+import { provisionCredentialSlot } from './credential-slots.ts';
+import { readHostIdentity } from './host-identity.ts';
+import { verifyHostRegistration } from './host-registration.ts';
+import { setupOwner } from './host.ts';
 import { buzzProviderInput, buzzProviderGuidance, databricksOAuthGuidance } from './buzz-provider.ts';
 import { customInput } from './custom-input.ts';
 import { showPresets } from './presets.ts';
@@ -30,6 +34,7 @@ const help = `Beehive — isolated development preview (loopback relay only)
   identity                                 Disabled: use your existing owner signer
   setup <host-directory>                     Offline host pairing/owner approval/import
   setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
+  provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
   catalog <new-file> <registration-files...> Retain verified public host registrations
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
@@ -50,6 +55,17 @@ Move is fixture-only experimental; containment acceptance remains gated. No prov
 async function main() {
   if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
+  } else if (command === 'provision-agent') {
+    const directory = resolve(text(args[0]));
+    const identity = readHostIdentity(directory);
+    verifyHostRegistration(identity.registration, identity.pairing);
+    const binding = object(readPrivate(resolve(text(args[1]))));
+    if (['host', 'ownerSecret', 'ownerPublic', 'agentSecret'].some(key => Object.hasOwn(binding, key))) throw Error('Local binding file must not carry identity');
+    const setup = validateSetup({ ...binding, host: identity.pairing.host, ownerPublic: identity.pairing.owner });
+    const genesis = validateGenesis(readPrivate(resolve(text(args[2]))));
+    const secret = await readAgentSecret();
+    provisionCredentialSlot(directory, setup, secret, genesis);
+    console.log(`Provisioned STOPPED public slot ${publicKey(secret)}; owner ${identity.pairing.owner}. Key stored and read-back verified in Beehive OS credential namespace. No Start or relay admission performed.`);
   } else if (command === 'presets') {
     showPresets();
   } else if (command === 'setup') {
@@ -142,7 +158,7 @@ async function main() {
     const first = installationSlots(dir)[0]!.setup;
     const importing = args.length > 1;
     const secret = importing ? text(object(readPrivate(resolve(text(args[1])))).secret) : newKey();
-    const root = importing ? validateGenesis(readPrivate(resolve(text(args[2])))) : createGenesis(publicKey(first.ownerSecret), publicKey(secret), first.host);
+    const root = importing ? validateGenesis(readPrivate(resolve(text(args[2])))) : createGenesis(setupOwner(first), publicKey(secret), first.host);
     if (importing && root.initialHost === first.host) throw Error('Import cannot recreate initial authority');
     const ui = createInterface({ input: stdin, output: stdout });
     try {
@@ -192,7 +208,7 @@ async function main() {
     const ui = createInterface({ input: stdin, output: stdout });
     try {
       if ((await ui.question('Enroll this existing stopped journal as the UNIQUE authority? Verify no clones or unmanaged execution of this identity exist. Missing journals cannot be repaired here. [yes/no]: ')) !== 'yes') return;
-      migrateAssignment(dir, createGenesis(publicKey(setup.ownerSecret), publicKey(setup.agentSecret), setup.host));
+      migrateAssignment(dir, createGenesis(setupOwner(setup), publicKey(setup.agentSecret), setup.host));
       console.log('Legacy journal pinned; lifecycle history retained. Do not clone or roll back this installation.');
     } finally { ui.close(); }
   } else if (command === 'conversation-setup') {

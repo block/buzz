@@ -1,3 +1,4 @@
+import { nativeCredentials } from './native-credentials.ts';
 import { publicKey } from './protocol.ts';
 
 /** Beehive namespace only. Never query Buzz Desktop's service or legacy entries. */
@@ -12,11 +13,9 @@ export interface CredentialBackend {
   create(reference: CredentialReference, secret: string): void;
   remove(reference: CredentialReference): void;
 }
-/** No vetted TS native bridge is present. No prompting or plaintext fallback. */
-export const systemCredentials: CredentialBackend = {
-  read() { throw unavailable(); }, create() { throw unavailable(); }, remove() { throw unavailable(); },
-};
-function unavailable() { return Error('Beehive OS credential store unavailable: a reviewed native Keychain/Secret Service/Credential Manager bridge is required. No plaintext fallback; existing keys are not migrated or regenerated.'); }
+/** Vetted native OS adapter. No entry lookup occurs until an explicit operation.
+ * OS approval dialogs cannot be suppressed by this bridge; see credential docs. */
+export const systemCredentials: CredentialBackend = nativeCredentials();
 /** Public references never contain a private identity key. */
 export function credentialReference(role: CredentialReference['role'], key: string): CredentialReference {
   if (!['host', 'agent', 'owner'].includes(role) || !/^[0-9a-f]{64}$/.test(key)) throw Error('Invalid credential reference');

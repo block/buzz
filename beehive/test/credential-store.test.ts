@@ -22,7 +22,8 @@ test('explicit isolated credential lifecycle; absence, locked/denied and bad rou
   }
   const bad: CredentialBackend = { read: () => null, create() {}, remove() {} };
   assert.throws(() => createCredential('host', secret, bad), /missing/);
-  assert.throws(() => createCredential('owner', secret, systemCredentials), /No plaintext fallback/);
+  // Never invoke the native backend in automated tests: it cannot suppress OS UI.
+  assert.equal(typeof systemCredentials.read, 'function');
   const again = createCredential('agent', secret, backend);
   const noDelete = { ...backend, remove() {} };
   assert.throws(() => removeCredential(again, noDelete), /not verified/);
@@ -33,7 +34,8 @@ test('host state persists public references only; removed keys never regenerate;
   try {
     const backend = memoryCredentials();
     const owner = 'a'.repeat(64);
-    assert.throws(() => bootstrapHostIdentity(join(root, 'production'), 'host', owner, 'wss://example.invalid'), /OS credential store unavailable/);
+    const unavailable: CredentialBackend = { read() { throw Error('OS credential store unavailable'); }, create() { assert.fail('no fallback'); }, remove() { assert.fail('no removal'); } };
+    assert.throws(() => bootstrapHostIdentity(join(root, 'production'), 'host', owner, 'wss://example.invalid', unavailable), /OS credential store unavailable/);
     assert.equal(existsSync(join(root, 'production', 'host-identity.json')), false);
     const directory = join(root, 'fixture');
     const identity = bootstrapHostIdentity(directory, 'host', owner, 'wss://example.invalid', backend);

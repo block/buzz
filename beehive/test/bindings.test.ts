@@ -224,7 +224,7 @@ test('local binding API shares atomic host.lock with competing service start; id
     assert.throws(() => addHarnessBinding(dir, 'B', { ...binding, conversation: {} } as any), /conversation authority/);
     assert.throws(() => addHarnessBinding(dir, 'B', binding, { id: 'default', fingerprint: '0'.repeat(64) }), /definition changed/);
     const fresh = newKey();
-    assert.throws(() => addSlot(dir, fresh, createGenesis(publicKey(_owner), publicKey(fresh), _host), 'default', '0'.repeat(64)), /definition changed/);
+    assert.throws(() => addSlot(dir, fresh, createGenesis(publicKey(_owner!), publicKey(fresh), _host), 'default', '0'.repeat(64)), /definition changed/);
     assert.deepEqual(readFileSync(join(dir, 'setup.json')), before, 'stale wizard inputs do not write');
     addHarnessBinding(dir, 'B', binding);
     assert.throws(() => addHarnessBinding(dir, 'B', binding), /exists/);
