@@ -7,6 +7,7 @@ use crate::{client::BuzzClient, error::CliError, ReposDefaultBranchCmd};
 
 #[derive(Deserialize)]
 struct DefaultBranch {
+    branch: String,
     head: String,
     manifest: String,
 }
@@ -21,7 +22,7 @@ fn parse_snapshot(raw: &str) -> Result<Value, CliError> {
         )
     })?;
     crate::validate::validate_hex64(&snapshot.manifest)?;
-    if !snapshot.head.starts_with("refs/") {
+    if snapshot.branch.is_empty() || snapshot.head != format!("refs/heads/{}", snapshot.branch) {
         return Err(CliError::Other("relay returned an invalid HEAD".into()));
     }
     Ok(value)
@@ -87,7 +88,8 @@ pub(super) async fn dispatch(
                     other => classify(other),
                 })?;
             let result = parse_snapshot(&raw).map_err(|e| uncertain(e.to_string()))?;
-            if !result["changed"].is_boolean() {
+            if !result["changed"].is_boolean() || result["branch"].as_str() != Some(branch.as_str())
+            {
                 return Err(uncertain(
                     "relay did not confirm the default-branch update".into(),
                 ));
@@ -143,8 +145,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_branch_reads_validate_state_before_any_mutation() {
+        for (branch, head, valid) in [
+            (Some("release/v1"), "refs/heads/release/v1", true),
+            (None, "refs/heads/main", false),
+            (Some("main"), "refs/tags/main", false),
+            (Some("main"), "refs/heads/other", false),
+            (Some(""), "refs/heads/", false),
+        ] {
+            let posts = Arc::new(AtomicUsize::new(0));
+            let post_count = posts.clone();
+            let keys = nostr::Keys::generate();
+            let path = format!("/git/{}/demo/default-branch", keys.public_key().to_hex());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let route = get(move || async move {
+                axum::Json(json!({"branch":branch, "head":head, "manifest":"a".repeat(64)}))
+            })
+            .post(move || {
+                post_count.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::INTERNAL_SERVER_ERROR }
+            });
+            let app = Router::new().route(&path, route);
+            let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+            let client = BuzzClient::new(url, keys, None, None).unwrap();
+            let result = dispatch(
+                ReposDefaultBranchCmd::Get {
+                    id: "demo".into(),
+                    owner: None,
+                },
+                &client,
+            )
+            .await;
+            assert_eq!(result.is_ok(), valid, "{branch:?} {head}: {result:?}");
+            if !valid {
+                let error = dispatch(
+                    ReposDefaultBranchCmd::Set {
+                        id: "demo".into(),
+                        owner: None,
+                        branch: "main".into(),
+                        expected_manifest: None,
+                    },
+                    &client,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    !matches!(error, CliError::DeliveryUnknown(_)),
+                    "no mutation attempted: {error}"
+                );
+            }
+            assert_eq!(posts.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn default_branch_command_binds_observed_digest_and_does_not_retry_or_follow_redirects() {
-        for status in [200u16, 307, 308, 409, 500, 502, 503, 504] {
+        let valid = json!({"head":"refs/heads/main", "branch":"main", "manifest":"b".repeat(64), "changed":true});
+        let mut no_op = valid.clone();
+        no_op["changed"] = json!(false);
+        no_op["manifest"] = json!("a".repeat(64));
+        let mut cases = vec![(200u16, valid.clone(), true), (200, no_op, true)];
+        for status in [307, 308, 409, 500, 502, 503, 504] {
+            cases.push((status, json!({"error":"test outcome"}), false));
+        }
+        for (field, value) in [
+            ("branch", None),
+            ("branch", Some(json!(""))),
+            ("head", Some(json!("refs/tags/main"))),
+            ("head", Some(json!("refs/heads/other"))),
+            ("manifest", Some(json!("not-a-digest"))),
+            ("changed", None),
+        ] {
+            let mut invalid = valid.clone();
+            if let Some(value) = value {
+                invalid[field] = value;
+            } else {
+                invalid.as_object_mut().unwrap().remove(field);
+            }
+            cases.push((200, invalid, false));
+        }
+        let mut other_branch = valid;
+        other_branch["branch"] = json!("other");
+        other_branch["head"] = json!("refs/heads/other");
+        cases.push((200, other_branch, false));
+        for (status, reply, success) in cases {
             let posts = Arc::new(AtomicUsize::new(0));
             let gets = Arc::new(AtomicUsize::new(0));
             let captured = Arc::new(Mutex::new(None));
@@ -164,6 +250,7 @@ mod tests {
                 let post_count = post_count.clone();
                 let capture = capture.clone();
                 let expected_url = expected_url.clone();
+                let reply = reply.clone();
                 async move {
                     post_count.fetch_add(1, Ordering::SeqCst);
                     let auth = headers["authorization"].to_str().unwrap().strip_prefix("Nostr ").unwrap();
@@ -177,7 +264,7 @@ mod tests {
                     assert!(event.tags.iter().any(|t| t.as_slice() == ["payload", &digest]));
                     *capture.lock().unwrap() = Some(serde_json::from_slice::<Value>(&body).unwrap());
                     Response::builder().status(status).header("location", "/redirect-target")
-                        .body(Body::from(if status == 200 { json!({"head":"refs/heads/main", "branch":"main", "manifest":"b".repeat(64), "changed":true}).to_string() } else { json!({"error":"test outcome"}).to_string() })).unwrap()
+                        .body(Body::from(reply.to_string())).unwrap()
                 }
             });
             let redirected = posts.clone();
@@ -211,13 +298,14 @@ mod tests {
                 Some(json!({"branch":"main", "expected_manifest":"a".repeat(64)}))
             );
             match status {
-                200 => assert!(result.is_ok(), "{result:?}"),
+                200 if success => assert!(result.is_ok(), "{result:?}"),
                 409 => assert!(matches!(result, Err(CliError::Conflict(_)))),
                 _ => {
                     let error = result.unwrap_err();
                     assert!(matches!(error, CliError::DeliveryUnknown(_)), "{error}");
                     assert!(!crate::error::is_retryable_error(&error));
                     assert!(error.to_string().contains(&"a".repeat(64)));
+                    assert!(error.to_string().contains("attempted branch \"main\""));
                 }
             }
             server.abort();

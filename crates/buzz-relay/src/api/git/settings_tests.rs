@@ -294,13 +294,22 @@ mod external_infra {
     }
 
     fn token(keys: &Keys, method: &str, url: &str, body: Option<&str>) -> String {
+        token_with_payload(
+            keys,
+            method,
+            url,
+            body.map(|body| Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap()),
+        )
+    }
+
+    fn token_with_payload(keys: &Keys, method: &str, url: &str, payload: Option<Tag>) -> String {
         let mut tags = vec![
             Tag::parse(["u", url]).unwrap(),
             Tag::parse(["method", method]).unwrap(),
             Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
         ];
-        if let Some(body) = body {
-            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap());
+        if let Some(payload) = payload {
+            tags.push(payload);
         }
         let event = EventBuilder::new(Kind::Custom(27235), "")
             .tags(tags)
@@ -384,17 +393,14 @@ mod external_infra {
             .0,
             StatusCode::CONFLICT
         );
-        let events = f
-            .state
-            .db
-            .query_events(&buzz_db::EventQuery {
-                kinds: Some(vec![30618]),
-                d_tag: Some(f.repo.clone()),
-                global_only: true,
-                ..buzz_db::EventQuery::for_community(f.tenant.community())
-            })
-            .await
-            .unwrap();
+        let notification_query = buzz_db::EventQuery {
+            kinds: Some(vec![30618]),
+            d_tag: Some(f.repo.clone()),
+            global_only: true,
+            ..buzz_db::EventQuery::for_community(f.tenant.community())
+        };
+        let events = f.state.db.query_events(&notification_query).await.unwrap();
+        let event_ids: Vec<_> = events.iter().map(|e| e.event.id).collect();
         assert!(
             events.iter().any(|e| e
                 .event
@@ -409,6 +415,18 @@ mod external_infra {
         let path = f.path();
         let url = format!("http://{}{path}", f.tenant.host());
         let requests = [
+            token_with_payload(
+                &f.owner,
+                "POST",
+                &url,
+                Some(Tag::parse(["payload"]).unwrap()),
+            ),
+            token_with_payload(
+                &f.owner,
+                "POST",
+                &url,
+                Some(Tag::parse(["payload", ""]).unwrap()),
+            ),
             token(&f.owner, "GET", &url, Some(&body)),
             token(&f.owner, "POST", &url, None),
             token(&f.owner, "POST", &url, Some("{}")),
@@ -433,13 +451,22 @@ mod external_infra {
                 .header("authorization", token)
                 .body(Body::from(body.clone()))
                 .unwrap();
+            let status = super::super::super::transport::git_router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert_eq!(
-                super::super::super::transport::git_router(f.state.clone())
-                    .oneshot(request)
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED
+                f.snapshot().await.digest,
+                after.digest,
+                "auth denial changed pointer"
+            );
+            let denied_events = f.state.db.query_events(&notification_query).await.unwrap();
+            assert_eq!(
+                denied_events.iter().map(|e| e.event.id).collect::<Vec<_>>(),
+                event_ids,
+                "auth denial published kind:30618"
             );
         }
         let reusable = token(&f.owner, "GET", &url, None);
@@ -692,8 +719,8 @@ mod external_infra {
             .manifest
             .refs
             .contains_key("refs/heads/main"));
-        // Restore main with a real push publication, select it, then prove a later
-        // push preserves HEAD and fresh Smart HTTP clone checks it out.
+        // Restore main and add release/v1, then select the non-main branch so
+        // Git's initial-branch default cannot mask a lost hydrated HEAD.
         let (push, parent) = super::super::super::hydrate::hydrate_for_write(
             &f.state.git_store,
             &f.tenant,
@@ -705,6 +732,11 @@ mod external_infra {
         .unwrap();
         let main = git(&f.scratch.path().join("source"), &["rev-parse", "main"]).await;
         git(push.path(), &["update-ref", "refs/heads/main", main.trim()]).await;
+        git(
+            push.path(),
+            &["update-ref", "refs/heads/release/v1", main.trim()],
+        )
+        .await;
         super::super::super::cas_publish::cas_publish(
             &f.state.git_store,
             &f.tenant,
@@ -716,7 +748,7 @@ mod external_infra {
         )
         .await
         .unwrap();
-        assert_eq!(f.set(&f.owner, "main", None).await.0, StatusCode::OK);
+        assert_eq!(f.set(&f.owner, "release/v1", None).await.0, StatusCode::OK);
         let (push, parent) = super::super::super::hydrate::hydrate_for_write(
             &f.state.git_store,
             &f.tenant,
@@ -742,7 +774,7 @@ mod external_infra {
         )
         .await
         .unwrap();
-        assert_eq!(f.snapshot().await.manifest.head, "refs/heads/main");
+        assert_eq!(f.snapshot().await.manifest.head, "refs/heads/release/v1");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -769,7 +801,7 @@ mod external_infra {
             &["-c", &auth, "ls-remote", "--symref", &repo_url, "HEAD"],
         )
         .await;
-        assert!(refs.contains("ref: refs/heads/main\tHEAD"), "{refs}");
+        assert!(refs.contains("ref: refs/heads/release/v1\tHEAD"), "{refs}");
         git(
             f.scratch.path(),
             &["-c", &auth, "clone", &repo_url, "clone"],
@@ -779,7 +811,7 @@ mod external_infra {
             git(&f.scratch.path().join("clone"), &["symbolic-ref", "HEAD"])
                 .await
                 .trim(),
-            "refs/heads/main"
+            "refs/heads/release/v1"
         );
         assert_eq!(
             std::fs::read(f.scratch.path().join("clone/main.txt")).unwrap(),
