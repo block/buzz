@@ -91,7 +91,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string) => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string) => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -113,9 +113,9 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
   function inventory() {
     const candidate = bindings[state.selected.harnessSetup?.id ?? setupId];
-    const nextSetup = candidate && (!state.selected.harnessSetup || state.selected.harnessSetup.fingerprint === bindingFingerprint(candidate)) ? candidate : undefined;
+    const nextSetup = !retiredBindings[state.selected.harnessSetup?.id ?? setupId] && candidate && (!state.selected.harnessSetup || state.selected.harnessSetup.fingerprint === bindingFingerprint(candidate)) ? candidate : undefined;
     return message('inventory',setup.host,agent,state.revision, {
-      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
+      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, availability: retiredBindings[id] ? 'retired' : 'available', fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
@@ -153,7 +153,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
     }
     if (first && state.move && m.type === 'save' && m.revision === state.revision && state.assignment.assignedHost === setup.host && !Object.hasOwn(state.operations, m.id)) {
-      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; resolveBinding(v); if ((v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
+      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; validateSaveBinding(v, m.body); if ((v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
     }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
   }
@@ -179,9 +179,14 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     if (!setupModels(value).includes(selected.model) || !(value.allowedWorkspaces ?? [value.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
     return { setup: value, id };
   }
+  function validateSaveBinding(selected: Selection, body: Record<string, unknown>) {
+    const { id } = resolveBinding(selected);
+    if (!['rename', 'remove'].includes(String(body.configurationAction)) && retiredBindings[id]) throw Error('Binding retired; explicitly select an available binding');
+  }
   function prepareLocal(selected: Selection) {
     selected = selection(selected);
     const { setup, id } = resolveBinding(selected);
+    if (retiredBindings[id]) throw Error('Binding retired; Start/Restart unavailable');
     if (!setupModels(setup).includes(selected.model) || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
     // The optional execution credential is absent for a public-only slot: reject before
     // any spawn or source effect. The secret is never regenerated or inferred.
@@ -403,7 +408,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           const candidate = configure(state.configurations, state.selected, m.body, state.revision + 1);
           const selected = candidate.selected;
           if (selected.behavior && hash(profiles.resolve(selected.profile)) !== hash(selected.behavior)) throw Error('Profile revision conflict');
-          resolveBinding(selected);
+          validateSaveBinding(selected, m.body);
           if (state.move) finishMove('Move cancelled before grant by save');
           state.configurations = candidate.entries; state.selected = selected; result = 'saved; running configuration unchanged';
         } else if (m.type === 'start' || m.type === 'restart') {
@@ -541,8 +546,9 @@ export async function host(directory: string, url: string, signal?: AbortSignal)
         if (!current) throw Error('Key removed');
         const value = current.bindings[id];
         if (!value) throw Error('Binding removed');
+        if (current.retiredBindings?.[id]) throw Error('Binding retired');
         return value;
-      }, publish, profiles, entry.setupId, entry.bindings));
+      }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings));
     }
     const setup = entries[0]!.setup;
     // Every slot is hydrated before dialing. Initial WS history may arrive in the

@@ -3,7 +3,7 @@ import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { realpathSync } from 'node:fs';
-import { installationSlots, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
+import { installationSlots, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
 import { bindingFingerprint } from './host.ts';
 import { newKey, publicKey, text } from './protocol.ts';
 import { readPrivate } from './storage.ts';
@@ -20,9 +20,9 @@ export async function localSetup(directory: string): Promise<void> {
   const ui = createInterface({ input: stdin, output: stdout });
   try {
     console.log(`Local installation ${first.setup.host}. Stop the host before committing changes. No login or process launch.`);
-    for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)}`);
+    for (const [id, setup] of Object.entries(first.bindings)) console.log(`Binding ${id}: ${setup.mode} | ${bindingFingerprint(setup)} | ${first.retiredBindings?.[id] ? 'retired' : 'available'}`);
     for (const entry of entries) console.log(`Agent ${entry.agent}: ${entry.keyPresent ? 'reuse existing key' : 'public-only; exact local key restoration required'} | binding ${entry.setupId}`);
-    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
+    const action = await ui.question('Local action [reuse / new-agent / restore-key / import-standby / replace-binding / retire-binding / add-binding / add-goose / add-claude / add-codex / normal / cancel]: ');
     if (action === 'cancel') return;
     if (action === 'normal') {
       const agent = await ui.question('Existing agent public key: ');
@@ -59,10 +59,24 @@ export async function localSetup(directory: string): Promise<void> {
       console.log(`Restored local key for ${agent}; no assignment or history reset, no Start permission added.`);
       return;
     }
-    if (!['new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
+    if (!['replace-binding', 'retire-binding', 'new-agent', 'add-binding', 'add-goose', 'add-claude', 'add-codex', 'import-standby'].includes(action)) throw Error('Unsupported local action');
     const id = await ui.question('Existing binding ID to reuse: ');
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
+    if (first.retiredBindings?.[id]) throw Error('Binding retired; choose an available source');
+    if (action === 'replace-binding' || action === 'retire-binding') {
+      for (const entry of entries) {
+        const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } }; configurations?: Record<string, { harnessSetup?: { id: string } }> };
+        const affected = Object.entries(state.configurations ?? { default: state.selected }).filter(([, selection]) => (selection.harnessSetup?.id ?? entry.setupId) === id).map(([name]) => name);
+        console.log(`Agent ${entry.agent}: affected choices ${affected.join(', ') || 'none'}; selected ${(state.selected.harnessSetup?.id ?? entry.setupId) === id}. History retained; no automatic selection/Restart.`);
+      }
+      if (action === 'retire-binding') {
+        if (await ui.question(`Retire ${id} for new selection/execution, preserving history? [yes/no]: `) !== 'yes') return;
+        retireHarnessBinding(directory, { id, fingerprint });
+        console.log(`Binding ${id} retired; selected references remain unavailable until explicit remote selection.`);
+        return;
+      }
+    }
     if (action === 'import-standby') {
       const genesis = validateGenesis(readPrivate(realpathSync(text(await ui.question('Local public genesis file (no key): ')))));
       if (genesis.owner !== publicKey(setup.ownerSecret) || genesis.initialHost === setup.host) throw Error('Standby import requires matching owner and another initial host');
@@ -129,9 +143,10 @@ export async function localSetup(directory: string): Promise<void> {
     const workspace = realpathSync(text(await ui.question('Allowed workspace (absolute directory): ')));
     const args = setup.mode === 'fixture' ? [realpathSync(text(await ui.question('Absolute fixture TypeScript script: ')))] : setup.args;
     const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
-    console.log(`Create ${nextId} from ${id}; same ${setup.mode} contract and local service auth context. This does not add a provider or change conversation relay/authority. No authentication tested. Old binding remains immutable; no edit/remove supported.`);
+    console.log(`Create ${nextId} from ${id}; same ${setup.mode} contract and local service auth context. This does not add a provider or change conversation relay/authority. No authentication tested. Old binding remains immutable; no definition edit/deletion. Replacement retires the source for new execution and selection.`);
+    if (action === 'replace-binding' && await ui.question(`Retire ${id} and replace with ${nextId}, without selecting it? [yes/no]: `) !== 'yes') return;
     if (await ui.question('Save NEW binding only (no selection, key change or restart)? [yes/no]: ') !== 'yes') return;
-    addHarnessBinding(directory, nextId, { ...harness, runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint });
+    addHarnessBinding(directory, nextId, { ...harness, runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint }, action === 'replace-binding');
     console.log(`Binding ${nextId} saved. Reopen local-setup to reuse it for a new identity, or select it in the remote TUI for an existing identity. Save does not Restart.`);
   } finally { ui.close(); }
 }

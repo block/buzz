@@ -346,6 +346,7 @@ async function main() {
         let action = line;
         if (line.startsWith('binding ')) {
           const binding = (current.body.harnessSetups as any[]).find(b => b.id === line.slice(8));
+          if (binding?.availability === 'retired') { console.log('Binding retired; choose an available binding.'); continue; }
           if (!binding) { console.log('Unknown binding; use show for advertised harnessSetups.'); continue; }
           const next = current.body.selectedNext as Record<string, unknown>;
           body = { ...next, harnessSetup: { id: binding.id, fingerprint: binding.fingerprint }, model: binding.models[0], workspace: binding.workspaces[0] };
