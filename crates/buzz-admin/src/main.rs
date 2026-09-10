@@ -187,7 +187,7 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
     }
 
     let db = connect_db().await?;
-    let _leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
+    let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
     let storage = Arc::new(MediaStorage::new(&storage_config_from_env()?)?);
@@ -230,16 +230,10 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
             Ok(page)
         }
     });
-    let snapshot_db = db.clone();
     let snapshot_code_sha = code_sha.clone();
     let persisted = persist_completed_fold(fold, move |encoded, duration_ms| async move {
-        snapshot_db
-            .save_storage_accounting_snapshot(
-                &encoded,
-                duration_ms,
-                max_objects_db,
-                &snapshot_code_sha,
-            )
+        leader
+            .save_snapshot(&encoded, duration_ms, max_objects_db, &snapshot_code_sha)
             .await?;
         Ok(())
     })

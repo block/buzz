@@ -11,7 +11,7 @@ pub const STORAGE_ACCOUNTING_LOCK_KEY: i64 = 0x4255_5a5a_5354_4f52;
 
 /// Owns the detached PostgreSQL session that excludes overlapping workers.
 pub struct StorageAccountingLeader {
-    _connection: PgConnection,
+    connection: PgConnection,
 }
 
 /// The newest complete snapshot stored by the worker.
@@ -29,36 +29,16 @@ pub struct StoredStorageSnapshot {
     pub code_sha: String,
 }
 
-impl Db {
-    /// Try to acquire the deployment-global storage-worker lease.
-    #[datastore_span(name = "try_lock_storage_accounting", system = "postgresql")]
-    pub async fn try_lock_storage_accounting(&self) -> Result<Option<StorageAccountingLeader>> {
-        let mut connection = observability::acquire_writer_with_legacy_metrics(
-            &self.pool,
-            observability::WriterOperation::Maintenance,
-        )
-        .await?;
-        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-            .bind(STORAGE_ACCOUNTING_LOCK_KEY)
-            .fetch_one(&mut *connection)
-            .await?;
-        Ok(acquired.then(|| StorageAccountingLeader {
-            _connection: connection.detach(),
-        }))
-    }
-
-    /// Atomically replace the singleton with one fully computed snapshot.
+impl StorageAccountingLeader {
+    /// Atomically replace the singleton through the lock-owning session.
     #[datastore_span(name = "save_storage_accounting_snapshot", system = "postgresql")]
-    pub async fn save_storage_accounting_snapshot(
-        &self,
+    pub async fn save_snapshot(
+        &mut self,
         snapshot: &serde_json::Value,
         duration_ms: i64,
         max_objects: i64,
         code_sha: &str,
     ) -> Result<()> {
-        let mut connection =
-            observability::acquire_writer(&self.pool, observability::WriterOperation::Maintenance)
-                .await?;
         sqlx::query(
             "INSERT INTO storage_accounting_snapshots \
              (singleton, snapshot, completed_at, duration_ms, max_objects, code_sha) \
@@ -74,9 +54,28 @@ impl Db {
         .bind(duration_ms)
         .bind(max_objects)
         .bind(code_sha)
-        .execute(&mut *connection)
+        .execute(&mut self.connection)
         .await?;
         Ok(())
+    }
+}
+
+impl Db {
+    /// Try to acquire the deployment-global storage-worker lease.
+    #[datastore_span(name = "try_lock_storage_accounting", system = "postgresql")]
+    pub async fn try_lock_storage_accounting(&self) -> Result<Option<StorageAccountingLeader>> {
+        let mut connection = observability::acquire_writer_with_legacy_metrics(
+            &self.pool,
+            observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(STORAGE_ACCOUNTING_LOCK_KEY)
+            .fetch_one(&mut *connection)
+            .await?;
+        Ok(acquired.then(|| StorageAccountingLeader {
+            connection: connection.detach(),
+        }))
     }
 
     /// Load the newest complete worker snapshot from the writer.
@@ -139,7 +138,7 @@ mod postgres_tests {
         let first = Db::from_pool(pool.clone());
         let second = Db::from_pool(pool.clone());
 
-        let leader = first
+        let mut leader = first
             .try_lock_storage_accounting()
             .await
             .expect("first lock")
@@ -153,12 +152,12 @@ mod postgres_tests {
             "overlapping worker must not start"
         );
 
-        first
-            .save_storage_accounting_snapshot(&serde_json::json!({"version": 1}), 10, 100, "a")
+        leader
+            .save_snapshot(&serde_json::json!({"version": 1}), 10, 100, "a")
             .await
             .expect("save first snapshot");
-        first
-            .save_storage_accounting_snapshot(&serde_json::json!({"version": 2}), 20, 200, "b")
+        leader
+            .save_snapshot(&serde_json::json!({"version": 2}), 20, 200, "b")
             .await
             .expect("replace snapshot");
         let stored = second
@@ -172,6 +171,80 @@ mod postgres_tests {
         assert_eq!(stored.code_sha, "b");
 
         drop(leader);
+        drop(first);
+        drop(second);
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lost_lock_session_cannot_overwrite_successor_snapshot() {
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin).await;
+        let first = Db::from_pool(pool.clone());
+        let second = Db::from_pool(pool.clone());
+
+        let mut stale_leader = first
+            .try_lock_storage_accounting()
+            .await
+            .expect("first lock")
+            .expect("first worker owns lock");
+        let stale_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut stale_leader.connection)
+            .await
+            .expect("load first worker backend pid");
+        let terminated = sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+            .bind(stale_backend_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("terminate first worker backend");
+        assert!(terminated, "first worker backend must terminate");
+
+        let mut fresh_leader = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(leader) = second
+                    .try_lock_storage_accounting()
+                    .await
+                    .expect("successor lock attempt")
+                {
+                    break leader;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("successor acquires released lock");
+
+        fresh_leader
+            .save_snapshot(&serde_json::json!({"worker": "fresh"}), 20, 200, "b")
+            .await
+            .expect("successor publishes fresh snapshot");
+        stale_leader
+            .save_snapshot(&serde_json::json!({"worker": "stale"}), 30, 100, "a")
+            .await
+            .expect_err("worker that lost its lock session cannot publish");
+
+        let stored = second
+            .load_storage_accounting_snapshot()
+            .await
+            .expect("load snapshot")
+            .expect("snapshot exists");
+        assert_eq!(stored.snapshot, serde_json::json!({"worker": "fresh"}));
+        assert_eq!(stored.duration_ms, 20);
+        assert_eq!(stored.max_objects, 200);
+        assert_eq!(stored.code_sha, "b");
+
+        drop(stale_leader);
+        drop(fresh_leader);
         drop(first);
         drop(second);
         pool.close().await;
