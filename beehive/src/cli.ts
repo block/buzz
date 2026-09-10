@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { credentialHelperReader } from './credential-helper.ts';
 import { systemCredentials } from './credential-store.ts';
 import { privateHostTransport } from './host-transport.ts';
-import { verifyProductionAdmission } from './relay-admission.ts';
 import { installationPublicSlots } from './slots.ts';
 import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
 import { readHostIdentity, readHostIdentityPublic, readHostIdentityAsync } from './host-identity.ts';
@@ -43,7 +42,7 @@ const [command, ...args] = process.argv.slice(2);
 // Default HOST state only, resolved from the current user's home (never cwd).
 // Owner approval uses a separately chosen owner exchange folder. An occupied default is never reinitialized.
 const defaultHostDirectory = () => join(homedir(), '.beehive', 'host');
-const help = `Beehive — private host preview (explicit direct relay membership required)
+const help = `Beehive — private host preview
 Command: beehive <command> from any directory once installed (one-time user link, reversible: ln -s <beehive-package>/bin/beehive.cjs <user bin on PATH>/beehive, e.g. ~/.local/bin); source fallback inside the package: node src/cli.ts <command>.
   identity                                 Disabled: use your existing owner signer
   setup                                    Configure/resume OWNER NPUB + RELAY on ~/.beehive/host; normal community join
@@ -75,7 +74,7 @@ setup/add-agent accept optional <local-key-file> <public-genesis-file> for stand
 The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. No approval files required. setup never starts the host or agents; host --owner-present is a deliberate foreground start. Legacy catalog <approval-file> remains available. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match retained local configuration.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
-Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
+Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog uses authenticated encrypted relay transport. Relay refusals are transport errors.`;
 async function main() {
   if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
@@ -352,8 +351,7 @@ async function main() {
       const credentials = privateInstallation ? { ...systemCredentials, readAsync: credentialHelperReader({ operatorApproved: true }) } : systemCredentials;
       const identity = privateInstallation ? await readHostIdentityAsync(directory, credentials, controller.signal) : undefined;
       if (identity && identity.pairing.relay !== url) throw Error('Wrong configured host relay; no network request sent');
-      const admission = identity ? await verifyProductionAdmission(url, identity.secret, controller.signal) : undefined;
-      const transport = identity ? privateHostTransport(identity.pairing, identity.secret, admission) : undefined;
+      const transport = identity ? privateHostTransport(identity.pairing, identity.secret) : undefined;
       const running = await host(directory, url, controller.signal, transport, credentials);
       console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
       // The host owns teardown both before and after ready. Observe its one
@@ -375,7 +373,7 @@ async function main() {
     const file = args.length === 1 ? join(dirname(setupPath(text(args[0]))), `catalog-${randomUUID()}.json`) : setupPath(text(args[0]));
     writePrivate(file, catalog, true);
     console.log(`Catalog saved: ${file}\nNext on owner computer: beehive tui ${shellQuote(file)}`);
-    console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; fresh direct membership verification required when opening tui. Labels are not authority.`);
+    console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; private relay transport opens with the owner signer. Labels are not authority.`);
   } else if (command === 'tui') {
     const discovering = args[0] === 'discover';
     const discoveryRelay = discovering ? text(args[1]) : undefined;
@@ -386,7 +384,6 @@ async function main() {
     const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;
     const secret = discoverySecret ?? (catalog ? await readAgentSecret('Owner') : text(identity.secret));
     if (catalog && publicKey(secret) !== catalog.owner) throw Error('Wrong catalog owner signer');
-    const admission = catalog ? await verifyProductionAdmission(text(args[1]), secret) : undefined;
     const inventory = new Map<string,Message>();
     const offers = new Map<string,Message>();
     const hostFresh = (host: string) => !catalog || (offers.has(host) && Date.now() - Number(offers.get(host)!.body.observedAt) <= 6000) || catalog.registrations.some(r => r.request.host === host && Date.now() < r.expires * 1000);
@@ -406,7 +403,7 @@ async function main() {
     }, () => {
       console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
       for (const operation of client.status()) console.log(`${operationLabel(operation.request)}: ${operation.state} | ${operation.result ?? operation.publication}`);
-    }, catalog ? { catalog, admission } : undefined);
+    }, catalog ? { catalog } : undefined);
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
     console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');

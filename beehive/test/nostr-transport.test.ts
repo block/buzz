@@ -11,8 +11,7 @@ import { unwrapEvent } from 'nostr-tools/nip59';
 import { v2 } from 'nostr-tools/nip44';
 import { message } from '../src/protocol.ts';
 import { wrapManagement, unwrapManagement, authorizeManagement, type AuthenticatedMessage } from '../src/nostr-codec.ts';
-import { attestHost, verifyHostAttestation } from '../src/host-attestation.ts';
-import { bootstrapHostIdentity, enrollHostIdentity, readHostIdentity, requireHostEnrollment } from '../src/host-identity.ts';
+import { bootstrapHostIdentity, enrollHostIdentity, readHostIdentity } from '../src/host-identity.ts';
 import { connectNostr } from '../src/nostr-client.ts';
 import { nostrFixture } from './nostr-fixture.ts';
 
@@ -57,15 +56,6 @@ test('independent enrolled hosts cannot forge owner, other host, or Move grant',
   assert.throws(() => authorizeManagement({ sender: owner, message: message('start', 'desktop', 'agent') }, owner, hosts, { host: 'laptop' }));
 });
 
-test('NIP-OA SDK spec vector and AUTH time vs kind semantics', () => {
-  const owner = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
-  const host = 'c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5';
-  const tag = ['auth', owner, 'kind=1&created_at<1713957000', '8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369'];
-  assert.deepEqual(verifyHostAttestation(tag, host, owner, 1713956999), tag);
-  assert.throws(() => verifyHostAttestation(tag, host, owner, 1713957000));
-  assert.throws(() => verifyHostAttestation(tag, getPublicKey(generateSecretKey()), owner, 1713956999));
-});
-
 test('durable owner-public-only pending bootstrap, genuine enrollment and installation exclusion', () => {
   const directory = mkdtempSync(join(tmpdir(), 'beehive-host-key-'));
   try {
@@ -74,15 +64,13 @@ test('durable owner-public-only pending bootstrap, genuine enrollment and instal
     const identity = bootstrapHostIdentity(directory, 'desktop', getPublicKey(owner), 'wss://example.invalid', credentials);
     assert.equal(identity.registration, null);
     assert.notEqual(identity.secret, hex(owner));
-    assert.throws(() => requireHostEnrollment(identity));
     assert.equal(statSync(join(directory, 'host-identity.json')).mode & 0o777, 0o600);
     assert.deepEqual(readHostIdentity(directory, credentials), identity);
     assert.throws(() => bootstrapHostIdentity(directory, 'other', identity.pairing.owner, 'wss://example.invalid'));
-    const tag = attestHost(hex(owner), getPublicKey(Buffer.from(identity.secret, 'hex')), 'kind=1059');
+    const tag = ['auth', getPublicKey(owner), 'kind=1059', '0'.repeat(128)];
     mkdirSync(join(directory, 'host.lock'));
     assert.throws(() => enrollHostIdentity(directory, tag, undefined, credentials));
     rmdirSync(join(directory, 'host.lock'));
-    assert.throws(() => enrollHostIdentity(directory, attestHost(hex(generateSecretKey()), getPublicKey(Buffer.from(identity.secret, 'hex')), ''), undefined, credentials));
     assert.throws(() => enrollHostIdentity(directory, tag, undefined, credentials), 'broad OA must never enroll infrastructure');
     const registration = registerHost(identity.pairing, hex(owner), Math.floor(Date.now() / 1000) + 60);
     for (const key of ['host', 'owner', 'label', 'relay', 'nonce'] as const) {
@@ -93,18 +81,17 @@ test('durable owner-public-only pending bootstrap, genuine enrollment and instal
     assert.throws(() => verifyHostRegistration(registration, identity.pairing, registration.expires));
     enrollHostIdentity(directory, registration, undefined, credentials);
     assert.deepEqual(readHostIdentity(directory, credentials).registration, registration);
-    assert.throws(() => requireHostEnrollment(readHostIdentity(directory, credentials)), /relay admission pending/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('real Nostr wire fixture: independent owner + two hosts inventory/command/receipt, history reopen and freshwrap dedup', async () => {
   const owner = generateSecretKey(), desktop = generateSecretKey(), laptop = generateSecretKey();
   const ownerPub = getPublicKey(owner), hosts = { desktop: getPublicKey(desktop), laptop: getPublicKey(laptop) };
-  const fixture = await nostrFixture(ownerPub);
+  const fixture = await nostrFixture(ownerPub, new Set([ownerPub, hosts.desktop, hosts.laptop]));
   const inbox = mailbox(), desktopInbox = mailbox(), laptopInbox = mailbox();
   const clients: ReturnType<typeof connectNostr>[] = [];
   const connect = (secret: Uint8Array, box: ReturnType<typeof mailbox>) => {
-    const client = connectNostr(fixture.url, secret, secret === owner ? undefined : attestHost(hex(owner), getPublicKey(secret), 'kind=1059'), box.receive, () => {});
+    const client = connectNostr(fixture.url, secret, box.receive, () => {});
     clients.push(client); return client;
   };
   try {
@@ -130,7 +117,7 @@ test('real Nostr wire fixture: independent owner + two hosts inventory/command/r
     assert.notEqual(fixture.history[2].id, fixture.history.at(-1)?.id);
     assert.equal(new Set(recovered.values.map(v => v.message.id)).size, 1, 'durable consumer must dedup same inner id (not lifecycle proof)');
     assert.ok(fixture.independentWraps >= 5);
-    const denied = connectNostr(fixture.url, generateSecretKey(), undefined, () => {}, () => {}); clients.push(denied);
+    const denied = connectNostr(fixture.url, generateSecretKey(), () => {}, () => {}); clients.push(denied);
     await assert.rejects(denied.ready, /authentication denied/);
   } finally { for (const client of clients) client.close(); await fixture.close(); }
 });

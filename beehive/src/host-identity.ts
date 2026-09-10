@@ -65,8 +65,3 @@ export function enrollHostIdentity(directory: string, registration: unknown, now
     writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: identity.pairing, key: credentialReference('host', identity.pairing.host), registration: identity.registration });
   });
 }
-/** Valid registration is NOT relay admission. Remains no-network until a narrow contract exists. */
-export function requireHostEnrollment(identity: HostIdentity, now = Math.floor(Date.now() / 1000)): never {
-  verifyHostRegistration(identity.registration, identity.pairing, now);
-  throw Error('Host registered locally; relay admission pending: broad NIP-OA owner delegation is prohibited');
-}

@@ -1,4 +1,4 @@
-# First private demo: configure → join → host availability
+# First private demo: configure → host availability
 
 On the host computer run **`beehive setup`**. Fresh setup asks only for the
 existing owner's **public npub** (valid hex also works) and the management relay
@@ -17,27 +17,17 @@ installations and their history remain usable.
 
 1. `beehive setup` uses `~/.beehive/host`, never your current directory. Confirm
    host-key access only while deliberately present as the host OS user.
-2. Accept **Check/join community** to verify ordinary membership with the host's
-   own key using NIP-98. An already-admitted host is not asked for an invite.
-   A nonmember needs a community-issued code/link or administrator admission of
-   the displayed host public key. Supported inputs are a bare code,
-   `https://<relay>/invite/<code>` or `buzz://join?relay=<url>&code=<code>`.
-   A link for another relay is refused, never used to retarget the host.
-   If community policy acceptance is required, complete its normal client/admin
-   process; this wizard neither fabricates policy receipts nor bypasses policy.
-   Enter at the invite prompt or `no` at confirmation safely leaves configuration
-   retained for the same `beehive setup` retry. Network/refusal errors preserve it
-   too. Unknown claim outcome requires rechecking membership before retrying.
-3. Setup is **configuration-only, NOT serving**, even after membership succeeds.
-   Deliberately start the foreground host: **`beehive host --owner-present`**.
+2. Setup is **configuration-only, NOT serving**. Resume retains the same identity,
+   owner and relay without network calls or credential reads. No invite is needed
+   by setup, and setup claims no verified access or membership.
+3. Deliberately start the foreground host: **`beehive host --owner-present`**.
    For a nondefault folder: `beehive host <same-directory> --owner-present`.
-   Startup rechecks membership and actual runtime support; only `Host online`
-   means serving. Zero agents is supported; configuring/joining starts none.
+   Startup waits for authenticated private transport and accepted availability
+   publication; only `Host online` means serving. Zero agents is supported; setup starts none.
    Ctrl-C stops this foreground host; no daemon/service is installed.
 4. On the **trusted owner computer** run
    **`beehive tui discover <management-relay> ~/.beehive/owner`** and provide the
-   existing owner signer at its hidden prompt. The owner must also be a direct
-   community member. `hosts` shows private available infrastructure; `agents`
+   existing owner signer at its hidden prompt. `hosts` shows private available infrastructure; `agents`
    shows actual agent inventory separately. No approval/catalog file is required.
    A host offer is routing/availability, **not human consent or agent authority**.
 
@@ -52,11 +42,11 @@ installations and their history remain usable.
   confirm only when owner-present. Live reads use an owned bounded helper;
   SIGINT/SIGTERM awaits its close, but may not dismiss an OS-owned dialog.
   Missing, denied and unavailable credentials are not automatically regenerated.
-- Relay must advertise its self key and NIP-43 and support membership-gated
-  signed `/query`, NIP-42 and private NIP-59 traffic. Open-relay AUTH/ACK is not
-  admission. Membership verification is not proof of all runtime compatibility.
-  Host membership is ordinary membership, not owner OA or a management-only role.
-- Joining/configuring does **not** configure provider credentials, create an
+- Use the configured private relay (owner-confirmed `wss://buzz.block.builderlab.xyz`).
+  Runtime requires NIP42 and private NIP44/59 transport, not NIP11 or NIP43
+  advertisements. Actual AUTH, subscription and publication refusals fail as
+  transport errors; Beehive does not enroll identities or bypass server policy.
+- Configuring does **not** configure provider credentials, create an
   agent, grant initial placement or authorize a conversation channel. Those
   deliberate inputs remain below. Do not use a new genesis to reset an existing
   agent's assignment.
@@ -64,10 +54,9 @@ installations and their history remain usable.
   `legacy-enrollment <directory>`; legacy `catalog` input still works. Neither
   is required by normal setup or private discovery.
 
-Automated coverage uses actual setup/host/TUI subprocesses, loopback membership
-and invite models, explicit isolated credential adapters, installed Buzz ACP/CLI,
+Automated coverage uses actual setup/host/TUI subprocesses, loopback private transport models, explicit isolated credential adapters, installed Buzz ACP/CLI,
 and a deterministic provider fixture. It is **not live Keychain, production
-relay/invite, or vendor authentication proof**.
+relay, or vendor authentication proof**.
 
 ## Optional initial demo agent → signed reply → Stop
 
@@ -131,14 +120,9 @@ No internal revisions or CAS IDs are needed for first Start: the TUI supplies th
 from the selected fresh host report. Do not use legacy two-argument setup to bypass
 this private configuration path.
 
-Membership proof is fresh and single-use for one connection (10s admission window),
-not indefinitely cached. After transport loss, no private automatic reconnect:
-close/reopen the command to verify membership again. `reconcile` explains that
-requirement instead of silently reusing proof. A live socket's revocation visibility
-is governed by relay policy; this is not continuous membership monitoring.
-
-Roster timestamps are not compared with local claim time. A fresh membership-gated
-row check can pass with an old or lagging roster. Failed admission does not fall back
-to public management, owner OA, another signer, or plaintext storage. Registrations,
-catalogs, management inventory and lifecycle commands remain private. Move, profile
-distribution and generalized recovery are outside this first demo.
+After transport loss, owner `reconcile` opens authenticated private transport again.
+There is no membership preflight or cached access proof. Actual transport errors
+remain errors, never an enrollment workflow or fallback to public management,
+owner OA, another signer, or plaintext storage. Registrations, catalogs,
+management inventory and lifecycle commands remain private. Move, profile
+ distribution and generalized recovery are outside this first demo.

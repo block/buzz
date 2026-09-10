@@ -42,7 +42,7 @@ async function runLauncher(installed: string, args: string[], env: NodeJS.Proces
 
 const createJourney = (owner: string): [string, string][] => [
   ['Owner PUBLIC npub', npubEncode(publicKey(owner))], ['Management relay URL (', 'wss://example.invalid'],
-  ['Create host identity', 'yes'], ['Check/join community', 'no'],
+  ['Create host identity', 'yes'],
 ];
 
 function installInto(root: string, name = 'user bin dir'): string {
@@ -71,7 +71,7 @@ test('installed launcher prints public help from an unrelated directory with spa
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('no-arg setup enrolls on the displayed default host folder via the isolated credential fixture', { timeout: 30000 }, async () => {
+test('no-arg setup configures on the displayed default host folder via the isolated credential fixture', { timeout: 30000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-launcher-'));
   const home = join(root, 'home dir');
   try {
@@ -83,7 +83,7 @@ test('no-arg setup enrolls on the displayed default host folder via the isolated
     const credentials = join(root, 'isolated fixture secrets.json');
     const created = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), createJourney(owner), cwd);
     assert.equal(created.code, 0, created.output);
-    assert.equal(created.answered, 4, created.output);
+    assert.equal(created.answered, 3, created.output);
     const folder = join(home, '.beehive', 'host');
     assert.ok(created.output.includes(`Default host folder: ${folder}`), created.output);
     const identity = JSON.parse(readFileSync(join(folder, 'host-identity.json'), 'utf8')) as { version: number; pairing: { host: string; owner: string; label: string }; registration: unknown };
@@ -100,7 +100,6 @@ test('no-arg setup enrolls on the displayed default host folder via the isolated
     // A second default setup must refuse to replace the retained identity.
     const before = readFileSync(join(folder, 'host-identity.json'), 'utf8');
     const second = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), [
-      ['Check/join community', 'no'],
     ], cwd);
     assert.equal(second.code, 0, second.output);
     assert.ok(second.output.includes('Identity, owner, relay and approval history retained'), second.output);

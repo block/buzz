@@ -17,7 +17,6 @@ import { provisionCredentialSlot } from '../src/credential-slots.ts';
 import { createGenesis } from '../src/assignment.ts';
 import { nostrFixture } from './nostr-fixture.ts';
 import { connectNostr } from '../src/nostr-client.ts';
-import { productionAdmission } from '../src/relay-admission.ts';
 
 function registration(owner: string, key: string, relay: string, label = 'same label') {
   return registerHost(hostPairing({ version: 1, purpose: 'beehive-host-registration', host: publicKey(key), owner: publicKey(owner), label, relay, nonce: newKey() }), owner, Math.floor(Date.now() / 1000) + 600);
@@ -43,7 +42,6 @@ test('catalog verifies owner/signature/relay/expiry; labels cannot spoof identit
   assert.equal(view.rows()[1]!.status, 'unreachable/unknown');
   assert.equal(view.rows(Date.now() + 7000)[0]!.status, 'unreachable/unknown');
   assert.equal(view.rows(one.expires * 1000)[0]!.report, undefined);
-  assert.throws(() => productionAdmission.admit({ relay, publicKey: publicKey(a), transport: 'nip42-nip59', ownerDelegation: false }), /pending/);
 });
 
 for (const scenario of ['external', 'configured', 'installed', 'v3-conversion']) {
@@ -52,7 +50,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-catalog-tui-')));
   const owner = newKey(), a = newKey(), b = newKey(), agent = newKey();
   const members = new Set([owner, a, b].map(publicKey));
-  const relay = await nostrFixture(publicKey(owner), members);
+  const relay = await nostrFixture(publicKey(owner), members, { open: scenario === 'installed' });
   const one = registration(owner, a, relay.url), two = registration(owner, b, relay.url);
   const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: (scenario === 'configured' || scenario === 'installed') ? [two] : [one, two] }, publicKey(owner), relay.url);
   const directory = join(root, 'host'); mkdirSync(directory);
@@ -92,13 +90,14 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   let setupOutput = ''; setupChild.stdout.on('data', b => setupOutput += b); setupChild.stderr.on('data', b => setupOutput += b);
   const setupExit = new Promise<number | null>(done => setupChild.on('close', done));
   try {
-    for (let n = 0; n < 400 && !setupOutput.includes('Check/join community'); n++) { if (setupChild.exitCode !== null) break; await delay(20); }
-    assert.match(setupOutput, /Check\/join community/); setupChild.stdin.write('yes\n');
     assert.equal(await setupExit, 0, setupOutput);
-    assert.match(setupOutput, /membership verified now; host configured, NOT serving/);
-    assert.ok(!setupOutput.includes('Issued invite code'));
+    assert.match(setupOutput, /Host configured, NOT serving/);
+    assert.ok(!setupOutput.includes('Check/join'));
     assert.deepEqual(readFileSync(join(directory, 'host-identity.json')), beforeSetup);
     assert.equal(readFileSync(join(directory, 'setup.json'), 'utf8'), manifest);
+  } catch (error) {
+    await conversation?.close(); await relay.close(); rmSync(root, { recursive: true, force: true });
+    throw error;
   } finally { if (setupChild.exitCode === null && setupChild.signalCode === null) setupChild.kill('SIGKILL'); await setupExit; }
   const hostChild = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), '--import', loader, 'src/cli.ts', 'host', directory, ...(installed ? [relay.url] : []), '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile }, stdio: ['ignore','pipe','pipe'] });
   let hostOutput = ''; hostChild.stdout.on('data', b => hostOutput += b); hostChild.stderr.on('data', b => hostOutput += b);
@@ -107,7 +106,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   for (let n=0; n<400 && !hostOutput.includes('Host online'); n++) { if (hostChild.exitCode !== null) break; await delay(20); }
   assert.match(hostOutput, /Host online/);
   const foreignMessages: unknown[] = [];
-  const foreign = connectNostr(relay.url, Buffer.from(b, 'hex'), undefined, m => foreignMessages.push(m), () => {});
+  const foreign = connectNostr(relay.url, Buffer.from(b, 'hex'), m => foreignMessages.push(m), () => {});
   await foreign.ready;
   const path = join(root, 'catalog.json'); writePrivate(path, catalog);
   const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile };
@@ -160,7 +159,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
     const beforeReplay = readFileSync(journalPath, 'utf8');
     await foreign.publish(message('start', publicKey(a), publicKey(agent), 2), publicKey(a));
     await foreign.publish(message('inventory', publicKey(a), publicKey(agent), 999, { phase: 'FORGED', observedAt: Date.now() + 500 }), publicKey(owner));
-    const ownerWire = connectNostr(relay.url, Buffer.from(owner, 'hex'), undefined, () => {}, () => {});
+    const ownerWire = connectNostr(relay.url, Buffer.from(owner, 'hex'), () => {}, () => {});
     await ownerWire.ready;
     try {
       const journal = JSON.parse(beforeReplay);
@@ -171,7 +170,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       const scope = join(intentDirectory, readdirSync(intentDirectory)[0]!);
       const intent = readdirSync(scope).filter(n => n.endsWith('.intent')).map(n => JSON.parse(readFileSync(join(scope, n), 'utf8'))).map(v => open(v.envelope, owner)).find(m => m.type === 'start')!;
       await ownerWire.publish(intent, publicKey(a));
-      assert.match(await command('reconcile'), /Fresh membership required/);
+      await command('reconcile');
       await delay(100);
       shown = await command('show');
       assert.ok(!shown.includes('FORGED'));
@@ -180,7 +179,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       assert.equal(Object.keys(journal.operations).length, converting ? 3 : 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
-    assert.deepEqual(relay.liveChecks.sort(), [publicKey(a), publicKey(a), publicKey(owner)].sort());
+    assert.equal(relay.httpRequests.length, 0);
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
     const state = JSON.parse(readFileSync(journalPath, 'utf8'));

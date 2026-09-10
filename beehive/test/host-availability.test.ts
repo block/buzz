@@ -1,5 +1,5 @@
 import { npubEncode } from 'nostr-tools/nip19';
-import { hostInviteCode, ownerPublicInput } from '../src/host-setup.ts';
+import { ownerPublicInput } from '../src/host-setup.ts';
 import { readHostIdentityPublic } from '../src/host-identity.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +16,6 @@ import { nostrFixture } from './nostr-fixture.ts';
 import { connectNostr } from '../src/nostr-client.ts';
 import { catalogTransport } from '../src/catalog-transport.ts';
 import { HostOffers, HostInventory, catalogResponse, type HostCatalog } from '../src/host-catalog.ts';
-import { verifyProductionAdmission } from '../src/relay-admission.ts';
 import { createGenesis } from '../src/assignment.ts';
 import { writePrivate } from '../src/storage.ts';
 
@@ -25,13 +24,14 @@ async function wait(predicate: () => boolean, detail: () => string = () => '') {
   throw Error(`Timed out: ${detail()}`);
 }
 
-test('actual zero-agent host CLI advertises privately; file-free owner TUI discovery is not Start authority', async () => {
+
+test(`actual zero-agent host CLI advertises privately; file-free owner TUI discovery is not Start authority`, async () => {
   const root = mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-availability-'));
   const owner = newKey(), stranger = newKey();
   const file = join(root, 'credentials.json'), credentials = isolatedFileCredentials(file);
   const directory = join(root, 'host');
-  const invites = { code: 'issued-fixture-code', policyRequired: true };
-  const relay = await nostrFixture(publicKey(owner), new Set([publicKey(owner), publicKey(stranger)]), invites);
+  const access = { open: true, denyAuth: false };
+  const relay = await nostrFixture(publicKey(owner), new Set(), access);
   const reads = join(root, 'reads.jsonl');
   const helper = join(root, 'credential-child.mjs');
   writeFileSync(helper, `import {readFileSync,appendFileSync} from 'node:fs';let input='';for await(const b of process.stdin)input+=b;appendFileSync(${JSON.stringify(reads)},input+'\\n');const secret=JSON.parse(readFileSync(${JSON.stringify(file)},'utf8'))[JSON.stringify(JSON.parse(input))];process.stdout.write(JSON.stringify(secret?{status:'present',secret}:{status:'missing'}));`);
@@ -56,28 +56,22 @@ test('actual zero-agent host CLI advertises privately; file-free owner TUI disco
     assert.ok(!run.output().includes('Host online'));
     return run.output();
   }
-  await setup([['Owner PUBLIC npub', npubEncode(publicKey(owner))], ['Management relay URL', relay.url], ['Create host identity', 'yes'], ['Check/join community', 'yes'], ['Issued invite code', '']]);
+  await setup([['Owner PUBLIC npub', npubEncode(publicKey(owner))], ['Management relay URL', relay.url], ['Create host identity', 'yes']]);
   const identity = readHostIdentityPublic(directory);
   assert.equal(identity.pairing.owner, publicKey(owner));
   assert.equal(identity.registration, null);
   const retained = readFileSync(join(directory, 'host-identity.json'));
   const retainedKeys = readFileSync(file);
-  // Retained unapproved f215-style state resumes without replacement or exchange.
-  const rejectedPolicy = await setup([['Check/join community', 'yes'], ['Issued invite code', invites.code], ['Claim this issued invite', 'yes']], 1);
-  assert.match(rejectedPolicy, /policy_acceptance_required/);
-  assert.deepEqual(readFileSync(file), retainedKeys);
-  invites.policyRequired = false;
-  await setup([['Check/join community', 'yes'], ['Issued invite code', `http://${new URL(relay.url).host}/invite/${invites.code}`], ['Claim this issued invite', 'no']]);
-  assert.equal(relay.claims.length, 1);
-  const joined = await setup([['Check/join community', 'yes'], ['Issued invite code', `buzz://join?relay=${encodeURIComponent(relay.url)}&code=${invites.code}`], ['Claim this issued invite', 'yes']]);
-  assert.match(joined, /membership verified now; host configured, NOT serving/);
-  assert.match(joined, /beehive tui discover/);
-  const member = await setup([['Check/join community', 'yes']]);
-  assert.ok(!member.includes('Issued invite code'));
-  assert.deepEqual(relay.claims, [identity.pairing.host, identity.pairing.host]);
+  writeFileSync(file, 'credential access during retained setup must fail');
+  const resumed = await setup([]);
+  assert.equal(readFileSync(file, 'utf8'), 'credential access during retained setup must fail');
+  writeFileSync(file, retainedKeys);
+  assert.match(resumed, /Host configured, NOT serving/);
+  assert.equal(relay.httpRequests.length, 0);
+  assert.equal(relay.connectionsOpened, 0);
+  assert.equal(existsSync(reads), false, 'setup/resume never opens credential helper');
   assert.deepEqual(readFileSync(join(directory, 'host-identity.json')), retained);
   assert.deepEqual(readFileSync(file), retainedKeys);
-  writeFileSync(reads, ''); // Runtime-read count starts after the explicitly consented setup reads.
   const host = cli(['host', directory, '--owner-present']);
   let ownerWire: ReturnType<ReturnType<typeof catalogTransport>> | undefined;
   let wrong: ReturnType<typeof connectNostr> | undefined;
@@ -86,15 +80,15 @@ test('actual zero-agent host CLI advertises privately; file-free owner TUI disco
     assert.ok(!existsSync(join(directory, 'setup.json')));
     const catalog: HostCatalog = { version: 1, owner: publicKey(owner), relay: relay.url, registrations: [] };
     const reports: ReturnType<typeof message>[] = [];
-    ownerWire = catalogTransport(catalog, await verifyProductionAdmission(relay.url, owner))(relay.url, owner, m => reports.push(m));
+    ownerWire = catalogTransport(catalog)(relay.url, owner, m => reports.push(m));
     await ownerWire.ready;
     await wait(() => reports.some(m => m.type === 'availability'));
     assert.equal(reports.filter(m => m.type === 'inventory').length, 0);
-    assert.ok(relay.liveChecks.includes(identity.pairing.host));
+    assert.equal(relay.httpRequests.length, 0);
     assert.ok(relay.history.every(e => JSON.stringify(e.tags) === JSON.stringify([['p', publicKey(owner)]])));
     assert.ok(relay.history.every(e => !e.content.includes(identity.pairing.label) && !e.content.includes(identity.pairing.host)));
     const leaked: unknown[] = [];
-    wrong = connectNostr(relay.url, Buffer.from(stranger, 'hex'), undefined, m => leaked.push(m), () => {});
+    wrong = connectNostr(relay.url, Buffer.from(stranger, 'hex'), m => leaked.push(m), () => {});
     await wrong.ready;
     const invalid = message('start', identity.pairing.host, publicKey(newKey()));
     await wrong.publish(invalid, identity.pairing.host);
@@ -141,18 +135,19 @@ test('actual zero-agent host CLI advertises privately; file-free owner TUI disco
     assert.ok(!rejected.output().includes('Host online'));
     assert.deepEqual(JSON.parse(readFileSync(journalFile, 'utf8')), forged);
     assert.ok(readFileSync(reads, 'utf8').trim().split('\n').every(s => JSON.parse(s).role === 'host'));
-    // A configured npub alone cannot pass the ordinary fresh member gate.
+    // An actual server AUTH refusal fails startup, never launches enrollment.
+    access.denyAuth = true;
     const pending = bootstrapHostIdentity(join(root, 'pending'), 'Pending', publicKey(owner), relay.url, credentials);
     const denied = cli(['host', join(root, 'pending'), '--owner-present']);
     assert.notEqual(await denied.exit, 0);
-    assert.match(denied.output(), /Direct membership not verified/);
+    assert.match(denied.output(), /authentication denied/);
     assert.ok(!denied.output().includes('Host online'));
-    assert.ok(!relay.liveChecks.includes(pending.pairing.host));
+    assert.equal(relay.httpRequests.length, 0);
     // Missing retained host credential is not repaired or regenerated by resume.
     credentials.remove(credentialReference('host', identity.pairing.host));
     const missingKeys = readFileSync(file);
-    const missing = await setup([['Check/join community', 'yes']], 1);
-    assert.match(missing, /Local host key missing/);
+    const missing = await setup([]);
+    assert.match(missing, /Host configured, NOT serving/);
     assert.deepEqual(readFileSync(file), missingKeys);
     assert.deepEqual(readFileSync(join(directory, 'host-identity.json')), retained);
 
@@ -183,13 +178,9 @@ test('availability schema and catalog fences: scope, signer, freshness, no fabri
   assert.equal(view.rows(now + 7000)[0]!.status, 'unreachable/unknown');
 });
 
-test('normal public owner and issued invite inputs preserve relay binding', () => {
+test('normal public owner inputs reject secrets', () => {
   const owner = publicKey(newKey());
   assert.equal(ownerPublicInput(npubEncode(owner)), owner);
   assert.equal(ownerPublicInput(owner.toUpperCase()), owner);
   assert.throws(() => ownerPublicInput('nsec1invalid'));
-  assert.equal(hostInviteCode('issued-code', 'wss://example.invalid'), 'issued-code');
-  assert.equal(hostInviteCode('https://example.invalid/invite/code/', 'wss://example.invalid'), 'code');
-  assert.throws(() => hostInviteCode('https://other.invalid/invite/code', 'wss://example.invalid'));
-  assert.throws(() => hostInviteCode('buzz://join?relay=wss://other.invalid&code=code', 'wss://example.invalid'));
 });

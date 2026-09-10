@@ -1,7 +1,6 @@
 import { profile } from './profiles.ts';
 import { catalogTransport } from './catalog-transport.ts';
 import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
-import type { ScopedRelayAdmission } from './relay-admission.ts';
 import { existsSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect, validateRelayURL } from './client.ts';
@@ -19,7 +18,7 @@ function matches(request: Message, receipt: Message) {
  * Immutable intent files precede all network effects. Receipt files are separate
  * so another reader's old publication observation cannot erase a terminal result.
  */
-export function managementClient(root: string, url: string, secret: string, receive: (m: Message) => void, changed: () => void = () => {}, privateHosts?: { catalog: HostCatalog; admission?: ScopedRelayAdmission }) {
+export function managementClient(root: string, url: string, secret: string, receive: (m: Message) => void, changed: () => void = () => {}, privateHosts?: { catalog: HostCatalog }) {
   if (privateHosts) verifyHostCatalog(privateHosts.catalog, publicKey(secret), url);
   else validateRelayURL(url);
   const scope = digest(JSON.stringify([url, publicKey(secret)])).toString('hex');
@@ -68,7 +67,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     }
     changed();
   }
-  const connectTransport = privateHosts ? catalogTransport(privateHosts.catalog, privateHosts.admission) : connect;
+  const connectTransport = privateHosts ? catalogTransport(privateHosts.catalog) : connect;
   const transport = connectTransport(url, secret, m => {
     if (m.type === 'receipt') {
       const intent = intents.get(String(m.body.operation));

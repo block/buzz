@@ -1,3 +1,24 @@
+## Current private transport validation
+
+Setup/resume is configuration-only. `host-availability.test.ts` covers fresh npub
+setup and retained resume with no HTTP or credential-helper calls, empty-host
+private discovery and owner/placement negatives. `private-transport-denial.test.ts`
+covers actual AUTH, REQ and availability publication rejection. Dedicated
+membership evidence/signer tests and admission proofs were deleted deliberately.
+`catalog-tui.test.ts` retains signed Start/reply/Stop and replay/foreign-owner
+negatives; only its installed normal-private case needs renewed installed evidence.
+Deletion validation at base `fcb82cf74b78dd1147bc9bc8316dc7ce97e17adf`:
+Node 24.15.0 strict passed; one default-concurrent `node --test test/*.test.ts`
+passed **140, failed 0, skipped 19** (installed opt-in unset). Only the directly
+affected installed normal-private catalog Start/signed-reply/Stop fixture was
+rerun with `BEEHIVE_REAL_BUZZ_ACP`: **1 passed, 0 failed, 0 skipped**, using the
+existing explicit isolated credential and loopback relay/provider adapters.
+Unchanged installed coverage reuses the preceding campaign; it is not new live
+relay/provider proof. Two stale focused prompt/output assertions initially failed
+and were corrected; failures remain in the external task evidence. No deadlines
+or concurrency were relaxed. The dated results below are historical, not
+validation of this deletion.
+
 # Package validation
 
 Activate Hermit from repo root, then enter `beehive`:

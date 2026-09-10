@@ -28,7 +28,7 @@ export async function enrollmentInput(directory: string): Promise<void> {
       const identity = action === 'create' ? bootstrapHostIdentity(directory,
         (await ui.question(`Computer name [${hostname()}]: `)) || hostname(),
         text(await ui.question('Owner PUBLIC key (hex, from your existing owner identity; never the private key): ')),
-        text(await ui.question('Management relay URL (wss://… from your community operator; membership is separate): '))) : readHostIdentityPublic(directory);
+        text(await ui.question('Management relay URL (wss://… from your community operator; private transport): '))) : readHostIdentityPublic(directory);
       const fingerprint = pairingFingerprint(identity.pairing);
       console.log(`Pairing fingerprint: ${fingerprint}`);
       const file = action === 'export-to' ? setupPath(text(await ui.question('New private request output path (~ supported): '))) : join(exchange, `request-${fingerprint}-${randomUUID()}.json`);
@@ -47,7 +47,7 @@ export async function enrollmentInput(directory: string): Promise<void> {
       ui.close();
       const secret = await readAgentSecret('Owner');
       writePrivate(file, registerHost(request, secret, expires), true);
-      console.log(`Approval saved: ${file}\nOwner secret not persisted. Transfer privately back to host, then run beehive legacy-enrollment and choose import. You may put it at the host's displayed default approval path.\nOn this owner computer next: beehive catalog ${quote(file)}\nRelay admission remains pending.`);
+      console.log(`Approval saved: ${file}\nOwner secret not persisted. Transfer privately back to host, then run beehive legacy-enrollment and choose import. You may put it at the host's displayed default approval path.\nOn this owner computer next: beehive catalog ${quote(file)}\nPrivate transport opens at startup.`);
     } else if (action === 'import') {
       if (!retained) throw Error('No host identity here. Run setup on the original host folder; do not create a replacement identity.');
       const expected = join(exchange, `approval-${pairingFingerprint(retained.pairing)}.json`);
@@ -57,7 +57,7 @@ export async function enrollmentInput(directory: string): Promise<void> {
       const approval = readPrivate(supplied ? setupPath(supplied) : expected);
       verifyHostRegistration(approval, retained.pairing);
       enrollHostIdentity(directory, approval);
-      console.log(`Host registered offline. Pending/no network: relay admission remains pending. Ask your relay operator to enroll the host and owner as direct members. No agent authorized or started.\nNext: prepare binding and owner-approved agent genesis as in FIRST_DEMO.md, then beehive provision-agent ${quote(directory)} <binding-file> <genesis-file>. Provider login is separate; beehive auth-info ${quote(directory)} prints its context. Then beehive host ${quote(directory)} --owner-present.`);
+      console.log(`Host registered offline. Private transport opens at startup. No agent authorized or started.\nNext: prepare binding and owner-approved agent genesis as in FIRST_DEMO.md, then beehive provision-agent ${quote(directory)} <binding-file> <genesis-file>. Provider login is separate; beehive auth-info ${quote(directory)} prints its context. Then beehive host ${quote(directory)} --owner-present.`);
     } else throw Error('Choose create to prepare a new computer, export to resume, approve on the owner computer, or import a returned approval');
   } finally { ui.close(); }
 }

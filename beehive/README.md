@@ -42,11 +42,12 @@ advertises its own availability, including with zero agents; this offer proves
 neither owner consent nor agent placement. The owner uses
 `beehive tui discover <relay> ~/.beehive/owner` without a catalog file.
 
-Ordinary direct membership is independently verified with the host's own key;
-issued invites use existing NIP-98 claim APIs, never host owner-account delegation.
-Policy acceptance/admin action remains the community's gate. Joining starts no
-agent and grants no placement. Actual per-agent grants, local genesis and retained
-assignment still gate Start. Owner secrets stay on the owner computer.
+Setup is configuration-only: no relay discovery, membership checks or invite prompts.
+Retained setup does not open credentials. Host startup and owner management use
+private NIP42/NIP59 transport directly; actual relay refusals fail as transport
+errors. Host availability waits for accepted publication. Actual per-agent grants,
+local genesis and retained assignment still gate Start. Owner secrets stay on the
+owner computer.
 
 Historical explicit registration tooling lives under `legacy-enrollment` and
 `catalog`, not the normal setup menu. Legacy two-argument diagnostic setup below
@@ -129,6 +130,11 @@ The runner must remain within its process group. Escaping descendants require
 stronger OS containment before arbitrary harness support.
 
 ## Relay boundary and trust
+
+The loopback diagnostic protocol described below is separate from normal private
+host setup. Normal host/owner management uses NIP42 plus NIP44/59 with independent
+signers on the configured relay; see FIRST_DEMO.md. It neither shares the owner
+secret with the host nor uses the diagnostic relay as a fallback.
 
 Dedicated loopback-only WebSocket relay, not a Nostr relay, and no reserved kind
 numbers. All application traffic is runtime-validated, Schnorr-signed and

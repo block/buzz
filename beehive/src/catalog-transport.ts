@@ -1,21 +1,18 @@
 import { connectNostr } from './nostr-client.ts';
 import { HostOffers, catalogHost, catalogResponse, verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
-import { productionAdmission, type ScopedRelayAdmission } from './relay-admission.ts';
 import { open, publicKey, type Envelope, type Message } from './protocol.ts';
 
 /** Adapter for the existing durable owner client. No broadcast, OA, or label routing.
- * Admission is injected internally for isolated fixtures; no CLI/env/JSON override.
  */
-export function catalogTransport(catalog: HostCatalog, admission: ScopedRelayAdmission = productionAdmission) {
+export function catalogTransport(catalog: HostCatalog) {
   return (url: string, secret: string, receive: (m: Message) => void, recovered?: () => void, disconnected?: (code: number) => void) => {
     const retained = structuredClone(verifyHostCatalog(catalog, publicKey(secret), url));
     const offers = new HostOffers();
     let closed = false;
     let generation = 0;
     function dial() {
-      admission.admit({ relay: url, publicKey: retained.owner, transport: 'nip42-nip59', ownerDelegation: false });
       const current = ++generation;
-      return connectNostr(url, Buffer.from(secret, 'hex'), undefined, input => {
+      return connectNostr(url, Buffer.from(secret, 'hex'), input => {
         if (closed || current !== generation) return;
         let m: Message;
         try { m = catalogResponse(retained, input, Math.floor(Date.now() / 1000), offers); } catch { return; }

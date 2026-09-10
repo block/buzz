@@ -8,7 +8,7 @@ import type { Message } from './protocol.ts';
  * completion; accepted publication is ONLY a relay ACK. No implicit effect retries.
  * A new instance resubscribes full history, deliberately overlapping live delivery.
  */
-export function connectNostr(url: string, secret: Uint8Array, authTag: string[] | undefined, receive: (value: AuthenticatedMessage) => void, disconnected: (error: Error) => void) {
+export function connectNostr(url: string, secret: Uint8Array, receive: (value: AuthenticatedMessage) => void, disconnected: (error: Error) => void) {
   const endpoint = new URL(url);
   if (endpoint.username || endpoint.password || endpoint.hash || !(endpoint.protocol === 'wss:' || (endpoint.protocol === 'ws:' && endpoint.hostname === '127.0.0.1'))) throw Error('Nostr transport requires wss (loopback ws fixtures only)');
   const socket = new WebSocket(url, { maxPayload: 300000, handshakeTimeout: 2000 });
@@ -42,7 +42,7 @@ export function connectNostr(url: string, secret: Uint8Array, authTag: string[] 
       subscribed = false; requested = false;
       clearTimeout(startup);
       startup = setTimeout(() => fail(Error('Nostr authentication/subscription timeout')), 5000);
-      const event = finalizeEvent({ kind: 22242, created_at: Math.floor(Date.now() / 1000), content: '', tags: [['relay', url], ['challenge', id], ...(authTag ? [authTag] : [])] }, secret);
+      const event = finalizeEvent({ kind: 22242, created_at: Math.floor(Date.now() / 1000), content: '', tags: [['relay', url], ['challenge', id]] }, secret);
       authentication = event.id;
       try { send(['AUTH', event]); } catch (error) { fail(error as Error); }
     } else if (type === 'OK' && typeof id === 'string') {
