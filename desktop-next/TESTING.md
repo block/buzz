@@ -55,3 +55,7 @@ nested navigation links, unknown-ID recovery, input and keyboard interactions,
 portal density, refresh, and appearance preferences. Representative pages are
 checked at 390/884/1440 in both densities and audited in both themes, with distinct
 per-component screenshots.
+
+Grammar-page coverage checks sidebar navigation, keyboard disclosure controls,
+reopening the same topic link, hash links across reloads, all 19 typography rows,
+source-link destinations, responsive tables, and accessibility in both themes.

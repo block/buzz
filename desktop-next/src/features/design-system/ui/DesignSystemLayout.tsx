@@ -27,6 +27,7 @@ const SECTIONS: Array<{ heading: string; items: NavItem[] }> = [
   {
     heading: "System",
     items: [
+      ["Logic & grammar", "/design/grammar"],
       ["Vocabulary", "/design/vocabulary"],
       ["Growing the system", "/design/growth"],
     ],

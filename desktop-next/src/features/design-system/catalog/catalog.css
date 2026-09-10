@@ -47,6 +47,25 @@
   min-width: 0;
   max-width: 100%;
 }
+.grammar-section {
+  scroll-margin-top: var(--space-panel-inset);
+}
+.grammar-section:target {
+  outline: 2px solid var(--ring-focus);
+  outline-offset: 4px;
+}
+.grammar-table {
+  table-layout: fixed;
+}
+.grammar-table th,
+.grammar-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+.grammar-table th:first-child {
+  width: 24%;
+}
 .component-page > header h1:focus {
   outline: none;
 }
