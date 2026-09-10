@@ -76,7 +76,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (m.params._meta?.systemPrompt) writeFileSync('received-system-instructions', m.params._meta.systemPrompt.append);
     result = { sessionId, models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } };
   }
-  else if (m.method === 'session/new') { if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; } if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
+  else if (m.method === 'session/new') { if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; } if (buzzProvider && buzzProvider !== 'databricks_v2') sessionId = `${buzzProvider}-${process.pid}-${++sessionNumber}`; if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose || buzzProvider) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
     if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported' } }); continue; }
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
@@ -84,6 +84,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   else if (m.method === 'session/load') { selected = ''; result = {}; }
   else if (m.method === 'session/set_model') {
+    if (buzzProvider && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
     if (codex) throw Error('Codex must not receive model/config switch');
     if (claude) throw Error('Claude never accepts invented set_model acknowledgement');
     if (goose) throw Error('Goose must never receive unstable set_model');
@@ -102,7 +103,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     writeFileSync('cancel-observed', 'yes');
     if (prompt) send({ jsonrpc: '2.0', id: prompt, result: { stopReason: 'cancelled' } }); continue;
   } else if (m.method === 'session/prompt') {
-    if ((goose || claude || codex) && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
+    if ((goose || claude || codex || buzzProvider) && gooseSessions.has(m.params.sessionId)) sessionId = m.params.sessionId;
     appendFileSync('received-prompts.jsonl', JSON.stringify(m.params) + '\n');
     if (selected !== model || m.params.sessionId !== sessionId) process.exit(8);
     writeFileSync('prompt-started', selected); prompt = m.id;

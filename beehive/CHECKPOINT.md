@@ -2042,3 +2042,37 @@ Instrumentation-complete.patch retained at ADMISSION_0BEA, SHA256
 will adapt before any final full-candidate validation. Custom confirmation review
 COMPLETE SOURCE-ONLY/no new blocker; R1 source-closed plus actual wizard tests.
 Custom conversion remains source-only; historical report complete/unclassified.
+
+## Provider 16b4 — final candidate gate preparation
+
+Initial NORMAL installed journeys PASS 3/3 (58.527s) for distinct Anthropic,
+OpenAI-compatible Responses, OpenRouter Chat env contracts. Each proves four signed
+same-agent replies/two channels/later turn/fresh-session Restart/exact profile and
+model, missing provider key, wrong-model/native/auth rejection, neutral Stop,
+unchanged sibling/history/manifest. Added wrong-file-credential and public endpoint
+privacy controls for final gate. Production prepareAgent unit controls PASS 3/3:
+all three OpenAI wire modes, other-provider wire rejection, HTTPS/credential/query
+endpoint guards, wrong model, mixed binding, unsafe/empty/symlink/missing key file.
+No real provider network calls; installed binaries are buzz-acp and Buzz CLI only.
+API-key provider diagnostic conversion/local add is implemented but not yet an
+executed installed journey. Databricks token and richer native OAuth diagnostics
+remain unfinished, existing legacy v2 path unchanged; no parity claim.
+
+Raw PROVIDER_16B4 evidence retains first journey failures (fixed fixture session ID)
+and two later-turn fixture failures (session selection restored at set_model then
+also prompt; no protocol-owner runtime fix), plus successful journeys. First strict
+failed due return type inference; instrumentation adaptation had two failed patch
+applications and missing-module strict failures, corrected without tests running.
+No test assertion/deadline relaxed. Source-level self-review covered immutable
+bindings, private env/profiles, closed endpoint/wire contracts and Stop neutrality.
+
+Preserved ADMISSION_0BEA patch is now narrowly adapted at the existing owners;
+trace inactive by default and activated ONLY by admission control tests when
+BEEHIVE_LATENCY_TRACE is set. Bounded 50k in-memory stamps per control, public event
+IDs/signatures and operation types, monotonic/wall clocks, actual async I/O completion,
+loop ticks; no payload/credential/result/URL capture. Exclusive 0600 capture now
+file+directory fsynced at test completion/failure; t.after also flushes if cleanup
+fails. No authority, queue, durability or timing-assertion semantic changes. Strict
+passes. ONE final FULL DEFAULT concurrent installed-enabled suite is next, with
+trace mode/source/installed hashes in PROVIDER_16B4. Original 105/106 gate remains
+OPEN and original cause UNRESOLVED; no diagnostic full rerun or speculative fix.

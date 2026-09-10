@@ -1,3 +1,4 @@
+import { trace } from './latency-trace.ts';
 import { WebSocket } from 'ws';
 import { open, seal, type Message, type Envelope } from './protocol.ts';
 /** Validate transport before acquiring installation resources. */
@@ -18,19 +19,19 @@ export function connect(url: string, secret: string, receive: (m: Message) => vo
   const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   function dial(): WebSocket {
     const current = new WebSocket(url, { maxPayload: 70000, handshakeTimeout: 2000 });
-    current.on('open', () => {
+    current.on('open', () => { trace('client.open');
       if (closed || current !== socket) { current.close(); return; }
       if (!established) { established = true; resolveReady(); }
       else recovered?.();
     });
     current.on('message', data => {
       if (closed || current !== socket) return;
-      let message: Message;
+      trace('client.wire'); let message: Message;
       try { message = open(JSON.parse(data.toString()),secret); } catch { return; }
-      receive(message); // Application persistence failures must not masquerade as malformed wire data.
+      trace('client.decoded', { id: message.id, type: message.type, op: message.body.operation }); receive(message); // Application persistence failures must not masquerade as malformed wire data.
     });
     current.on('error', error => { if (!established) rejectReady(error); });
-    current.on('close', code => {
+    current.on('close', code => { trace('client.close', { code });
       if (!established) rejectReady(Error('Relay closed before ready'));
       if (!closed && current === socket) disconnected?.(code);
       if (code === 1008 || closed || current !== socket || !established || !recovered || attempts >= 8) return;
@@ -43,7 +44,7 @@ export function connect(url: string, secret: string, receive: (m: Message) => vo
     get socket() { return socket; },
     ready,
     sendEnvelope(e: Envelope) { if (closed || socket.readyState !== WebSocket.OPEN) throw Error('Relay disconnected; result unknown'); socket.send(JSON.stringify(e)); },
-    send(m: Message) { if (closed || socket.readyState !== WebSocket.OPEN) throw Error('Relay disconnected; result unknown'); socket.send(JSON.stringify(seal(m,secret))); },
+    send(m: Message) { if (closed || socket.readyState !== WebSocket.OPEN) throw Error('Relay disconnected; result unknown'); trace('client.seal.begin', { id: m.id, type: m.type, op: m.body.operation }); const e = seal(m,secret); trace('client.seal.end', { id: m.id, signature: e.signature }); socket.send(JSON.stringify(e)); trace('client.sent', { id: m.id }); },
     /** Explicit transport reconciliation; opening is never an operation result. */
     reconnect() {
       if (closed) throw Error('UI closed');

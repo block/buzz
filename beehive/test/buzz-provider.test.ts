@@ -1,0 +1,36 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, realpathSync, writeFileSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { prepareAgent } from '../src/acp.ts';
+import { validateSetup, setupModels } from '../src/host.ts';
+import { newKey } from '../src/protocol.ts';
+import { validateBuzzProvider, type BuzzProvider } from '../src/buzz-provider.ts';
+
+for (const provider of ['anthropic', 'openai-compat', 'openrouter'] as const) test(`Buzz Agent ${provider}: closed provider env and fail-closed local inputs`, t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-provider-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const apiKeyFile = join(dir, 'key'); writeFileSync(apiKeyFile, 'fresh-fixture-key', { mode: 0o600 });
+  const binding: BuzzProvider = { provider, apiKeyFile, baseUrl: 'https://fixture.invalid/v1', models: ['exact-model'], ...(provider === 'openai-compat' ? { wire: 'responses' as const } : {}) };
+  const setup = validateSetup({ mode: 'buzz-agent-api-key', buzzProvider: binding, host: 'fixture', ownerSecret: newKey(), runner: realpathSync(process.execPath), args: [], workspace: dir, serviceHome: dir, configDirectory: dir });
+  assert.deepEqual(setupModels(setup), ['exact-model']);
+  const launch = { executable: setup.runner, args: [], workspace: dir, home: dir, configDirectory: dir, databricksHost: '', buzzProvider: binding, model: 'exact-model' };
+  const prepared = prepareAgent(launch);
+  const key = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : provider === 'openai-compat' ? 'OPENAI_COMPAT_API_KEY' : 'OPENROUTER_API_KEY';
+  const url = provider === 'anthropic' ? 'ANTHROPIC_BASE_URL' : provider === 'openai-compat' ? 'OPENAI_COMPAT_BASE_URL' : 'OPENROUTER_BASE_URL';
+  assert.deepEqual(prepared.env, { PATH: '/usr/bin:/bin', HOME: dir, BUZZ_AGENT_CONFIG_DIR: dir, BUZZ_AGENT_PROVIDER: provider, BUZZ_AGENT_MODEL: 'exact-model', [key]: 'fresh-fixture-key', [url]: binding.baseUrl, ...(provider === 'openai-compat' ? { OPENAI_COMPAT_API: 'responses' } : {}) });
+  assert.throws(() => prepareAgent({ ...launch, model: 'not-approved' }), /Unsupported Buzz Agent model/);
+  assert.throws(() => validateSetup({ ...setup, mode: 'goose' }), /only to Buzz Agent/);
+  for (const baseUrl of ['http://fixture.invalid', 'https://user:secret@fixture.invalid', 'https://fixture.invalid/?key=secret', 'https://fixture.invalid/#secret']) assert.throws(() => validateBuzzProvider({ ...binding, baseUrl }));
+  assert.throws(() => validateBuzzProvider({ ...binding, env: { OPENAI_API_KEY: 'injected' } } as BuzzProvider));
+  assert.throws(() => validateBuzzProvider({ ...binding, wire: 'invented' } as unknown as BuzzProvider));
+  if (provider !== 'openai-compat') assert.throws(() => validateBuzzProvider({ ...binding, wire: 'responses' }));
+  else for (const wire of ['auto', 'chat', 'responses'] as const) assert.equal(prepareAgent({ ...launch, buzzProvider: { ...binding, wire } }).env.OPENAI_COMPAT_API, wire);
+  chmodSync(apiKeyFile, 0o644); assert.throws(() => prepareAgent(launch), /API key prerequisite/);
+  chmodSync(apiKeyFile, 0o600); writeFileSync(apiKeyFile, ''); assert.throws(() => prepareAgent(launch), /API key prerequisite/);
+  writeFileSync(apiKeyFile, 'fresh-fixture-key'); const link = join(dir, 'linked-key'); symlinkSync(apiKeyFile, link);
+  assert.throws(() => prepareAgent({ ...launch, buzzProvider: { ...binding, apiKeyFile: link } }), /API key prerequisite/);
+  rmSync(apiKeyFile); assert.throws(() => prepareAgent(launch), /API key prerequisite/);
+  assert.doesNotThrow(() => validateBuzzProvider(binding), 'offline setup never reads credentials');
+});

@@ -1,3 +1,4 @@
+import { trace } from './latency-trace.ts';
 import { validateBuzzProvider, type BuzzProvider } from './buzz-provider.ts';
 import { validateCustom, diagnosticReason, type CustomAcp } from './custom-acp.ts';
 import { validateCodex, type CodexSetup } from './codex.ts';
@@ -151,7 +152,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
   const queuedOperations = new Set<string>();
   const retracted = new Map<string, number>();
   const retracting = (revision: number) => { for (const target of retracted.values()) if (target === revision) return true; return false; };
-  function receive(m: Message) {
+  function receive(m: Message) { trace('slot.receive', { id: m.id, type: m.type, revision: m.revision });
     // Cancellation is signalled outside the serialized mutation queue. Admission is
     // still exact-authority/revision and never bypasses durable receipt processing.
     const operation = m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type);
@@ -175,7 +176,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     if (state.move) publish(state.move.prepare);
     publish(inventory());
   }
-  async function stopOwned() {
+  async function stopOwned() { trace('host.stop-owned.begin');
     const hadProbe = !!restartProbe;
     if (restartProbe) { await restartProbe.owned.stop(); restartProbe = undefined; }
     if (!owned && hadProbe) return;
@@ -244,7 +245,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
         void process.ready.catch(() => finish(Error('Installed executable unavailable')));
       });
     } finally {
-      try { await stopOwned(); state.phase = 'stopped'; save(); }
+      try { await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; save(); }
       catch (error) { state.phase = 'quarantined'; save(); throw error; }
     }
   }
@@ -293,7 +294,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           const probe = new AgentSession(prepared.launch); acp = probe; owned = probe.owned;
           try { await probe.catalog(); await probe.verify(); }
           finally {
-            try { await stopOwned(); state.phase = 'stopped'; save(); }
+            try { await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; save(); }
             catch (error) { state.phase = 'quarantined'; save(); throw error; }
           }
         }
@@ -381,7 +382,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       } // Invalid grants are inert; they cannot change local authority.
     }
   }
-  async function handle(m: Message) {
+  async function handle(m: Message) { trace('slot.handle', { id: m.id, type: m.type, revision: m.revision });
     if (m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type)) queuedOperations.delete(m.id);
     if (closing || persistenceFailed || m.host !== setup.host || !['inspect','save','start','restart','stop','move','prepare','prepared','grant'].includes(m.type)) return;
     if (['prepare','prepared','grant'].includes(m.type)) { await exchange(m); return; }
@@ -460,7 +461,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           if (setup.mode === 'fixture') {
             owned = spawnOwned(setup.runner, setup.args, state.actual.selection.workspace, { PATH: '/usr/bin:/bin', BEEHIVE_FIXTURE: '1', ...(selected.behavior ? { BUZZ_AGENT_SYSTEM_PROMPT: selected.behavior.instructions } : {}) });
             owned.child.stdout.resume(); owned.child.stderr.resume();
-            try { await owned.ready; } catch (e) { await stopOwned(); state.phase = 'stopped'; state.actual = null; throw e; }
+            try { await owned.ready; } catch (e) { await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null; throw e; }
           } else if (setup.conversation) {
             const session = new ConversationSession(setup.conversation, launch!, prepared.credential, state.binding.owner);
             acp = session; owned = session;
@@ -468,7 +469,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
               state.actual.evidence = await session.verify();
               if (!session.healthy) throw Error('Conversation failed before running commit');
             } catch (e) {
-              await stopOwned(); state.phase = 'stopped'; state.actual = null;
+              await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null;
               if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
               throw e;
             }
@@ -481,7 +482,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
               if (!session.healthy) throw Error('ACP session failed before running commit');
             } catch (e) {
               catalog = { state: 'failed', authentication: 'unverified' };
-              await stopOwned(); state.phase = 'stopped'; state.actual = null;
+              await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null;
               if (retracting(m.revision)) throw Error('Start cancelled by concurrent Stop');
               throw e;
             }
@@ -489,7 +490,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
           // The retraction may also arrive while this admission executes: verified
           // teardown must precede the running commit, mirroring the queued path.
           if (retracting(m.revision)) {
-            await stopOwned(); state.phase = 'stopped'; state.actual = null;
+            await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null;
             throw Error('Start cancelled by concurrent Stop');
           }
           state.phase = 'running';
@@ -497,7 +498,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
         } else {
           fields(m.body,[]);
           if (state.phase !== 'stopped') {
-            state.phase = 'transitioning'; save(); await stopOwned(); state.phase = 'stopped'; state.actual = null;
+            state.phase = 'transitioning'; save(); await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null;
           }
         }
         state.revision++;
@@ -520,7 +521,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     if (restartProbe) { await restartProbe.owned.stop(); restartProbe = undefined; }
     if (owned) {
       state.phase = 'transitioning'; save();
-      try { await stopOwned(); state.phase = 'stopped'; state.actual = null; }
+      try { await stopOwned(); trace('host.stop-owned.end'); state.phase = 'stopped'; state.actual = null; }
       catch (e) { state.phase = 'quarantined'; save(); throw e; }
     }
     save();
@@ -571,7 +572,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal)
       if (!initialized) return;
       profiles.receive(m);
       if (m.host !== setup.host) return;
-      const selected = slots.get(m.agent);
+      const selected = slots.get(m.agent); trace('host.route', { id: m.id, type: m.type, selected: !!selected });
       if (selected) selected.receive(m);
       else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }
       else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));

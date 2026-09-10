@@ -1,3 +1,4 @@
+import { trace } from './latency-trace.ts';
 import { WebSocketServer, WebSocket } from 'ws';
 import { existsSync } from 'node:fs';
 import { verifyEnvelope, type Envelope } from './protocol.ts';
@@ -24,7 +25,7 @@ export async function relay(port: number, owner: string, path: string, boundary?
   };
   async function commit() {
     while (waiting.length) {
-      const batch = waiting.splice(0);
+      const batch = waiting.splice(0); trace('relay.batch', batch.map(x => x.e.signature));
       const additions: Envelope[] = [];
       const signatures = new Set<string>();
       for (const { e, socket } of batch) {
@@ -49,12 +50,12 @@ export async function relay(port: number, owner: string, path: string, boundary?
           pending -= batch.length;
           continue;
         }
-        history.push(...additions);
+        trace('relay.durable', additions.map(e => e.signature)); history.push(...additions);
         for (const e of additions) {
           known.add(e.signature);
           for (const client of server.clients) if (client.readyState === WebSocket.OPEN) {
             if (client.bufferedAmount > 1000000) client.close(1008, 'Slow reader');
-            else client.send(JSON.stringify(e));
+            else { trace('relay.broadcast', { signature: e.signature }); client.send(JSON.stringify(e)); }
           }
         }
 
@@ -73,7 +74,7 @@ export async function relay(port: number, owner: string, path: string, boundary?
       try { e = verifyEnvelope(JSON.parse(data.toString()), owner); }
       catch { socket.close(1008, 'Invalid publication'); return; }
       if (pending >= 10000) { socket.close(1013, 'Publication queue full'); return; }
-      pending++;
+      trace('relay.enqueue', { signature: e.signature, pending }); pending++;
       waiting.push({ e, socket });
       if (active) return;
       active = true;

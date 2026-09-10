@@ -777,3 +777,25 @@ source-pinned diagnostic presets, owner-only structured custom JSON and wizard
 journey. Preset discovery is not authentication/readiness; arbitrary ACP adapters
 are not assumed to support native model/profile contracts. Only the explicitly
 opted-in Goose-native custom contract has fixture conversation acceptance here.
+
+### Buzz Agent API-key providers (local bindings)
+
+Normal `setup` option **8** offers Anthropic, OpenAI-compatible and OpenRouter.
+Existing installations use `local-setup` → `add-buzz-provider`, reusing pinned
+conversation authority without selecting or restarting any agent. Supply the
+installed Buzz Agent executable, dedicated service HOME/config directory, allowed
+workspace, owner-only key file, HTTPS provider base URL and operator-approved exact
+models. OpenAI-compatible additionally requires explicit `auto`, `chat` or
+`responses`; OpenRouter is Chat Completions only, Anthropic has no wire override.
+The key variables are respectively `ANTHROPIC_API_KEY`, `OPENAI_COMPAT_API_KEY`
+(**not** `OPENAI_API_KEY`), and `OPENROUTER_API_KEY`.
+
+Endpoint, key path/value and service context remain local in immutable bindings.
+Remote users choose a compatible binding/model/workspace and independent profile,
+Save selected-next, then explicitly Start/Restart. No automatic install/login,
+credential probe, key generation or Restart during ordinary management. Operator
+model lists and keyfile presence are not authentication or actual-model proof.
+Source-shaped fixture acceptance does not establish real vendor inference.
+Databricks static-token setup and expanded OAuth diagnostics remain future work;
+existing v2 native service-user OAuth setup remains separate (never copy owner,
+Goose or Claude caches). Preset diagnostics are not provider parity.

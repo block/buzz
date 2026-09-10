@@ -283,7 +283,11 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
       for (const privateValue of ['owner-only-custom-value', literal, customFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'custom local input never advertised');
       assert.ok(!existsSync(join(dir, 'shell-was-invoked')), 'structured argv never invokes shell');
     }
-    if (buzz) assert.ok(existsSync(join(dir, `${kind}-env-checked`)), 'distinct Buzz provider env contract');
+    if (buzz) {
+      assert.ok(existsSync(join(dir, `${kind}-env-checked`)), 'distinct Buzz provider env contract');
+      for (const value of [`fixture-${kind}-private-key`, keyFile, entry.setup.serviceHome!, `https://${kind}.fixture.invalid/v1`]) assert.ok(!JSON.stringify(inventory).includes(value), 'Buzz provider private input never advertised');
+      assert.ok(!setupOutput.includes(`fixture-${kind}-private-key`));
+    }
     if (!goose && !buzz) {
       assert.ok(existsSync(join(dir, `${kind}-env-checked`)));
       assert.ok(!readFileSync(join(dir, `${kind}-rpc-methods`), 'utf8').includes('session/set_model'));
@@ -356,6 +360,12 @@ for (const kind of ['goose', 'claude', 'codex', 'custom', 'anthropic', 'openai-c
           assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
           assert.deepEqual(state().actual, actual);
         }
+      }
+      if (buzz) {
+        writeFileSync(join(dir, 'mode'), 'ok');
+        writeFileSync(keyFile, 'wrong-fixture-credential');
+        assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
+        assert.deepEqual(state().actual, actual, 'wrong private credential preserves actual');
       }
       if (!goose) {
         rmSync(keyFile);
