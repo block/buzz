@@ -46,20 +46,20 @@ test('catalog verifies owner/signature/relay/expiry; labels cannot spoof identit
   assert.throws(() => productionAdmission.admit({ relay, publicKey: publicKey(a), transport: 'nip42-nip59', ownerDelegation: false }), /pending/);
 });
 
-for (const scenario of ['external', 'installed', 'v3-conversion']) {
-const installed = scenario !== 'external', converting = scenario === 'v3-conversion';
+for (const scenario of ['external', 'configured', 'installed', 'v3-conversion']) {
+const installed = scenario === 'installed' || scenario === 'v3-conversion', converting = scenario === 'v3-conversion';
 test(`actual owner TUI owner-public credential slots Start/Stop via private transport (${scenario})`, { skip: installed && !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-catalog-tui-')));
   const owner = newKey(), a = newKey(), b = newKey(), agent = newKey();
   const members = new Set([owner, a, b].map(publicKey));
   const relay = await nostrFixture(publicKey(owner), members);
   const one = registration(owner, a, relay.url), two = registration(owner, b, relay.url);
-  const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: [one, two] }, publicKey(owner), relay.url);
+  const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: scenario === 'configured' ? [two] : [one, two] }, publicKey(owner), relay.url);
   const directory = join(root, 'host'); mkdirSync(directory);
   const credentialFile = join(root, 'credentials.json');
   const credentials = isolatedFileCredentials(credentialFile);
   credentials.create(credentialReference('host', publicKey(a)), a);
-  writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: one.request, key: credentialReference('host', publicKey(a)), registration: one });
+  writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: one.request, key: credentialReference('host', publicKey(a)), registration: scenario === 'configured' ? null : one });
   const conversation = installed ? await conversationRelayFixture(root, owner, publicKey(agent)) : undefined;
   provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', ...(!converting ? { conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
   const journalPath = join(directory, 'agents', publicKey(agent), 'journal.json');
@@ -85,7 +85,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   writeFileSync(helper, `import { readFileSync } from 'node:fs'; let input=''; for await (const b of process.stdin) input+=b; const secret=JSON.parse(readFileSync(${JSON.stringify(credentialFile)},'utf8'))[JSON.stringify(JSON.parse(input))]; process.stdout.write(JSON.stringify(secret ? {status:'present',secret} : {status:'missing'}));`);
   const loader = join(root, 'credential-helper-loader.mjs');
   writeFileSync(loader, `import { registerHooks } from 'node:module'; registerHooks({load(url,ctx,next){const r=next(url,ctx); if(!url.endsWith('/src/credential-helper.ts'))return r;return {...r,source:String(r.source).replace("new URL('./credential-helper-child.ts', import.meta.url)", ${JSON.stringify(`new URL(${JSON.stringify('file://' + helper)})`)})};}});`);
-  const hostChild = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'host', directory, ...(installed ? [relay.url] : []), '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root }, stdio: ['ignore','pipe','pipe'] });
+  const hostChild = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), '--import', loader, 'src/cli.ts', 'host', directory, ...(installed ? [relay.url] : []), '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile }, stdio: ['ignore','pipe','pipe'] });
   let hostOutput = ''; hostChild.stdout.on('data', b => hostOutput += b); hostChild.stderr.on('data', b => hostOutput += b);
   const hostExit = new Promise<number | null>(resolve => hostChild.on('close', resolve));
   const running = { async close() { if (hostChild.exitCode === null && hostChild.signalCode === null) hostChild.kill('SIGTERM'); assert.equal(await hostExit, 0, hostOutput); } };
@@ -95,8 +95,8 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   const foreign = connectNostr(relay.url, Buffer.from(b, 'hex'), undefined, m => foreignMessages.push(m), () => {});
   await foreign.ready;
   const path = join(root, 'catalog.json'); writePrivate(path, catalog);
-  const env: NodeJS.ProcessEnv = { ...process.env }; delete env.BUZZ_PRIVATE_KEY; delete env.BUZZ_AUTH_TAG; delete env.BUZZ_RELAY_URL;
-  const child = spawn(process.execPath, ['src/cli.ts', 'tui', path, ...(installed ? [relay.url] : [])], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile };
+  const child = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), 'src/cli.ts', 'tui', path, ...(installed ? [relay.url] : [])], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', b => output += b.toString()); child.stderr.on('data', b => output += b.toString());
   const exit = new Promise<number | null>((done, reject) => { child.on('exit', done); child.on('error', reject); });
   async function wait(predicate: () => boolean) { for (let n = 0; n < (installed ? 3000 : 400); n++) { if (predicate()) return; if (child.exitCode !== null) throw Error(output); await delay(20); } throw Error(`TUI observation timeout: ${output}`); }

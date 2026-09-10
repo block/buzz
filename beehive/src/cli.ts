@@ -64,12 +64,13 @@ Command: beehive <command> from any directory once installed (one-time user link
   auth-info <host-directory> [binding-id]   Print local harness service context (no login)
   conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
-  host --owner-present                     Default host and retained registered relay
+  host --owner-present                     Default host and retained configured relay
   host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
   host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
+  tui discover <relay> <state-directory>   Private availability discovery; no approval file
   tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
-The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval files are automatic in the separately chosen owner exchange folder. catalog <approval-file> saves beside the approval. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match registration.
+The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval files are automatic in the separately chosen owner exchange folder. catalog <approval-file> saves beside the approval. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match retained local configuration.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
@@ -79,7 +80,6 @@ async function main() {
   } else if (command === 'provision-agent' || command === 'reconcile-provision') {
     const directory = setupPath(text(args[0]));
     const identity = readHostIdentity(directory);
-    verifyHostRegistration(identity.registration, identity.pairing);
     const binding = object(readPrivate(setupPath(text(args[1]))));
     if (['host', 'ownerSecret', 'ownerPublic', 'agentSecret'].some(key => Object.hasOwn(binding, key))) throw Error('Local binding file must not carry identity');
     const setup = validateSetup({ ...binding, host: identity.pairing.host, ownerPublic: identity.pairing.owner });
@@ -347,9 +347,9 @@ async function main() {
       if (privateInstallation && !args.includes('--owner-present')) throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
       const credentials = privateInstallation ? { ...systemCredentials, readAsync: credentialHelperReader({ operatorApproved: true }) } : systemCredentials;
       const identity = privateInstallation ? await readHostIdentityAsync(directory, credentials, controller.signal) : undefined;
-      if (identity && identity.pairing.relay !== url) throw Error('Wrong registered host relay; no network request sent');
+      if (identity && identity.pairing.relay !== url) throw Error('Wrong configured host relay; no network request sent');
       const admission = identity ? await verifyProductionAdmission(url, identity.secret, controller.signal) : undefined;
-      const transport = identity ? privateHostTransport(verifyHostRegistration(identity.registration, identity.pairing), identity.secret, admission) : undefined;
+      const transport = identity ? privateHostTransport(identity.pairing, identity.secret, admission) : undefined;
       const running = await host(directory, url, controller.signal, transport, credentials);
       console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
       // The host owns teardown both before and after ready. Observe its one
@@ -373,16 +373,26 @@ async function main() {
     console.log(`Catalog saved: ${file}\nNext on owner computer: beehive tui ${shellQuote(file)}`);
     console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; fresh direct membership verification required when opening tui. Labels are not authority.`);
   } else if (command === 'tui') {
-    const identity = object(readPrivate(setupPath(text(args[0]))));
+    const discovering = args[0] === 'discover';
+    const discoveryRelay = discovering ? text(args[1]) : undefined;
+    if (discovering) { args[0] = join(setupPath(text(args[2])), 'discovery.json'); args[1] = discoveryRelay!; }
+    const discoverySecret = discovering ? await readAgentSecret('Owner') : undefined;
+    const identity = discovering ? { version: 1, owner: publicKey(discoverySecret!), relay: discoveryRelay!, registrations: [] } : object(readPrivate(setupPath(text(args[0]))));
     if (args[1] === undefined && 'registrations' in identity) args[1] = text(identity.relay);
     const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;
-    const secret = catalog ? await readAgentSecret('Owner') : text(identity.secret);
+    const secret = discoverySecret ?? (catalog ? await readAgentSecret('Owner') : text(identity.secret));
     if (catalog && publicKey(secret) !== catalog.owner) throw Error('Wrong catalog owner signer');
     const admission = catalog ? await verifyProductionAdmission(text(args[1]), secret) : undefined;
     const inventory = new Map<string,Message>();
+    const offers = new Map<string,Message>();
+    const hostFresh = (host: string) => !catalog || (offers.has(host) && Date.now() - Number(offers.get(host)!.body.observedAt) <= 6000) || catalog.registrations.some(r => r.request.host === host && Date.now() < r.expires * 1000);
     const profiles = new Profiles();
     const client = managementClient(join(dirname(setupPath(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       profiles.receive(m);
+      if (m.type === 'availability') {
+        const prior = offers.get(m.host);
+        if ((prior || offers.size < 256) && (!prior || Number(m.body.observedAt) > Number(prior.body.observedAt))) offers.set(m.host, m);
+      }
       if (m.type === 'inventory') {
         const key = JSON.stringify([m.host, m.agent]);
         const prior = inventory.get(key);
@@ -419,11 +429,13 @@ async function main() {
           continue;
         }
         if (line === 'hosts') {
+          for (const offer of offers.values()) console.log(`${object(offer.body.configuration).label} | host ${offer.host} | ${Date.now() - Number(offer.body.observedAt) > 6000 ? 'STALE/UNKNOWN' : 'available infrastructure (not agent authorization)'}`);
           if (catalog) for (const r of catalog.registrations) {
+            if (offers.has(r.request.host)) continue;
             const expired = Date.now() >= r.expires * 1000;
             console.log(`${r.request.label} | host ${r.request.host} | ${expired ? 'REGISTRATION EXPIRED / UNKNOWN' : [...inventory.values()].some(m => m.host === r.request.host) ? 'registered infrastructure' : 'UNREACHABLE / UNKNOWN (no host report)'}`);
           }
-          [...inventory.values()].forEach((m, index) => console.log(`${index + 1}. ${m.host} | agent ${m.agent} | assigned ${m.body.assignedHost} | ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 || (catalog && !catalog.registrations.some(r => r.request.host === m.host && Date.now() < r.expires * 1000)) ? 'STALE/UNKNOWN' : 'recent host report'}`)); continue;
+          [...inventory.values()].forEach((m, index) => console.log(`${index + 1}. ${m.host} | agent ${m.agent} | assigned ${m.body.assignedHost} | ${m.body.phase} | ${m.body.readiness} | ${Date.now()-Number(m.body.observedAt) > 6000 || !hostFresh(m.host) ? 'STALE/UNKNOWN' : 'recent host report'}`)); continue;
         }
         if (line === 'agents') {
           const agents = new Set([...inventory.values()].map(m => m.agent));
@@ -460,7 +472,7 @@ async function main() {
         const current = inventory.get(selected);
         if (!current) { console.log('Select an advertised host first.'); continue; }
         if (line === 'show') {
-          if (catalog && (Date.now() - Number(current.body.observedAt) > 6000 || !catalog.registrations.some(r => r.request.host === current.host && Date.now() < r.expires * 1000))) console.log('STALE/UNKNOWN: the following is a historical host report, not current actual state.');
+          if (catalog && (Date.now() - Number(current.body.observedAt) > 6000 || !hostFresh(current.host))) console.log('STALE/UNKNOWN: the following is a historical host report, not current actual state.');
           const next = current.body.selectedNext as any, actual = current.body.actualRun as any;
           const label = (s: any) => `${s?.configuration ? `${s.configuration.name} @ ${s.configuration.revision}` : 'default (legacy/unversioned)'} | behavior ${s?.behavior ? `${s.behavior.name} @ ${s.behavior.revision.slice(0, 12)}` : 'upstream default'}`;
           console.log(`Agent ${current.agent} | host ${current.host} | assigned ${current.body.assignedHost}\nCurrent: ${actual ? label(actual.selection) : 'no actual run'}\nSelected next: ${label(next)} (explicit Restart to apply)\n${JSON.stringify(current,null,2)}`); continue; }

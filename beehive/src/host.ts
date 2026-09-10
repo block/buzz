@@ -559,7 +559,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
 }
 
 /** One installation owns every slot, lock and management transport. */
-export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }, credentials: CredentialBackend = systemCredentials) {
+export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { availability?(): Message; binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }, credentials: CredentialBackend = systemCredentials) {
   signal?.throwIfAborted();
   (transport?.validate ?? validateRelayURL)(url);
   const lock = join(directory, 'host.lock');
@@ -581,7 +581,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
   // Abort uses the same owner as ready shutdown, including quarantine fences.
   const abort = () => { void close().catch(() => {}); };
   try {
-    const entries = await installationSlotsAsync(directory, credentials, signal);
+    const entries = transport && !existsSync(join(directory, 'setup.json')) ? [] : await installationSlotsAsync(directory, credentials, signal);
     signal?.throwIfAborted();
     signal?.addEventListener('abort', abort, { once: true });
     for (const entry of entries) {
@@ -596,18 +596,19 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         return value;
       }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings));
     }
-    const setup = entries[0]!.setup;
+    const setup = entries[0]?.setup;
+    const hostKey = transport?.binding.host ?? setup!.host;
     // Every slot is hydrated before dialing. Initial WS history may arrive in the
     // same event-loop turn as open, before the ready promise continuation.
     initialized = true;
-    client = (transport ? transport.connect.bind(transport) : connect)(url, transport ? '' : text(setup.ownerSecret), m => {
+    client = (transport ? transport.connect.bind(transport) : connect)(url, transport ? '' : text(setup!.ownerSecret), m => {
       if (!initialized) return;
       profiles.receive(m);
-      if (m.host !== setup.host) return;
+      if (m.host !== hostKey) return;
       const selected = slots.get(m.agent); trace('host.route', { id: m.id, type: m.type, selected: !!selected });
       if (selected) selected.receive(m);
       else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }
-      else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',setup.host,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
+      else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',hostKey,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
     }, () => { if (initialized) for (const s of slots.values()) s.replay(); });
     await client.ready;
     signal?.throwIfAborted();
@@ -617,9 +618,10 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
     throw e;
   }
   initialized = true;
+  if (transport?.availability) publish(transport.availability());
   for (const s of slots.values()) s.replay();
-  heartbeat = setInterval(() => { for (const s of slots.values()) s.heartbeat(); }, 2000);
-  return { agent: [...slots.keys()][0]!, agents: [...slots.keys()], close() {
+  heartbeat = setInterval(() => { if (transport?.availability) publish(transport.availability()); for (const s of slots.values()) s.heartbeat(); }, 2000);
+  return { agent: [...slots.keys()][0], agents: [...slots.keys()], close() {
     signal?.removeEventListener('abort', abort);
     return close();
   } };

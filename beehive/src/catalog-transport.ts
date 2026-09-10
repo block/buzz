@@ -1,5 +1,5 @@
 import { connectNostr } from './nostr-client.ts';
-import { catalogHost, catalogResponse, verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
+import { HostOffers, catalogHost, catalogResponse, verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
 import { productionAdmission, type ScopedRelayAdmission } from './relay-admission.ts';
 import { open, publicKey, type Envelope, type Message } from './protocol.ts';
 
@@ -9,6 +9,7 @@ import { open, publicKey, type Envelope, type Message } from './protocol.ts';
 export function catalogTransport(catalog: HostCatalog, admission: ScopedRelayAdmission = productionAdmission) {
   return (url: string, secret: string, receive: (m: Message) => void, recovered?: () => void, disconnected?: (code: number) => void) => {
     const retained = structuredClone(verifyHostCatalog(catalog, publicKey(secret), url));
+    const offers = new HostOffers();
     let closed = false;
     let generation = 0;
     function dial() {
@@ -17,7 +18,7 @@ export function catalogTransport(catalog: HostCatalog, admission: ScopedRelayAdm
       return connectNostr(url, Buffer.from(secret, 'hex'), undefined, input => {
         if (closed || current !== generation) return;
         let m: Message;
-        try { m = catalogResponse(retained, input); } catch { return; }
+        try { m = catalogResponse(retained, input, Math.floor(Date.now() / 1000), offers); } catch { return; }
         receive(m);
       }, () => { if (!closed && current === generation) disconnected?.(1008); });
     }
@@ -26,7 +27,7 @@ export function catalogTransport(catalog: HostCatalog, admission: ScopedRelayAdm
       if (closed) throw Error('UI closed');
       // Profiles need explicit per-host distribution and receipts before enabling.
       if (!['inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) throw Error('Operation not integrated with private host transport');
-      const host = catalogHost(retained, m.host);
+      const host = catalogHost(retained, m.host, Math.floor(Date.now() / 1000), offers);
       const current = generation;
       void wire.publish(m, host.request.host).catch(() => { if (!closed && current === generation) disconnected?.(1008); });
     }
