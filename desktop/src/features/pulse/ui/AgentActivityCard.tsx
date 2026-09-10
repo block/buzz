@@ -6,7 +6,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 type AgentActivityCardProps = {
   group: AgentNoteGroup;
@@ -51,7 +51,7 @@ export function AgentActivityCard({
   agentStatus,
 }: AgentActivityCardProps) {
   const [expanded, setExpanded] = React.useState(false);
-  const displayName = profile?.displayName ?? truncatePubkey(group.pubkey);
+  const displayName = profile?.displayName ?? truncateNpub(group.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
   const isSingleNote = group.notes.length === 1;
 
