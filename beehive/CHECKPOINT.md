@@ -1,134 +1,146 @@
 # Beehive executable checkpoint
 
 Worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440`, branch `beehive/cbfd9440`.
-Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; this continuation starts at
-`c4f30176765bdedd075e9634f33e4d4576ce3619`. Candidate is the commit containing
+Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
+`023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No push/PR/merge/release.
 
-## Implemented: actual signed reply in the isolated installed-binary path
+## Implemented: ordinary multi-conversation Buzz CLI tool authority
 
-Host -> existing installed buzz-acp -> escaping childless ACP shim -> separately
-host-owned ACP fixture harness -> escaping childless MCP shim -> host-resident
-TypeScript MCP adapter -> separately host-owned **actual installed Buzz CLI**.
-The CLI, not Beehive/test publisher code, resolves members/thread and signs/publishes
-an actual reply. The isolated relay verifies canonical event hash, Schnorr signature,
-persistent fixture agent pubkey, channel, parent and sole explicit owner recipient.
-This is legacy kind-9 fixture evidence, NOT current production kind-40002 compatibility,
-real community admission, live Databricks/provider evidence or full product completion.
+Host -> installed buzz-acp -> childless ACP shim -> separately host-owned ACP
+harness -> childless MCP shim -> host-resident TypeScript MCP adapter -> separately
+host-owned installed Buzz CLI. No second chat/agent runtime; no Rust/client edits.
 
-`conversation-setup` optionally provisions a canonical installed Buzz CLI executable
-and a **fixed single-thread channel/parent/owner-recipient grant**. Existing identity,
-provider context and assignment are preserved. No remote executable/env/key/scope
-policy is accepted. The local configuration is frozen at launch; the ACP caller must
-still supply EMPTY MCP provisioning. The broker substitutes only its own fixed
-stdio MCP descriptor, and rejects foreign workspace/executable/env/MCP requests.
+`conversation-setup` optionally provisions only a canonical installed Buzz CLI
+executable. `buzz({argv, stdin})` exposes its native command contract to the model,
+including native help. No local channel/parent/recipient grants and no prompt
+scraping in the host. One persistent agent can answer different conversations
+without another host-admin step. Old single-thread setup objects are explicitly
+rejected with reprovisioning guidance, never silently widened. Executable path/hash,
+agent signer, relay and optional attestation remain host-owned snapshots. Caller
+executable/env/shell/MCP provisioning and identity/relay/attestation flag overrides
+are rejected. Normal CLI file operations have local service-process authority;
+this adapter is not an OS filesystem sandbox or a shell tool.
 
-`src/reply-tool.ts` exposes only `buzz_reply({content})`, during a model-confirmed
-active prompt. No shell, arbitrary CLI argv, file upload or caller-selected destination.
-CLI invocation is fixed `messages send --channel ... --reply-to ... --mention ...
---content -`; content goes through stdin. Mention syntax is conservatively rejected
-so implicit CLI mention resolution cannot widen the sole provisioned recipient.
-Host-local signer/relay/optional attestation override all context. HOME is isolated;
-no owner cache/profile or ambient env inheritance. Raw CLI output is bounded and
-withheld from management/tool diagnostics. MCP is newline stdio only, not HTTP/SSE.
+### Short source-driven comparison / authority choice
 
-**Scope limitation is intentional and explicit:** the tool does not discover dynamic
-per-turn authority. It only replies into the locally provisioned thread, with an
-additional fail-closed check that the upstream prompt contains that channel and
-`--reply-to` instruction. Text parsing cannot enlarge the local grant and is not
-signed-event provenance. General automatic multi-thread routing still needs a real
-request-local scope interface; do not market this one-thread provisioning UX as
-Desktop parity. A prompt for another thread fails rather than silently replying there.
+- Desktop `managed_agents/runtime.rs:290` selects canonical MCP; `:574` injects
+  the agent private key and relay; `:708` injects optional owner attestation.
+- `buzz-acp/src/lib.rs:5894` builds MCP with that agent signer/relay/attestation.
+  `pool.rs:1732` adds git hints, not authoritative per-turn permission metadata.
+- `buzz-dev-mcp/src/lib.rs:168` delegates its buzz personality to the existing CLI.
+- `buzz-acp/src/queue.rs:1380–1407` renders ordinary reply guidance and explicitly
+  permits requested channel-root posts. It does NOT mint a per-turn scope grant.
+- `buzz-cli/src/commands/messages.rs:611–680` owns explicit/implicit mention
+  resolution, member checks, immediate-parent/root lookup and publication.
+- `buzz-cli/src/lib.rs:78–106` identifies relay/private-key/auth-tag override
+  flags; the adapter rejects these while preserving normal command arguments.
 
-## Source-grounded ownership and teardown
+Choice: reuse the CLI/runtime as destination/thread owner and relay membership /
+agent authentication / optional attestation as permission authority, not a second
+controller. Owner-only inbound dispatch remains unchanged. Outgoing mentions need
+not be restricted to the owner when other channel participants are authorized.
+No permissions are manufactured from untrusted model prompt prose. The fixture
+model interprets upstream instructions only to choose tool arguments, as a model
+would; that is not a host authorization decision.
 
-Bounded read at base source:
-- `buzz-acp/src/lib.rs:5894` build_mcp_servers derives stdio executable and signer/relay/
-  attestation env; `pool.rs:1732` adds git-origin hints, not authoritative reply scope.
-- `buzz-acp/src/queue.rs:1383` and following render ordinary reply instructions into
-  prompts; the existing CLI owns actual member/thread resolution and signed publication
-  (`buzz-cli/src/commands/messages.rs:611` and following).
-- **Two deliberate process-group escapes** preclude simply enabling dev MCP:
-  `buzz-agent/src/mcp.rs:758` detaches its MCP subprocess, and
-  `buzz-dev-mcp/src/shell.rs:677` detaches tool shell processes. Directly forwarding
-  dev-mcp would lose host ownership of shell groups on abrupt parent death.
+## Process ownership and model evidence preserved
 
-Only the existing childless stdio shim can escape here. MCP adapter lives in the
-host; every actual CLI invocation uses `spawnOwned`, with retained live group anchor.
-Supervisor now forwards only numeric runner exit code so CLI failure is not confused
-with successful publication. TERM-resistant in-group descendants are killed through
-the living anchor; PID observations never grant kill authority. Stop, cancellation,
-failed startup, CLI failure and MCP disconnect retain/await teardown promises.
-Broker failure starts tool cleanup immediately and final Stop checks the same promise.
-Connections, IDs, frames, calls, stdout/stderr bytes and deadlines are bounded.
-Host IPC loss continues to use the existing anchored group cleanup. Arbitrary trusted
-executables that deliberately escape groups remain outside this POSIX containment claim.
+Upstream `buzz-agent/src/mcp.rs:758` and `buzz-dev-mcp/src/shell.rs:677` deliberately
+detach process groups. Only childless shims may escape here; actual harness and
+CLI launches use separately retained `spawnOwned` anchors. Stop/cancel/disconnect/
+failed startup retain and await teardown, including TERM-resistant descendants.
+No recovered numeric PID confers kill authority. Resource limits bound sockets,
+requests, frames, calls, output and deadlines. Current per-connection request and
+per-run shim/session caps still require future long-running recovery work.
 
-## Review reconciled: B1 optional-setting rejection
+Tool stdout is bounded UTF-8 and returned after anchored cleanup/drain, so reads
+are useful. Stderr is withheld. A normal CLI nonzero exit becomes MCP `isError`,
+not fatal conversation teardown; model can correct a failed member/argument request.
+Containment/protocol errors still fail closed. Exact-model same-session acknowledgement,
+model-before-prompt, malformed-tail fences and actual completed response proof remain.
 
-Consumed independent `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BROKER_REVIEW_C4F30176.md`
-(pinned c4f30176; independent strict + 11/11 and installed replay). It found one
-medium B1: optional non-model config rejection cleared model eligibility permanently.
-Upstream optional effort/permission rejection intentionally falls back rather than
-aborting (`pool.rs:1880–1930`, `1973–2035`). Broker now conservatively re-acknowledges
-the exact session/model BEFORE forwarding the original optional-setting error.
-It does not assume the error had no side effects. Rejected model-setting changes
-remain fail-closed. Production broker tests cover accepted optional setting,
-rejected optional setting then successful prompt, failed re-ack and rejected model
-config sibling. Existing wrong-model/conflict/cancellation/malformed-tail guards remain.
-New MCP code and this B1 fix have NOT received independent delta review yet.
+B1 from independent `BROKER_REVIEW_C4F30176.md` was fixed in the predecessor:
+optional config rejection is followed by exact-model re-ack BEFORE forwarding the
+original error. Existing accepted/rejected optional config, failed re-ack and
+model-changing rejection regressions remain green. Consumed independent `TOOL_REVIEW_023C9274.md` (workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/`): no new high-confidence blocking defect,
+B1 resolved through original/extended independent probes; strict/full12/12 and
+independently verified installed signed publication. Its retained invariants are
+host executable/env/key/relay ownership, childless shims, exact-model fencing,
+distinct tool/ACP/publication evidence and bounded resources. This ordinary-CLI
+delta has NOT yet received independent review. Long-lived request/session cap
+recovery remains explicit subsequent work, not general MCP compatibility.
 
-## Actual executable evidence
+## Observable installed isolated outcome
 
-Installed `/Applications/Buzz.app/Contents/MacOS/buzz-acp` SHA256:
-`10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`.
-Installed `/Applications/Buzz.app/Contents/MacOS/buzz` SHA256:
-`147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5`.
-Binary digests are independent of the source base; neither binary is rebuilt/modified.
+Actual installed binaries (read-only, freshly rehashed):
+- `/Applications/Buzz.app/Contents/MacOS/buzz-acp` SHA256
+  `10612d0025d1420bdd9e9afcc2e7129377da2414e75049a8b640e81d857441ea`
+- `/Applications/Buzz.app/Contents/MacOS/buzz` SHA256
+  `147cc2ccf276ddedc5b84d13f5399a95282066303c9dca566bb2af5a37b856c5`
 
-One isolated run verified NIP-42, two subscriptions, exact-model same-session ACP
-completion, and signed threaded publication:
-- reply `47f814433a621434fc76c8d282f46e3d4c2311081823def7d4aabde281a9dfff`
-- fixture agent `3daf86eecb494ae8db349ea57ca2551c55c02eb3b2b923d54bd653000dbf5522`
-- parent `d5e3633b90efcc7d76f66a1e1f0079c6782c1287e4c7b9aae640414449f3b9be`
-- channel `aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`
+`installed-conversation.test.ts` provisions fresh fixture credentials once, starts
+one installed runtime and uses two authorized channels/threads, then a later owner
+prompt in the first thread. All three actual CLI-published replies have canonical
+hashes, valid Schnorr signatures, the SAME provisioned agent pubkey, expected
+channel/parent, and explicit non-owner member recipient. Later reply references the later owner event, which itself references the original
+root. The installed legacy CLI emits an immediate-parent `e` reply tag only; it
+does not duplicate the root tag (unlike the current source contract). Three native `channels list` reads return useful channel data.
+Non-member mentions fail without publication; a member who is not the configured
+owner cannot trigger a reply. Harness model/session checks occur before every
+prompt. The broker remains healthy after the later turns; owned Stop removes
+harnesses, shims and resistant descendants. Test code never manufactures the agent
+reply. No reconfiguration or new agent key between prompts.
 
-Fixture keys/events change each run and the loopback relay is removed afterward.
-This is reproducible test evidence, not an event on the production relay. Harness,
-MCP shim and resistant descendant PID files are checked absent after Stop. Tests
-never manufacture the expected agent reply; the fixture merely calls the real tool,
-as an LLM would. No provider, OAuth or real-owner credential access occurs.
+One full-suite replay observed agent
+`9aa6385895b9b03438af14e5ede3f947c0e3d71e2eb378b923dd571aec770a26`
+and replies `591297eb4f81d62656c896e7ee4e2b391d5cf971e3790cb6675533113e7ca746`,
+`8de7f8c4b4d15f6edbff7a7ad24cf9f78eb4ac70997bea118435cf197b25fef5`,
+`81f42e7f3a5ed59c151d5152159b30e729eb72cad64b4dd502864ae91680bb41`.
+These are disposable loopback fixture events, not production relay links.
 
-## Validation / next action
+Fixture model remains a fixture. This is installed runtime/CLI execution with
+legacy kind-9 NIP-42/NIP-29 fixture evidence, NOT current production kind-40002,
+real admission, provider/OAuth or Databricks evidence. Explicit hex mentions are
+validated; unresolved implicit display-name mentions are NOT claimed to work.
 
-Hermit Node24.15.0 / pnpm11.4.0. Fresh node_modules and fresh store frozen install
-fetched all seven locked packages from the approved mirror. No new dependencies,
-borrowed modules, global config changes or lockfile delta.
+## Validation
+
+Hermit Node24.15.0 / pnpm11.4.0; standalone registry-agnostic lock unchanged.
+Predecessor fresh-store frozen install fetched all seven locked packages from the
+approved mirror. No dependencies, global config changes or borrowed modules added.
 
 ```
 . ./bin/activate-hermit
 cd beehive
-pnpm install --ignore-workspace --frozen-lockfile --ignore-scripts \
-  --registry https://global.block-artifacts.com/artifactory/api/npm/square-npm/
 npm run check
 BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp npm test
 ```
 
-Full package suite with installed opt-in: **12/12 pass** (including additional
-B1/tool authority/cleanup cases within top-level tests); strict TS and diff check
-pass. Exact candidate is re-run before commit. No repo-wide just ci, production
-operations, owner OAuth, live provider or new independent MCP review.
+Strict TS, complete installed-enabled package suite **12/12**, and diff check pass;
+final candidate rerun before commit. Self-review added legacy-scope opt-in migration,
+UTF-8/drain correctness and explicit relay/attestation/env override negatives. No
+repo-wide `just ci`, production operations, owner credential/profile reads or live
+provider calls. Configured Logan Johnson author/committer and DCO retained; no
+cryptographic signing key configured, so no invented signer/signature claim.
 
-**ONE next executable step:** independently review/replay this pinned fixed-reply
-MCP delta and B1 regression, including the installed isolated signed-reply test,
-before expanding to automatically provisioned per-turn scopes.
+## Remaining product scope / ONE next executable step
 
-Still open: actual community admission/attestation and named-service-user normal
-Databricks v2 OAuth/live model proof; current Buzz protocol compatibility; catalog
-auth ambiguity; general per-turn reply scope (not prompt parsing); reconnect/ACKs,
-durable TUI intents and crash recovery; multiple hosts/agents/setups; profiles;
-key import/revocation; Restart/Move; remaining Desktop harnesses/presets/providers/
-relay-mesh/compute. S1 two-host identity unproven. Selected-next != actual-run;
-stopped identity remains assigned. No remote secrets, credential/workspace/session
-transfer or unreachable-host takeover. Hash/spawn TOCTOU, hostile journals,
-rollback/clones, outbox pruning and stronger OS containment remain outside evidence.
+**Next:** implement durable relay management ACK/reconnect replay with a dropped-
+connection test proving saved intent converges exactly once after host/controller
+reconnect, rather than requiring users to resubmit uncertain lifecycle operations.
+Independent delta review can proceed in parallel against this pinned artifact.
+
+README retains the full parity matrix: reconnect/ACKs/crash recovery; multiple
+hosts/agents/setups and S1 two-host identity; reusable profiles/metadata/history;
+key import/revocation; Restart/Move; other Desktop harness/provider/preset/relay-
+mesh/compute support and final independent real UI review. None is excluded.
+Production admission/protocol and named-service-user normal Databricks v2 OAuth /
+live model remain unproven. The later live gate requires exact named-service-user
+local auth and necessary community admission, not replacement of missing engineering.
+Dedicated management TS relay remains explicit; no hidden privileged lifecycle API.
+Selected-next != actual-run; stopped identity remains assigned. No remote secrets,
+credential/workspace/session transfer or unreachable-host takeover. Hash/spawn
+TOCTOU, hostile journals, rollback/clones, outbox pruning and stronger OS containment
+remain outside evidence.

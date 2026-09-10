@@ -1,6 +1,6 @@
 /** Owned ACP harness fixture: exact session/model, bidirectional RPC, resistant child. */
 import { createInterface } from 'node:readline';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { publicKey } from '../src/protocol.ts';
 const mode = readFileSync('mode', 'utf8');
@@ -8,10 +8,10 @@ let tool: any; let configRejected = false;
 const sessionId = 'conversation-session'; let selected = ''; let prompt: number | undefined;
 writeFileSync('harness-identity', publicKey(process.env.BUZZ_PRIVATE_KEY!));
 writeFileSync('harness-pid', String(process.pid));
-const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setTimeout(()=>{},15000)"], { stdio: 'ignore' });
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setTimeout(()=>{},60000)"], { stdio: 'ignore' });
 writeFileSync('descendant-pid', String(child.pid));
 process.on('SIGTERM', () => {});
-setTimeout(() => process.exit(0), 15000).unref();
+setTimeout(() => process.exit(0), 60000).unref();
 const send = (m: any) => process.stdout.write(JSON.stringify(m) + '\n');
 for await (const line of createInterface({ input: process.stdin })) {
   const m = JSON.parse(line); let result: any;
@@ -52,8 +52,23 @@ for await (const line of createInterface({ input: process.stdin })) {
       await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } });
       mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
       const tools = await rpc('tools/list', {});
-      if (tools.tools[0].name !== 'buzz_reply') throw Error('Missing scoped reply tool');
-      await rpc('tools/call', { name: 'buzz_reply', arguments: { content: 'Private conversation fixture response' } });
+      if (tools.tools[0].name !== 'buzz') throw Error('Missing Buzz CLI tool');
+      // Fixture model interprets upstream instructions, NOT host permission logic.
+      const text = m.params.prompt.map((p: any) => p.text ?? '').join('\n');
+      writeFileSync('last-prompt', text);
+      const parent = [...text.matchAll(/--reply-to ([a-f0-9]{64})/g)].at(-1)?.[1];
+      const channel = [...text.matchAll(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g)].at(-1)?.[0];
+      const recipient = readFileSync('recipient', 'utf8');
+      if (!parent || !channel) throw Error('Fixture model could not interpret routing');
+      const read = await rpc('tools/call', { name: 'buzz', arguments: { argv: ['channels', 'list'] } });
+      if (!JSON.stringify(read).includes(channel)) throw Error('CLI read did not return channel');
+      let rejected = false;
+      try { await rpc('tools/call', { name: 'buzz', arguments: { argv: ['messages', 'send', '--channel', channel, '--reply-to', parent, '--mention', readFileSync('outsider', 'utf8'), '--content', 'must not publish'] } }); }
+      catch { rejected = true; }
+      if (!rejected) throw Error('CLI accepted non-member mention');
+      appendFileSync('rejected-mentions', parent + '\n');
+      await rpc('tools/call', { name: 'buzz', arguments: { argv: ['messages', 'send', '--channel', channel, '--reply-to', parent, '--mention', recipient, '--content', '-'], stdin: 'Private conversation fixture response' } });
+      appendFileSync('completed-tools', parent + '\n');
       // Remain connected until host Stop; the MCP shim has no children.
     }
     const update = { jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Private conversation fixture response' } } } };

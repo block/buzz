@@ -158,7 +158,7 @@ seam remains missing in the external protocol; do not relabel it authenticated.
 An empty/filtered catalog does not prevent trying an explicitly saved exact model;
 only same-session acknowledgement plus completed response establishes probe evidence.
 
-## External conversation setup (fixed-thread reply tool; broader delivery incomplete)
+## External conversation setup (ordinary Buzz CLI tools)
 
 `node src/cli.ts conversation-setup /absolute/existing-host-directory` attaches
 an installed **buzz-acp** and separate conversation relay to the SAME existing
@@ -181,19 +181,29 @@ isolated NIP-42/NIP-29 relay fixture, not a real community or provider. That bin
 subscribes to legacy kind 9; this is not current Buzz relay compatibility evidence.
 **An actual signed threaded reply is now observed** through the installed Buzz CLI
 in that isolated test, with a deterministic ACP harness (not a live model). Local
-`conversation-setup` can optionally provision a canonical Buzz CLI path and one
-fixed channel/parent/owner-recipient scope. The host supplies a narrow stdio MCP
-`buzz_reply({content})` tool during confirmed prompts. It invokes the existing CLI,
-which owns signing, membership and thread semantics. MCP/CLI argv and destinations
-cannot come from relay/ACP callers; foreign provisioning is still rejected.
+`conversation-setup` can optionally provision a canonical Buzz CLI executable.
+The fixed stdio MCP `buzz({argv, stdin})` tool passes native arguments to that CLI
+under the provisioned agent identity. Use its `--help` to discover operations.
+The existing CLI owns member/mention/thread semantics; no local channel, parent,
+or recipient setup is required when another owner conversation arrives.
+Explicit hex `--mention` supports authorized non-owner channel members too.
+Implicit display-name mention behavior remains the installed CLI's contract and
+has not been validated here.
 
-This is deliberately **single-thread local provisioning**, not automatic per-turn
-routing or final UX parity. Another thread fails closed. Mention syntax in content
-is currently unsupported (the host supplies the sole recipient). There is no shell,
-file upload, arbitrary CLI or HTTP/SSE MCP support. No server is launched by an
-escaping subprocess: the MCP shim stays childless and each CLI group has its own
-host-owned anchor. See CHECKPOINT.md for source trace, cleanup and signed evidence.
-The new tool surface still needs independent review.
+The host rejects caller executable/env/MCP provisioning and relay/signer/attestation
+flag overrides. There is no shell parser or HTTP/SSE MCP support. Native CLI
+operations (including file operations) have local service-process authority, not
+an OS sandbox. Old single-thread tool configurations require explicit rerunning of
+`conversation-setup`; they are not silently broadened. MCP shims remain childless
+and every actual CLI group retains its own host anchor through cleanup. Bounded
+stdout reaches the model for reads; stderr stays withheld. Ordinary CLI errors are
+tool errors, not a reason to destroy a healthy conversation.
+
+Installed isolated validation covers two channels/threads and a later prompt in
+the first thread, three signed replies under one agent identity, native channel
+reads, non-member mention rejection and owner-only incoming dispatch. No local
+reconfiguration or key generation occurs between prompts. This new surface still
+needs independent delta review; see CHECKPOINT.md for exact evidence and limits.
 
 Community admission/attestation and normal OAuth in the named host-service context
 remain explicit local/operator actions. No live Databricks request has occurred.
@@ -206,7 +216,7 @@ remain explicit local/operator actions. No live Databricks request has occurred.
 | Host inventory | Real relay, fixed authority, freshness | multiple setups/agents, service install, reconnect/reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
 | Lifecycle | fixture Start/Stop, UI-independent host | strict real launch, Restart, host-owned irreversible Move |
-| Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | general per-turn reply scope, live OAuth/model proof and catalog provenance |
+| Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, production protocol compatibility and catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
 | Ten presets / custom ACP | Not implemented | explicit executable/env trust, preset-specific capability grounding |

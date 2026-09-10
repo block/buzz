@@ -151,7 +151,7 @@ export class ConversationSession {
       PATH: '/usr/bin:/bin', HOME: this.prepared.plan.home,
       BUZZ_PRIVATE_KEY: this.plan.env.BUZZ_PRIVATE_KEY, BUZZ_RELAY_URL: this.plan.env.BUZZ_RELAY_URL,
       ...(this.plan.env.BUZZ_AUTH_TAG ? { BUZZ_AUTH_TAG: this.plan.env.BUZZ_AUTH_TAG } : {}),
-    }, () => this.fail('Scoped Buzz reply tool failed (diagnostics withheld)')) : undefined;
+    }, () => this.fail('Buzz CLI tool failed (diagnostics withheld)')) : undefined;
     if (tool) this.tools.push(tool);
     const pending = new Map<string | number, Pending>();
     const sessions = new Set<string>();
@@ -177,7 +177,7 @@ export class ConversationSession {
         const p = msg.params;
         // Session transport does not grant a shim authority to provision tools,
         // workspaces or credentials. Replace only empty upstream provisioning with
-        // the host-local fixed reply adapter; never forward a supplied command.
+        // the host-local fixed CLI adapter; never forward a supplied command.
         if (['session/new', 'session/load', 'session/resume'].includes(msg.method)) {
           if (p?.cwd !== this.prepared.plan.workspace || !Array.isArray(p.mcpServers) || p.mcpServers.length) throw Error();
           if (tool) p.mcpServers = [tool.descriptor];
@@ -193,14 +193,7 @@ export class ConversationSession {
         if (['session/set_model', 'session/set_config_option'].includes(msg.method)) sessions.delete(p?.sessionId);
         if (msg.method === 'session/prompt') {
           if (!sessions.has(p?.sessionId) || prompts.has(p.sessionId) || msg.id === undefined) throw Error();
-          if (tool) {
-            if (prompts.size) throw Error();
-            // This is a locally pinned single-thread grant, NOT authority parsed
-            // out of user text. Refuse prompts lacking the expected upstream routing
-            // instruction; parsing cannot enlarge the host's fixed destination.
-            const text = JSON.stringify(p.prompt);
-            if (!text.includes(`--reply-to ${this.plan.replyTool!.parent}`) || !text.includes(this.plan.replyTool!.channel)) throw Error();
-          }
+          if (tool && prompts.size) throw Error();
           tool?.setActive(true);
           prompts.set(p.sessionId, { id: msg.id, hash: createHash('sha256'), text: false, cancelled: false });
         }

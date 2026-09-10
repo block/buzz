@@ -49,7 +49,7 @@ strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
   and teardown including TERM-resistant descendants. B1 now tests accepted and
   rejected optional config changes, preserving the original application error only
   after exact-model re-ack; failed re-ack and rejected model configs still fail.
-  Tool-enabled foreign MCP and wrong-thread prompts remain rejected.
+  Tool-enabled foreign MCP provisioning remains rejected; thread arguments now belong to the CLI.
 - `cancellation.test.ts` also exercises the conversation replacement path for
   admitted Stop, host close, non-authority attempts and malformed completions.
 - `installed-conversation.test.ts`: opt-in with
@@ -58,20 +58,22 @@ strict TypeScript checking passed on Node 24.15.0 / pnpm 11.4.0. Keep
   fixture. Verifies actual installed executable AUTH signatures, membership,
   owner mention dispatch, and exact-model same-conversation ACP completion through
   the broker. Its actual kind-9 subscription is respected. No provider is called.
-  An actual signed threaded reply is required through the installed sibling `buzz`
-  CLI and the fixed host MCP adapter. Verifies canonical hash/signature, same agent,
-  channel/parent and sole owner p-tag; absence after Stop includes the MCP shim.
+  Three actual signed replies across two channels and a later prompt in the first
+  thread are required through the installed sibling `buzz` CLI and fixed adapter.
+  Verifies canonical hash/signature, same agent, channel/parent and explicit
+  non-owner member p-tag; native channels list returns useful output, non-member
+  mentions fail, and a non-owner inbound prompt is ignored; absence after Stop includes the MCP shim.
   Test code supplies the owner event and invokes the tool, never signs/publishes the
   expected agent response. This does not test a live LLM deciding to invoke tools.
 - `reply-tool.test.ts`: production stdio adapter under detached childless shim;
-  caller destination/mention expansion and inactive calls cannot spawn a CLI;
+  caller executable/env/signer/relay/attestation overrides and inactive calls cannot spawn a CLI;
   fixed argv/environment; success, cancellation, disconnect, failed startup and
-  CLI error all clean up the shim and any TERM-resistant in-group descendants.
+  CLI error (returned without killing the session) all clean up the shim and any TERM-resistant in-group descendants.
 
 Tests never open existing owner keys/profiles/cache, production services or native
 client resources. With installed opt-in: 12/12 pass; without: 11 pass/1 explicit
 skip. The installed fixture relay does not establish actual community admission,
-current relay compatibility, provider/model attestation or general multi-thread reply delivery.
+current relay compatibility, provider/model attestation. Multi-thread delivery is isolated legacy-binary evidence only.
 
 ## Independent evidence and limits
 
@@ -79,8 +81,10 @@ Prior reviews are in workspace
 `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/EXECUTABLE_REVIEW_{94D1DA0E,6BD85947}.md`.
 Prior c4f30176 broker independently passed strict/11 tests and installed replay in
 `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BROKER_REVIEW_C4F30176.md`. Its B1 optional-config
-finding is fixed with production regressions here. This new fixed-reply MCP delta
-and B1 fix have not yet received independent review. The generic ACP fixture and signed/encrypted WS
+finding is fixed with production regressions here. Independent `TOOL_REVIEW_023C9274.md` found no new blocking defect in the
+predecessor MCP delta and independently confirmed B1 resolved (strict/full12/12,
+original/extended B1 probes and signed installed replay). The new ordinary-CLI
+multi-conversation delta has not yet received independent review. The generic ACP fixture and signed/encrypted WS
 management protocol are different seams; passing them does not prove current
 Buzz relay auth/member/owner semantics.
 
@@ -88,7 +92,7 @@ No full repo `just ci`, multi-host Move, arbitrary escaped descendant containmen
 strong OS sandbox, hostile journal, log-full/reconnect/ACK, rollback, host SIGKILL
 recovery or real provider proof. Genuine ownership loss retains quarantine/lock;
 no stale numeric PID grants cleanup authority. See CHECKPOINT.md for exact next
-executable action and the wired broker, narrow fixed-thread tool, and remaining general per-turn scope gap.
+executable action and the wired broker, ordinary fixed-executable CLI tool, and remaining product scope.
 
 ## Installed executable pins
 
@@ -97,6 +101,5 @@ executable action and the wired broker, narrow fixed-thread tool, and remaining 
 
 Both are read-only `/Applications/Buzz.app/Contents/MacOS/` binaries. Their digests
 are not a claim that they were built from the source base. The MCP adapter supports
-only newline stdio, fixed content-only reply calls, and host-local single-thread
-scope. Optional local attestation is forwarded using the normal CLI environment;
+newline stdio and native CLI argv/stdin, with host-owned executable/identity/relay. Optional local attestation is forwarded using the normal CLI environment;
 no live admission/delegation policy proof is claimed from the fixture relay.

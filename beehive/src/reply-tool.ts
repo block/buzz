@@ -1,4 +1,5 @@
 import { createServer, type Socket } from 'node:net';
+import { finished } from 'node:stream/promises';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,15 +7,15 @@ import { randomBytes, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
-/** Local-only, single-thread reply authority. No scope or executable comes from ACP. */
-export type ReplyToolSetup = { executable: string; channel: string; parent: string; recipient: string };
-/** Snapshot the explicitly provisioned CLI and reply destination before launching anything. */
+/** Local-only executable provisioning. CLI and relay retain conversation authority. */
+export type ReplyToolSetup = { executable: string };
+/** Snapshot the explicitly provisioned CLI before launching anything. */
 export function prepareReplyTool(input: ReplyToolSetup) {
+  if (Object.keys(input).some(k => k !== 'executable')) throw Error('Legacy scoped tool setup requires explicit conversation-setup reprovisioning');
   if (!isAbsolute(input.executable) || realpathSync(input.executable) !== input.executable) throw Error('Reply CLI must be a canonical absolute path');
   accessSync(input.executable, constants.X_OK);
   if (!statSync(input.executable).isFile()) throw Error('Reply CLI must be a regular file');
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.channel) || !/^[a-f0-9]{64}$/.test(input.parent) || !/^[a-f0-9]{64}$/.test(input.recipient)) throw Error('Invalid local reply scope');
-  return Object.freeze({ executable: input.executable, channel: input.channel, parent: input.parent, recipient: input.recipient,
+  return Object.freeze({ executable: input.executable,
     executableHash: createHash('sha256').update(readFileSync(input.executable)).digest('hex') });
 }
 
@@ -40,15 +41,16 @@ export class ReplyTool {
   private plan; private cwd; private env; private fail;
   constructor(path: string, plan: ReturnType<typeof prepareReplyTool>, cwd: string, env: NodeJS.ProcessEnv, fail: () => void) {
     this.plan = plan; this.cwd = cwd; this.env = Object.freeze({ ...env }); this.fail = fail;
-    this.descriptor = Object.freeze({ name: 'beehive-buzz-reply', command: process.execPath,
+    this.descriptor = Object.freeze({ name: 'beehive-buzz', command: process.execPath,
       args: [fileURLToPath(new URL('./acp-shim.ts', import.meta.url)), path, this.capability], env: [] });
     this.server.on('error', fail);
     this.ready = new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(path, resolve); });
     void this.ready.catch(fail);
   }
-  /** Only a model-confirmed active ACP prompt can exercise the local reply grant. */
+  /** Only a model-confirmed active ACP prompt can exercise the provisioned tool. */
   setActive(active: boolean) {
     this.active = active;
+    if (active) this.calls = 0;
     if (!active && this.current) void this.stopOwned(this.current).catch(this.fail);
   }
   private stopOwned(p: OwnedProcess) {
@@ -83,37 +85,43 @@ export class ReplyTool {
           if (!(typeof m.id === 'number' && Number.isSafeInteger(m.id)) && !(typeof m.id === 'string' && m.id.length <= 200)) throw Error();
           if (ids.has(m.id)) throw Error();
           ids.add(m.id);
-          if (m.method === 'initialize') send(m.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'beehive-buzz-reply', version: '0.0.1' } });
-          else if (m.method === 'tools/list') send(m.id, { tools: [{ name: 'buzz_reply', description: 'Send an ordinary reply using the actual Buzz CLI to the locally authorized channel, parent and recipient. Destination is fixed by the host, not by tool arguments. Mention syntax (@, nostr URIs, npub/nprofile) is unsupported; the host supplies the sole explicit recipient.', inputSchema: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 16384 } }, required: ['content'], additionalProperties: false } }] });
+          if (m.method === 'initialize') send(m.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'beehive-buzz', version: '0.0.1' } });
+          else if (m.method === 'tools/list') send(m.id, { tools: [{ name: 'buzz', description: 'Run the installed Buzz CLI under your provisioned agent identity. Supply native argv without the executable, and optional stdin. Use --help for the CLI contract. CLI/relay enforce membership and resolve mentions and threads. Relay, signer and attestation are host-owned; no shell or environment overrides. Use explicit hex --mention for reliable notification.', inputSchema: { type: 'object', properties: { argv: { type: 'array', items: { type: 'string' }, maxItems: 128 }, stdin: { type: 'string', maxLength: 16384 } }, required: ['argv'], additionalProperties: false } }] });
           else if (m.method === 'ping') send(m.id, {});
           else if (m.method === 'tools/call') {
             const args = m.params?.arguments;
-            if (!this.active || this.busy || ++this.calls > 8 || m.params?.name !== 'buzz_reply' || !args || Object.keys(args).length !== 1 || typeof args.content !== 'string' || !args.content.trim() || Buffer.byteLength(args.content) > 16384 || /@|nostr:|npub1|nprofile1/i.test(args.content)) throw Error();
+            if (!this.active || this.busy || ++this.calls > 32 || m.params?.name !== 'buzz' || !args || Object.keys(args).some(k => !['argv', 'stdin'].includes(k)) || !Array.isArray(args.argv) || args.argv.length > 128 || args.argv.some((a: unknown) => typeof a !== 'string' || a.includes('\0') || /^(--relay|--private-key|--auth-tag)(=|$)/.test(a)) || (args.stdin !== undefined && (typeof args.stdin !== 'string' || Buffer.byteLength(args.stdin) > 16384)) || Buffer.byteLength(JSON.stringify(args)) > 32768) throw Error();
             this.busy = true;
-            void this.call(args.content).then(() => send(m.id, { content: [{ type: 'text', text: 'Buzz CLI accepted the scoped reply.' }] }), () => { send(m.id, { isError: true, content: [{ type: 'text', text: 'Buzz reply failed; diagnostics withheld.' }] }); this.fail(); }).finally(() => { this.busy = false; });
+            void this.call(args.argv, args.stdin ?? '').then(result => send(m.id, result), () => { send(m.id, { isError: true, content: [{ type: 'text', text: 'Buzz tool execution failed.' }] }); this.fail(); }).finally(() => { this.busy = false; });
           } else throw Error();
         }
       } catch { socket.destroy(); this.fail(); }
     });
   }
-  private async call(content: string) {
+  private async call(argv: string[], content: string) {
     if (this.closed || !this.active) throw Error();
-    const p = spawnOwned(this.plan.executable, ['messages', 'send', '--channel', this.plan.channel, '--reply-to', this.plan.parent, '--mention', this.plan.recipient, '--content', '-'], this.cwd, this.env);
+    const p = spawnOwned(this.plan.executable, argv, this.cwd, this.env);
     this.owned.push(p); this.current = p;
-    let bytes = 0;
-    const account = (chunk: Buffer) => { bytes += chunk.length; if (bytes > 128 * 1024) this.fail(); };
+    let bytes = 0; let stdout = '';
+    p.child.stdout.setEncoding('utf8');
+    p.child.stdout.on('data', (chunk: string) => { if (bytes + Buffer.byteLength(chunk) <= 128 * 1024) stdout += chunk; });
+    const account = (chunk: Buffer | string) => { bytes += Buffer.byteLength(chunk); if (bytes > 128 * 1024) this.fail(); };
     p.child.stdout.on('data', account); p.child.stderr.on('data', account);
     p.child.stdin.on('error', () => this.fail());
     // Supervisor forwards the actual runner exit code, not its own anchor exit.
-    const completion = new Promise<void>((resolve, reject) => {
+    const completion = new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => reject(Error('Reply timed out')), 10_000);
-      p.child.on('message', (m: any) => { if (m?.type === 'runner-exit' || m?.type === 'runner-error') { clearTimeout(timer); m.type === 'runner-exit' && m.code === 0 ? resolve() : reject(Error('Reply CLI failed')); } });
+      p.child.on('message', (m: any) => { if (m?.type === 'runner-exit' || m?.type === 'runner-error') { clearTimeout(timer); m.type === 'runner-exit' && Number.isInteger(m.code) ? resolve(m.code) : reject(Error('Buzz CLI failed')); } });
       p.child.once('error', () => { clearTimeout(timer); reject(Error('Reply unavailable')); });
     });
     void completion.catch(() => {});
     await p.ready; p.child.stdin.end(content);
-    try { await completion; } finally { this.current = undefined; }
-    await this.stopOwned(p);
+    try {
+      const code = await completion;
+      await this.stopOwned(p);
+      await finished(p.child.stdout, { signal: AbortSignal.timeout(1000) });
+      return { ...(code ? { isError: true } : {}), content: [{ type: 'text', text: stdout || `Buzz CLI exited ${code}; stderr withheld.` }] };
+    } finally { this.current = undefined; await this.stopOwned(p); }
   }
   /** Retain all anchors through teardown; no recovered numeric PID is kill authority. */
   stop() {

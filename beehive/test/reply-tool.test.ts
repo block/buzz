@@ -11,8 +11,8 @@ import { ReplyTool, prepareReplyTool } from '../src/reply-tool.ts';
 const scope = { executable: realpathSync(process.execPath), channel: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', parent: 'a'.repeat(64), recipient: 'b'.repeat(64) };
 const absent = (pid: number) => { try { process.kill(pid, 0); return false; } catch (e) { return (e as NodeJS.ErrnoException).code === 'ESRCH'; } };
 
-test('fixed reply MCP rejects caller authority and owns CLI descendants on success, cancel, disconnect and failure', async () => {
-  for (const mode of ['success', 'cancel', 'disconnect', 'failure', 'startup', 'destination', 'mention', 'inactive']) {
+test('fixed Buzz CLI MCP rejects caller authority and owns CLI descendants on success, cancel, disconnect and failure', async () => {
+  for (const mode of ['success', 'cancel', 'disconnect', 'failure', 'startup', 'executable', 'identity', 'environment', 'relay', 'attestation', 'inactive']) {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-tool-')));
     // Node executes this extensionless JS-subset TypeScript fixture as its fixed
     // "messages" program. Production passes the very same argv to real Buzz CLI.
@@ -25,10 +25,11 @@ test('fixed reply MCP rejects caller authority and owns CLI descendants on succe
       process.stdin.resume();
       process.stdin.on('end', () => { ${mode === 'success' ? 'setTimeout(()=>process.exit(0),100)' : mode === 'failure' ? 'process.exit(2)' : "process.on('SIGTERM',()=>{});setTimeout(()=>process.exit(0),15000)"} });
     `);
-    let plan = prepareReplyTool(scope);
+    assert.throws(() => prepareReplyTool(scope), /reprovisioning/);
+    let plan = prepareReplyTool({ executable: scope.executable });
     if (mode === 'startup') {
       const executable = join(dir, 'unavailable'); writeFileSync(executable, '', { mode: 0o700 });
-      plan = prepareReplyTool({ ...scope, executable }); chmodSync(executable, 0o600);
+      plan = prepareReplyTool({ executable }); chmodSync(executable, 0o600);
     }
     let failed = false;
     const tool = new ReplyTool(join(dir, 'mcp'), plan, dir, { PATH: '/usr/bin:/bin', BUZZ_PRIVATE_KEY: 'fixture-only' }, () => { failed = true; void tool.stop().catch(() => {}); });
@@ -44,12 +45,12 @@ test('fixed reply MCP rejects caller authority and owns CLI descendants on succe
       shim.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
     try {
-      assert.equal((await rpc('initialize', {})).serverInfo.name, 'beehive-buzz-reply');
+      assert.equal((await rpc('initialize', {})).serverInfo.name, 'beehive-buzz');
       assert.equal((await rpc('tools/list', {})).tools.length, 1);
       tool.setActive(mode !== 'inactive');
-      const call = rpc('tools/call', { name: 'buzz_reply', arguments: { content: mode === 'mention' ? '@other' : 'fixture', ...(mode === 'destination' ? { channel: 'arbitrary' } : {}) } });
+      const call = rpc('tools/call', { name: 'buzz', arguments: { argv: mode === 'identity' ? ['--private-key=foreign'] : mode === 'relay' ? ['--relay', 'ws://foreign.invalid'] : mode === 'attestation' ? ['--auth-tag=foreign'] : ['messages', 'send', '--channel', scope.channel, '--reply-to', scope.parent, '--mention', scope.recipient, '--content', '-'], stdin: 'fixture', ...(mode === 'executable' ? { executable: '/bin/sh' } : mode === 'environment' ? { env: { BUZZ_PRIVATE_KEY: 'foreign' } } : {}) } });
       void call.catch(() => {});
-      if (['destination', 'mention', 'inactive', 'startup'].includes(mode)) {
+      if (['executable', 'identity', 'environment', 'relay', 'attestation', 'inactive', 'startup'].includes(mode)) {
         for (let i = 0; i < 100 && !failed; i++) await delay(10);
         assert.ok(failed); assert.ok(!existsSync(join(dir, 'argv')));
       } else {
@@ -58,7 +59,7 @@ test('fixed reply MCP rejects caller authority and owns CLI descendants on succe
         if (mode === 'success') assert.ok(!(await call).isError);
         else if (mode === 'cancel') tool.setActive(false);
         else if (mode === 'disconnect') shim.stdin.end();
-        else { for (let i = 0; i < 100 && !failed; i++) await delay(10); assert.ok(failed); }
+        else { assert.ok((await call).isError); assert.equal(failed, false); }
         assert.deepEqual(JSON.parse(readFileSync(join(dir, 'argv'), 'utf8')), ['send', '--channel', scope.channel, '--reply-to', scope.parent, '--mention', scope.recipient, '--content', '-']);
         assert.equal(readFileSync(join(dir, 'identity'), 'utf8'), 'fixture-only');
       }

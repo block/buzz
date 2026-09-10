@@ -18,7 +18,6 @@ export type ConversationPlan = ReturnType<typeof prepareConversation>;
 export function prepareConversation(input: ConversationSetup, agent: AgentLaunch, agentSecret: string, owner: string) {
   const prepared = prepareAgent(agent);
   const agentPublicKey = publicKey(agentSecret);
-  if (input.replyTool && input.replyTool.recipient !== owner) throw Error('This reply tool supports the explicit owner recipient only');
   if (!/^[a-f0-9]{64}$/.test(owner)) throw Error('Invalid conversation owner public key');
   if (!isAbsolute(input.executable) || realpathSync(input.executable) !== input.executable) throw Error('Conversation executable must be a canonical absolute path');
   accessSync(input.executable, constants.X_OK);
@@ -57,5 +56,5 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
 
 /** Safe remote summary. Credentials and executable paths are never included. */
 export function conversationSummary(setup: ConversationSetup) {
-  return { replyTool: setup.replyTool ? 'fixed-owner-thread' : 'disabled', transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'host-owned ACP broker; awaiting conversation evidence' };
+  return { replyTool: setup.replyTool ? 'agent-cli' : 'disabled', transport: 'external-buzz-acp', admission: 'unverified', modelEvidence: 'not-observed', launch: 'host-owned ACP broker; awaiting conversation evidence' };
 }
