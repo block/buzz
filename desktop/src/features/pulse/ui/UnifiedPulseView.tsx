@@ -1,4 +1,4 @@
-import { ArrowUp, Bot, Hash, Inbox, MessageCircle, Search } from "lucide-react";
+import { ArrowUp, Inbox, Search } from "lucide-react";
 import * as React from "react";
 import { TerminalSurfaceContext } from "@/features/terminal/TerminalSurfaceContext";
 import { useTerminalPanel } from "@/features/terminal/terminalPanelStore";
@@ -6,7 +6,6 @@ import { cn } from "@/shared/lib/cn";
 import { useUnifiedPulseFeed } from "@/features/pulse/useUnifiedPulseFeed";
 import {
   matchesPulseFilter,
-  type FeedFilter,
   type PulseConversation,
 } from "@/features/pulse/lib/unifiedFeed";
 import { Button } from "@/shared/ui/button";
@@ -14,10 +13,15 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 import { ConversationCard } from "./ConversationCard";
+import {
+  isPulseWorkspacePage,
+  type PulseView,
+  PULSE_WORKSPACE_KEYS,
+  CLEAR_WORKSPACE_PANELS,
+} from "../lib/workspaceNavigation";
+import { PulseWorkspacePage } from "./PulseWorkspacePage";
 import { PulseCombinedView } from "./PulseCombinedView";
 import { PulseVariationMenu } from "./PulseVariationMenu";
-import { PulseDmView } from "./PulseDmView";
-import { PulseChannelsView } from "./PulseChannelsView";
 import {
   CLEAR_CONVERSATION_PANELS,
   PULSE_CONVERSATION_KEYS,
@@ -33,22 +37,7 @@ const FEED_SEARCH_KEYS = [
   "feed",
   "layout",
   ...PULSE_CONVERSATION_KEYS,
-] as const;
-
-type PulseView = FeedFilter | "search" | "conversation";
-
-const separateFilters = [
-  { id: "search", label: "Search", icon: Search },
-  { id: "all", label: "For you", icon: Inbox },
-  { id: "dm", label: "DMs", icon: MessageCircle },
-  { id: "channel", label: "Channels", icon: Hash },
-  { id: "agent", label: "Agents", icon: Bot },
-] as const;
-
-const combinedFilters = [
-  { id: "search", label: "Search", icon: Search },
-  { id: "all", label: "For you", icon: Inbox },
-  { id: "conversation", label: "Conversations", icon: MessageCircle },
+  ...PULSE_WORKSPACE_KEYS,
 ] as const;
 
 export function UnifiedPulseView({
@@ -65,17 +54,39 @@ export function UnifiedPulseView({
   const terminalPanel = useTerminalPanel();
   const expanded =
     terminalPanel.mode !== "closed" ||
-    Boolean(values.channelManagement || values.profile || values.agentSession);
-  const combined = values.layout === "combined";
-  const filters = combined ? combinedFilters : separateFilters;
-  const filter: PulseView = filters.some((f) => f.id === values.feed)
-    ? (values.feed as PulseView)
-    : "all";
+    Boolean(
+      values.channelManagement ||
+        values.profile ||
+        values.profilePersona ||
+        values.agentSession,
+    );
+  const combined = values.layout !== "separate";
+  const filter: PulseView = isPulseWorkspacePage(values.feed)
+    ? values.feed
+    : values.feed === "search"
+      ? "search"
+      : values.feed && values.feed !== "all"
+        ? "conversation"
+        : "all";
+  React.useEffect(() => {
+    if (values.feed === "dm" || values.feed === "channel") {
+      applyPatch(
+        {
+          feed: "conversation",
+          conversation: values.feed === "dm" ? values.dm : values.channel,
+          dm: null,
+          channel: null,
+        },
+        { replace: true },
+      );
+    }
+  }, [values.feed, values.dm, values.channel, applyPatch]);
   const setFilter = (next: PulseView) => {
     if (!allowNavigation({ kind: "route", href: `/pulse?feed=${next}` }))
       return false;
     applyPatch({
       ...CLEAR_CONVERSATION_PANELS,
+      ...CLEAR_WORKSPACE_PANELS,
       feed: next === "all" ? null : next,
     });
     setBriefingFilter(null);
@@ -86,14 +97,10 @@ export function UnifiedPulseView({
     if (!allowNavigation({ kind: "route", href: `/pulse?layout=${next}` }))
       return;
     applyPatch({
-      ...CLEAR_CONVERSATION_PANELS,
-      layout: next === "combined" ? "combined" : null,
-      feed: next === "combined" ? "conversation" : null,
+      layout: next === "combined" ? null : "separate",
     });
     setBriefingFilter(null);
   };
-  const isSplitView =
-    filter === "dm" || filter === "channel" || filter === "conversation";
   const [search, setSearch] = React.useState("");
   const [scrollElement, setScrollElement] =
     React.useState<HTMLDivElement | null>(null);
@@ -153,7 +160,7 @@ export function UnifiedPulseView({
     .filter((item) =>
       matchesPulseFilter(
         item,
-        filter === "search" || filter === "conversation" ? "all" : filter,
+        "all",
         false,
         false,
         filter === "search" ? search : "",
@@ -206,6 +213,7 @@ export function UnifiedPulseView({
           renderItem={(item) => (
             <ConversationCard
               item={item}
+              divider={filter === "conversation"}
               currentPubkey={currentPubkey}
               profiles={feed.profiles}
               onRefresh={() => void refresh()}
@@ -319,23 +327,7 @@ export function UnifiedPulseView({
           </Button>
         </div>
       )}
-      {filter === "dm" ? (
-        <PulseDmView
-          channels={feed.channels}
-          currentPubkey={currentPubkey}
-          search={""}
-        />
-      ) : filter === "channel" ? (
-        <PulseChannelsView
-          channels={feed.channels}
-          search={""}
-          scrollRef={setScrollElement}
-        >
-          {feedContent}
-        </PulseChannelsView>
-      ) : filter !== "all" ? (
-        feedContent
-      ) : null}
+      {filter !== "all" ? feedContent : null}
     </>
   );
   return (
@@ -349,41 +341,11 @@ export function UnifiedPulseView({
       <div
         data-testid="pulse-main-container"
         className={cn(
-          "relative mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[24px] border border-border/40 bg-background",
+          "relative mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[24px] bg-background",
           !expanded && "max-w-[960px]",
         )}
         data-expanded={expanded}
       >
-        {!combined && (
-          <div className="z-20 flex shrink-0 items-center border-b border-border/50 bg-background px-3 sm:px-5">
-            <div className="min-w-0 flex-1 overflow-x-auto">
-              <fieldset
-                aria-label="Pulse views"
-                data-testid="pulse-tabs"
-                className="flex min-w-max"
-              >
-                {filters.map(({ id, label, icon: Icon }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    aria-pressed={filter === id}
-                    onClick={() => setFilter(id)}
-                    className={`relative flex flex-1 items-center justify-center gap-2 whitespace-nowrap px-3 py-4 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${filter === id ? "text-foreground" : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"}`}
-                  >
-                    <Icon aria-hidden className="h-4 w-4" />
-                    {label}
-                    {filter === id && (
-                      <span
-                        aria-hidden
-                        className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-primary"
-                      />
-                    )}
-                  </button>
-                ))}
-              </fieldset>
-            </div>
-          </div>
-        )}
         <PulseVariationMenu
           value={combined ? "combined" : "separate"}
           onChange={setVariation}
@@ -392,28 +354,25 @@ export function UnifiedPulseView({
         />
         <div className="pulse-conversation-workspace flex min-h-0 flex-1">
           <div
-            className={`min-h-0 min-w-0 flex-1 ${combined || isSplitView ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
-            ref={combined || isSplitView ? undefined : setScrollElement}
+            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
             data-testid="pulse-scroll-area"
           >
-            {combined ? (
-              <PulseCombinedView
-                channels={feed.channels}
-                conversations={feed.conversations}
-                currentPubkey={currentPubkey}
-                scrollRef={setScrollElement}
-                view={
-                  filter === "search" || filter === "all"
-                    ? filter
-                    : "conversation"
-                }
-                onSelectView={setFilter}
-              >
-                {content}
-              </PulseCombinedView>
-            ) : (
-              content
-            )}
+            <PulseCombinedView
+              grouped={!combined}
+              channels={feed.channels}
+              conversations={feed.conversations}
+              currentPubkey={currentPubkey}
+              scrollRef={setScrollElement}
+              view={filter}
+              workspaceContent={
+                isPulseWorkspacePage(filter) ? (
+                  <PulseWorkspacePage page={filter} />
+                ) : undefined
+              }
+              onSelectView={setFilter}
+            >
+              {content}
+            </PulseCombinedView>
           </div>
           <div
             className="pulse-terminal-side-host"

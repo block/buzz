@@ -1,4 +1,9 @@
 import * as React from "react";
+import { parseProjectDetailSearch } from "@/features/projects/lib/projectDetailSearch";
+import {
+  parseWorkflowEditorPane,
+  serializeWorkflowEditorPane,
+} from "@/features/workflows/ui/workflowEditorPane";
 import { createFileRoute } from "@tanstack/react-router";
 
 import {
@@ -15,9 +20,14 @@ const PulseScreen = React.lazy(async () => {
   return { default: module.PulseScreen };
 });
 
-type PulseRouteSearch = {
+type PulseRouteSearch = ReturnType<typeof parseProjectDetailSearch> & {
+  projectId?: string;
+  workflowId?: string;
+  profilePersona?: string;
+  view?: "create" | "edit" | "duplicate";
+  pane?: string;
   feed?: string;
-  layout?: "combined";
+  layout?: "combined" | "separate";
   conversation?: string;
   dm?: string;
   channel?: string;
@@ -40,12 +50,35 @@ function validatePulseSearch(
       ? search[key]
       : undefined;
   return {
-    feed: ["search", "dm", "channel", "agent", "conversation"].includes(
-      String(search.feed),
-    )
+    ...parseProjectDetailSearch(search),
+    projectId: stringValue("projectId"),
+    workflowId: stringValue("workflowId"),
+    profilePersona: stringValue("profilePersona"),
+    view:
+      search.view === "create" ||
+      search.view === "edit" ||
+      search.view === "duplicate"
+        ? search.view
+        : undefined,
+    pane: serializeWorkflowEditorPane(parseWorkflowEditorPane(search.pane)),
+    feed: [
+      "search",
+      "dm",
+      "channel",
+      "agent",
+      "conversation",
+      "projects",
+      "agents",
+      "workflows",
+    ].includes(String(search.feed))
       ? String(search.feed)
       : undefined,
-    layout: search.layout === "combined" ? "combined" : undefined,
+    layout:
+      search.layout === "separate"
+        ? "separate"
+        : search.layout === "combined"
+          ? "combined"
+          : undefined,
     conversation: stringValue("conversation"),
     dm: stringValue("dm"),
     channel: stringValue("channel"),

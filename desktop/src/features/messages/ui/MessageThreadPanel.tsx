@@ -44,6 +44,9 @@ import type { ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadRow } from "./MessageThreadRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { ThreadReplyRegion } from "./MessageThreadReplyState";
+import { MessageBubbleContext } from "./MessageBubbleContext";
+import { BubbleAvatarScope } from "./BubbleAvatarScope";
+import { TimelineTypingIndicator } from "./TimelineTypingIndicator";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
@@ -230,8 +233,10 @@ export function MessageThreadPanel({
   const hasConstrainedColumn = columnMaxWidthPx != null;
   // Whether the composer dock trades its quiet-state spacer for the
   // conditional activity accessory (agent working and/or someone typing).
+  const inlineTyping = React.useContext(MessageBubbleContext) !== null;
   const hasComposerBottomActivity =
-    activityAccessoryVisible || threadTypingPubkeys.length > 0;
+    activityAccessoryVisible ||
+    (!inlineTyping && threadTypingPubkeys.length > 0);
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -599,7 +604,10 @@ export function MessageThreadPanel({
         ) : null}
 
         <div
-          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
+          className={cn(
+            THREAD_PANEL_MESSAGE_GUTTER_CLASS,
+            inlineTyping ? "pb-0 pt-0" : "pb-3 pt-0",
+          )}
           data-testid="message-thread-replies"
         >
           <ThreadReplyRegion
@@ -698,6 +706,10 @@ export function MessageThreadPanel({
                             huddleMemberPubkeysPending
                           }
                           isContinuation={isContinuation}
+                          isFollowedByContinuation={
+                            threadReplyRenderItems[index + 1]?.isContinuation ??
+                            false
+                          }
                           isUnread={isMessageUnreadById?.(entry.message.id)}
                           message={entry.message}
                           onCollapseDepthGuide={handleCollapseDepthGuide}
@@ -789,6 +801,17 @@ export function MessageThreadPanel({
             }
           />
         </div>
+        {inlineTyping && (
+          <div className={THREAD_PANEL_MESSAGE_GUTTER_CLASS}>
+            <TimelineTypingIndicator
+              key={threadHead.id}
+              channel={channel}
+              currentPubkey={currentPubkey}
+              profiles={profiles}
+              typingPubkeys={threadTypingPubkeys}
+            />
+          </div>
+        )}
       </div>
     </AuxiliaryPanelBody>
   );
@@ -880,7 +903,7 @@ export function MessageThreadPanel({
                     {activityAccessoryContent}
                   </div>
                 ) : null}
-                {threadTypingPubkeys.length > 0 ? (
+                {!inlineTyping && threadTypingPubkeys.length > 0 ? (
                   <TypingIndicatorRow
                     channel={channel}
                     className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
@@ -929,7 +952,12 @@ export function MessageThreadPanel({
         transparentChrome={transparentChrome}
         widthPx={widthPx}
       >
-        {threadScrollRegion}
+        <BubbleAvatarScope
+          lastMessage={deferredThreadReplies.at(-1)?.message ?? threadHead}
+          typingPubkeys={inlineTyping ? threadTypingPubkeys : []}
+        >
+          {threadScrollRegion}
+        </BubbleAvatarScope>
       </AuxiliaryPanel>
     </VideoReviewNavigationProvider>
   );

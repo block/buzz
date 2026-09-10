@@ -89,6 +89,7 @@ export const MessageRow = React.memo(
     collapseDescendantsLabel,
     isFollowingThread,
     isContinuation = false,
+    isFollowedByContinuation = false,
     isUnread,
     layoutVariant = "default",
     message,
@@ -131,6 +132,7 @@ export const MessageRow = React.memo(
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
     isContinuation?: boolean;
+    isFollowedByContinuation?: boolean;
     isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
@@ -464,9 +466,8 @@ export const MessageRow = React.memo(
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedRem = isThreadReplyLayout ? 0.25 : 0;
-    const avatarButtonRadiusClass = isAuthorAgent
-      ? "rounded-[30%]"
-      : "rounded-full";
+    const avatarButtonRadiusClass =
+      isAuthorAgent && !bubbleLayout ? "rounded-[30%]" : "rounded-full";
 
     const showRespondToIndicator =
       message.respondTo === "anyone" || message.respondTo === "allowlist";
@@ -478,7 +479,7 @@ export const MessageRow = React.memo(
           avatarUrl={message.avatarUrl ?? null}
           className="shrink-0"
           displayName={message.author}
-          shape={isAuthorAgent ? "squircle" : "circle"}
+          shape={isAuthorAgent && !bubbleLayout ? "squircle" : "circle"}
           testId="message-avatar"
         />
         {showRespondToIndicator &&
@@ -529,27 +530,28 @@ export const MessageRow = React.memo(
       </div>
     );
 
-    const avatarGutterNode = isDisplayedAsContinuation ? (
-      continuationTimestampGutter
-    ) : message.pubkey ? (
-      <UserProfilePopover
-        pubkey={message.pubkey}
-        role={profilePopoverRole}
-        botIdenticonValue={message.author}
-      >
-        <button
-          className={cn(
-            "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-            avatarButtonRadiusClass,
-          )}
-          type="button"
+    const avatarGutterNode =
+      isDisplayedAsContinuation && !bubbleLayout ? (
+        continuationTimestampGutter
+      ) : message.pubkey ? (
+        <UserProfilePopover
+          pubkey={message.pubkey}
+          role={profilePopoverRole}
+          botIdenticonValue={message.author}
         >
-          {avatarNode}
-        </button>
-      </UserProfilePopover>
-    ) : (
-      <div className="flex shrink-0 items-start">{avatarNode}</div>
-    );
+          <button
+            className={cn(
+              "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              avatarButtonRadiusClass,
+            )}
+            type="button"
+          >
+            {avatarNode}
+          </button>
+        </UserProfilePopover>
+      ) : (
+        <div className="flex shrink-0 items-start">{avatarNode}</div>
+      );
 
     const authorNode = message.pubkey ? (
       <MessageAuthorText
@@ -566,12 +568,13 @@ export const MessageRow = React.memo(
         {message.author}
       </MessageAuthorText>
     );
-    const agentOwnerNode = message.isAgent ? (
-      <MessageAgentOwner
-        ownerLabel={message.ownerLabel}
-        ownerPubkey={message.ownerPubkey}
-      />
-    ) : null;
+    const agentOwnerNode =
+      message.isAgent && !bubbleLayout ? (
+        <MessageAgentOwner
+          ownerLabel={message.ownerLabel}
+          ownerPubkey={message.ownerPubkey}
+        />
+      ) : null;
 
     const actionBarNode = (
       <div
@@ -940,6 +943,8 @@ export const MessageRow = React.memo(
         >
           {bubbleLayout ? (
             <MessageBubbleLayout
+              messageId={message.id}
+              showAvatar={!isFollowedByContinuation}
               outgoing={outgoingBubble}
               continuation={isDisplayedAsContinuation}
               avatar={avatarGutterNode}
@@ -1025,6 +1030,7 @@ export const MessageRow = React.memo(
     prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
     prev.hideAgentAccessBadge === next.hideAgentAccessBadge &&
     prev.isContinuation === next.isContinuation &&
+    prev.isFollowedByContinuation === next.isFollowedByContinuation &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&

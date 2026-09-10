@@ -30,35 +30,40 @@ export function PulseChannelDetail({ channel }: { channel: Channel }) {
   useTerminalContextOverride(terminalContext);
   return (
     <div
-      ref={detailRef}
-      className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      className="flex min-h-0 min-w-0 flex-1 flex-col"
+      data-testid="pulse-message-view"
     >
-      <MessageBubbleContext.Provider value={identity.data?.pubkey ?? null}>
-        <MainInsetProvider mainInsetRef={detailRef}>
-          <React.Suspense
-            fallback={
-              <p role="status" className="p-6 text-sm text-muted-foreground">
-                Loading conversation…
-              </p>
-            }
-          >
-            <ChannelScreen
-              key={channel.id}
-              activeChannel={channel}
-              currentIdentity={identity.data}
-              currentProfile={profile.data}
-              drillInThreads
-              autoSendDraftKey={null}
-              onCloseForumPost={() => applyPatch({ post: null, reply: null })}
-              onSelectForumPost={(post) => applyPatch({ post, reply: null })}
-              selectedForumPostId={values.post}
-              targetForumReplyId={values.reply}
-              targetMessageEvents={EMPTY_EVENTS}
-              targetMessageId={null}
-            />
-          </React.Suspense>
-        </MainInsetProvider>
-      </MessageBubbleContext.Provider>
+      <div
+        ref={detailRef}
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      >
+        <MessageBubbleContext.Provider value={identity.data?.pubkey ?? null}>
+          <MainInsetProvider mainInsetRef={detailRef}>
+            <React.Suspense
+              fallback={
+                <p role="status" className="p-6 text-sm text-muted-foreground">
+                  Loading conversation…
+                </p>
+              }
+            >
+              <ChannelScreen
+                key={channel.id}
+                activeChannel={channel}
+                currentIdentity={identity.data}
+                currentProfile={profile.data}
+                drillInThreads
+                autoSendDraftKey={null}
+                onCloseForumPost={() => applyPatch({ post: null, reply: null })}
+                onSelectForumPost={(post) => applyPatch({ post, reply: null })}
+                selectedForumPostId={values.post}
+                targetForumReplyId={values.reply}
+                targetMessageEvents={EMPTY_EVENTS}
+                targetMessageId={null}
+              />
+            </React.Suspense>
+          </MainInsetProvider>
+        </MessageBubbleContext.Provider>
+      </div>
     </div>
   );
 }

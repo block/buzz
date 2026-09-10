@@ -1,0 +1,24 @@
+.typing-dot {
+  animation: typing-dot-pulse 1.2s ease-in-out infinite;
+}
+.timeline-typing-transition[data-active="false"] .typing-dot {
+  animation-play-state: paused;
+}
+@keyframes typing-dot-pulse {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  30% {
+    transform: translateY(var(--typing-dot-lift, -3px));
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot {
+    animation: none;
+    opacity: 0.65;
+  }
+}

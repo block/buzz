@@ -83,6 +83,8 @@ type MessageTimelineProps = {
   hideAgentAccessBadges?: boolean;
   /** Stable context rendered above the timeline, including when it is empty. */
   pinnedIntro?: React.ReactNode;
+  /** Status content after the newest message, inside the scroll region. */
+  trailingContent?: React.ReactNode;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -181,6 +183,7 @@ const MessageTimelineBase = React.forwardRef<
     alwaysShowMessageIdentity = false,
     hideAgentAccessBadges = false,
     pinnedIntro,
+    trailingContent,
     hasOlderMessages = true,
     historyExhausted = false,
     isFetchingOlder = false,
@@ -669,6 +672,7 @@ const MessageTimelineBase = React.forwardRef<
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
+      trailingContent={useTimelineVirtualizer ? trailingContent : undefined}
       historyExhausted={renderedHistoryExhausted}
       hideDayDividers={hideDayDividers}
       alwaysShowMessageIdentity={alwaysShowMessageIdentity}
@@ -874,6 +878,7 @@ const MessageTimelineBase = React.forwardRef<
                     {timelineList}
                   </div>
                 ) : null}
+                {trailingContent}
               </div>
             </div>
           )}

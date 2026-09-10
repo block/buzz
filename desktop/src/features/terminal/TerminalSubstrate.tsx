@@ -479,6 +479,7 @@ export function TerminalSubstrate({
   return (
     <section
       aria-label="Buzz Term"
+      inert={!visible}
       className="buzz-terminal-substrate"
       data-terminal-mode={mode}
       data-terminal-side-panel={sidePanel || undefined}

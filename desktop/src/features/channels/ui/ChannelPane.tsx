@@ -44,6 +44,9 @@ import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPre
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { MessageBubbleContext } from "@/features/messages/ui/MessageBubbleContext";
+import { BubbleAvatarScope } from "@/features/messages/ui/BubbleAvatarScope";
+import { TimelineTypingIndicator } from "@/features/messages/ui/TimelineTypingIndicator";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
@@ -332,11 +335,13 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isMainDeferredEditPending &&
     acceptsMainAttachments &&
     !isSinglePanelView;
-  const hasTypingActivity = typingPubkeys.length > 0;
+  const inlineTyping = React.useContext(MessageBubbleContext) !== null;
+  const hasTypingActivity = !inlineTyping && typingPubkeys.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
-  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
+  const hasComposerBotActivity =
+    !inlineTyping && composerWorkingBotPubkeys.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
@@ -346,7 +351,17 @@ export const ChannelPane = React.memo(function ChannelPane({
     [botTypingEntries, openThreadHeadId],
   );
   const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+    !inlineTyping && threadComposerBotTypingPubkeys.length > 0;
+  const timelineTypingPubkeys = React.useMemo(
+    () => [...new Set([...typingPubkeys, ...composerWorkingBotPubkeys])],
+    [typingPubkeys, composerWorkingBotPubkeys],
+  );
+  const timelineThreadTypingPubkeys = React.useMemo(
+    () => [
+      ...new Set([...threadTypingPubkeys, ...threadComposerBotTypingPubkeys]),
+    ],
+    [threadTypingPubkeys, threadComposerBotTypingPubkeys],
+  );
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -622,78 +637,96 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : null}
           <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
-            <MessageTimeline
-              ref={messageTimelineRef}
-              channelId={activeChannel?.id}
-              channelIntro={channelIntro}
-              directMessageIntro={directMessageIntro}
-              scrollContainerRef={timelineScrollRef}
-              currentPubkey={currentPubkey}
-              fetchOlder={fetchOlder}
-              followThreadById={followThreadById}
-              hasComposerOverlay={hasMainComposerOverlay}
-              hasOlderMessages={hasOlderMessages}
-              historyExhausted={historyExhausted}
-              hideDayDividers={isHuddleTranscript}
-              alwaysShowMessageIdentity={isHuddleTranscript}
-              hideAgentAccessBadges={isHuddleTranscript}
-              pinnedIntro={
-                isHuddleTranscript ? <HuddleTranscriptIntro /> : undefined
-              }
-              huddleMemberPubkeys={huddleMemberPubkeys}
-              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-              isFetchingOlder={isFetchingOlder}
-              isFollowingThreadById={isFollowingThreadById}
-              isMessageUnreadById={isMessageUnreadById}
-              personaLookup={personaLookup}
-              profiles={profiles}
-              ownerProfiles={ownerProfiles}
-              unfollowThreadById={unfollowThreadById}
-              emptyDescription={
-                activeChannel?.channelType === "forum"
-                  ? "Select a stream or DM to load real message history in this first integration pass."
-                  : "Messages and sub-replies will appear here once the relay has history for this channel."
-              }
-              emptyTitle={
-                activeChannel
-                  ? activeChannel.channelType === "forum"
-                    ? "Forum channels are next"
-                    : "No messages yet"
-                  : "No channel selected"
-              }
-              isError={isTimelineError}
-              isLoading={isHuddleTranscript ? false : isTimelineLoading}
-              onRetry={onRetryTimeline}
-              entranceMessageId={entranceMessageId}
-              onEntranceMessageComplete={onEntranceMessageComplete}
-              mainEntries={mainTimelineEntries}
-              threadSummaries={threadSummaries}
-              messages={visibleMessages}
-              firstUnreadMessageId={firstUnreadMessageId}
-              unreadCount={unreadCount}
-              onDelete={onDelete}
-              onEdit={handleRoutedEdit}
-              onMarkUnread={onMarkUnread}
-              onMarkRead={onMarkRead}
-              onReply={timelineReplyHandler}
-              onOpenThread={isHuddleTranscript ? undefined : onOpenThread}
-              channelName={activeChannel?.name}
-              channelType={activeChannel?.channelType ?? null}
-              isSendingVideoReviewComment={isSending}
-              onSendVideoReviewComment={
-                activeChannel?.archivedAt ? undefined : onSendVideoReviewComment
-              }
-              onTargetReached={onTargetReached}
-              onToggleReaction={onToggleReaction}
-              {...searchHighlightProps.timeline}
-              targetMessageId={targetMessageId}
-              splitThreadPanelOpen={
-                useSplitAuxiliaryPane &&
-                !useFocusThreadDrawer &&
-                Boolean(openThreadHeadId)
-              }
-              threadUnreadCounts={threadUnreadCounts}
-            />
+            <BubbleAvatarScope
+              lastMessage={mainTimelineEntries.at(-1)?.message}
+              typingPubkeys={inlineTyping ? timelineTypingPubkeys : []}
+            >
+              <MessageTimeline
+                ref={messageTimelineRef}
+                channelId={activeChannel?.id}
+                trailingContent={
+                  inlineTyping ? (
+                    <TimelineTypingIndicator
+                      key={activeChannel?.id}
+                      channel={activeChannel}
+                      currentPubkey={currentPubkey}
+                      profiles={profiles}
+                      typingPubkeys={timelineTypingPubkeys}
+                    />
+                  ) : undefined
+                }
+                channelIntro={channelIntro}
+                directMessageIntro={directMessageIntro}
+                scrollContainerRef={timelineScrollRef}
+                currentPubkey={currentPubkey}
+                fetchOlder={fetchOlder}
+                followThreadById={followThreadById}
+                hasComposerOverlay={hasMainComposerOverlay}
+                hasOlderMessages={hasOlderMessages}
+                historyExhausted={historyExhausted}
+                hideDayDividers={isHuddleTranscript}
+                alwaysShowMessageIdentity={isHuddleTranscript}
+                hideAgentAccessBadges={isHuddleTranscript}
+                pinnedIntro={
+                  isHuddleTranscript ? <HuddleTranscriptIntro /> : undefined
+                }
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isFetchingOlder={isFetchingOlder}
+                isFollowingThreadById={isFollowingThreadById}
+                isMessageUnreadById={isMessageUnreadById}
+                personaLookup={personaLookup}
+                profiles={profiles}
+                ownerProfiles={ownerProfiles}
+                unfollowThreadById={unfollowThreadById}
+                emptyDescription={
+                  activeChannel?.channelType === "forum"
+                    ? "Select a stream or DM to load real message history in this first integration pass."
+                    : "Messages and sub-replies will appear here once the relay has history for this channel."
+                }
+                emptyTitle={
+                  activeChannel
+                    ? activeChannel.channelType === "forum"
+                      ? "Forum channels are next"
+                      : "No messages yet"
+                    : "No channel selected"
+                }
+                isError={isTimelineError}
+                isLoading={isHuddleTranscript ? false : isTimelineLoading}
+                onRetry={onRetryTimeline}
+                entranceMessageId={entranceMessageId}
+                onEntranceMessageComplete={onEntranceMessageComplete}
+                mainEntries={mainTimelineEntries}
+                threadSummaries={threadSummaries}
+                messages={visibleMessages}
+                firstUnreadMessageId={firstUnreadMessageId}
+                unreadCount={unreadCount}
+                onDelete={onDelete}
+                onEdit={handleRoutedEdit}
+                onMarkUnread={onMarkUnread}
+                onMarkRead={onMarkRead}
+                onReply={timelineReplyHandler}
+                onOpenThread={isHuddleTranscript ? undefined : onOpenThread}
+                channelName={activeChannel?.name}
+                channelType={activeChannel?.channelType ?? null}
+                isSendingVideoReviewComment={isSending}
+                onSendVideoReviewComment={
+                  activeChannel?.archivedAt
+                    ? undefined
+                    : onSendVideoReviewComment
+                }
+                onTargetReached={onTargetReached}
+                onToggleReaction={onToggleReaction}
+                {...searchHighlightProps.timeline}
+                targetMessageId={targetMessageId}
+                splitThreadPanelOpen={
+                  useSplitAuxiliaryPane &&
+                  !useFocusThreadDrawer &&
+                  Boolean(openThreadHeadId)
+                }
+                threadUnreadCounts={threadUnreadCounts}
+              />
+            </BubbleAvatarScope>
             {isNonMemberView ? (
               <div
                 data-testid="join-banner"
@@ -803,9 +836,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onOpenAgentSession={onOpenAgentSession}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
-                    typingPubkeys={typingPubkeys}
+                    typingPubkeys={inlineTyping ? [] : typingPubkeys}
                     visible={hasComposerBottomActivity}
-                    workingBotPubkeys={composerWorkingBotPubkeys}
+                    workingBotPubkeys={
+                      inlineTyping ? [] : composerWorkingBotPubkeys
+                    }
                   />
                 </div>
               </div>
@@ -892,7 +927,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                   threadHeadMessage.id,
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
+                threadTypingPubkeys={
+                  inlineTyping
+                    ? timelineThreadTypingPubkeys
+                    : threadTypingPubkeys
+                }
                 activityAccessoryVisible={hasThreadComposerBotActivity}
                 activityAccessoryContent={
                   hasThreadComposerBotActivity ? (

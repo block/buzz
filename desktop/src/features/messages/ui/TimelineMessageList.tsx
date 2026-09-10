@@ -45,6 +45,7 @@ export type TimelineVirtualizerApi = {
 };
 
 type TimelineMessageListProps = {
+  trailingContent?: React.ReactNode;
   channelId?: string | null;
   channelName?: string;
   channelType?: ChannelType | null;
@@ -160,6 +161,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   threadUnreadCounts,
   unfollowThreadById,
   leadingContent,
+  trailingContent,
   historyExhausted = false,
   hideDayDividers = false,
   alwaysShowMessageIdentity = false,
@@ -326,6 +328,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         historyExhausted={historyExhausted}
         hideDayDividers={hideDayDividers}
         leadingContent={leadingContent}
+        trailingContent={trailingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
         onVirtualizerApiChange={onVirtualizerApiChange}
@@ -381,6 +384,7 @@ function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
 }
 
 type VirtualizedTimelineRowsProps = {
+  trailingContent?: React.ReactNode;
   dayGroups: TimelineDayGroup[];
   historyExhausted: boolean;
   hideDayDividers: boolean;
@@ -421,6 +425,7 @@ function VirtualizedTimelineItemShell({
 }
 
 function VirtualizedTimelineRows({
+  trailingContent,
   dayGroups,
   historyExhausted,
   hideDayDividers,
@@ -757,11 +762,13 @@ function VirtualizedTimelineRows({
           {(item) => {
             if (item.kind === "bottom-spacer") {
               return (
-                <div
-                  aria-hidden
-                  className="h-[var(--composer-overlay-height,6rem)]"
-                  key={virtualizedItemKey(item)}
-                />
+                <div key={virtualizedItemKey(item)}>
+                  {trailingContent}
+                  <div
+                    aria-hidden
+                    className="h-[var(--composer-overlay-height,6rem)]"
+                  />
+                </div>
               );
             }
             if (item.kind === "leading-content") {

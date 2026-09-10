@@ -149,6 +149,7 @@ export function ConversationCard({
   profiles,
   onRefresh,
   summary,
+  divider = false,
   onOpenContext,
 }: {
   item: PulseConversation;
@@ -156,6 +157,7 @@ export function ConversationCard({
   profiles: Record<string, UserProfileSummary>;
   onRefresh: () => void;
   summary?: string;
+  divider?: boolean;
   onOpenContext?: () => void;
 }) {
   const [expanded, setExpanded] = React.useState(false);
@@ -302,7 +304,7 @@ export function ConversationCard({
     <article
       data-testid={summary ? "pulse-briefing-highlight" : "pulse-conversation"}
       data-conversation-id={item.id}
-      className={`px-5 sm:px-7 ${summary ? "border-b border-border/50 py-6" : "py-[12px]"}`}
+      className={`px-5 sm:px-7 ${summary || divider ? "border-b border-border/50" : ""} ${summary ? "py-6" : "py-[12px]"}`}
     >
       {!summary && head.id !== item.rootId && (
         <p className="mb-3 pl-12 text-xs text-muted-foreground">

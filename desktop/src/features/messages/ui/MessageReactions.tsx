@@ -80,6 +80,7 @@ function EmojiGlyph({
   if (reaction.emojiUrl) {
     return (
       <img
+        data-reaction-glyph="custom"
         alt={reaction.emoji}
         title={displayName}
         src={rewriteRelayUrl(reaction.emojiUrl)}
@@ -93,6 +94,7 @@ function EmojiGlyph({
   }
   return (
     <span
+      data-reaction-glyph="native"
       className={cn(
         "inline-flex items-center justify-center leading-none",
         className,
@@ -255,22 +257,27 @@ export function MessageReactions({
   }
 
   return (
-    <div
+    <fieldset
       className={cn(
-        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
+        "group/reactions mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5",
         className,
       )}
       data-testid="message-reactions"
+      aria-label="Message reactions"
     >
       {reactions.map((reaction) => (
-        <ReactionPill
+        <span
+          className="reaction-segment contents"
           key={`${messageId}-${reaction.emoji}`}
-          canToggle={canToggle}
-          pending={pending}
-          reaction={reaction}
-          registerPill={registerPill}
-          onSelect={onSelect}
-        />
+        >
+          <ReactionPill
+            canToggle={canToggle}
+            pending={pending}
+            reaction={reaction}
+            registerPill={registerPill}
+            onSelect={onSelect}
+          />
+        </span>
       ))}
       {canToggle && showPicker ? (
         <InlineReactionPicker
@@ -281,7 +288,7 @@ export function MessageReactions({
           requestBadgeBurst={setPendingBadgeBurstEmoji}
         />
       ) : null}
-    </div>
+    </fieldset>
   );
 }
 

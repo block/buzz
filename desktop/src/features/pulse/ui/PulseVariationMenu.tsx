@@ -28,7 +28,7 @@ export function PulseVariationMenu({
   }, []);
   if (!host) return null;
   return createPortal(
-    <div className="ml-auto flex items-center">
+    <div data-pulse-window-actions className="ml-auto flex items-center">
       <Button
         variant="ghost"
         size="icon"

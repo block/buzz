@@ -13,6 +13,10 @@ import {
   type GuardedNavigation,
   traverseHistory,
 } from "@/app/navigation/navigationGuard";
+import {
+  NavigationTargetContext,
+  type AppNavigationTarget,
+} from "./NavigationTargetContext";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -26,22 +30,15 @@ export function useAppNavigation() {
   const navigate = useNavigate();
   const location = useLocation();
   const canGoBack = useCanGoBack();
+  const resolveTarget = React.useContext(NavigationTargetContext);
 
   const commitNavigation = React.useCallback(
     async (
-      next: {
-        to: string;
-        params?: Record<string, string>;
-        search?: Record<string, string | undefined>;
-        state?:
-          | Record<string, unknown>
-          | ((
-              previousState: Record<string, unknown>,
-            ) => Record<string, unknown>);
-      },
+      target: AppNavigationTarget,
       behavior: NavigationBehavior = {},
       guardedTarget?: GuardedNavigation,
     ) => {
+      const next = resolveTarget?.(target) ?? target;
       const nextLocation = router.buildLocation(next as never);
       const hasStateUpdate = next.state !== undefined;
 
@@ -68,7 +65,7 @@ export function useAppNavigation() {
       } as never);
       return true;
     },
-    [location.href, navigate, router],
+    [location.href, navigate, router, resolveTarget],
   );
 
   const goHome = React.useCallback(

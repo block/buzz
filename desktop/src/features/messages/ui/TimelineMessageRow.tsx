@@ -171,6 +171,7 @@ export function MessageRowItem({
           }
           isUnread={isUnread}
           isContinuation={isContinuation}
+          isFollowedByContinuation={isFollowedByContinuation}
           playEntrance={playEntrance}
           onEntranceComplete={onEntranceComplete}
           message={message}
@@ -216,6 +217,7 @@ export function MessageRowItem({
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
         hideAgentAccessBadge={hideAgentAccessBadges}
         isContinuation={isContinuation}
+        isFollowedByContinuation={isFollowedByContinuation}
         isUnread={isUnread}
         playEntrance={playEntrance}
         onEntranceComplete={onEntranceComplete}

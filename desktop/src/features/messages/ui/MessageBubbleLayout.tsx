@@ -1,9 +1,12 @@
 import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 import "./MessageBubbleLayout.css";
+import { BubbleAvatar } from "./BubbleAvatarScope";
 
 /** Present the existing message content and controls as a directional chat bubble. */
 export function MessageBubbleLayout({
+  messageId,
+  showAvatar = true,
   outgoing,
   continuation,
   avatar,
@@ -15,6 +18,8 @@ export function MessageBubbleLayout({
   reactions,
   actions,
 }: {
+  messageId?: string;
+  showAvatar?: boolean;
   outgoing: boolean;
   continuation: boolean;
   avatar: React.ReactNode;
@@ -50,11 +55,7 @@ export function MessageBubbleLayout({
   }, [hasActions]);
   return (
     <>
-      {!outgoing && (
-        <div className="w-7 shrink-0 self-end pb-1 [&_[data-testid=message-avatar]]:!h-7 [&_[data-testid=message-avatar]]:!w-7">
-          {!continuation && avatar}
-        </div>
-      )}
+      {!outgoing && <div className="w-7 shrink-0" />}
       <div
         className={cn(
           "flex min-w-0 max-w-[82%] flex-col",
@@ -74,9 +75,13 @@ export function MessageBubbleLayout({
           </div>
         )}
         <div
-          className={cn("relative min-w-0 max-w-full", footer && "w-full")}
+          className={cn(
+            "message-bubble-anchor relative min-w-0 max-w-full",
+            footer && "w-full",
+          )}
           ref={anchorRef}
           data-testid="message-bubble-anchor"
+          data-bubble-direction={outgoing ? "outgoing" : "incoming"}
         >
           <div
             data-testid="message-body"
@@ -88,10 +93,20 @@ export function MessageBubbleLayout({
           >
             {body}
           </div>
+          {!outgoing && showAvatar && (
+            <div className="absolute -left-[38px] bottom-0 w-7 [&_[data-testid=message-avatar]]:!h-7 [&_[data-testid=message-avatar]]:!w-7">
+              <BubbleAvatar messageId={messageId}>{avatar}</BubbleAvatar>
+            </div>
+          )}
           {reactions && (
             <div
               data-testid="bubble-reactions-anchor"
-              className="absolute -right-2 top-0 z-10 w-max max-w-[min(28rem,70vw)] -translate-y-1/2 [&_[data-testid=message-reactions]]:mt-0 [&_[data-testid=message-reactions]]:justify-end"
+              className={cn(
+                "absolute top-0 z-10 w-max max-w-[min(28rem,70vw)] -translate-y-1/2 [&_button]:text-badge [&_[data-testid=message-reactions]]:mt-0",
+                outgoing
+                  ? "-left-2 [&_[data-testid=message-reactions]]:justify-start"
+                  : "-right-2 [&_[data-testid=message-reactions]]:justify-end",
+              )}
             >
               {reactions}
             </div>

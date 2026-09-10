@@ -75,7 +75,13 @@ export function useComposerHeightPadding(
     };
 
     const applyPadding = (height: number) => {
-      const padding = Math.ceil(height);
+      const scrollEndGap =
+        Number.parseFloat(
+          getComputedStyle(scrollEl).getPropertyValue(
+            "--message-scroll-end-gap",
+          ),
+        ) || 0;
+      const padding = Math.ceil(height + scrollEndGap);
       if (lastPadding !== null && Math.abs(padding - lastPadding) <= 1) {
         return;
       }

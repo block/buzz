@@ -1,15 +1,15 @@
 /* Keep rich media outside the message surface. The renderer already marks
    image/video blocks, so captions and attachments retain their original order. */
-.message-bubble-body {
+.message-bubble-anchor {
   --bubble-background: #f0f0f2;
   --bubble-foreground: var(--foreground);
   --bubble-link-color: var(--color-blue-600);
 }
-.dark .message-bubble-body {
+.dark .message-bubble-anchor {
   --bubble-background: hsl(var(--muted));
   --bubble-link-color: var(--color-blue-400);
 }
-.message-bubble-body[data-message-bubble="outgoing"] {
+.message-bubble-anchor[data-bubble-direction="outgoing"] {
   --bubble-background: hsl(var(--primary));
   --bubble-foreground: var(--primary-foreground);
 }
@@ -99,4 +99,63 @@
   .mention-chip-hover:is([data-mention], [data-channel-link]):hover {
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* Reactions share their message surface, with a cutout in the conversation color. */
+[data-testid="bubble-reactions-anchor"] [data-testid="message-reactions"] {
+  height: 1.75rem;
+  flex-wrap: nowrap;
+  gap: 0;
+  border-radius: 9999px;
+  background: var(--bubble-background);
+  color: hsl(var(--bubble-foreground));
+  border: 1.5px solid hsl(var(--background));
+}
+
+[data-testid="bubble-reactions-anchor"] .reaction-segment {
+  position: relative;
+  display: inline-flex;
+  height: 100%;
+}
+
+[data-testid="bubble-reactions-anchor"]
+  .reaction-segment
+  + .reaction-segment::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  left: 0;
+  top: 25%;
+  height: 50%;
+  width: 1px;
+  background: hsl(var(--bubble-foreground) / 0.15);
+}
+
+[data-testid="bubble-reactions-anchor"] button {
+  height: 100%;
+  background: transparent;
+  color: inherit;
+  border: 0;
+}
+
+[data-testid="bubble-reactions-anchor"] .buzz-animated-count {
+  color: inherit;
+}
+
+[data-testid="bubble-reactions-anchor"] [data-reaction-glyph="native"] {
+  font-size: inherit;
+  width: 0.625rem;
+  height: 0.625rem;
+}
+
+[data-testid="bubble-reactions-anchor"] [data-reaction-glyph="custom"] {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.typing-dots-bubble {
+  background: var(--bubble-background);
+}
+.typing-avatar-stroke {
+  box-shadow: 0 0 0 1.5px hsl(var(--background));
 }

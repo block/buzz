@@ -117,3 +117,27 @@
 ::view-transition-new(root) {
   animation: none;
 }
+
+/* Retarget transitions when typing starts again during its exit. A fixed slot
+   keeps the timeline and composer stationary while the status fades. */
+.timeline-typing-transition {
+  opacity: 0;
+  transform: translateY(0.25rem);
+  transition:
+    opacity var(--motion-duration-fast) var(--motion-ease-standard),
+    transform var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.timeline-typing-transition[data-active="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-typing-transition,
+  .timeline-typing-transition[data-active="true"] {
+    transform: none;
+    transition: opacity var(--motion-duration-instant)
+      var(--motion-ease-standard);
+  }
+}
