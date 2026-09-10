@@ -166,7 +166,7 @@ export function importSlotKey(directory: string, agentKey: string, secret: strin
 
 /** Provision an immutable reusable local binding under the service-start lock.
  * No identity, journal, selected configuration or running process is changed. */
-export function addHarnessBinding(directory: string, id: string, value: Harness, source?: { id: string; fingerprint: string }, retireSource = false): void {
+export function addHarnessBinding(directory: string, id: string, value: Harness, source?: { id: string; fingerprint: string; confirmation?: string }, retireSource = false): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || ['constructor', 'prototype', '__proto__'].includes(id)) throw Error('Invalid binding ID');
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
@@ -176,6 +176,7 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
     if (source && i.retiredBindings?.[source.id]) throw Error('Binding retired');
     if (retireSource) {
       if (!source) throw Error('Replacement requires source');
+      if (source.confirmation !== undefined && source.confirmation !== bindingConfirmation(directory)) throw Error('Affected choices changed; reopen local setup');
       requireStoppedBindings(directory);
     }
     const raw = object(value);
@@ -234,14 +235,20 @@ function requireStoppedBindings(directory: string): void {
 
 /** Retire eligibility only, retaining immutable definitions and every journal byte.
  * Rechecks the confirmed reference and stopped authority under the startup lock. */
-export function retireHarnessBinding(directory: string, source: { id: string; fingerprint: string }): void {
+export function retireHarnessBinding(directory: string, source: { id: string; fingerprint: string; confirmation?: string }): void {
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
     const i = readInstallation(directory);
     if (!Object.hasOwn(i.setups, source.id) || semanticHash(i.setups[source.id]) !== source.fingerprint) throw Error('Binding definition changed; reopen local setup');
     if (i.retiredBindings?.[source.id]) throw Error('Binding already retired');
+    if (source.confirmation !== undefined && source.confirmation !== bindingConfirmation(directory)) throw Error('Affected choices changed; reopen local setup');
     requireStoppedBindings(directory);
     i.retiredBindings = { ...i.retiredBindings, [source.id]: source.fingerprint };
     writePrivate(join(directory, 'setup.json'), i);
   } finally { rmdirSync(lock); }
+}
+
+/** Opaque confirmation fence for the local wizard's affected choices and authority. */
+export function bindingConfirmation(directory: string): string {
+  return semanticHash(installationSlots(directory).map(entry => ({ agent: entry.agent, state: readPrivate(entry.path) })));
 }

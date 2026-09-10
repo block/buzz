@@ -558,3 +558,22 @@ actual local key removal/service reopen, no missing-key spawn/recreation and neu
 Stop. These use the existing installed opt-in and unchanged default concurrent runner.
 Source contract and limitations: `CODEX_SOURCE_29C7.md`; exact logs/hashes are in the
 workspace evidence directory named there. No provider or current relay approval.
+
+## Binding replacement and retirement (1bc0)
+
+`bindings.test.ts` reuses the actual local wizard and remote TUI/Restart journey:
+replacement creates B and retires its predecessor atomically without changing A,
+identity, selected-next, sibling or retained history. Separate retirement probes
+exercise declined/stale confirmation, stopped-state and competing startup-lock
+refusal, immutable fingerprint/0600 preservation, corrupt-definition rejection,
+retired selected host reopen, no runner spawn for Start/Restart/Save/select, and
+credential-neutral Stop/configuration rename/removal. The wizard displays affected
+agent/configuration choices and requires confirmation; it never selects or starts.
+`binding-recovery.test.ts` adds retirement to its delayed consumed-grant/reopen
+harness: original preparation and definitions survive, target accepts authority but
+stays stopped, replay is inert and source restart cannot revive consumed authority.
+`normal-conversation.test.ts` reuses all three selected-B normal journeys with an
+additional actual local replacement before explicit remote selection: installed
+buzz-acp/CLI still produce four signed replies, including explicit Restart with
+same identity/profile and unchanged sibling/history. Provider adapters remain
+source-shaped TypeScript fixtures, not live Goose/Claude/Codex.

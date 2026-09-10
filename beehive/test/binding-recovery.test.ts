@@ -1,4 +1,4 @@
-import { migrateSlots, addHarnessBinding, installationSlots } from '../src/slots.ts';
+import { migrateSlots, retireHarnessBinding, addHarnessBinding, installationSlots } from '../src/slots.ts';
 import { bindingFingerprint } from '../src/host.ts';
 import { profileRevision } from '../src/profiles.ts';
 import { test } from 'node:test';
@@ -14,7 +14,7 @@ import { writePrivate } from '../src/storage.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
 
-for (const failure of ['changed-across-target-restart', 'remote-candidate-save'] as const) test(`explicit B binding profiled Move reserved revision; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
+for (const failure of ['changed-across-target-restart', 'retired-across-target-restart', 'remote-candidate-save'] as const) test(`explicit B binding profiled Move reserved revision; post-grant ${failure} leaves target assigned stopped`, { timeout: 20000 }, async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-move-loss-')));
   const ownerSecret = newKey(), agentSecret = newKey(), agent = publicKey(agentSecret);
   const genesis = createGenesis(publicKey(ownerSecret), agent, 'source');
@@ -68,23 +68,27 @@ for (const failure of ['changed-across-target-restart', 'remote-candidate-save']
     // A stale pre-reservation Save must not consume/redefine the reserved revision.
     const stale = message('save','target',agent,1,oldCandidate); ui.send(stale);
     await until(() => seen.some(m => m.body.operation === stale.id && m.body.result === 'revision-conflict'));
-    if (failure === 'changed-across-target-restart') await target.close();
+    if (failure !== 'remote-candidate-save') await target.close();
     const targetSetup = join(dir,'target','setup.json');
     if (failure === 'remote-candidate-save') {
       const edit = message('save', 'target', agent, 2, oldCandidate); ui.send(edit);
       await until(() => journal('target').revision === 3);
       assert.equal(journal('target').selected.configuration.revision, 3); assert.equal(journal('target').selected.profile, 'default');
+    } else if (failure === 'retired-across-target-restart') {
+      const before = JSON.parse(readFileSync(targetSetup, 'utf8'));
+      retireHarnessBinding(join(dir, 'target'), ref);
+      assert.deepEqual(JSON.parse(readFileSync(targetSetup, 'utf8')).setups, before.setups);
     } else {
       // Fault injection: offline definition changed after consumed preparation.
       const manifest = JSON.parse(readFileSync(targetSetup, 'utf8'));
       manifest.setups.B.args.push('changed-after-preparation'); writePrivate(targetSetup, manifest);
     }
-    if (failure === 'changed-across-target-restart') target = await host(join(dir,'target'),url);
+    if (failure !== 'remote-candidate-save') target = await host(join(dir,'target'),url);
     drop = false; loseReceipt = false;
     ui.send(message('inspect','source',agent));
     await until(() => seen.some(m => m.type === 'receipt' && m.body.operation === move.id && m.body.result === 'accepted'));
     await until(() => journal('target').assignment.assignedHost === 'target');
-    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes(failure === 'remote-candidate-save' ? 'Destination candidate changed after preparation' : failure === 'changed-across-target-restart' ? 'Destination preparation invalidated' : 'Local agent key/setup missing')));
+    await until(() => seen.some(m => m.host === 'target' && m.type === 'receipt' && String(m.body.result).includes(failure === 'remote-candidate-save' ? 'Destination candidate changed after preparation' : 'Destination preparation invalidated')));
     assert.equal(journal('target').phase,'stopped'); assert.equal(journal('target').actual,null);
     if (failure === 'remote-candidate-save') { assert.equal(journal('target').selected.configuration.revision, 3); assert.equal(journal('target').selected.profile, 'default'); }
     else { assert.deepEqual(journal('target').configurations.default, consumed.selection); assert.equal(journal('target').selected.behavior.instructions, behavior.instructions); }
@@ -92,6 +96,13 @@ for (const failure of ['changed-across-target-restart', 'remote-candidate-save']
       const staleStart = message('start', 'target', agent, journal('target').revision);
       ui.send(staleStart); await until(() => seen.some(m => m.body.operation === staleStart.id && m.body.result === 'Binding definition changed'));
       assert.equal(journal('target').actual, null);
+    }
+    if (failure === 'retired-across-target-restart') {
+      for (const action of ['start', 'restart'] as const) {
+        const denied = message(action, 'target', agent, journal('target').revision); ui.send(denied);
+        await until(() => seen.some(m => m.body.operation === denied.id && String(m.body.result).includes('Binding retired')));
+        assert.equal(journal('target').actual, null);
+      }
     }
     const denied = message('start','source',agent,3); ui.send(denied);
     await until(() => seen.some(m => m.body.operation === denied.id && m.body.result === 'not-authority'));

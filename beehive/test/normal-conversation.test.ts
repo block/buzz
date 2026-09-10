@@ -20,7 +20,7 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false, true]) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
+for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false, true]) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const goose = kind === 'goose', claude = kind === 'claude', codex = kind === 'codex';
   const title = codex ? 'Codex' : 'Claude';
   const model = `${kind}-model-a`;
@@ -209,11 +209,27 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
     assert.deepEqual(readFileSync(entry.path), beforeJournal);
     assert.deepEqual(installationSlots(installation)[0]!.bindings.B, beforeB);
     assert.deepEqual(installationSlots(installation)[0]!.bindings.default, originalA);
+    const normal = installationSlots(installation)[0]!.bindings['B-normal']!;
+    const replaced = await terminal(['local-setup', installation], [
+      { prompt: 'Local action [', answer: 'replace-binding' },
+      { prompt: 'Existing binding ID to reuse: ', answer: 'B-normal' },
+      { prompt: 'NEW immutable binding ID: ', answer: 'B-replacement' },
+      { prompt: 'Absolute compatible executable: ', answer: normal.runner },
+      { prompt: 'Allowed workspace (absolute directory): ', answer: normal.workspace },
+      { prompt: 'Retire B-normal and replace with B-replacement, without selecting it? [yes/no]: ', answer: 'yes' },
+      { prompt: 'Save NEW binding only (no selection, key change or restart)? [yes/no]: ', answer: 'yes' },
+    ]);
+    assert.match(replaced, /Binding B-replacement saved/);
+    assert.deepEqual(readFileSync(entry.path), beforeJournal);
+    const afterReplacement = installationSlots(installation)[0]!;
+    assert.deepEqual(afterReplacement.bindings['B-normal'], normal);
+    assert.deepEqual(afterReplacement.bindings['B-replacement'], normal);
+    assert.ok(afterReplacement.retiredBindings?.['B-normal']);
     inventory = undefined; h = await service();
     await terminal(['tui', identity, managementURL], [
       { prompt: 'beehive> ', answer: 'select 1' },
-      { prompt: 'beehive> ', answer: 'binding B-normal', observedRevision: 3 },
-      { prompt: 'beehive> ', answer: 'quit', gate: () => state().selected.harnessSetup?.id === 'B-normal', observedRevision: 4 },
+      { prompt: 'beehive> ', answer: 'binding B-replacement', observedRevision: 3 },
+      { prompt: 'beehive> ', answer: 'quit', gate: () => state().selected.harnessSetup?.id === 'B-replacement', observedRevision: 4 },
     ]);
   }
   const seen: Message[] = [];

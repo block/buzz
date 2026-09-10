@@ -3,7 +3,7 @@ import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { realpathSync } from 'node:fs';
-import { installationSlots, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
+import { installationSlots, bindingConfirmation, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
 import { bindingFingerprint } from './host.ts';
 import { newKey, publicKey, text } from './protocol.ts';
 import { readPrivate } from './storage.ts';
@@ -64,6 +64,7 @@ export async function localSetup(directory: string): Promise<void> {
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
     if (first.retiredBindings?.[id]) throw Error('Binding retired; choose an available source');
+    const confirmation = action === 'replace-binding' || action === 'retire-binding' ? bindingConfirmation(directory) : undefined;
     if (action === 'replace-binding' || action === 'retire-binding') {
       for (const entry of entries) {
         const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } }; configurations?: Record<string, { harnessSetup?: { id: string } }> };
@@ -72,7 +73,7 @@ export async function localSetup(directory: string): Promise<void> {
       }
       if (action === 'retire-binding') {
         if (await ui.question(`Retire ${id} for new selection/execution, preserving history? [yes/no]: `) !== 'yes') return;
-        retireHarnessBinding(directory, { id, fingerprint });
+        retireHarnessBinding(directory, { id, fingerprint, confirmation });
         console.log(`Binding ${id} retired; selected references remain unavailable until explicit remote selection.`);
         return;
       }
@@ -146,7 +147,7 @@ export async function localSetup(directory: string): Promise<void> {
     console.log(`Create ${nextId} from ${id}; same ${setup.mode} contract and local service auth context. This does not add a provider or change conversation relay/authority. No authentication tested. Old binding remains immutable; no definition edit/deletion. Replacement retires the source for new execution and selection.`);
     if (action === 'replace-binding' && await ui.question(`Retire ${id} and replace with ${nextId}, without selecting it? [yes/no]: `) !== 'yes') return;
     if (await ui.question('Save NEW binding only (no selection, key change or restart)? [yes/no]: ') !== 'yes') return;
-    addHarnessBinding(directory, nextId, { ...harness, runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint }, action === 'replace-binding');
+    addHarnessBinding(directory, nextId, { ...harness, runner, args, workspace, allowedWorkspaces: [workspace] }, { id, fingerprint, confirmation }, action === 'replace-binding');
     console.log(`Binding ${nextId} saved. Reopen local-setup to reuse it for a new identity, or select it in the remote TUI for an existing identity. Save does not Restart.`);
   } finally { ui.close(); }
 }

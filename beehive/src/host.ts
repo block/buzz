@@ -115,6 +115,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     const candidate = bindings[state.selected.harnessSetup?.id ?? setupId];
     const nextSetup = !retiredBindings[state.selected.harnessSetup?.id ?? setupId] && candidate && (!state.selected.harnessSetup || state.selected.harnessSetup.fingerprint === bindingFingerprint(candidate)) ? candidate : undefined;
     return message('inventory',setup.host,agent,state.revision, {
+      defaultHarnessSetup: setupId,
       harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, availability: retiredBindings[id] ? 'retired' : 'available', fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),

@@ -2,16 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, realpathSync, mkdirSync, readFileSync, statSync, rmSync, rmdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, mkdirSync, readFileSync, statSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 import { readPrivate, writePrivate } from '../src/storage.ts';
-import { provision } from '../src/host.ts';
+import { bindingFingerprint, host, provision } from '../src/host.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
-import { installationSlots, addHarnessBinding, addSlot, migrateSlots, removeSlotKey } from '../src/slots.ts';
+import { installationSlots, bindingConfirmation, retireHarnessBinding, addHarnessBinding, addSlot, migrateSlots, removeSlotKey } from '../src/slots.ts';
 import { createGenesis } from '../src/assignment.ts';
 import { hostReady } from './host-driver.ts';
 import { provisionSetup } from './provision.ts';
@@ -79,16 +79,23 @@ test('reusable A/B bindings: real remote named TUI and external Restart, stable 
   assert.equal(manifest.agents[X].setup, manifest.agents[Y].setup);
   for (const key of [secret, manifest.agents[X].secret, manifest.agents[Y].secret]) assert.ok(!setupOutput.includes(key));
   const binding = { ...manifest.setups.default, workspace, allowedWorkspaces: [workspace], args: [resolve('test/binding-runner.ts')] };
+  addHarnessBinding(source, 'previous-B', manifest.setups.default);
+  const oldDefinition = JSON.stringify((readPrivate(join(source, 'setup.json')) as any).setups['previous-B']);
   const localOutput = await terminal(['local-setup', source], [
-    { prompt: 'Local action [', answer: 'add-binding' },
-    { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
+    { prompt: 'Local action [', answer: 'replace-binding' },
+    { prompt: 'Existing binding ID to reuse: ', answer: 'previous-B' },
     { prompt: 'NEW immutable binding ID: ', answer: 'B' },
     { prompt: 'Absolute compatible executable: ', answer: realpathSync(process.execPath) },
     { prompt: 'Allowed workspace (absolute directory): ', answer: workspace },
     { prompt: 'Absolute fixture TypeScript script: ', answer: resolve('test/binding-runner.ts') },
+    { prompt: 'Retire previous-B and replace with B, without selecting it? [yes/no]: ', answer: 'yes' },
     { prompt: 'Save NEW binding only (no selection, key change or restart)? [yes/no]: ', answer: 'yes' },
   ]);
   assert.match(localOutput, /Binding B saved/);
+  const replaced = readPrivate(join(source, 'setup.json')) as any;
+  assert.equal(JSON.stringify(replaced.setups['previous-B']), oldDefinition);
+  assert.ok(replaced.retiredBindings['previous-B']);
+  assert.equal((readPrivate(installationSlots(source).find(e => e.agent === X)!.path) as any).selected.harnessSetup, undefined);
   assert.deepEqual((readPrivate(join(source, 'setup.json')) as any).setups.B, binding);
   for (const key of [secret, manifest.agents[X].secret, manifest.agents[Y].secret]) assert.ok(!localOutput.includes(key));
   const slots = installationSlots(source), first = slots.find(s => s.agent === X)!;
@@ -207,6 +214,7 @@ test('local binding API shares atomic host.lock with competing service start; id
     try {
       assert.equal(statSync(lock).mode & 0o777, 0o700);
       assert.throws(() => addHarnessBinding(dir, 'B', binding), /EEXIST/);
+      assert.throws(() => retireHarnessBinding(dir, { id: 'default', fingerprint: bindingFingerprint(installationSlots(dir)[0]!.setup) }), /EEXIST/);
       const competing = spawn(process.execPath, ['src/cli.ts', 'host', dir, 'ws://127.0.0.1:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
       await assert.rejects(hostReady(competing, 'competing start during local mutation lock'), /EEXIST/);
       assert.equal(statSync(lock).mode & 0o777, 0o700, 'refused callers do not remove another owner lock');
@@ -263,4 +271,81 @@ test('local wizard reuses an identity without mutation, creates independent key 
     assert.deepEqual(readFileSync(original.path), journal); assert.deepEqual(readFileSync(second.path), sibling);
     for (const output of [reuse, added, restored]) for (const value of [secret, key, second.setup.agentSecret!]) assert.ok(!output.includes(value));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('retired selected binding reopens unavailable: no spawn, neutral Stop/rename/remove, stale and declined local confirmation', { timeout: 20000 }, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-retired-')));
+  const ownerSecret = newKey(), agentSecret = newKey(), agent = publicKey(agentSecret);
+  let service: Awaited<ReturnType<typeof host>> | undefined;
+  let client: ReturnType<typeof connect> | undefined;
+  let server: Awaited<ReturnType<typeof relay>> | undefined;
+  try {
+    provisionSetup(join(dir, 'setup.json'), { host: 'retired', ownerSecret, agentSecret, runner: realpathSync(process.execPath), args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' });
+    migrateSlots(dir);
+    const entry = installationSlots(dir)[0]!, reference = { id: 'default', fingerprint: bindingFingerprint(entry.setup) };
+    const manifestPath = join(dir, 'setup.json');
+    const before = readFileSync(manifestPath), journal = readFileSync(entry.path);
+    const declined = await terminal(['local-setup', dir], [
+      { prompt: 'Local action [', answer: 'retire-binding' },
+      { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
+      { prompt: 'Retire default for new selection/execution, preserving history? [yes/no]: ', answer: 'no' },
+    ]);
+    assert.match(declined, /affected choices default; selected true/);
+    assert.deepEqual(readFileSync(manifestPath), before);
+    assert.throws(() => retireHarnessBinding(dir, { ...reference, fingerprint: '0'.repeat(64) }), /definition changed/);
+    const confirmation = bindingConfirmation(dir);
+    const state = readPrivate(entry.path) as any;
+    state.configurations = { default: { ...state.selected, configuration: { name: 'default', revision: 1 } }, spare: { ...state.selected, configuration: { name: 'spare', revision: 1 } } };
+    writePrivate(entry.path, state);
+    assert.throws(() => retireHarnessBinding(dir, { ...reference, confirmation }), /Affected choices changed/);
+    state.phase = 'quarantined'; writePrivate(entry.path, state);
+    assert.throws(() => retireHarnessBinding(dir, reference), /every slot stopped/);
+    state.phase = 'stopped'; writePrivate(entry.path, state);
+    const retained = readFileSync(entry.path);
+    await terminal(['local-setup', dir], [
+      { prompt: 'Local action [', answer: 'retire-binding' },
+      { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
+      { prompt: 'Retire default for new selection/execution, preserving history? [yes/no]: ', answer: 'yes' },
+    ]);
+    assert.deepEqual(readFileSync(entry.path), retained);
+    const retired = readPrivate(manifestPath) as any;
+    assert.deepEqual(retired.setups, JSON.parse(before.toString()).setups);
+    assert.equal(retired.retiredBindings.default, reference.fingerprint);
+    assert.equal(statSync(manifestPath).mode & 0o777, 0o600);
+    assert.throws(() => addHarnessBinding(dir, 'B', retired.setups.default, reference, true), /retired/);
+    const fresh = newKey();
+    assert.throws(() => addSlot(dir, fresh, createGenesis(publicKey(ownerSecret), publicKey(fresh), 'retired')), /retired/);
+    // Missing/corrupt historical definitions are not a legitimate retirement.
+    delete retired.setups.default; writePrivate(manifestPath, retired);
+    assert.throws(() => installationSlots(dir), /Invalid retired binding definition/);
+    retired.setups = JSON.parse(before.toString()).setups; writePrivate(manifestPath, retired);
+    server = await relay(0, publicKey(ownerSecret), join(dir, 'relay.json'));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const url = `ws://127.0.0.1:${address.port}`, seen: Message[] = [];
+    service = await host(dir, url); client = connect(url, ownerSecret, m => seen.push(m)); await client.ready;
+    client.send(message('inspect', 'retired', agent));
+    await until(() => seen.some(m => m.type === 'inventory' && m.body.setup === 'unavailable'));
+    const inventory = seen.find(m => m.type === 'inventory' && m.body.setup === 'unavailable')!;
+    assert.equal((inventory.body.harnessSetups as any[])[0].availability, 'retired');
+    async function operation(type: 'start' | 'restart' | 'stop' | 'save', body: Record<string, unknown> = {}) {
+      const revision = (readPrivate(entry.path) as any).revision;
+      const request = message(type, 'retired', agent, revision, body); client!.send(request);
+      await until(() => seen.some(m => m.type === 'receipt' && m.body.operation === request.id));
+      return String(seen.find(m => m.type === 'receipt' && m.body.operation === request.id)!.body.result);
+    }
+    for (const type of ['start', 'restart'] as const) assert.match(await operation(type), /Binding retired/);
+    assert.match(await operation('save', state.selected), /Binding retired/);
+    assert.match(await operation('save', { configurationAction: 'select', name: 'spare' }), /Binding retired/);
+    assert.match(await operation('save', { configurationAction: 'rename', name: 'default', newName: 'Archived' }), /saved/);
+    assert.match(await operation('save', { configurationAction: 'remove', name: 'spare' }), /saved/);
+    assert.doesNotMatch(await operation('stop'), /retired|error/i);
+    assert.equal(existsSync(join(dir, 'received-instructions.jsonl')), false, 'no runner or descendant spawned');
+    assert.deepEqual((readPrivate(entry.path) as any).runs, JSON.parse(journal.toString()).runs);
+    assert.deepEqual(readPrivate(manifestPath), retired, 'remote cleanup never rewrites definitions/keys');
+  } finally {
+    await service?.close(); client?.close();
+    if (server) { for (const socket of server.clients) socket.terminate(); await new Promise<void>(resolve => server!.close(() => resolve())); }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

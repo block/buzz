@@ -323,7 +323,8 @@ async function main() {
           for (const [name, value] of Object.entries(object(current.body.configurations))) {
             const candidate = object(value), revision = object(candidate.configuration).revision;
             const active = name === ((current.body.selectedNext as any).configuration?.name ?? 'default');
-            console.log(`${active ? '* selected-next' : '  saved'} ${name} @ ${revision} | ${candidate.model} | ${candidate.workspace} | behavior ${candidate.behavior ? object(candidate.behavior).name : 'upstream default'}`);
+            const binding = (current.body.harnessSetups as any[]).find(b => b.id === (candidate.harnessSetup ? object(candidate.harnessSetup).id : current.body.defaultHarnessSetup ?? 'default'));
+            console.log(`${binding?.availability === 'retired' ? '[retired binding; unavailable] ' : ''}${active ? '* selected-next' : '  saved'} ${name} @ ${revision} | ${candidate.model} | ${candidate.workspace} | behavior ${candidate.behavior ? object(candidate.behavior).name : 'upstream default'}`);
           }
           console.log('config-select <name> selects next; save edits it; explicit restart applies it.'); continue;
         }

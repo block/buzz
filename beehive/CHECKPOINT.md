@@ -1886,3 +1886,27 @@ protocol fixture / Node placeholder, NOT installed Claude. Only buzz-acp/Buzz CL
 are real installed binaries. No real provider calls. Codex remains UNIMPLEMENTED;
 source says no model env mapping/no native config, protocol-dependent profile
 transport and distinct auth/config context. Do not relabel Goose or Claude as Codex.
+
+## Binding replacement/retirement 1bc0 — implemented candidate before final full gate
+
+Code checkpoint 9f6d88569 added local replace-binding/retire-binding, separate
+manifest retirement fingerprints, stopped startup-lock atomic write and host
+execution/Save eligibility gates. Follow-up adds affected-state confirmation fencing,
+truthful inventory/TUI availability, and production-bound tests at existing owners.
+Immutable Setup hashes, original definitions, keys, selected configurations,
+journals and Move authority are never rewritten by local retirement/replacement.
+Reopened retired selection is unavailable without fallback; Stop/rename/remove
+remain credential-neutral. Consumed grant acceptance still precedes launch checks.
+No physical history pruning, automatic Restart/selection, stale-lock deletion or
+standby Start permission. Replacement deliberately reuses the same provider contract,
+service context and pinned conversation authority; changing provider credentials or
+expanding the provider schema is not part of this action.
+
+Focused strict passes; bindings/recovery 7/7, natural 12.754s. Existing installed
+normal journeys with replacement: 6/6, natural 133.413s. Self-reviewed the atomic
+writer, integrity versus eligibility split and unchanged consumed Move ordering.
+Final strict and ONE default concurrent installed-enabled full run are next at this
+committed candidate. Raw logs/results live outside source in workspace
+WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BINDING_1BC0 (final result recorded there, not an
+untested subsequent source edit). No repository CI or real provider approval;
+historical broker/tool failures remain unclassified by these focused passes.
