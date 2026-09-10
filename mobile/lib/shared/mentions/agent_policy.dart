@@ -24,11 +24,14 @@ Future<List<NostrEvent>> _queryAgentFilters(
 
 /// Overlay current owner-authenticated policy onto the existing runtime
 /// directory. This does not expand discovery to owner-only coordinates yet.
+/// [onProfileEvidence] observes immutable latest query heads after the final
+/// scope check. It does not resolve ownership or mutate any shared profile cache.
 Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
   RelaySessionNotifier session,
   List<NostrEvent> runtimeEvents, {
   Set<String>? requestedKeys,
   void Function()? checkCurrent,
+  void Function(Map<String, NostrEvent> profiles)? onProfileEvidence,
 }) async {
   final latest = <String, NostrEvent>{};
   for (final event in runtimeEvents.where((event) => event.kind == 10100)) {
@@ -64,6 +67,7 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
       ),
   ], checkCurrent: checkCurrent);
   checkCurrent?.call();
+  onProfileEvidence?.call(Map.unmodifiable(profiles));
   return mergeAgentPolicies(latest.values, policies, owners);
 }
 
