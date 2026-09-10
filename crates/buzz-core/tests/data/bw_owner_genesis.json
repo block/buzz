@@ -1,0 +1,67 @@
+{
+  "events": [
+    {
+      "content": "",
+      "created_at": 1788473889,
+      "id": "476eed383f33074c81d178d6393ecaec2046ea6c777e433d76410582442a093f",
+      "kind": 30617,
+      "pubkey": "1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada",
+      "sig": "53fd9a0019ac2c7c40ef73b00257f3341eb3130d20213f07c793441fc515342c3b80ae1cf3c453380214fd99992caf44451a82a55af1fa24cfa9492e8dc45807",
+      "tags": [
+        [
+          "d",
+          "mybuzz"
+        ],
+        [
+          "name",
+          "MyBuzz"
+        ],
+        [
+          "description",
+          "Canonical MyBuzz application fork: Desktop, Mobile/Android, buzz-acp and shared Buzz components. Relay-Git work remote; GitHub only upstream/CI mirror."
+        ],
+        [
+          "clone",
+          "https://buzz.cholewa.online/git/1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada/mybuzz.git"
+        ],
+        [
+          "buzz-channel",
+          "70114f25-3b91-46f5-bea8-7125dbb18336"
+        ]
+      ]
+    },
+    {
+      "content": "{\"version\":1,\"effective_at\":1789026525,\"cutover\":1789026525,\"operators\":[\"f8f8261d2d54109684aebcd56d00a70c210c47873abae75c66a3eeff5bc6537a\"],\"coordinators\":[\"f8f8261d2d54109684aebcd56d00a70c210c47873abae75c66a3eeff5bc6537a\"],\"workers\":{\"windows\":[\"dfbb7275f14e56a93874b59ad65aca19e81005668568820255edda69a44b6e9c\",\"d91956e1547150ee4150aa563263d6c5b937e28be4d44fd0f3157ad5282d8ccc\",\"b6bc8c2e25f062c9c2b1f47551987f661ee4697109ed5e56787a5d6253581a60\"],\"android\":[\"dfbb7275f14e56a93874b59ad65aca19e81005668568820255edda69a44b6e9c\",\"d91956e1547150ee4150aa563263d6c5b937e28be4d44fd0f3157ad5282d8ccc\",\"b6bc8c2e25f062c9c2b1f47551987f661ee4697109ed5e56787a5d6253581a60\"],\"ios\":[],\"macos\":[],\"acp\":[\"dfbb7275f14e56a93874b59ad65aca19e81005668568820255edda69a44b6e9c\",\"d91956e1547150ee4150aa563263d6c5b937e28be4d44fd0f3157ad5282d8ccc\"]},\"human_testers\":[\"dd57c78422bccf568feb2a7ae5bcf4d7ebefc2c6c54bf56a26faeb9e0b08d36b\",\"0552fa68939fc8c829d8c3159a77541357778e52cdf8b9de46785f120566a9b2\"],\"triage_delegations\":[]}",
+      "created_at": 1789026525,
+      "id": "4a0843b0b20e81caa5153506071a307ebb4b00d99e18164f8ba85f5c082df01e",
+      "kind": 46100,
+      "pubkey": "1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada",
+      "sig": "f9abf278cb70e53458eadfe40b1d8d31911eae74296840d11253bc9b20548d06fb9dd3674d7a863919490c4e4290ee07ba5c2e8828765ba36c8e09a93ab2b899",
+      "tags": [
+        [
+          "record",
+          "role-policy"
+        ],
+        [
+          "a",
+          "30617:1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada:mybuzz"
+        ]
+      ]
+    }
+  ],
+  "trust": {
+    "community": "https://buzz.cholewa.online",
+    "repo": "30617:1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada:mybuzz",
+    "owner": "1af26bb78ad6313ca562eed7bec2c72f69ceacce968fb06b92de0aad26901ada"
+  },
+  "external": {
+    "host_authorization": {
+      "allowed": true
+    },
+    "git_readbacks": [],
+    "git_ancestry": [],
+    "provider_readbacks": [],
+    "downloads": []
+  },
+  "now": 1789026525
+}

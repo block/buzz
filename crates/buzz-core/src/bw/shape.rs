@@ -297,6 +297,7 @@ fn check(w: &Value) -> Check<Value> {
                 "web",
                 "r",
                 "t",
+                "buzz-channel",
             ]
         }
         1 if matches!(tag("t"), "assignment" | "unassignment") => {
@@ -324,7 +325,9 @@ fn check(w: &Value) -> Check<Value> {
         } else {
             2
         };
-        if kind != 30617 {
+        // Repository metadata retains NIP-34's multi-value forms. The existing
+        // Buzz channel binding is a singleton name/value tag, not BW authority.
+        if kind != 30617 || name == "buzz-channel" {
             add(a(t).len() == expected, "arity");
         }
         let value = &t[1];
