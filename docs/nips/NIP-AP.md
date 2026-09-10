@@ -100,13 +100,24 @@ at creation and may be reconfigured independently afterwards. They were
 previously carried only on the kind:30177 projection (see
 "Slimming: kind:30177" below).
 
-**Status: reserved.** In the current implementation these behavioral fields are
-*parsed but not yet applied*: readers tolerate and preserve them at the wire
-layer, but the local definition store does not yet carry them and writers do
-not emit them. The instance-copy-at-creation behavior activates in a
-subsequent release (the create-path unification). Until then a definition
-carrying these fields round-trips through the wire type but the values do not
-survive a local edit-and-republish cycle.
+**Status: active.** Writers emit these fields whenever they are set on the
+local definition, and the local definition store carries them (in the
+unified agent store they appear on key-less definition records as
+`definition_respond_to`, `definition_respond_to_allowlist`, and
+`definition_parallelism`, keeping them distinct from the sibling
+instance-level fields). At instance creation the effective respond-to
+policy resolves in order: explicit creation input, then the definition's
+default, then the client default (`owner-only`). After creation the
+instance's policy is independent instance state: it lives on the instance
+record, is published via the instance's kind:30177 event, and editing the
+definition does NOT retroactively change existing instances.
+
+**Which value is live?** For a running instance the instance-level
+`respond_to` (kind:30177 head / the keyed instance record) is what the
+spawner enforces; the definition-level field only seeds new instances.
+Clients that surface both should label the definition value as a default,
+not as the running policy — displaying the definition field for an
+existing agent shows a value the spawner may not be using.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
 
