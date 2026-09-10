@@ -1,7 +1,7 @@
 # Beehive (experimental first slice)
 
 Standalone TypeScript host + relay + terminal UI. **Not Desktop parity, not
-production-ready, not compatible with the current Buzz relay.** No existing
+production-ready; deployed relay/provider compatibility remains unverified.** No existing
 client, relay policy, credential store, or native service is changed.
 
 A locally created owner secp256k1 identity signs encrypted commands/receipts.
@@ -25,37 +25,32 @@ ln -s "$(pwd)/bin/beehive.cjs" ~/.local/bin/beehive   # adjust if your PATH diff
 `beehive setup` (no directory) then uses the default host state folder
 `~/.beehive/host`, resolved from your home and displayed once; an occupied
 default is never reinitialized. Pass an explicit directory for additional
-hosts. Owner approval/catalog files remain explicit and outside host state.
+hosts. Normal configuration and private discovery need no approval files.
 Undo the command with `rm ~/.local/bin/beehive` (or your equivalent link).
 
-## Offline standalone host enrollment (partial, no network)
+## Configure and join a private host
 
-`beehive setup <directory>` (or `node src/cli.ts setup <directory>` inside the
-package) without an identity file opens Beehive's
-own enrollment interface. No Buzz Desktop is needed. Use **create** on a fresh
-host directory: enter its label, relay URL and your existing owner **public** key.
-The host generates its durable independent key and exports a private pairing file.
-Compare the full displayed fingerprint in your owner context.
+See [FIRST_DEMO.md](FIRST_DEMO.md) for the current short flow:
+`beehive setup` → OWNER NPUB + RELAY → ordinary community check/join →
+`beehive host --owner-present`. Setup merely configures; host start is an explicit
+foreground lifecycle decision. Retained unapproved and approved identities resume
+without key replacement, retargeting, file exchange or approval import.
 
-Run the same command in your separate owner context and choose **approve**. Read
-the pairing file, verify the host/key/label/relay/fingerprint, confirm registration,
-choose an expiration and a new approval file, then enter your existing owner key
-through hidden local input. Do not run owner approval on a host you do not trust
-with that input. No new controller key is created and the owner key is not saved.
-Transfer the approval privately back to the host and choose **import**. **export**
-can repeat pairing-file export without replacing the retained host key.
+The locally configured owner public key is the management trust root. Only that
+owner's actual signed commands can manage the host. A host signs and privately
+advertises its own availability, including with zero agents; this offer proves
+neither owner consent nor agent placement. The owner uses
+`beehive tui discover <relay> ~/.beehive/owner` without a catalog file.
 
-Files must be owner-only regular files; transfer them privately and retain mode
-0600. Registration is domain-separated from agent NIP-OA, binds this exact pairing
-request, and grants neither agent placement nor owner account permissions.
-Registration expiration is checked locally; offline verification cannot discover
-remote revocation, prove a physical machine, or erase a copied key.
+Ordinary direct membership is independently verified with the host's own key;
+issued invites use existing NIP-98 claim APIs, never host owner-account delegation.
+Policy acceptance/admin action remains the community's gate. Joining starts no
+agent and grants no placement. Actual per-agent grants, local genesis and retained
+assignment still gate Start. Owner secrets stay on the owner computer.
 
-**This milestone stops at registered/pending/no-network.** Narrow relay admission,
-private host inventory in the TUI, and Start/reply/Move/reply over the new transport
-are not implemented. Broad NIP-OA cannot enroll a host. The legacy diagnostic
-workflow below remains separate and stores a shared owner key; do not use it for
-real host enrollment. Existing a8 OA identity files are rejected, not migrated.
+Historical explicit registration tooling lives under `legacy-enrollment` and
+`catalog`, not the normal setup menu. Legacy two-argument diagnostic setup below
+stores a shared owner key; do not use it for normal private configuration.
 
 ## Run an isolated fixture
 

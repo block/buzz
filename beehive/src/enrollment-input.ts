@@ -33,9 +33,9 @@ export async function enrollmentInput(directory: string): Promise<void> {
       console.log(`Pairing fingerprint: ${fingerprint}`);
       const file = action === 'export-to' ? setupPath(text(await ui.question('New private request output path (~ supported): '))) : join(exchange, `request-${fingerprint}-${randomUUID()}.json`);
       writePrivate(file, identity.pairing, true);
-      console.log(`Request saved: ${file}\nTransfer this file privately to the owner computer (contains public keys and private infrastructure metadata, no secrets). There run beehive setup ~/.beehive/owner-exchange, choose approve and supply the transferred file. Compare the full fingerprint above. Re-export is safe; older files are never replaced.`);
+      console.log(`Request saved: ${file}\nTransfer this file privately to the owner computer (contains public keys and private infrastructure metadata, no secrets). There run beehive legacy-enrollment ~/.beehive/owner-exchange, choose approve and supply the transferred file. Compare the full fingerprint above. Re-export is safe; older files are never replaced.`);
     } else if (action === 'approve' || action === 'approve-to') {
-      if (retained) throw Error('This folder belongs to a host. Approve on the trusted owner computer using beehive setup ~/.beehive/owner-exchange; no owner key requested here.');
+      if (retained) throw Error('This folder belongs to a host. Approve on the trusted owner computer using beehive legacy-enrollment ~/.beehive/owner-exchange; no owner key requested here.');
       const request = hostPairing(readPrivate(setupPath(text(await ui.question('Private pairing file (transferred from host, ~ supported): ')))));
       console.log(`Host: ${request.host}\nLabel: ${request.label}\nOwner: ${request.owner}\nRelay: ${request.relay}\nFingerprint: ${pairingFingerprint(request)}`);
       if (await ui.question('Compare full fingerprint with host. Register ONLY this infrastructure (not agents or relay delegation)? [yes/no]: ') !== 'yes') return;
@@ -47,7 +47,7 @@ export async function enrollmentInput(directory: string): Promise<void> {
       ui.close();
       const secret = await readAgentSecret('Owner');
       writePrivate(file, registerHost(request, secret, expires), true);
-      console.log(`Approval saved: ${file}\nOwner secret not persisted. Transfer privately back to host, then run beehive setup and choose import. You may put it at the host's displayed default approval path.\nOn this owner computer next: beehive catalog ${quote(file)}\nRelay admission remains pending.`);
+      console.log(`Approval saved: ${file}\nOwner secret not persisted. Transfer privately back to host, then run beehive legacy-enrollment and choose import. You may put it at the host's displayed default approval path.\nOn this owner computer next: beehive catalog ${quote(file)}\nRelay admission remains pending.`);
     } else if (action === 'import') {
       if (!retained) throw Error('No host identity here. Run setup on the original host folder; do not create a replacement identity.');
       const expected = join(exchange, `approval-${pairingFingerprint(retained.pairing)}.json`);

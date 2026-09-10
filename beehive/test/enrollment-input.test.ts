@@ -14,7 +14,7 @@ import { createGenesis } from '../src/assignment.ts';
 import { writePrivate } from '../src/storage.ts';
 import { pairingFingerprint, registerHost } from '../src/host-registration.ts';
 
-async function wizard(directory: string, steps: [string, string][], credentialFile: string, expectedCode = 0, home?: string, command = 'setup', extra: string[] = []): Promise<string> {
+async function wizard(directory: string, steps: [string, string][], credentialFile: string, expectedCode = 0, home?: string, command = 'legacy-enrollment', extra: string[] = []): Promise<string> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...(home ? { HOME: home } : {}), BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile };
   delete env.BUZZ_PRIVATE_KEY; delete env.BUZZ_AUTH_TAG; delete env.BUZZ_RELAY_URL;
   const child = spawn(process.execPath, ['--import', fileURLToPath(new URL('./isolated-credentials-loader.ts', import.meta.url)), fileURLToPath(new URL('../src/cli.ts', import.meta.url)), command, directory, ...extra], { env, stdio: ['pipe', 'pipe', 'pipe'] });

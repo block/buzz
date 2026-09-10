@@ -11,12 +11,14 @@ import { verifyHostAttestation } from '../src/host-attestation.ts';
  * explicit giftwrap author/connection mismatch exception. req.rs p-gate.
  * No DB/token/push implementation; fixtures grant member MessagesWrite only.
  */
-export async function nostrFixture(owner: string, independentMembers?: ReadonlySet<string>) {
+export async function nostrFixture(owner: string, independentMembers?: ReadonlySet<string>, invites?: { code: string; policyRequired?: boolean }) {
   // api/mod.rs direct membership is distinct from ViaOwner. This is fixture
   // policy only, NOT evidence that deployed membership has narrow permissions.
   const members = independentMembers ? new Set(independentMembers) : undefined;
   const self = newKey();
   const liveChecks: string[] = [];
+  const claims: string[] = [];
+  const httpEvents = new Set<string>();
   const http = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.method === 'GET' && req.url === '/') { res.end(JSON.stringify({ self: publicKey(self), supported_nips: members ? [43] : [] })); return; }
@@ -24,7 +26,17 @@ export async function nostrFixture(owner: string, independentMembers?: ReadonlyS
     try {
       const auth = JSON.parse(Buffer.from((req.headers.authorization ?? '').replace(/^Nostr /, ''), 'base64').toString());
       if (!verifyEvent(auth) || auth.kind !== 27235 || auth.content !== '' || Math.abs(auth.created_at - Math.floor(Date.now()/1000)) > 60 ||
-        JSON.stringify(auth.tags) !== JSON.stringify([['u', url.replace('ws:', 'http:') + req.url], ['method', 'POST'], ['payload', digest(body).toString('hex')]])) throw Error('auth');
+        JSON.stringify(auth.tags.filter((tag: string[]) => tag[0] !== 'nonce')) !== JSON.stringify([['u', url.replace('ws:', 'http:') + req.url], ['method', 'POST'], ['payload', digest(body).toString('hex')]])) throw Error('auth');
+      if (httpEvents.has(auth.id)) { res.writeHead(401).end(JSON.stringify({ error: 'nip98_replay' })); return; }
+      httpEvents.add(auth.id);
+      if (req.url === '/api/invites/claim' && req.method === 'POST' && members && invites) {
+        claims.push(auth.pubkey);
+        const input = JSON.parse(body);
+        if (input.code !== invites.code) { res.writeHead(403).end(JSON.stringify({ error: 'invite_invalid' })); return; }
+        if (invites.policyRequired) { res.writeHead(403).end(JSON.stringify({ error: 'policy_acceptance_required' })); return; }
+        const status = members.has(auth.pubkey) ? 'already_member' : 'joined'; members.add(auth.pubkey);
+        res.end(JSON.stringify({ status, community_id: 'fixture', host: new URL(url).host, role: 'member' })); return;
+      }
       if (!members?.has(auth.pubkey)) { res.writeHead(403).end(JSON.stringify({ error: 'relay_membership_required' })); return; }
       if (req.url !== '/query' || req.method !== 'POST') throw Error('route');
       liveChecks.push(auth.pubkey);
@@ -78,5 +90,5 @@ export async function nostrFixture(owner: string, independentMembers?: ReadonlyS
       }
     });
   });
-  return { url, history, liveChecks, get independentWraps() { return independentWraps; }, async close() { for (const peer of connections.keys()) peer.terminate(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); } };
+  return { url, history, liveChecks, claims, get independentWraps() { return independentWraps; }, async close() { for (const peer of connections.keys()) peer.terminate(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); } };
 }

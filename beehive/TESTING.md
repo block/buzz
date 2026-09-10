@@ -589,3 +589,34 @@ host errno test checks receipt sanitization, not inventory workspace suppression
 owner TUI before the installed ACP/Buzz CLI signed-reply journey. Other provider
 journeys are unchanged; no provider parity expansion, OS-store or live enrollment
 proof. Workspace V3_BINDINGS_7FDD records exact execution/failures.
+
+## Owner configuration and ordinary join (3a946)
+
+Normal setup now uses OWNER NPUB/hex + retained relay configuration, not approval
+exchange. `host-availability.test.ts` drives actual fresh CLI configuration,
+nonmember cancellation, policy-required refusal, issued-link claim confirmation,
+member resume, zero-agent host/private owner discovery, wrong-owner/absent-agent
+Start rejection and missing-key refusal. Both credential boundaries are explicitly
+isolated. `launcher.test.ts` covers npub/default paths and retained resume;
+`enrollment-input.test.ts` retains historical explicit exchange compatibility.
+`catalog-tui.test.ts` now runs normal setup before approved and unapproved host
+Start/Stop, including installed Buzz signed-reply and v3-conversion scenarios.
+
+Validation: one default-concurrent installed-enabled whole-package run completed
+naturally in 311.190s: **167 passed, 0 failed, 0 skipped**, including all 19 installed
+opt-in cases (`BEEHIVE_REAL_BUZZ_ACP=/Applications/Buzz.app/Contents/MacOS/buzz-acp`).
+This run predates the subsequently discovered NIP-98 nonce correction: same-second
+requests previously had identical event IDs and native replay protection refused
+rechecks. `membership-signer.test.ts` binds the production signer to unique signed
+IDs and a replay-enforcing loopback fixture; the nonce matches native Buzz CLI's
+existing contract, not a new relay API. Final source strict + focused
+`membership-signer`, `direct-membership`, `host-availability`, `catalog-tui`,
+`nostr-transport`, `launcher`, `enrollment-input`: **30 passed, 0 failed, 0 skipped**,
+installed opt-in enabled. The whole suite was not repeated after that causal fix.
+Original failing replay assertion and stale setup-check-count assertions are
+preserved in the external work log evidence; no retry-to-green or serial masking.
+
+These are synthetic local credential/relay/provider fixtures using installed
+binaries, not live OS credential, community admission, policy acceptance or vendor
+readiness evidence. Authority foundation 91d2246 received a scoped independent
+no-blocker review; it must not be represented as review of this later setup slice.

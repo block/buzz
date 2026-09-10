@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hostname } from 'node:os';
+import { npubEncode } from 'nostr-tools/nip19';
 import { newKey, publicKey } from '../src/protocol.ts';
 
 /** Launcher-focused smoke: the installed symlink must behave exactly like the
@@ -39,8 +41,8 @@ async function runLauncher(installed: string, args: string[], env: NodeJS.Proces
 }
 
 const createJourney = (owner: string): [string, string][] => [
-  ['Enrollment [', 'create'], ['Computer name [', 'launcher-host'], ['Owner PUBLIC key (hex,', publicKey(owner)],
-  ['Management relay URL (', 'wss://example.invalid'],
+  ['Owner PUBLIC npub', npubEncode(publicKey(owner))], ['Management relay URL (', 'wss://example.invalid'],
+  ['Create host identity', 'yes'], ['Check/join community', 'no'],
 ];
 
 function installInto(root: string, name = 'user bin dir'): string {
@@ -86,22 +88,22 @@ test('no-arg setup enrolls on the displayed default host folder via the isolated
     assert.ok(created.output.includes(`Default host folder: ${folder}`), created.output);
     const identity = JSON.parse(readFileSync(join(folder, 'host-identity.json'), 'utf8')) as { version: number; pairing: { host: string; owner: string; label: string }; registration: unknown };
     assert.equal(identity.version, 3);
-    assert.equal(identity.pairing.label, 'launcher-host');
+    assert.equal(identity.pairing.label, hostname().slice(0, 128));
     assert.equal(identity.pairing.owner, publicKey(owner));
     assert.ok(/^[0-9a-f]{64}$/.test(identity.pairing.host));
     assert.equal(identity.registration, null);
     const fixture = readFileSync(credentials, 'utf8');
     assert.ok(fixture.includes(identity.pairing.host), 'host key stored in the isolated fixture');
     assert.equal(Object.keys(JSON.parse(fixture)).length, 1);
-    const files = [join(folder, 'host-identity.json'), join(folder, 'exchange', readdirSync(join(folder, 'exchange'))[0]!), credentials];
+    const files = [join(folder, 'host-identity.json'), credentials];
     for (const value of [...files.map(file => readFileSync(file, 'utf8')), created.output]) assert.ok(!value.includes(owner), 'owner secret never persisted or printed');
     // A second default setup must refuse to replace the retained identity.
     const before = readFileSync(join(folder, 'host-identity.json'), 'utf8');
     const second = await runLauncher(installed, ['setup'], isolatedEnv(home, credentials), [
-      ['Enrollment [', 'create'],
+      ['Check/join community', 'no'],
     ], cwd);
-    assert.equal(second.code, 1, second.output);
-    assert.ok(second.output.includes('Host identity already exists. Rerun setup'), second.output);
+    assert.equal(second.code, 0, second.output);
+    assert.ok(second.output.includes('Identity, owner, relay and approval history retained'), second.output);
     assert.equal(readFileSync(join(folder, 'host-identity.json'), 'utf8'), before, 'retained identity unchanged');
     assert.ok(!existsSync(join(root, 'second request.json')));
   } finally { rmSync(root, { recursive: true, force: true }); }

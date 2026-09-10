@@ -54,12 +54,12 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   const members = new Set([owner, a, b].map(publicKey));
   const relay = await nostrFixture(publicKey(owner), members);
   const one = registration(owner, a, relay.url), two = registration(owner, b, relay.url);
-  const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: scenario === 'configured' ? [two] : [one, two] }, publicKey(owner), relay.url);
+  const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: (scenario === 'configured' || scenario === 'installed') ? [two] : [one, two] }, publicKey(owner), relay.url);
   const directory = join(root, 'host'); mkdirSync(directory);
   const credentialFile = join(root, 'credentials.json');
   const credentials = isolatedFileCredentials(credentialFile);
   credentials.create(credentialReference('host', publicKey(a)), a);
-  writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: one.request, key: credentialReference('host', publicKey(a)), registration: scenario === 'configured' ? null : one });
+  writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: one.request, key: credentialReference('host', publicKey(a)), registration: (scenario === 'configured' || scenario === 'installed') ? null : one });
   const conversation = installed ? await conversationRelayFixture(root, owner, publicKey(agent)) : undefined;
   provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', ...(!converting ? { conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
   const journalPath = join(directory, 'agents', publicKey(agent), 'journal.json');
@@ -85,6 +85,21 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   writeFileSync(helper, `import { readFileSync } from 'node:fs'; let input=''; for await (const b of process.stdin) input+=b; const secret=JSON.parse(readFileSync(${JSON.stringify(credentialFile)},'utf8'))[JSON.stringify(JSON.parse(input))]; process.stdout.write(JSON.stringify(secret ? {status:'present',secret} : {status:'missing'}));`);
   const loader = join(root, 'credential-helper-loader.mjs');
   writeFileSync(loader, `import { registerHooks } from 'node:module'; registerHooks({load(url,ctx,next){const r=next(url,ctx); if(!url.endsWith('/src/credential-helper.ts'))return r;return {...r,source:String(r.source).replace("new URL('./credential-helper-child.ts', import.meta.url)", ${JSON.stringify(`new URL(${JSON.stringify('file://' + helper)})`)})};}});`);
+  // Actual normal setup resumes both approved compatibility and unapproved
+  // installed reply/Stop fixtures, even when an agent manifest already exists.
+  const beforeSetup = readFileSync(join(directory, 'host-identity.json'));
+  const setupChild = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), '--import', loader, 'src/cli.ts', 'setup', directory], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let setupOutput = ''; setupChild.stdout.on('data', b => setupOutput += b); setupChild.stderr.on('data', b => setupOutput += b);
+  const setupExit = new Promise<number | null>(done => setupChild.on('close', done));
+  try {
+    for (let n = 0; n < 400 && !setupOutput.includes('Check/join community'); n++) { if (setupChild.exitCode !== null) break; await delay(20); }
+    assert.match(setupOutput, /Check\/join community/); setupChild.stdin.write('yes\n');
+    assert.equal(await setupExit, 0, setupOutput);
+    assert.match(setupOutput, /membership verified now; host configured, NOT serving/);
+    assert.ok(!setupOutput.includes('Issued invite code'));
+    assert.deepEqual(readFileSync(join(directory, 'host-identity.json')), beforeSetup);
+    assert.equal(readFileSync(join(directory, 'setup.json'), 'utf8'), manifest);
+  } finally { if (setupChild.exitCode === null && setupChild.signalCode === null) setupChild.kill('SIGKILL'); await setupExit; }
   const hostChild = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), '--import', loader, 'src/cli.ts', 'host', directory, ...(installed ? [relay.url] : []), '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: credentialFile }, stdio: ['ignore','pipe','pipe'] });
   let hostOutput = ''; hostChild.stdout.on('data', b => hostOutput += b); hostChild.stderr.on('data', b => hostOutput += b);
   const hostExit = new Promise<number | null>(resolve => hostChild.on('close', resolve));
@@ -165,7 +180,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       assert.equal(Object.keys(journal.operations).length, converting ? 3 : 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
-    assert.deepEqual(relay.liveChecks.sort(), [publicKey(a), publicKey(owner)].sort());
+    assert.deepEqual(relay.liveChecks.sort(), [publicKey(a), publicKey(a), publicKey(owner)].sort());
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
     const state = JSON.parse(readFileSync(journalPath, 'utf8'));

@@ -18,6 +18,7 @@ import { claudeGuidance } from './claude.ts';
 import { readAgentSecret } from './key-input.ts';
 import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
+import { hostSetup } from './host-setup.ts';
 import { enrollmentInput } from './enrollment-input.ts';
 import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
@@ -45,13 +46,14 @@ const defaultHostDirectory = () => join(homedir(), '.beehive', 'host');
 const help = `Beehive — private host preview (explicit direct relay membership required)
 Command: beehive <command> from any directory once installed (one-time user link, reversible: ln -s <beehive-package>/bin/beehive.cjs <user bin on PATH>/beehive, e.g. ~/.local/bin); source fallback inside the package: node src/cli.ts <command>.
   identity                                 Disabled: use your existing owner signer
-  setup                                    Offline pairing/owner approval/import on the default host folder ~/.beehive/host
-  setup <host-directory>                   Explicit host folder (additional hosts/tests); same offline wizard
+  setup                                    Configure/resume OWNER NPUB + RELAY on ~/.beehive/host; normal community join
+  setup <host-directory>                   Same configuration/join flow on an explicit retained host folder
   setup <host-directory> <identity-file>  LEGACY loopback diagnostic setup (owner key copied)
   provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
   reconcile-provision <host-directory> <binding-file> <genesis-file> Explicit exact first-provision recovery
   catalog <approval-file>                  Automatic private catalog beside approval; prints tui command
   catalog <new-file> <registration-files...> Retain verified public host registrations
+  legacy-enrollment <host-directory>       Explicit historical approval exchange (not required)
   presets                                  Local process-free preset discovery/setup guidance
   local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
@@ -70,7 +72,7 @@ Command: beehive <command> from any directory once installed (one-time user link
   tui discover <relay> <state-directory>   Private availability discovery; no approval file
   tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
-The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. Owner approval files are automatic in the separately chosen owner exchange folder. catalog <approval-file> saves beside the approval. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match retained local configuration.
+The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. No approval files required. setup never starts the host or agents; host --owner-present is a deliberate foreground start. Legacy catalog <approval-file> remains available. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match retained local configuration.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
@@ -90,6 +92,8 @@ async function main() {
     console.log(`Provisioned STOPPED public slot ${publicKey(secret)}; owner ${identity.pairing.owner}. Key stored and read-back verified in Beehive OS credential namespace. No Start or relay admission performed.`);
   } else if (command === 'presets') {
     showPresets();
+  } else if (command === 'legacy-enrollment') {
+    await enrollmentInput(setupPath(text(args[0])));
   } else if (command === 'setup') {
     const usingDefaultHostFolder = args.length === 0;
     if (usingDefaultHostFolder) {
@@ -97,8 +101,8 @@ async function main() {
       console.log(`Default host folder: ${args[0]} (pass an explicit directory for another host; existing installations are never reinitialized)`);
     }
     const dir = setupPath(text(args[0]));
-    if (args.length === 1 && !existsSync(join(dir, 'setup.json'))) {
-      await enrollmentInput(dir); return;
+    if (args.length === 1 && (existsSync(join(dir, 'host-identity.json')) || !existsSync(join(dir, 'setup.json')))) {
+      await hostSetup(dir); return;
     }
     if (existsSync(dir)) {
       if (args.length !== 1) throw Error('Existing setup: supply host directory only; retained owner cannot be replaced');

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { finalizeEvent } from 'nostr-tools/pure';
 import { publicKey } from './protocol.ts';
 import { verifyDirectMembershipEvidence, type HostAuthorizationSigner } from './direct-membership.ts';
@@ -13,11 +14,13 @@ export const productionAdmission: ScopedRelayAdmission = {
   admit() { throw Error('Host relay admission pending: verified ordinary direct membership required (relay admin: buzz-admin add-member --pubkey <host-public-key> --role member); NIP-OA prohibited'); },
 };
 
-/** Infrastructure or owner signs only its own fresh HTTP authentication; no OA. */
+/** Infrastructure or owner signs only its own fresh HTTP authentication; no OA.
+ * Match Buzz CLI's nonce tag: same-second checks/claim retries must have distinct
+ * event IDs for the community-scoped NIP-98 replay guard. */
 export function membershipSigner(secret: string): HostAuthorizationSigner {
   return { hostPublicKey: publicKey(secret), async signHttpAuthentication(request) {
     return JSON.stringify(finalizeEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), content: '',
-      tags: [['u', request.url], ['method', request.method], ['payload', request.payloadSha256Hex]] }, Buffer.from(secret, 'hex')));
+      tags: [['u', request.url], ['method', request.method], ['payload', request.payloadSha256Hex], ['nonce', randomUUID()]] }, Buffer.from(secret, 'hex')));
   } };
 }
 /** One fresh live row check authorizes ONE immediate connection. Reopen the command
