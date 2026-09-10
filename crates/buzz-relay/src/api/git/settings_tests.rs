@@ -48,7 +48,11 @@ mod external_infra {
             config.media.s3_secret_key = "buzz_dev_secret".into();
             let pool = sqlx::PgPool::connect(&config.database_url).await.unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            db.migrate().await.unwrap();
+            // CI provisions schema/schema.sql with pgschema before this suite.
+            // Only migration-backed local fixtures own the migration lifecycle.
+            if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+                db.migrate().await.unwrap();
+            }
             let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .unwrap();
