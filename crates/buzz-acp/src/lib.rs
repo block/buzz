@@ -14,6 +14,7 @@ mod queue;
 mod relay;
 mod scope;
 mod setup_mode;
+mod ssh_auth_sock;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -84,6 +85,10 @@ fn current_working_directory() -> Result<String> {
         cwd.display()
     );
     Ok(cwd.to_string_lossy().into_owned())
+}
+
+fn generated_codex_config_for_spawn(command: &str, relay_url: &str) -> Option<String> {
+    config::codex_network_env(command, relay_url).map(|(_, value)| value)
 }
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
@@ -3064,11 +3069,11 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
-                let has_codex = config.has_generated_codex_config;
+                let relay_url = config.relay_url.clone();
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(&cmd, &args, &env, &relay_url, idx, observer).await;
                     guard.send(result);
                 });
             }
@@ -5183,13 +5188,13 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
-    let has_codex = config.has_generated_codex_config;
+    let relay_url = config.relay_url.clone();
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, &relay_url, i, observer).await;
         guard.send(result);
     });
 }
@@ -5414,7 +5419,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
-    let has_codex = config.has_generated_codex_config;
+    let relay_url = config.relay_url.clone();
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5426,7 +5431,7 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, &relay_url, index, observer).await;
         guard.send(result);
     });
 
@@ -5469,7 +5474,7 @@ struct PoolStartup {
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
-    has_generated_codex_config: bool,
+    relay_url: String,
     model: Option<String>,
     effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
@@ -5482,7 +5487,7 @@ impl PoolStartup {
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
-            has_generated_codex_config: config.has_generated_codex_config,
+            relay_url: config.relay_url.clone(),
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -5498,11 +5503,13 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
+        let generated_codex_config =
+            generated_codex_config_for_spawn(&startup.command, &startup.relay_url);
         let spawn_result = AcpClient::spawn(
             &startup.command,
             &startup.args,
             &startup.extra_env,
-            startup.has_generated_codex_config,
+            generated_codex_config.as_deref(),
         )
         .await;
         match spawn_result {
@@ -5605,11 +5612,12 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
-    has_generated_codex_config: bool,
+    relay_url: &str,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+    let generated_codex_config = generated_codex_config_for_spawn(command, relay_url);
+    let mut acp = AcpClient::spawn(command, args, extra_env, generated_codex_config.as_deref())
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -5640,7 +5648,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], None).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -5766,14 +5774,14 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
-    let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: failed to spawn agent: {e}");
-                std::process::exit(1);
-            }
-        };
+    let mut client = match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], None).await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
@@ -9147,10 +9155,81 @@ mod observer_chunk_coalescer_tests {
 #[cfg(test)]
 mod build_mcp_servers_tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::Mutex;
 
     /// Env-var-touching tests must run serially — env vars are process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                original: std::env::var_os(name),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn spawn_test_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "buzz-acp-spawn-codex-config-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn spawn_test_ssh_dir(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp").join(format!(
+            "ssh-buzz-acp-spawn-codex-config-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn create_spawn_test_dir(path: &std::path::Path) {
+        std::fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_spawn_test_ssh_socket(socket: &std::path::Path) {
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        drop(listener);
+    }
+
+    #[cfg(not(unix))]
+    fn create_spawn_test_ssh_socket(socket: &std::path::Path) {
+        std::fs::write(socket, "").unwrap();
+    }
+
+    fn generated_socket_parent(config: &str) -> String {
+        let json: serde_json::Value = serde_json::from_str(config).unwrap();
+        json["network"]["allow_unix_sockets"][0]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
 
     fn test_config() -> Config {
         Config {
@@ -9190,7 +9269,6 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -9200,6 +9278,46 @@ mod build_mcp_servers_tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn generated_codex_config_for_spawn_reads_current_ssh_auth_sock() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _ssh_auth_sock = EnvVarGuard::capture("SSH_AUTH_SOCK");
+        let _home = EnvVarGuard::capture("HOME");
+
+        let home = spawn_test_dir("home");
+        let first_dir = spawn_test_ssh_dir("first");
+        let second_dir = spawn_test_ssh_dir("second");
+        create_spawn_test_dir(&home);
+        create_spawn_test_dir(&first_dir);
+        create_spawn_test_dir(&second_dir);
+        let first_socket = first_dir.join("agent.sock");
+        let second_socket = second_dir.join("agent.sock");
+        create_spawn_test_ssh_socket(&first_socket);
+        create_spawn_test_ssh_socket(&second_socket);
+
+        std::env::set_var("HOME", &home);
+        std::env::set_var("SSH_AUTH_SOCK", &first_socket);
+        let first = generated_codex_config_for_spawn("codex-acp", "wss://relay.example.com")
+            .expect("first spawn should receive generated config");
+
+        std::env::set_var("SSH_AUTH_SOCK", &second_socket);
+        let second = generated_codex_config_for_spawn("codex-acp", "wss://relay.example.com")
+            .expect("second spawn should receive generated config");
+
+        assert_eq!(
+            generated_socket_parent(&first),
+            first_dir.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(
+            generated_socket_parent(&second),
+            second_dir.canonicalize().unwrap().display().to_string()
+        );
+
+        std::fs::remove_dir_all(&first_dir).ok();
+        std::fs::remove_dir_all(&second_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -9416,7 +9534,6 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -9450,7 +9567,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], None)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),

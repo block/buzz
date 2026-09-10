@@ -4,7 +4,8 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -14,6 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
+use crate::ssh_auth_sock::safe_ssh_auth_sock_parent;
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -598,12 +600,6 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
-    /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
-    /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
-    /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
-    /// When false (non-Codex agents or rejected relay URL), the helper returns None and
-    /// any persona-supplied `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
-    pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
@@ -816,26 +812,47 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 }
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
-/// network access in Codex's macOS Seatbelt sandbox.
+/// network access in Codex's macOS Seatbelt sandbox, plus the local SSH agent
+/// socket directory when it is narrow enough to grant safely.
 ///
 /// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
 /// that blocks all outbound network by default. Without this env var, `buzz-cli`
 /// requests are blocked before they can reach the relay WebSocket.
 ///
-/// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
-/// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
+/// Returns `Some(("CODEX_CONFIG", json))` for Codex agents, or `None` for
+/// non-Codex agents or when the relay URL cannot be parsed.
 ///
 /// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
 /// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
-/// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
-/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
-/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
+/// equivalent to the TOML overrides:
+/// - `sandbox_workspace_write.network_access = true`
+/// - `network.allow_unix_sockets += <SSH_AUTH_SOCK parent>`
+///
+/// The first setting allows outbound TCP/TLS for the relay. The SSH socket
+/// setting lets `git push` reach the user's existing SSH agent from within the
+/// Codex sandbox without granting write access to the socket directory.
 ///
 /// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
 ///
 /// Handles `ws://`, `wss://`, `http://`, and `https://` schemes.
 pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String, String)> {
+    let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    codex_network_env_with_env(
+        agent_command,
+        relay_url,
+        ssh_auth_sock.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn codex_network_env_with_env(
+    agent_command: &str,
+    relay_url: &str,
+    ssh_auth_sock: Option<&OsStr>,
+    home: Option<&Path>,
+) -> Option<(String, String)> {
     match normalize_agent_command_identity(agent_command).as_str() {
         "codex" | "codex-acp" => {}
         _ => return None,
@@ -860,12 +877,35 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
         }
     };
 
-    tracing::debug!(host, "injecting CODEX_CONFIG network_access for relay host");
+    let ssh_socket_parent =
+        ssh_auth_sock.and_then(|socket| safe_ssh_auth_sock_parent(Path::new(socket), home));
+
+    tracing::debug!(
+        host,
+        ssh_socket_parent = ?ssh_socket_parent.as_deref(),
+        "injecting CODEX_CONFIG sandbox defaults for relay host"
+    );
 
     Some((
         "CODEX_CONFIG".into(),
-        "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
+        codex_sandbox_config_json(ssh_socket_parent.as_deref()),
     ))
+}
+
+fn codex_sandbox_config_json(ssh_socket_parent: Option<&str>) -> String {
+    let Some(socket_parent) = ssh_socket_parent else {
+        return "{\"sandbox_workspace_write\":{\"network_access\":true}}".to_string();
+    };
+
+    serde_json::json!({
+        "network": {
+            "allow_unix_sockets": [socket_parent],
+        },
+        "sandbox_workspace_write": {
+            "network_access": true,
+        },
+    })
+    .to_string()
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -1134,19 +1174,8 @@ impl Config {
 
         // Spawned desktop agents now carry a complete instance snapshot. Team
         // instructions arrive independently so they can be layered at runtime.
-        let mut persona_env_vars = Vec::new();
+        let persona_env_vars = Vec::new();
         let model = args.model;
-
-        // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
-        // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
-        // for non-Codex agents or unparseable relay URLs.
-        let has_generated_codex_config =
-            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
-                persona_env_vars.push(network_env);
-                true
-            } else {
-                false
-            };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1195,7 +1224,6 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
-            has_generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
@@ -1571,7 +1599,6 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -1775,9 +1802,17 @@ mod tests {
 
     const CODEX_CONFIG_JSON: &str = "{\"sandbox_workspace_write\":{\"network_access\":true}}";
 
+    fn codex_network_env_without_ssh(
+        agent_command: &str,
+        relay_url: &str,
+    ) -> Option<(String, String)> {
+        codex_network_env_with_env(agent_command, relay_url, None, None)
+    }
+
     #[test]
     fn codex_network_env_wss_url() {
-        let result = codex_network_env("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+        let result =
+            codex_network_env_without_ssh("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1786,7 +1821,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_ws_url() {
-        let result = codex_network_env("codex-acp", "ws://localhost:3000");
+        let result = codex_network_env_without_ssh("codex-acp", "ws://localhost:3000");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1795,7 +1830,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_https_url() {
-        let result = codex_network_env("codex-acp", "https://relay.example.com/path");
+        let result = codex_network_env_without_ssh("codex-acp", "https://relay.example.com/path");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1804,7 +1839,8 @@ mod tests {
 
     #[test]
     fn codex_network_env_http_url_with_port() {
-        let result = codex_network_env("codex-acp", "http://relay.example.com:8080/query");
+        let result =
+            codex_network_env_without_ssh("codex-acp", "http://relay.example.com:8080/query");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1814,7 +1850,7 @@ mod tests {
     #[test]
     fn codex_network_env_bare_codex_command() {
         // "codex" (not "codex-acp") should also get the env var.
-        let result = codex_network_env("codex", "wss://relay.example.com");
+        let result = codex_network_env_without_ssh("codex", "wss://relay.example.com");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1824,7 +1860,8 @@ mod tests {
     #[test]
     fn codex_network_env_full_path_codex_command() {
         // Full path like /usr/local/bin/codex-acp should be normalized.
-        let result = codex_network_env("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        let result =
+            codex_network_env_without_ssh("/usr/local/bin/codex-acp", "wss://relay.example.com");
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1833,16 +1870,18 @@ mod tests {
 
     #[test]
     fn codex_network_env_non_codex_agent_returns_none() {
-        assert!(codex_network_env("goose", "wss://relay.example.com").is_none());
-        assert!(codex_network_env("claude-agent-acp", "wss://relay.example.com").is_none());
-        assert!(codex_network_env("buzz-agent", "wss://relay.example.com").is_none());
+        assert!(codex_network_env_without_ssh("goose", "wss://relay.example.com").is_none());
+        assert!(
+            codex_network_env_without_ssh("claude-agent-acp", "wss://relay.example.com").is_none()
+        );
+        assert!(codex_network_env_without_ssh("buzz-agent", "wss://relay.example.com").is_none());
     }
 
     #[test]
     fn codex_network_env_includes_sandbox_network_access() {
         // The JSON value must set sandbox_workspace_write.network_access=true — without
         // it, the Seatbelt sandbox blocks outbound connections in the 1.x adapter.
-        let result = codex_network_env("codex-acp", "wss://relay.example.com");
+        let result = codex_network_env_without_ssh("codex-acp", "wss://relay.example.com");
         let (key, val) = result.expect("expected Some for valid codex + valid url");
         assert_eq!(key, "CODEX_CONFIG");
         assert!(
@@ -1858,13 +1897,13 @@ mod tests {
     #[test]
     fn codex_network_env_empty_relay_url_returns_none() {
         // Empty string fails Url::parse — graceful None return.
-        assert!(codex_network_env("codex-acp", "").is_none());
+        assert!(codex_network_env_without_ssh("codex-acp", "").is_none());
     }
 
     #[test]
     fn codex_network_env_schemeless_string_returns_none() {
         // A bare string with no scheme fails Url::parse — graceful None return.
-        assert!(codex_network_env("codex-acp", "not-a-url").is_none());
+        assert!(codex_network_env_without_ssh("codex-acp", "not-a-url").is_none());
     }
 
     #[test]
