@@ -19,7 +19,60 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::sync::Mutex;
+
+/// Translate a canned non-streaming `chat.completion` body into the SSE stream
+/// goose's openai-compatible provider actually consumes.
+///
+/// The canned bodies are written in the plain `chat.completion` shape because
+/// that is what reads clearly in a test. goose requests `stream: true` and
+/// parses `chat.completion.chunk` frames, so a plain body is silently ignored:
+/// the turn ends `end_turn` with no tool call and no permission ask, which
+/// looks like a broken gate rather than a broken fixture. Converting here keeps
+/// the fixtures readable and the wire correct.
+fn to_sse(body: &Value) -> String {
+    let choice = &body["choices"][0];
+    let message = &choice["message"];
+    let finish = choice["finish_reason"].clone();
+
+    let mut delta = json!({ "role": "assistant" });
+    if let Some(content) = message["content"].as_str() {
+        delta["content"] = json!(content);
+    }
+    if let Some(calls) = message["tool_calls"].as_array() {
+        delta["tool_calls"] = Value::Array(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    json!({
+                        "index": index,
+                        "id": call["id"].clone(),
+                        "type": "function",
+                        "function": call["function"].clone(),
+                    })
+                })
+                .collect(),
+        );
+    }
+
+    let chunk = json!({
+        "id": body["id"].clone(),
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": body["model"].clone(),
+        "choices": [{ "index": 0, "delta": delta, "finish_reason": Value::Null }],
+    });
+    let done = json!({
+        "id": body["id"].clone(),
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": body["model"].clone(),
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 },
+    });
+    format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n")
+}
 
 pub struct CapturingLlm {
     pub url: String,
@@ -76,6 +129,27 @@ pub async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> Ca
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                 }
+                // The catalog endpoint always succeeds and consumes no canned
+                // response: it is a startup lookup, not part of the scripted
+                // conversation, and letting it pop the queue would desync every
+                // subsequent turn.
+                let request_line = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                if request_line.starts_with("GET") || request_line.contains("/models") {
+                    let payload = json!({
+                        "object": "list",
+                        "data": [{ "id": "fake-model", "object": "model" }],
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    return;
+                }
+
                 if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
                     captured.lock().await.push(req);
                 }
@@ -84,14 +158,21 @@ pub async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> Ca
                     .await
                     .pop_front()
                     .unwrap_or_else(|| (200, json!({ "error": "no canned response" })));
-                let body_s = serde_json::to_string(&body).unwrap();
                 let reason = match status {
                     200 => "OK",
                     400 => "Bad Request",
                     _ => "Error",
                 };
+                // Success bodies go out as SSE (what goose asks for); error
+                // bodies stay JSON, which is what a real provider returns for a
+                // non-200 and what the provider's error path parses.
+                let (content_type, body_s) = if status == 200 {
+                    ("text/event-stream", to_sse(&body))
+                } else {
+                    ("application/json", serde_json::to_string(&body).unwrap())
+                };
                 let resp = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body_s.len(), body_s,
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
@@ -103,36 +184,36 @@ pub async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> Ca
 }
 
 pub struct Harness {
+    /// Per-harness config/data root. Held so it outlives the child: goose reads
+    /// `HOME`/`XDG_*` at startup, and a dropped tempdir would pull the session
+    /// store out from under a live agent.
+    _home: tempfile::TempDir,
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
     stderr: Arc<StdMutex<String>>,
-    stderr_changed: Arc<Notify>,
     next_id: i64,
 }
 
 impl Harness {
     pub async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        Self::spawn_with_stderr_gate(base_url, extra, None).await
-    }
-
-    /// Delay stderr collection until released, to exercise stdout/stderr ordering
-    /// without changing the child or relying on scheduler timing.
-    pub async fn spawn_with_stderr_gate(
-        base_url: &str,
-        extra: &[(&str, &str)],
-        stderr_gate: Option<oneshot::Receiver<()>>,
-    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
+        let home = tempfile::tempdir().expect("home");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+        // Same shape as the other integration harnesses: goose resolves the
+        // provider from `BUZZ_AGENT_PROVIDER`, and every run gets its own
+        // config/data root so concurrent tests cannot share a session store or
+        // reach the developer's real goose config.
+        cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
+            .env("BUZZ_AGENT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_API_KEY", "test")
-            .env("OPENAI_COMPAT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_BASE_URL", base_url)
-            .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_MAX_ROUNDS", "8")
-            .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("GOOSE_DISABLE_KEYRING", "1")
+            .env("RUST_LOG", "warn")
+            .env("BUZZ_AGENT_MAX_ROUNDS", "8");
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -146,14 +227,7 @@ impl Harness {
         let stderr = child.stderr.take().unwrap();
         let stderr_buf = Arc::new(StdMutex::new(String::new()));
         let stderr_out = Arc::clone(&stderr_buf);
-        let stderr_changed = Arc::new(Notify::new());
-        let changed = Arc::clone(&stderr_changed);
         tokio::spawn(async move {
-            if let Some(gate) = stderr_gate {
-                // Dropping the sender (e.g. on assertion failure) also unblocks
-                // collection, rather than leaving a detached reader waiting.
-                let _ = gate.await;
-            }
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {
@@ -168,15 +242,14 @@ impl Harness {
                 if let Ok(mut out) = stderr_out.lock() {
                     out.push_str(&line);
                 }
-                changed.notify_waiters();
             }
         });
         Self {
+            _home: home,
             child,
             stdin,
             stdout,
             stderr: stderr_buf,
-            stderr_changed,
             next_id: 1,
         }
     }
@@ -248,35 +321,8 @@ impl Harness {
         let _ = self.child.start_kill();
     }
 
-    /// Snapshot only: receiving a response on stdout does not drain stderr.
     pub fn stderr_text(&self) -> String {
         self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    /// Wait for a diagnostic in the independently collected stderr stream.
-    /// Returns the matching snapshot so subsequent assertions see its prefix.
-    pub async fn wait_for_stderr(&self, needle: &str, timeout: Duration) -> String {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let changed = self.stderr_changed.notified();
-                tokio::pin!(changed);
-                // Register before inspecting the buffer: a line collected between
-                // the snapshot and await must not become a lost wakeup.
-                changed.as_mut().enable();
-                let stderr = self.stderr_text();
-                if stderr.contains(needle) {
-                    return stderr;
-                }
-                changed.await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "timed out waiting for stderr diagnostic {needle:?}; stderr={}",
-                self.stderr_text()
-            )
-        })
     }
 }
 

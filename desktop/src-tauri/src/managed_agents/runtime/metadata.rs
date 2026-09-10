@@ -108,14 +108,26 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
         .find(|value| !value.is_empty())
 }
 
-/// Build the `RUST_LOG` value forwarded to the agent child: keep an existing
-/// filter that already mentions `buzz_acp`, append `buzz_acp=info` to any other
-/// non-empty filter, and default to `buzz_acp=info` when unset.
+/// Build the `RUST_LOG` value forwarded to the agent child, retaining an
+/// operator filter while ensuring both harness and agent diagnostics reach the
+/// per-agent log.
 pub(crate) fn child_rust_log_filter() -> String {
+    const DEFAULTS: &str = "buzz_acp=info,buzz_agent=info";
     match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
+        Ok(existing) if existing.contains("buzz_acp") && existing.contains("buzz_agent") => {
+            existing
+        }
+        Ok(existing) if !existing.trim().is_empty() => {
+            let mut filter = existing;
+            if !filter.contains("buzz_acp") {
+                filter.push_str(",buzz_acp=info");
+            }
+            if !filter.contains("buzz_agent") {
+                filter.push_str(",buzz_agent=info");
+            }
+            filter
+        }
+        _ => DEFAULTS.to_string(),
     }
 }
 

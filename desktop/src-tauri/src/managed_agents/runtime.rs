@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, Manager};
 
-use super::agent_env::idle_pool_sleep_env;
+use super::agent_env::{clear_inherited_agent_config, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
@@ -677,6 +677,9 @@ pub fn spawn_agent_child(
         &mut command,
         resolve_session_title(record.display_name.as_deref(), &record.name),
     );
+    // Remove ambient provider configuration before applying Buzz's baked and
+    // record-derived launch configuration.
+    clear_inherited_agent_config(&mut command);
     // Strip all known effort keys and emit exactly one projected key. Command
     // inherits the parent env — the returned EffortApplied token is consumed
     // by spawn_with_effort_proof below; deleting this call is a compile error.

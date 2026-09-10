@@ -35,7 +35,9 @@ jobs:
   desktop-e2e-relay:
     name: Desktop E2E Relay
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Cold builds can exceed 30 minutes when agent dependency changes invalidate
+    # the shared workspace cache before relay artifacts are produced.
+    timeout-minutes: 45
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read

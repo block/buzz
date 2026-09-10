@@ -10,11 +10,11 @@ use rmcp::ServiceError;
 use rmcp::ServiceExt;
 use serde_json::{Map, Value};
 use tokio::process::Command;
-use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, HookServers};
-use crate::types::{clamp, AgentError, McpServerStdio, ToolDef, ToolResult, ToolResultContent};
+use crate::config::Config;
+use crate::types::{AgentError, McpServerStdio, ToolDef, ToolResult, ToolResultContent};
 
 const SEP: &str = "__";
 const MAX_NAME_LEN: usize = 128;
@@ -24,7 +24,6 @@ const MAX_DESCRIPTION_BYTES: usize = 1024;
 const MAX_SCHEMA_BYTES: usize = 4096;
 const MARKER_FIELD_MAX: usize = 256;
 pub const MAX_MCP_SERVERS: usize = 16;
-const MAX_HOOK_RESULT_BYTES: usize = 16 * 1024;
 
 /// Byte budgets for a single tool result. `total` bounds everything the
 /// result may occupy in history (text + images); `text` bounds the text
@@ -36,6 +35,107 @@ pub struct ResultBudget {
     pub text: usize,
 }
 
+fn without_builtin_skills(
+    skills: Vec<goose_sdk_types::custom_requests::SourceEntry>,
+) -> Vec<goose_sdk_types::custom_requests::SourceEntry> {
+    use goose_sdk_types::custom_requests::SourceType;
+
+    skills
+        .into_iter()
+        .filter(|skill| skill.source_type != SourceType::BuiltinSkill)
+        .collect()
+}
+
+#[cfg(test)]
+mod skill_filter_tests {
+    use super::without_builtin_skills;
+    use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
+
+    fn entry(name: &str, source_type: SourceType) -> SourceEntry {
+        SourceEntry {
+            source_type,
+            name: name.to_owned(),
+            description: String::new(),
+            content: String::new(),
+            path: format!("/tmp/{name}"),
+            global: false,
+            writable: false,
+            supporting_files: Vec::new(),
+            properties: Default::default(),
+        }
+    }
+
+    #[test]
+    fn builtin_skills_are_removed_at_the_discovery_boundary() {
+        let filtered = without_builtin_skills(vec![
+            entry("widget-maker", SourceType::Skill),
+            entry("web-search", SourceType::BuiltinSkill),
+        ]);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "widget-maker");
+        assert_eq!(filtered[0].source_type, SourceType::Skill);
+    }
+}
+
+fn discover_skills(
+    working_dir: &std::path::Path,
+) -> Vec<goose_sdk_types::custom_requests::SourceEntry> {
+    use goose_agent::skills::{SkillDiscoveryOptions, SkillRoot, SkillScope};
+
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for (precedence, path) in [
+            home.join(".agents/skills"),
+            home.join(".config/goose/skills"),
+            home.join(".claude/skills"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            roots.push(SkillRoot {
+                path,
+                scope: SkillScope::Global,
+                precedence: precedence as u32,
+                writable: false,
+                preserve_path: false,
+            });
+        }
+    }
+    for (offset, path) in [
+        working_dir.join(".agents/skills"),
+        working_dir.join(".goose/skills"),
+        working_dir.join(".claude/skills"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        roots.push(SkillRoot {
+            path,
+            scope: SkillScope::Project,
+            precedence: 100 + offset as u32,
+            writable: false,
+            preserve_path: false,
+        });
+    }
+
+    match goose_agent::skills::discover_skills(&SkillDiscoveryOptions {
+        roots,
+        working_dir: Some(working_dir.to_path_buf()),
+    }) {
+        Ok(discovery) => {
+            for diagnostic in discovery.diagnostics {
+                tracing::warn!(path = %diagnostic.path.display(), error = diagnostic.message, "skill ignored");
+            }
+            without_builtin_skills(discovery.skills)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "skill discovery failed");
+            Vec::new()
+        }
+    }
+}
+
 const PASSTHROUGH_ENV: &[&str] = &[
     // Core
     "PATH",
@@ -45,9 +145,6 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "LC_ALL",
     "TMPDIR",
     "XDG_CONFIG_HOME",
-    // Explicit Buzz-owned OAuth root for named demo builds. The agent may spawn
-    // auth-capable child tools after clearing its ambient environment.
-    "BUZZ_AGENT_CONFIG_DIR",
     // SSH — required for git clone/push over SSH (git@github.com:...)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
@@ -55,31 +152,6 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
-    // Proxy — on a host whose only route out is a CONNECT proxy, dropping
-    // these does not degrade the tools, it blinds them: apt, curl, pip and git
-    // all connect directly instead, and the egress firewall resets the socket.
-    // The agent then reports "Connection reset by peer" and concludes the
-    // environment has no network, which is indistinguishable in the transcript
-    // from a task that is genuinely offline.
-    //
-    // Both cases are needed. curl and git read the lowercase spellings, most
-    // Go and Python tooling reads the uppercase ones, and libcurl deliberately
-    // ignores uppercase HTTP_PROXY (CGI ambiguity), so keeping only one form
-    // silently breaks half the toolchain.
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "all_proxy",
-    // TLS trust — a proxy that terminates TLS presents its own CA, and an
-    // image whose trust store does not carry it fails every https fetch with a
-    // verification error. Same class of failure as the proxy vars: the parent
-    // was configured correctly and the child could not see it.
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
     // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
     // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
     // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
@@ -89,11 +161,6 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
-    // Agent display name — dev-mcp uses it as the git author name. On the
-    // Desktop path this arrives via the wire `mcpServers[].env` declaration
-    // (which wins here anyway); the allowlist entry covers ACP clients that
-    // spawn buzz-agent without declaring it.
-    "BUZZ_ACP_DISPLAY_NAME",
 ];
 
 // Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what
@@ -107,10 +174,11 @@ const PASSTHROUGH_ENV_WINDOWS: &[&str] = &["TMP", "TEMP", "USERPROFILE", "APPDAT
 /// Shell resolver keys are shared with Doctor through the public contract.
 #[cfg(windows)]
 fn windows_child_passthrough_env() -> impl Iterator<Item = &'static str> {
-    PASSTHROUGH_ENV_WINDOWS
-        .iter()
-        .copied()
-        .chain(crate::WINDOWS_SHELL_RESOLUTION_ENV.iter().copied())
+    PASSTHROUGH_ENV_WINDOWS.iter().copied().chain(
+        buzz_model_catalog::WINDOWS_SHELL_RESOLUTION_ENV
+            .iter()
+            .copied(),
+    )
 }
 
 type Client = RunningService<RoleClient, ()>;
@@ -197,13 +265,30 @@ pub struct McpRegistry {
     backoff_base: Duration,
     backoff_max: Duration,
     init_timeout: Duration,
-    /// Consecutive hook timeout count per server. Kill on second consecutive.
-    hook_timeouts: std::sync::Mutex<HashMap<String, u32>>,
+    tool_timeout: Duration,
+    hook_timeout: Duration,
+    skills: Vec<goose_sdk_types::custom_requests::SourceEntry>,
 }
 
 impl McpRegistry {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            by_qname: HashMap::new(),
+            defs: Vec::new(),
+            servers: Vec::new(),
+            max_attempts: 1,
+            backoff_base: Duration::from_millis(1),
+            backoff_max: Duration::from_millis(1),
+            init_timeout: Duration::from_secs(1),
+            tool_timeout: Duration::from_secs(1),
+            hook_timeout: Duration::from_secs(1),
+            skills: Vec::new(),
+        }
+    }
+
     pub async fn spawn_all(
-        cfg: &Config,
+        _cfg: &Config,
         servers: &[McpServerStdio],
         cwd: &str,
     ) -> Result<Self, AgentError> {
@@ -218,11 +303,21 @@ impl McpRegistry {
             defs: Vec::new(),
             servers: Vec::new(),
 
-            max_attempts: cfg.mcp_max_restart_attempts.max(1),
-            backoff_base: Duration::from_millis(cfg.mcp_restart_base_ms.max(1)),
-            backoff_max: Duration::from_millis(cfg.mcp_restart_max_ms.max(1)),
-            init_timeout: cfg.mcp_init_timeout,
-            hook_timeouts: std::sync::Mutex::new(HashMap::new()),
+            max_attempts: env_u32("BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS", 3).max(1),
+            backoff_base: Duration::from_millis(
+                env_u64("BUZZ_AGENT_MCP_RESTART_BASE_MS", 500).max(1),
+            ),
+            backoff_max: Duration::from_millis(
+                env_u64("BUZZ_AGENT_MCP_RESTART_MAX_MS", 30_000).max(1),
+            ),
+            init_timeout: Duration::from_secs(
+                env_u64("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", 30).max(1),
+            ),
+            tool_timeout: Duration::from_secs(env_u64("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660).max(1)),
+            hook_timeout: Duration::from_millis(
+                env_u64("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2_500).max(1),
+            ),
+            skills: discover_skills(std::path::Path::new(cwd)),
         };
 
         let mut seen_names = HashSet::new();
@@ -316,6 +411,17 @@ impl McpRegistry {
             .unwrap_or(false)
     }
 
+    /// First extension exposing the requested lifecycle hook, in config order.
+    pub fn hook_extension(&self, hook: &str) -> Option<String> {
+        self.servers
+            .iter()
+            .find(|server| {
+                self.by_qname
+                    .contains_key(&format!("{}{SEP}{hook}", server.name))
+            })
+            .map(|server| server.name.clone())
+    }
+
     pub fn tools(&self) -> Vec<ToolDef> {
         self.defs
             .iter()
@@ -340,110 +446,95 @@ impl McpRegistry {
             .collect()
     }
 
-    /// Call every tool whose bare name equals `hook_name` across all
-    /// allowlisted servers in parallel, bounded by `timeout`. Returns
-    /// `(server_name, text)` pairs in **config order** (deterministic),
-    /// dropping empty/whitespace-only responses, errors and timeouts.
-    /// Hooks are fail-open and must never block the agent.
-    pub async fn call_hooks(
-        self: &Arc<Self>,
-        hook_name: &str,
-        input: &Value,
+    /// Tool definitions in the GDK/provider-native RMCP shape.
+    pub fn rmcp_tools(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools: Vec<_> = self
+            .defs
+            .iter()
+            .cloned()
+            .map(|tool| {
+                let schema = match tool.input_schema {
+                    Value::Object(schema) => schema,
+                    _ => Map::new(),
+                };
+                rmcp::model::Tool::new(tool.name, tool.description, Arc::new(schema))
+            })
+            .collect();
+        if !self.skills.is_empty() {
+            tools.push(crate::skills::load_skill_tool());
+        }
+        tools
+    }
+
+    pub fn skills(&self) -> &[goose_sdk_types::custom_requests::SourceEntry] {
+        &self.skills
+    }
+
+    /// Call one qualified tool and return the provider-native RMCP result.
+    pub async fn call_rmcp(
+        &self,
+        qname: &str,
+        provider_id: &str,
+        arguments: &Value,
+        cancel: &CancellationToken,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        self.call_rmcp_with_timeout(qname, provider_id, arguments, cancel, self.tool_timeout)
+            .await
+    }
+
+    /// Call a lifecycle hook using its shorter fail-open timeout budget.
+    pub async fn call_hook_rmcp(
+        &self,
+        qname: &str,
+        provider_id: &str,
+        arguments: &Value,
+        cancel: &CancellationToken,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        self.call_rmcp_with_timeout(qname, provider_id, arguments, cancel, self.hook_timeout)
+            .await
+    }
+
+    async fn call_rmcp_with_timeout(
+        &self,
+        qname: &str,
+        provider_id: &str,
+        arguments: &Value,
+        cancel: &CancellationToken,
         timeout: Duration,
-        allowed: &HookServers,
-    ) -> Vec<(String, String)> {
-        if allowed.is_disabled() {
-            return Vec::new();
+    ) -> Result<rmcp::model::CallToolResult, rmcp::model::ErrorData> {
+        if qname == "load_skill" {
+            return Ok(crate::skills::load_skill(&self.skills, arguments));
         }
-        // Walk servers in registration order so the result is deterministic
-        // regardless of HashMap iteration order or task completion order.
-        let mut targets: Vec<(usize, String, String)> = Vec::new();
-        for (idx, server) in self.servers.iter().enumerate() {
-            if !allowed.allows(&server.name) {
-                continue;
-            }
-            let qname = format!("{}{SEP}{}", server.name, hook_name);
-            if self.by_qname.contains_key(&qname) {
-                targets.push((idx, server.name.clone(), qname));
-            }
-        }
-        if targets.is_empty() {
-            return Vec::new();
-        }
-        let mut set = tokio::task::JoinSet::new();
-        for (idx, server_name, qname) in targets {
-            let reg = Arc::clone(self);
-            let args = input.clone();
-            set.spawn(async move {
-                // Hooks are intentionally non-cancellable: they are
-                // already bounded by their own timeout and are fail-open.
-                // Session cancel should not interrupt hook evaluation.
-                let (_dummy_tx, mut dummy_cancel) = watch::channel(false);
-                let res = tokio::time::timeout(
-                    timeout,
-                    reg.call(
-                        &qname,
-                        "hook",
-                        &args,
-                        ResultBudget {
-                            total: MAX_HOOK_RESULT_BYTES,
-                            text: MAX_HOOK_RESULT_BYTES,
-                        },
-                        &mut dummy_cancel,
-                    ),
-                )
-                .await;
-                drop(_dummy_tx);
-                (idx, server_name, res)
-            });
-        }
-        let mut indexed: Vec<(usize, String, String)> = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            // fail-open: drop join errors, timeouts, call errors,
-            // empty/whitespace-only text. On timeout, also kill the server
-            // process group so a wedged hook can't poison the next regular
-            // tool call. The registry's lazy restart handles the rest.
-            match joined {
-                Ok((idx, server_name, Ok(Ok(r)))) => {
-                    // Success — reset consecutive timeout counter.
-                    if let Ok(mut counts) = self.hook_timeouts.lock() {
-                        counts.remove(&server_name);
-                    }
-                    if !r.is_error && !r.text().trim().is_empty() {
-                        indexed.push((idx, server_name, r.text()));
-                    }
-                }
-                Ok((_idx, server_name, Err(_elapsed))) => {
-                    // Kill only on second consecutive timeout.
-                    let count = {
-                        let mut counts =
-                            self.hook_timeouts.lock().unwrap_or_else(|e| e.into_inner());
-                        let c = counts.entry(server_name.clone()).or_insert(0);
-                        *c += 1;
-                        *c
-                    };
-                    if count >= 2 {
-                        tracing::warn!(
-                            "hook: killing server '{}' after {} consecutive timeouts",
-                            server_name,
-                            count
-                        );
-                        self.kill_server(&server_name, "hook timeout (consecutive)");
-                        if let Ok(mut counts) = self.hook_timeouts.lock() {
-                            counts.remove(&server_name);
-                        }
-                    } else {
-                        tracing::warn!("hook: server '{}' timed out ({}/2)", server_name, count);
-                    }
-                }
-                _ => {}
-            }
-        }
-        indexed.sort_by_key(|(idx, _, _)| *idx);
-        indexed
+        let text = env_u64("BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES", 50 * 1024) as usize;
+        let result = self
+            .call(
+                qname,
+                provider_id,
+                arguments,
+                ResultBudget {
+                    total: 8 * 1024 * 1024,
+                    text,
+                },
+                cancel,
+                timeout,
+            )
+            .await
+            .map_err(|error| rmcp::model::ErrorData::internal_error(error.to_string(), None))?;
+        let content = result
+            .content
             .into_iter()
-            .map(|(_, name, text)| (name, text))
-            .collect()
+            .map(|block| match block {
+                ToolResultContent::Text(text) => rmcp::model::ContentBlock::text(text),
+                ToolResultContent::Image { data, mime_type } => {
+                    rmcp::model::ContentBlock::image(data, mime_type)
+                }
+            })
+            .collect();
+        Ok(if result.is_error {
+            rmcp::model::CallToolResult::error(content)
+        } else {
+            rmcp::model::CallToolResult::success(content)
+        })
     }
 
     /// Kill the server's process group and mark it dead. Idempotent:
@@ -521,7 +612,8 @@ impl McpRegistry {
         provider_id: &str,
         arguments: &Value,
         budget: ResultBudget,
-        cancel: &mut watch::Receiver<bool>,
+        cancel: &CancellationToken,
+        timeout: Duration,
     ) -> Result<ToolResult, AgentError> {
         let entry = self
             .by_qname
@@ -548,6 +640,7 @@ impl McpRegistry {
                     arguments,
                     budget,
                     cancel,
+                    timeout,
                 )
                 .await;
         }
@@ -581,6 +674,7 @@ impl McpRegistry {
             arguments,
             budget,
             cancel,
+            timeout,
         )
         .await
     }
@@ -595,9 +689,18 @@ impl McpRegistry {
         provider_id: &str,
         arguments: &Value,
         budget: ResultBudget,
-        cancel: &mut watch::Receiver<bool>,
+        cancel: &CancellationToken,
+        timeout: Duration,
     ) -> Result<ToolResult, AgentError> {
-        let arg_obj = validate_arg_shape(qname, arguments)?;
+        let arg_obj = match arguments {
+            Value::Object(m) => Some(m.clone()),
+            Value::Null => None,
+            _ => {
+                return Err(AgentError::Mcp(format!(
+                    "tool {qname} arguments must be a JSON object"
+                )))
+            }
+        };
         let mut params = CallToolRequestParams::default();
         params.name = bare.to_owned().into();
         params.arguments = arg_obj;
@@ -613,7 +716,7 @@ impl McpRegistry {
             .map_err(|e| AgentError::Mcp(format!("call {qname}: {e}")))?;
 
         // Early cancel check — watch::changed() only fires on NEW writes.
-        if *cancel.borrow() {
+        if cancel.is_cancelled() {
             fire_and_forget_cancel(handle, qname);
             return Err(AgentError::Cancelled);
         }
@@ -622,9 +725,21 @@ impl McpRegistry {
         // the cancel branch (await_response would move it).
         let raw: Result<ServerResult, ServiceError> = tokio::select! {
             biased;
-            _ = cancel.changed() => {
+            _ = cancel.cancelled() => {
                 fire_and_forget_cancel(handle, qname);
                 return Err(AgentError::Cancelled);
+            }
+            _ = tokio::time::sleep(timeout) => {
+                fire_and_forget_cancel(handle, qname);
+                self.kill_and_mark_dead_if_current(
+                    server,
+                    client,
+                    &format!("call timed out after {}ms", timeout.as_millis()),
+                );
+                return Err(AgentError::Mcp(format!(
+                    "call {qname}: timed out after {}ms",
+                    timeout.as_millis()
+                )));
             }
             r = &mut handle.rx => match r {
                 Ok(inner) => inner,
@@ -807,29 +922,6 @@ async fn spawn_one(
     Ok((client, pgid, names, tools))
 }
 
-/// Validate that tool-call arguments are a shape the MCP transport can carry:
-/// a JSON object (`Some(map)`) or absent (`None`). Any other JSON type is a
-/// malformed call that the transport would reject.
-///
-/// Hoisted out of `do_call` so the permission gate can run it *before* asking
-/// the user: a malformed non-object argument is rejected locally without
-/// prompting for approval of a call that could never execute. `do_call` runs
-/// it again as the single authoritative shape check — the duplicate is a cheap
-/// idempotent match, and keeping it here means no code path can reach the
-/// transport with an unvalidated shape.
-pub fn validate_arg_shape(
-    qname: &str,
-    arguments: &Value,
-) -> Result<Option<Map<String, Value>>, AgentError> {
-    match arguments {
-        Value::Object(m) => Ok(Some(m.clone())),
-        Value::Null => Ok(None),
-        _ => Err(AgentError::Mcp(format!(
-            "tool {qname} arguments must be a JSON object"
-        ))),
-    }
-}
-
 /// Send `notifications/cancelled` to the MCP server, fire-and-forget.
 /// Per MCP spec, cancellation notifications are best-effort; we never
 /// block the agent on slow server stdio.
@@ -911,7 +1003,15 @@ fn valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-pub(crate) fn truncate_at_boundary(s: &str, max: usize) -> &str {
+pub(crate) fn clamp(value: String, max: usize) -> String {
+    if value.len() <= max {
+        value
+    } else {
+        truncate_at_boundary(&value, max).to_string()
+    }
+}
+
+fn truncate_at_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
@@ -959,11 +1059,10 @@ pub(crate) fn truncate_middle(s: &str, max: usize) -> String {
 /// with a marker; text is middle-elided so the head (what ran) and tail
 /// (how it ended) both survive. Every elision leaves an inline marker.
 fn tool_result_content(
-    blocks: &[rmcp::model::Content],
+    blocks: &[rmcp::model::ContentBlock],
     max_bytes: usize,
     max_text_bytes: usize,
 ) -> Vec<ToolResultContent> {
-    use rmcp::model::RawContent;
     let mut out = Vec::new();
     let mut text = String::new();
     let mut used = 0usize; // total bytes emitted (text + images)
@@ -997,9 +1096,9 @@ fn tool_result_content(
     };
 
     for c in blocks {
-        match &c.raw {
-            RawContent::Text(t) => append(&mut text, &t.text),
-            RawContent::Image(i) => {
+        match c {
+            rmcp::model::ContentBlock::Text(t) => append(&mut text, &t.text),
+            rmcp::model::ContentBlock::Image(i) => {
                 flush_text(&mut out, &mut text, &mut used, &mut text_used);
                 let image_bytes = i.data.len().saturating_add(i.mime_type.len());
                 if used.saturating_add(image_bytes) <= max_bytes {
@@ -1019,7 +1118,7 @@ fn tool_result_content(
                     );
                 }
             }
-            RawContent::Audio(a) => append(
+            rmcp::model::ContentBlock::Audio(a) => append(
                 &mut text,
                 &format!(
                     "[audio elided: {}, {} bytes]",
@@ -1027,10 +1126,11 @@ fn tool_result_content(
                     a.data.len()
                 ),
             ),
-            RawContent::ResourceLink(r) => {
+            rmcp::model::ContentBlock::ResourceLink(r) => {
                 append(&mut text, &format!("[resource: {}]", short(&r.uri)));
             }
-            RawContent::Resource(_) => append(&mut text, "[resource elided]"),
+            rmcp::model::ContentBlock::Resource(_) => append(&mut text, "[resource elided]"),
+            _ => append(&mut text, "[unsupported content elided]"),
         }
     }
     flush_text(&mut out, &mut text, &mut used, &mut text_used);
@@ -1050,6 +1150,20 @@ fn configure_no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod content_tests {
     use super::*;
@@ -1058,42 +1172,7 @@ mod content_tests {
     fn passthrough_includes_buzz_owner_attestation() {
         assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
     }
-
-    #[test]
-    fn passthrough_carries_proxy_configuration_to_tools() {
-        // On a proxy-only host this is the difference between an agent that can
-        // install a package and one that reports the network is down. Both
-        // spellings: libcurl ignores uppercase HTTP_PROXY, and Go/Python
-        // tooling largely ignores the lowercase set.
-        for var in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "NO_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "no_proxy",
-            "all_proxy",
-        ] {
-            assert!(
-                PASSTHROUGH_ENV.contains(&var),
-                "{var} must survive env_clear() or every MCP tool loses the proxy"
-            );
-        }
-    }
-
-    #[test]
-    fn passthrough_carries_tls_trust_to_tools() {
-        // A TLS-terminating proxy presents its own CA; without these the child
-        // rejects every https fetch even though the proxy itself is reachable.
-        for var in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
-            assert!(
-                PASSTHROUGH_ENV.contains(&var),
-                "{var} must survive env_clear() or https fails inside tools"
-            );
-        }
-    }
-    use rmcp::model::Content;
+    use rmcp::model::ContentBlock as Content;
 
     #[cfg(windows)]
     #[test]
@@ -1106,7 +1185,7 @@ mod content_tests {
             );
         }
         let child_env: Vec<_> = windows_child_passthrough_env().collect();
-        for var in crate::WINDOWS_SHELL_RESOLUTION_ENV {
+        for var in buzz_model_catalog::WINDOWS_SHELL_RESOLUTION_ENV {
             assert!(
                 child_env.contains(var),
                 "{var} must pass through so the MCP shell resolver matches Doctor"
