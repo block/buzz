@@ -22,6 +22,14 @@ Rehashed binaries match the pins below. Fresh signed reply IDs were
 all from agent `ea79535a7d50890ba23bbc960ffd780acecd31f9c9a1dd975dd0d7fbbac419f8`.
 No recovered PID was used for cleanup and no private run artifacts were read.
 
+New implementation commit `998e919a9b26af0ec3b15eefba539661380eeed7`
+was pushed successfully as the first publication of `beehive/cbfd9440` to
+`https://github.com/block/buzz.git`. This checkpoint-only follow-up retains that
+source. No GitHub or NIP-34 PR has been created; repo-wide `just ci` and independent
+review remain outstanding. `buzz pr open --help` requires a NIP-34 repository
+owner pubkey/id; neither was inferred from GitHub ownership. Any later Buzz PR
+must carry channel `f45d3304-dcf0-44e8-a46d-bcd63b235fbc`.
+
 ## New continuation: host management transport recovery
 
 `client.ts` now supports opt-in bounded reconnect (eight attempts per lifetime,
@@ -141,6 +149,9 @@ Fixture model remains a fixture. This is installed runtime/CLI execution with
 legacy kind-9 NIP-42/NIP-29 fixture evidence, NOT current production kind-40002,
 real admission, provider/OAuth or Databricks evidence. Explicit hex mentions are
 validated; unresolved implicit display-name mentions are NOT claimed to work.
+Recovery also ran the installed CLI's `messages send --help` under empty env:
+`--mention <MENTIONS>` supports hex or npub and is repeatable. Only hex was
+exercised by the integration.
 
 ## Validation
 
