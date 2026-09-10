@@ -1,14 +1,34 @@
 part of 'agent_identity_provider.dart';
 
 /// Evidence requirements, not a claim that an ordinary identity is human.
-enum SelectedMentionKind { ordinary, agent, unresolvedAgent }
+enum SelectedMentionKind {
+  /// No fresh agent evidence for this key. Absence of agent evidence, not
+  /// a humanity claim: the ordinary membership flow applies.
+  ordinary,
+
+  /// Fresh verified agent evidence for this key: a verified NIP-OA profile
+  /// owner, a `bot` destination-roster role, or a signature-verified latest
+  /// kind:10100 runtime event. Evidence only, never permission to write.
+  agent,
+
+  /// Agent evidence that is not safely established: an invalid profile
+  /// attestation, an unverifiable latest runtime head, or prior-agent
+  /// provenance whose fresh evidence is gone. Never demoted to the ordinary
+  /// flow; carries no agent entry or invitation role.
+  unresolvedAgent,
+}
 
 /// Fresh evidence for one exact selected key. This is NOT permission to write:
 /// consumers must apply their existing agent eligibility evaluator to [agent],
 /// normal channel invitation permission, consent and scope fences separately.
 /// An existing member needs no role write, whatever their current role is.
 class SelectedMentionAuthorization {
+  /// Fresh evidence classification for this exact key. Values state what
+  /// fresh evidence showed, never permission, role, or humanity.
   final SelectedMentionKind kind;
+
+  /// Presence in the destination's signed roster at read time only, not a
+  /// role, eligibility, or authorization claim.
   final bool isMember;
 
   /// Policy projection with relay-authenticated destination membership only.
@@ -18,6 +38,10 @@ class SelectedMentionAuthorization {
 
   const SelectedMentionAuthorization._(this.kind, this.isMember, this.agent);
 
+  /// True when this key's evidence must be routed through the agent
+  /// authorization evaluator rather than the ordinary flow: agent or
+  /// unresolvedAgent evidence. Routing only, never a granted write;
+  /// eligibility, consent, and invitation fences still apply separately.
   bool get requiresAgentAuthorization => kind != SelectedMentionKind.ordinary;
 
   /// Role selection only, never an invitation authorization. A consumer must
