@@ -510,7 +510,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     <div
       className={cn(
         "-m-1 p-1 transition-opacity duration-150 ease-out",
-        "opacity-100 sm:pointer-events-none sm:opacity-0",
+        "pointer-events-auto opacity-100 sm:pointer-events-none sm:opacity-0",
         "sm:group-hover/message:pointer-events-auto sm:group-hover/message:opacity-100",
         "sm:group-focus-within/message:pointer-events-auto sm:group-focus-within/message:opacity-100",
         isReactionPickerOpen || isDropdownOpen

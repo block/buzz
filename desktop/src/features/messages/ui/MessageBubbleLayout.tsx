@@ -117,7 +117,7 @@ export function MessageBubbleLayout({
               style={{ right: -8 - actionShift }}
               data-testid="bubble-actions-anchor"
               className={cn(
-                "absolute -right-2 bottom-full z-20",
+                "pointer-events-none absolute -right-2 bottom-full z-20",
                 reactions ? "mb-5" : "translate-y-[4px]",
               )}
             >

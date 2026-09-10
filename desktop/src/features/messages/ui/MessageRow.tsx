@@ -681,9 +681,13 @@ export const MessageRow = React.memo(
       ) : null;
 
     const headerNode = isDisplayedAsContinuation ? null : (
-      // pe reserves the measured action-rail footprint (0px until measured) so
-      // header content ends before the rail's left edge in every rail state.
-      <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)]">
+      // Standard rows reserve the action rail's width. Bubble controls sit
+      // above the bubble, so their headers do not need that reservation.
+      <MessageHeaderRow
+        className={
+          bubbleLayout ? undefined : "pe-[var(--message-action-rail-width,0px)]"
+        }
+      >
         {message.pubkey ? (
           <MessageAuthorWithIndicators
             authorName={message.author}
