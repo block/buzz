@@ -101,7 +101,7 @@ function AvatarCircle({
         <span
           className={cn(
             "flex items-center justify-center overflow-hidden rounded-full shadow-xs",
-            cardLayout ? "size-28 text-4xl" : "size-36 text-5xl",
+            "size-28 text-4xl min-[44rem]:size-36 min-[44rem]:text-5xl",
           )}
           style={{ backgroundColor: emojiAvatar.color }}
         >
@@ -112,7 +112,7 @@ function AvatarCircle({
           avatarUrl={avatarUrl}
           className={cn(
             "rounded-full",
-            cardLayout ? "size-28 text-3xl" : "size-36 text-4xl",
+            "size-28 text-3xl min-[44rem]:size-36 min-[44rem]:text-4xl",
           )}
           label={previewName}
           testId="community-avatar-circle"
@@ -122,7 +122,7 @@ function AvatarCircle({
           className={cn(
             "flex items-center justify-center rounded-full text-[var(--buzz-onboarding-backup-ink)] transition-colors",
             cardLayout
-              ? "size-28 border border-[#e2e2e2] bg-[#f9f9f9] group-hover:bg-[#f3f3f3]"
+              ? "size-28 border border-[#e2e2e2] bg-[#f9f9f9] group-hover:bg-[#f3f3f3] min-[44rem]:size-36"
               : "size-36 bg-white/30 group-hover:bg-white/40",
           )}
           data-testid="community-avatar-empty"

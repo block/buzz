@@ -568,6 +568,8 @@ type E2eConfig = {
       id: string;
       href: string;
     }>;
+    /** Reject one `get_identity` call after this many successful reads. */
+    identityReadErrorAfter?: { message: string; successfulReads: number };
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -1697,6 +1699,8 @@ const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 let mockIdentityLostCleared = false;
 // Same pattern for `mock.identityLocked`.
 let mockIdentityLockedCleared = false;
+let identityReadCount = 0;
+let identityReadErrorConsumed = false;
 
 // ── get_event defer/release seam ────────────────────────────────────────────
 // When `window.__BUZZ_E2E_DEFER_GET_EVENT__` is set to a target event ID,
@@ -12562,6 +12566,16 @@ export function maybeInstallE2eTauriMocks() {
         }
       }
       case "get_identity": {
+        const identityReadError = activeConfig?.mock?.identityReadErrorAfter;
+        if (
+          identityReadError &&
+          !identityReadErrorConsumed &&
+          identityReadCount >= identityReadError.successfulReads
+        ) {
+          identityReadErrorConsumed = true;
+          throw new Error(identityReadError.message);
+        }
+        identityReadCount += 1;
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
         const isLocked =

@@ -67,10 +67,7 @@ const SUBSCRIPTION_NAMES: Record<string, string> = {
   devin: "Devin account",
 };
 
-function useSetupStepState(): {
-  onRefresh: () => void;
-  state: SetupStepState;
-} {
+function useSetupStepState() {
   const runtimesQuery = useAcpRuntimesQueryForced();
   const items = runtimesQuery.data ?? [];
   const isChecking = runtimesQuery.isFetching;
@@ -82,6 +79,7 @@ function useSetupStepState(): {
     state: {
       runtimeProviders: {
         errorMessage,
+        hasForcedCheckStarted: runtimesQuery.hasForcedCheckStarted,
         isChecking,
         items,
       },
@@ -981,6 +979,10 @@ function SetupStepContent({
 }: SetupStepContentProps) {
   const cardLayout = useOnboardingCardLayout();
   const { runtimeProviders } = state;
+  const readinessConfirmed =
+    runtimeProviders.hasForcedCheckStarted &&
+    !runtimeProviders.isChecking &&
+    runtimeProviders.errorMessage === null;
   const [stage, setStage] = React.useState<"method" | "list" | "detail">(
     initialMethod ? "list" : "method",
   );
@@ -990,29 +992,39 @@ function SetupStepContent({
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
     string | null
   >(null);
+  const [detailConfigBackTarget, setDetailConfigBackTarget] = React.useState<
+    "method" | "list"
+  >("list");
   const [localDirection, setLocalDirection] =
     React.useState<OnboardingTransitionDirection>(direction);
   const [installResults, setInstallResults] =
     React.useState<InstallResultsState>({});
   const readyRuntimeIds = React.useMemo(
     () =>
-      getReadyOnboardingRuntimes(runtimeProviders.items).map(
-        (runtime) => runtime.id,
-      ),
-    [runtimeProviders.items],
+      readinessConfirmed
+        ? getReadyOnboardingRuntimes(runtimeProviders.items).map(
+            (runtime) => runtime.id,
+          )
+        : [],
+    [readinessConfirmed, runtimeProviders.items],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
-  // The key prevents catalog object refreshes from creating an effect loop
-  // when the detected ready IDs have not changed.
+  // Use an ID key so catalog object refreshes cannot loop the effect.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by ID content
   React.useEffect(() => {
-    if (runtimeProviders.isChecking && runtimeProviders.items.length === 0) {
+    if (
+      !runtimeProviders.hasForcedCheckStarted ||
+      runtimeProviders.isChecking ||
+      runtimeProviders.errorMessage !== null
+    ) {
       return;
     }
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [
     onReadyRuntimeIdsChange,
     readyRuntimeIdsKey,
+    runtimeProviders.errorMessage,
+    runtimeProviders.hasForcedCheckStarted,
     runtimeProviders.isChecking,
     runtimeProviders.items.length,
   ]);
@@ -1020,9 +1032,10 @@ function SetupStepContent({
   const selectedRuntime = runtimeProviders.items.find(
     (runtime) => runtime.id === selectedRuntimeId,
   );
-  const selectedRuntimeIsReady = selectedRuntime
-    ? runtimeIsReadyForOnboarding(selectedRuntime)
-    : false;
+  const selectedRuntimeIsReady =
+    readinessConfirmed && selectedRuntime
+      ? runtimeIsReadyForOnboarding(selectedRuntime)
+      : false;
   const actionsRef = React.useRef(actions);
   actionsRef.current = actions;
   const navigateBack = React.useCallback(() => {
@@ -1054,8 +1067,8 @@ function SetupStepContent({
       return;
     }
     setLocalDirection("forward");
-    actionsRef.current.next([selectedRuntime.id]);
-  }, [selectedRuntime, selectedRuntimeIsReady, stage]);
+    actionsRef.current.next([selectedRuntime.id], detailConfigBackTarget);
+  }, [detailConfigBackTarget, selectedRuntime, selectedRuntimeIsReady, stage]);
 
   function chooseMethod(nextMethod: HarnessConnectionMethod) {
     setMethod(nextMethod);
@@ -1067,10 +1080,11 @@ function SetupStepContent({
         (runtime) => runtime.id === "buzz-agent",
       );
       if (buzzRuntime) {
-        if (runtimeIsReadyForOnboarding(buzzRuntime)) {
+        if (readinessConfirmed && runtimeIsReadyForOnboarding(buzzRuntime)) {
           actions.next([buzzRuntime.id], "method");
           return;
         }
+        setDetailConfigBackTarget("method");
         setSelectedRuntimeId(buzzRuntime.id);
         setStage("detail");
         return;
@@ -1085,10 +1099,11 @@ function SetupStepContent({
     const runtime = runtimeProviders.items.find(
       (item) => item.id === runtimeId,
     );
-    if (runtime && runtimeIsReadyForOnboarding(runtime)) {
+    if (readinessConfirmed && runtime && runtimeIsReadyForOnboarding(runtime)) {
       actions.next([runtime.id]);
       return;
     }
+    setDetailConfigBackTarget("list");
     setSelectedRuntimeId(runtimeId);
     setStage("detail");
   }

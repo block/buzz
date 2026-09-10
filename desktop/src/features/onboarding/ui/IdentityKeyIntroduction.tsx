@@ -15,11 +15,13 @@ const GUIDANCE_ICON_CLASS = `flex size-10 shrink-0 items-center justify-center r
 export function IdentityKeyIntroduction({
   direction,
   disabled,
+  error,
   onCreate,
   onOpenHelp,
 }: {
   direction: OnboardingTransitionDirection;
   disabled: boolean;
+  error?: string | null;
   onCreate: () => void;
   onOpenHelp: () => void;
 }) {
@@ -41,6 +43,15 @@ export function IdentityKeyIntroduction({
         <div className="mt-2">
           <IdentityKeyHelpDialog inline onOpen={onOpenHelp} />
         </div>
+        {error ? (
+          <p
+            className="mt-4 rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            data-testid="identity-key-create-error"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
       </div>
 
       <div className="flex w-full flex-1 items-center py-10">

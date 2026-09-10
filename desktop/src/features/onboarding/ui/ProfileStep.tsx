@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { SidebarRelayConnectionCompactCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
@@ -143,10 +144,11 @@ function OnboardingRelayConnectionErrorCard({
     return null;
   }
 
-  return (
-    <div className="fixed bottom-4 left-4 z-50 w-[calc(100vw-2rem)] text-left sm:bottom-6 sm:left-6 sm:w-[22rem]">
+  return createPortal(
+    <div className="buzz-onboarding-neutral-theme fixed bottom-4 left-4 z-50 w-[calc(100vw-2rem)] text-left sm:bottom-6 sm:left-6 sm:w-[22rem]">
       <SidebarRelayConnectionCompactCard
         actionTestId="onboarding-reconnect-relay"
+        dismissClassName="pointer-events-auto [&>span]:opacity-100"
         isActionDisabled={isActionPending}
         isConnected={hasSuccess}
         isReconnectPending={isActionPending}
@@ -156,7 +158,8 @@ function OnboardingRelayConnectionErrorCard({
         surface="secondary"
         testId="onboarding-relay-reconnect-card"
       />
-    </div>
+    </div>,
+    document.body,
   );
 }
 

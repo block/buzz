@@ -54,12 +54,6 @@ export type MachineOnboardingPage =
 
 type BackupSubview = "created" | "password";
 
-/** A pending navigation the parent should execute after RouterProvider mounts. */
-export type PostOnboardingNavigation = {
-  to: string;
-  search?: Record<string, string>;
-};
-
 export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
@@ -67,7 +61,6 @@ export function MachineOnboardingFlow({
   identityLost,
   initialPage,
   queryClient,
-  navigateAfterComplete,
 }: {
   complete: (pubkey?: string) => void;
   continueWithIdentity: (pubkey: string) => void;
@@ -75,13 +68,6 @@ export function MachineOnboardingFlow({
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
-  /**
-   * Called when the user finishes onboarding and requests navigation to a
-   * specific route (e.g. Settings → Agents). The parent owns the RouterProvider,
-   * so navigation must be deferred to it — calling router.navigate() here races
-   * with RouterProvider mounting.
-   */
-  navigateAfterComplete?: (nav: PostOnboardingNavigation) => void;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
@@ -133,16 +119,26 @@ export function MachineOnboardingFlow({
   // subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
   const reduceMotion = useReducedMotion() ?? false;
+  const setupSelectionHandoffRef = React.useRef(false);
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
+      if (setupSelectionHandoffRef.current) return;
       setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
     },
     [],
   );
   const handleSetupBackActionChange = React.useCallback(
-    (backAction: () => void) => setSetupBackAction(() => backAction),
+    (backAction: () => void) =>
+      setSetupBackAction((current) =>
+        current === backAction ? current : backAction,
+      ),
     [],
   );
+  const returnToApiConfig = React.useCallback(() => {
+    setIsChoosingDifferentHarness(false);
+    setTransitionDirection("backward");
+    setPage("config");
+  }, []);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -273,6 +269,7 @@ export function MachineOnboardingFlow({
   }, [backupSession, backupSubview, identityWasImported]);
 
   const backFromConfig = React.useCallback(() => {
+    setupSelectionHandoffRef.current = false;
     setTransitionDirection("backward");
     setIsChoosingDifferentHarness(false);
     if (configBackTarget === "method") {
@@ -293,6 +290,7 @@ export function MachineOnboardingFlow({
         ? {
             disabled: isPending,
             onClick: () => {
+              setError(null);
               setTransitionDirection("backward");
               setPage("identity");
             },
@@ -412,8 +410,10 @@ export function MachineOnboardingFlow({
         <IdentityKeyIntroduction
           direction={transitionDirection}
           disabled={isPending}
+          error={error}
           onCreate={() => void loadFreshIdentity()}
           onOpenHelp={() => {
+            setError(null);
             setIdentityKeyHelpReturnPage("identity-key-intro");
             setTransitionDirection("forward");
             setPage("identity-key-help");
@@ -503,7 +503,7 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
-                        disabled={isPending}
+                        disabled={isPending || isKeyImporting}
                         onClick={() => {
                           setKeyImportStage("key-entry");
                           setKeyImportDialog("backup");
@@ -516,7 +516,7 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
-                        disabled={isPending}
+                        disabled={isPending || isKeyImporting}
                         onClick={() => {
                           setPhoneRecoveryStep("loading");
                           setKeyImportDialog("phone");
@@ -593,6 +593,7 @@ export function MachineOnboardingFlow({
             },
             next: (runtimeIds, nextConfigBackTarget = "list") => {
               const ids = Array.from(runtimeIds);
+              setupSelectionHandoffRef.current = ids.length > 0;
               setReadyRuntimeIds(ids);
               // Harness install can fail (Windows/PATH/network). Don't soft-lock
               // onboarding — users can finish setup later in Settings → Agents.
@@ -605,28 +606,11 @@ export function MachineOnboardingFlow({
               setTransitionDirection("forward");
               setPage("config");
             },
-            navigateToAgentSettings: () => {
-              // Complete onboarding first, then delegate the Settings → Agents
-              // navigation to the parent.  The parent owns RouterProvider, so
-              // navigation from within the onboarding flow races with the
-              // router mounting — calling router.navigate() here is unsafe.
-              complete(selectedPubkey ?? undefined);
-              navigateAfterComplete?.({
-                to: "/settings",
-                search: { section: "agents" },
-              });
-            },
           }}
           direction={transitionDirection}
           initialMethod={harnessConnectionMethod}
           onInitialListBack={
-            isChoosingDifferentHarness
-              ? () => {
-                  setIsChoosingDifferentHarness(false);
-                  setTransitionDirection("backward");
-                  setPage("config");
-                }
-              : undefined
+            isChoosingDifferentHarness ? returnToApiConfig : undefined
           }
           onBackActionChange={handleSetupBackActionChange}
           onMethodChange={setHarnessConnectionMethod}

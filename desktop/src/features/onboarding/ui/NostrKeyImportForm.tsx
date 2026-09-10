@@ -435,10 +435,7 @@ export function NostrKeyImportForm({
       {!isPasswordStage && mode === "backup" ? (
         <>
           <div
-            className={cn(
-              "mx-auto flex h-[312px] w-full flex-col items-center justify-center gap-4 [@media(max-height:40rem)]:h-auto",
-              !cardLayout && "max-w-[500px]",
-            )}
+            className="mx-auto flex h-[312px] w-full max-w-[500px] flex-col items-center justify-center gap-4 [@media(max-height:40rem)]:h-auto"
             data-testid="nostr-import-backup-file-section"
           >
             <Button
@@ -455,7 +452,7 @@ export function NostrKeyImportForm({
           </div>
           {isDragging ? (
             <fieldset
-              className="absolute inset-[var(--buzz-card-textured-safe-inset)] z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-background/80 backdrop-blur-sm"
+              className="absolute inset-[var(--buzz-card-textured-safe-inset)] z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-background/80 backdrop-blur-sm min-[44rem]:-inset-x-6"
               data-dragging="true"
               data-testid="nostr-import-backup-drop"
             >

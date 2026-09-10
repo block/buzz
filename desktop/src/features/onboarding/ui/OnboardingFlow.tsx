@@ -501,7 +501,6 @@ export function OnboardingFlow({
         allowWideContent={currentPage === "avatar"}
         backAction={chromeBackAction}
         current={currentStep}
-        stableWideWidth={currentPage === "avatar"}
         systemColorScheme={systemColorScheme}
         testId="onboarding-gate"
         total={totalOnboardingSteps}

@@ -160,7 +160,7 @@ function deferred() {
 }
 
 const NOOP = () => {};
-const ACTIONS = { back: NOOP, next: NOOP, navigateToAgentSettings: NOOP };
+const ACTIONS = { back: NOOP, next: NOOP };
 
 /** Mount SetupStep under the query client + tooltip provider it requires. */
 function renderSetupStep() {
@@ -170,7 +170,12 @@ function renderSetupStep() {
   return { container, root };
 }
 
-function setupStepTree(queryClient) {
+function setupStepTree(
+  queryClient,
+  actions = ACTIONS,
+  onReadyRuntimeIdsChange = NOOP,
+  initialMethod = "subscription",
+) {
   return React.createElement(
     QueryClientProvider,
     { client: queryClient },
@@ -178,10 +183,10 @@ function setupStepTree(queryClient) {
       TooltipProvider,
       null,
       React.createElement(SetupStep, {
-        actions: ACTIONS,
+        actions,
         direction: "forward",
-        initialMethod: "subscription",
-        onReadyRuntimeIdsChange: NOOP,
+        initialMethod,
+        onReadyRuntimeIdsChange,
       }),
     ),
   );
@@ -200,9 +205,19 @@ describe("SetupStep cached-ready revalidation", () => {
     discoverHandler = (args) =>
       args?.force === true ? pending.promise : Promise.resolve([]);
 
+    const nextCalls = [];
+    const readyRuntimeIdSnapshots = [];
+    const actions = {
+      ...ACTIONS,
+      next: (...args) => nextCalls.push(args),
+    };
     const { container, root } = renderSetupStep();
     await act(async () => {
-      root.render(setupStepTree(queryClient));
+      root.render(
+        setupStepTree(queryClient, actions, (runtimeIds) =>
+          readyRuntimeIdSnapshots.push([...runtimeIds]),
+        ),
+      );
     });
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
@@ -213,6 +228,21 @@ describe("SetupStep cached-ready revalidation", () => {
     );
     assert.ok(readyCard, "the cached harness remains visible during recheck");
     assert.equal(readyCard.getAttribute("data-ready"), "true");
+    await act(async () => {
+      readyCard
+        .querySelector('[data-testid="onboarding-runtime-details-codex"]')
+        ?.click();
+    });
+    assert.equal(
+      nextCalls.length,
+      0,
+      "cached readiness cannot navigate while the forced recheck is pending",
+    );
+    assert.deepEqual(
+      readyRuntimeIdSnapshots,
+      [],
+      "pending cached readiness is not exported as confirmed",
+    );
     assert.equal(
       container.querySelector('[data-testid="onboarding-runtime-ready-codex"]'),
       null,
@@ -238,12 +268,84 @@ describe("SetupStep cached-ready revalidation", () => {
       "true",
       "the harness remains ready once the warm recheck succeeds",
     );
+    assert.deepEqual(
+      readyRuntimeIdSnapshots,
+      [["codex"]],
+      "only a successful forced recheck exports cached readiness",
+    );
     assert.equal(
       container.querySelector(
         '[data-testid="onboarding-runtime-rechecking-codex"]',
       ),
       null,
       "no Checking indicator appears on success",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("hands off only the API harness selected while forced discovery is pending", async () => {
+    const queryClient = makeQueryClient();
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      catalogEntry("buzz-agent", "not_applicable"),
+      catalogEntry("goose", "not_applicable"),
+    ]);
+
+    const pending = deferred();
+    discoverHandler = (args) =>
+      args?.force === true ? pending.promise : Promise.resolve([]);
+
+    const nextCalls = [];
+    const readyRuntimeIdSnapshots = [];
+    const actions = {
+      ...ACTIONS,
+      next: (...args) => nextCalls.push(args),
+    };
+    const { container, root } = renderSetupStep();
+    await act(async () => {
+      root.render(
+        setupStepTree(
+          queryClient,
+          actions,
+          (runtimeIds) => readyRuntimeIdSnapshots.push([...runtimeIds]),
+          null,
+        ),
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      container
+        .querySelector('[data-testid="onboarding-harness-method-api"]')
+        ?.click();
+    });
+    assert.deepEqual(
+      nextCalls,
+      [],
+      "cached Buzz readiness cannot advance before forced discovery settles",
+    );
+
+    await act(async () => {
+      pending.resolve([rawReadyEntry("buzz-agent"), rawReadyEntry("goose")]);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    assert.deepEqual(
+      nextCalls,
+      [[["buzz-agent"], "method"]],
+      "successful discovery advances with only the explicitly chosen API harness",
+    );
+    assert.ok(
+      readyRuntimeIdSnapshots.some(
+        (snapshot) =>
+          snapshot.length === 2 &&
+          snapshot.includes("buzz-agent") &&
+          snapshot.includes("goose"),
+      ),
+      "catalog readiness may still be published independently of the selected handoff",
     );
 
     await act(async () => {
