@@ -253,6 +253,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
+    /// Sibling pubkey notified when an ordinary request fails (opt-in).
+    #[arg(long, env = "BUZZ_ACP_FAILURE_HANDLER")]
+    pub failure_handler: Option<String>,
+
+    /// Sibling pubkey notified when a recovery notice fails (opt-in).
+    #[arg(long, env = "BUZZ_ACP_RECOVERY_HANDLER")]
+    pub recovery_handler: Option<String>,
+
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -623,6 +631,7 @@ pub struct Config {
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
+    pub(crate) failure_handlers: crate::failure_routing::FailureHandlers,
     /// Disable the `<base>` platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
@@ -938,6 +947,13 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
+        let failure_handlers = crate::failure_routing::FailureHandlers::parse(
+            args.failure_handler.as_deref(),
+            args.recovery_handler.as_deref(),
+            keys.public_key(),
+        )
+        .map_err(ConfigError::ConfigFile)?;
+
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
@@ -1202,6 +1218,7 @@ impl Config {
             idle_pool_sleep_secs: args.idle_pool_sleep,
             replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            failure_handlers,
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
         };
@@ -1578,6 +1595,7 @@ mod tests {
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
+            failure_handlers: Default::default(),
             no_base_prompt: false,
             base_prompt_content: None,
         }

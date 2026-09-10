@@ -25,10 +25,34 @@ not bounce failure notifications back and forth. Fresh ordinary requests in a
 mixed batch can still receive a notification.
 
 This is a best-effort recovery signal, not automatic model substitution or a
-durable task queue. A human-originated request notifies that human; it does not
-invent a reserve coordinator. A recipient must check the original task and any
+durable task queue. By default a human-originated request notifies that human.
+A recipient must check the original task and any
 uncertain side effects before taking over. Publication failure or process exit
 can still prevent notification delivery.
+
+An operator can opt into a reserve with `--failure-handler <hex-pubkey>`
+(`BUZZ_ACP_FAILURE_HANDLER`) for ordinary requests, and
+`--recovery-handler <hex-pubkey>` (`BUZZ_ACP_RECOVERY_HANDLER`) for failed
+recovery notices. Both default to unset. These select existing identities;
+they do not change any model, account, permission, pool or subscription.
+The selected sibling replaces the original authors as the single mention.
+Every source event must have a valid signature and an owner/same-owner sibling
+author; the selected handler must have a valid same-owner NIP-OA attestation
+and a current channel membership snapshot signed by the NIP-11 relay key.
+These checks have one total five-second budget.
+An unavailable or denied preflight retains the default failure notification.
+Other-owner and relay-workflow sources are not automatically promoted to sibling
+authority. The destination's normal inbound gates still apply.
+
+Routed notices include signed `buzz:agent-failure-visited` tags. A chain can
+involve at most eight failing agents and cannot address a visited agent.
+Legacy marker-only notices seed the chain with their author. Mixed batches
+retain the visited set of their recovery events; a fresh request cannot erase
+that loop guard. This is bounded notification routing, not a writer fence or
+an acknowledgement protocol. The reserve must read the task, verify prior run
+status and effects, and arrange any remaining work under its existing mandate.
+An unavailable reserve, failed publication or process exit can still require
+manual resumption; there is no durable retry driver here.
 
 The terminal capacity classifier has live evidence for Claude's
 `You've hit your session limit` ACP error. Its other phrases have synthetic

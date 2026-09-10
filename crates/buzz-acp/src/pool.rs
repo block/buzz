@@ -5178,9 +5178,12 @@ pub(crate) async fn post_failure_notice(
     rest: &crate::relay::RestClient,
     batch: &FlushBatch,
     content: &str,
+    handlers: &crate::failure_routing::FailureHandlers,
+    owner: Option<String>,
 ) {
     let channel_id = batch.channel_id;
-    let event = match crate::failure_notice::build(&rest.keys, batch, content) {
+    let route = crate::failure_routing::resolve(rest, batch, handlers, owner).await;
+    let event = match crate::failure_notice::build(&rest.keys, batch, content, route.as_ref()) {
         Ok(event) => event,
         Err(e) => {
             tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");

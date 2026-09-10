@@ -12,7 +12,12 @@ const FAILURE_TAG: &str = "buzz:agent-failure";
 const MAX_RECIPIENTS: usize = 50;
 
 /// Build the signed notice sent by the production failure path.
-pub(crate) fn build(keys: &Keys, batch: &FlushBatch, content: &str) -> anyhow::Result<Event> {
+pub(crate) fn build(
+    keys: &Keys,
+    batch: &FlushBatch,
+    content: &str,
+    route: Option<&crate::failure_routing::VerifiedRoute>,
+) -> anyhow::Result<Event> {
     anyhow::ensure!(
         batch.scope.channel_id() == batch.channel_id,
         "failure notice scope/channel mismatch"
@@ -38,7 +43,7 @@ pub(crate) fn build(keys: &Keys, batch: &FlushBatch, content: &str) -> anyhow::R
 
     let own_key = keys.public_key();
     let mut seen = HashSet::new();
-    let recipients: Vec<String> = batch
+    let mut recipients: Vec<String> = batch
         .events
         .iter()
         .rev()
@@ -47,28 +52,37 @@ pub(crate) fn build(keys: &Keys, batch: &FlushBatch, content: &str) -> anyhow::R
             // Never bounce a native failure signal back to its sender. A
             // failed recovery turn may still report a visible, unaddressed
             // notice; a new ordinary request in the batch remains eligible.
-            !item.event.tags.iter().any(|tag| {
-                let parts = tag.as_slice();
-                parts.first().map(String::as_str) == Some(FAILURE_TAG)
-                    && parts.get(1).map(String::as_str) == Some("1")
-            })
+            !crate::failure_routing::is_failure(&item.event)
         })
         .map(|item| item.event.pubkey)
         .filter(|key| *key != own_key && seen.insert(*key))
         .take(MAX_RECIPIENTS)
         .map(|key| key.to_hex())
         .collect();
+    if let Some(route) = route {
+        recipients = vec![route.recipient()];
+    }
+    let content = if route.is_some() {
+        format!("{content}\n\nRecovery notification: read the original task and current run status; inspect prior side effects before resuming. This notice does not prove that a previous writer stopped or authorize replay.")
+    } else {
+        content.to_string()
+    };
     let mentions: Vec<&str> = recipients.iter().map(String::as_str).collect();
     let marker = Tag::parse([FAILURE_TAG, "1"])?;
-    Ok(buzz_sdk::build_message(
+    let mut builder = buzz_sdk::build_message(
         batch.channel_id,
-        content,
+        &content,
         Some(&thread),
         &mentions,
         false,
         &[],
         &[],
     )?
-    .tag(marker)
-    .sign_with_keys(keys)?)
+    .tag(marker);
+    if let Some(route) = route {
+        for visited in route.visited() {
+            builder = builder.tag(Tag::parse([crate::failure_routing::VISITED_TAG, &visited])?);
+        }
+    }
+    Ok(builder.sign_with_keys(keys)?)
 }

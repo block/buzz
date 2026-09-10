@@ -6,6 +6,11 @@ mod engram_fetch;
 mod failure_notice;
 #[cfg(test)]
 mod failure_notice_tests;
+mod failure_routing;
+#[cfg(test)]
+mod failure_routing_config_tests;
+#[cfg(test)]
+mod failure_routing_tests;
 mod filter;
 mod observer;
 mod pi_launcher;
@@ -4675,6 +4680,7 @@ fn is_terminal_provider_error(error: &acp::AcpError) -> bool {
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
 /// dead-letter path so neither duplicates the tokio::spawn block.
 fn spawn_failure_notice(
+    config: &Config,
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
     content: String,
@@ -4682,8 +4688,13 @@ fn spawn_failure_notice(
     if let Some(rest) = rest_client {
         let batch = batch.clone();
         let rest = rest.clone();
+        let handlers = config.failure_handlers.clone();
+        let owner = handlers
+            .enabled()
+            .then(|| resolve_agent_owner(config))
+            .flatten();
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, &batch, &content).await;
+            pool::post_failure_notice(&rest, &batch, &content, &handlers, owner).await;
         });
     }
 }
@@ -4781,10 +4792,10 @@ fn handle_prompt_result(
                     batch.events.len(),
                 );
                 let content = format!(
-                    "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                    "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). This turn will not retry automatically.",
                     config.max_turn_duration_secs
                 );
-                spawn_failure_notice(rest_client, &batch, content);
+                spawn_failure_notice(config, rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
             } else if matches!(
                 result.outcome,
@@ -4799,10 +4810,10 @@ fn handle_prompt_result(
                 );
                 if let Some(dead) = queue.requeue(batch) {
                     let content = format!(
-                        "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                        "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). This turn will not retry automatically.",
                         config.max_turn_duration_secs
                     );
-                    spawn_failure_notice(rest_client, &dead, content);
+                    spawn_failure_notice(config, rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
@@ -4819,9 +4830,9 @@ fn handle_prompt_result(
                 );
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
+                    before using this agent again."
                     .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+                spawn_failure_notice(config, rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_terminal_provider_error(e))
             {
                 tracing::warn!(
@@ -4829,8 +4840,8 @@ fn handle_prompt_result(
                     events = batch.events.len(),
                     "dead-lettering batch immediately — terminal provider capacity error"
                 );
-                let content = "⚠️ The provider refused this request because of a session, usage or credit limit. It will not resume automatically. Please re-send once access is available.".to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+                let content = "⚠️ The provider refused this request because of a session, usage or credit limit. This turn will not retry automatically.".to_string();
+                spawn_failure_notice(config, rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4843,9 +4854,9 @@ fn handle_prompt_result(
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
-                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                    "⚠️ I couldn't process the last request after multiple retries ({reason}). This turn will not retry automatically."
                 );
-                spawn_failure_notice(rest_client, &dead, content);
+                spawn_failure_notice(config, rest_client, &dead, content);
             }
         } else {
             tracing::debug!(
@@ -9213,6 +9224,7 @@ mod build_mcp_servers_tests {
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
+            failure_handlers: Default::default(),
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -9439,6 +9451,7 @@ mod error_outcome_emission_tests {
             idle_pool_sleep_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
+            failure_handlers: Default::default(),
             no_base_prompt: false,
             base_prompt_content: None,
         }

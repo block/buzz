@@ -93,7 +93,7 @@ fn build_addresses_distinct_authors_and_excludes_processing_agent() {
         vec![],
     );
 
-    let notice = failure_notice::build(&agent, &batch, "limit").expect("notice builds");
+    let notice = failure_notice::build(&agent, &batch, "limit", None).expect("notice builds");
     assert_eq!(
         tag_values(&notice, "p"),
         vec![
@@ -124,7 +124,7 @@ fn build_collects_cancelled_and_current_events_but_skips_marked_failures() {
     let current_id = current.id.to_hex();
     let batch = batch(channel_id, vec![old_failure, current], vec![cancelled]);
 
-    let notice = failure_notice::build(&agent, &batch, "limit").expect("notice builds");
+    let notice = failure_notice::build(&agent, &batch, "limit", None).expect("notice builds");
     assert_eq!(
         tag_values(&notice, "p"),
         vec![
@@ -143,8 +143,13 @@ fn build_top_level_anchors_notice_root_and_parent_to_trigger() {
     let channel_id = uuid::Uuid::new_v4();
     let trigger = event(&author, "trigger", None, false);
     let trigger_id = trigger.id.to_hex();
-    let notice = failure_notice::build(&agent, &batch(channel_id, vec![trigger], vec![]), "limit")
-        .expect("notice builds");
+    let notice = failure_notice::build(
+        &agent,
+        &batch(channel_id, vec![trigger], vec![]),
+        "limit",
+        None,
+    )
+    .expect("notice builds");
     let tags = queue::parse_thread_tags(&notice);
     assert_eq!(tags.root_event_id.as_deref(), Some(trigger_id.as_str()));
     assert_eq!(tags.parent_event_id.as_deref(), Some(trigger_id.as_str()));
@@ -161,7 +166,7 @@ fn build_caps_recipients_at_fifty_without_duplicates_or_self() {
             .iter()
             .map(|keys| event(keys, "request", None, false)),
     );
-    let notice = failure_notice::build(&agent, &batch(channel_id, events, vec![]), "limit")
+    let notice = failure_notice::build(&agent, &batch(channel_id, events, vec![]), "limit", None)
         .expect("notice builds");
     let recipients = tag_values(&notice, "p");
     assert_eq!(recipients.len(), 50);
@@ -240,7 +245,7 @@ async fn post_failure_notice_submits_signed_event_through_local_http() {
         auth_tag_json: None,
     };
 
-    pool::post_failure_notice(&rest, &batch, "limit").await;
+    pool::post_failure_notice(&rest, &batch, "limit", &Default::default(), None).await;
     tokio::time::timeout(std::time::Duration::from_secs(2), server)
         .await
         .expect("fixture completes")
@@ -274,6 +279,7 @@ fn failure_chain_is_not_addressed_again_and_does_not_loop() {
         &worker,
         &batch(channel_id, vec![request], vec![]),
         "worker unavailable",
+        None,
     )
     .expect("worker notice");
     assert_eq!(
@@ -284,6 +290,7 @@ fn failure_chain_is_not_addressed_again_and_does_not_loop() {
         &coordinator,
         &batch(channel_id, vec![worker_notice], vec![]),
         "coordinator also unavailable",
+        None,
     )
     .expect("coordinator notice");
     assert!(
@@ -306,8 +313,13 @@ fn original_mentions_are_not_notification_recipients() {
         .tag(Tag::parse(["p", unrelated.as_str()]).expect("mention tag"))
         .sign_with_keys(&author)
         .expect("sign request");
-    let notice = failure_notice::build(&agent, &batch(channel_id, vec![request], vec![]), "limit")
-        .expect("notice");
+    let notice = failure_notice::build(
+        &agent,
+        &batch(channel_id, vec![request], vec![]),
+        "limit",
+        None,
+    )
+    .expect("notice");
     assert_eq!(tag_values(&notice, "p"), vec![author.public_key().to_hex()]);
     assert!(!tag_values(&notice, "p").contains(&unrelated));
 }
@@ -329,7 +341,7 @@ fn thread_scope_canonical_root_wins_over_raw_event_markers() {
         vec![trigger],
         vec![],
     );
-    let notice = failure_notice::build(&agent, &batch, "limit").expect("notice builds");
+    let notice = failure_notice::build(&agent, &batch, "limit", None).expect("notice builds");
     let e = tag_values(&notice, "e");
     assert_eq!(e[0], canonical_root);
     assert_ne!(e[0], raw_root);
@@ -340,7 +352,9 @@ fn thread_scope_canonical_root_wins_over_raw_event_markers() {
 fn empty_batch_and_scope_channel_mismatch_fail_closed() {
     let agent = Keys::generate();
     let channel_id = uuid::Uuid::new_v4();
-    assert!(failure_notice::build(&agent, &batch(channel_id, vec![], vec![]), "limit").is_err());
+    assert!(
+        failure_notice::build(&agent, &batch(channel_id, vec![], vec![]), "limit", None).is_err()
+    );
     let other_channel = uuid::Uuid::new_v4();
     let author = Keys::generate();
     let mismatch = batch_with_scope(
@@ -351,7 +365,7 @@ fn empty_batch_and_scope_channel_mismatch_fail_closed() {
         vec![event(&author, "request", None, false)],
         vec![],
     );
-    assert!(failure_notice::build(&agent, &mismatch, "limit").is_err());
+    assert!(failure_notice::build(&agent, &mismatch, "limit", None).is_err());
 }
 
 #[test]
@@ -367,6 +381,7 @@ fn owner_originated_failure_has_no_synthetic_reserve_mention() {
             vec![],
         ),
         "limit",
+        None,
     )
     .expect("notice builds");
     assert_eq!(tag_values(&notice, "p"), vec![owner.public_key().to_hex()]);
