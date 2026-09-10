@@ -339,7 +339,11 @@ pub(crate) async fn start_builderlab_login(
         return Err("Builderlab code exchange returned an empty credential".to_owned());
     }
 
-    let me = authenticated_user(&app_state.http_client, &exchanged.session_credential).await?;
+    let me = authenticated_user(
+        &app_state.http_client.current(),
+        &exchanged.session_credential,
+    )
+    .await?;
     if exchanged.expires_at != me.expires_at {
         return Err("Builderlab session expiry did not match code exchange".to_owned());
     }
@@ -378,7 +382,7 @@ pub(crate) async fn get_builderlab_auth(
     let Some(credential) = stored else {
         return Ok(None);
     };
-    match authenticated_user(&app_state.http_client, &credential).await {
+    match authenticated_user(&app_state.http_client.current(), &credential).await {
         Ok(me) => Ok(Some(BuilderlabAuthInfo {
             expires_at: me.expires_at,
             email: me.email,
@@ -469,7 +473,7 @@ pub(crate) async fn get_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/current",
@@ -484,7 +488,7 @@ pub(crate) async fn bind_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     let challenge_value = authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/challenge",
@@ -510,7 +514,7 @@ pub(crate) async fn bind_builderlab_nostr_identity(
         &challenge.expires_at,
     )?;
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/verify",
@@ -529,7 +533,7 @@ pub(crate) async fn delete_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/delete",
@@ -544,7 +548,7 @@ pub(crate) async fn list_builderlab_communities(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/list",
@@ -560,7 +564,7 @@ pub(crate) async fn check_builderlab_community_name(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/availability",
@@ -576,7 +580,7 @@ pub(crate) async fn create_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities",
@@ -592,7 +596,7 @@ pub(crate) async fn archive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/archive",
@@ -608,7 +612,7 @@ pub(crate) async fn unarchive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/unarchive",
@@ -628,7 +632,7 @@ pub(crate) async fn transfer_builderlab_community(
     // archive/unarchive endpoints which take `community_id`; mirror the web
     // client's payload exactly.
     authenticated_json(
-        &app_state.http_client,
+        &app_state.http_client.current(),
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/transfer",

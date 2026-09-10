@@ -7,7 +7,10 @@ use sha2::{Digest, Sha256};
 
 // nostr 0.36 alias — required for cross-version bridging with buzz-sdk.
 
-use crate::app_state::AppState;
+use crate::app_state::{AppHttpClient, AppState};
+
+mod http_client;
+use http_client::{intercepted_response_message, send_relay_request};
 
 const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 
@@ -198,13 +201,39 @@ fn classify_body_timeout(e: &reqwest::Error) -> Option<String> {
 
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
-/// Returns `Some(msg)` when the response clearly did not come from the relay:
+/// Returns the interception kind when the response clearly did not come from
+/// the relay:
 /// - Cloudflare Access redirect (final URL on `*.cloudflareaccess.com`)
-/// - Any other HTML response (proxy login page, captive portal, etc.)
+/// - Any other HTML response (relay ingress, proxy login page, captive portal,
+///   etc.)
 ///
 /// Pure function: takes the already-extracted host and content-type strings so
 /// it can be unit-tested without constructing a real `reqwest::Response`.
-fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option<String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterceptedResponse {
+    CloudflareAccess,
+    UnexpectedHtml,
+}
+
+impl InterceptedResponse {
+    fn message(self) -> &'static str {
+        match self {
+            Self::CloudflareAccess => {
+                "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
+                 — re-authenticate and reconnect"
+            }
+            Self::UnexpectedHtml => {
+                "relay unreachable: relay returned an unexpected HTML page \
+                 (VPN or proxy sign-in?)"
+            }
+        }
+    }
+}
+
+fn classify_intercepted_response(
+    final_host: &str,
+    content_type: &str,
+) -> Option<InterceptedResponse> {
     let host = final_host.to_lowercase();
     let ct = content_type.to_lowercase();
 
@@ -212,20 +241,12 @@ fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option
     // Label-boundary check prevents `notcloudflareaccess.com.evil.example` from
     // matching.
     if host == "cloudflareaccess.com" || host.ends_with(".cloudflareaccess.com") {
-        return Some(
-            "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
-             — re-authenticate and reconnect"
-                .to_string(),
-        );
+        return Some(InterceptedResponse::CloudflareAccess);
     }
 
     // Generic HTML body from any other proxy or captive portal.
     if ct.contains("text/html") {
-        return Some(
-            "relay unreachable: relay returned an unexpected HTML page \
-             (VPN or proxy sign-in?)"
-                .to_string(),
-        );
+        return Some(InterceptedResponse::UnexpectedHtml);
     }
 
     None
@@ -241,15 +262,7 @@ fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option
 pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, String> {
-    let final_host = response.url().host_str().unwrap_or("").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = intercepted_response_message(&response) {
         return Err(msg);
     }
 
@@ -286,15 +299,7 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
 
     // Check for intercepted/proxy responses before reading the body.
-    let final_host = response.url().host_str().unwrap_or("").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = intercepted_response_message(&response) {
         return msg;
     }
 
@@ -382,8 +387,9 @@ pub async fn query_relay_at(
         &url,
         &auth,
         None,
-        body_bytes,
+        &body_bytes,
         QUERY_REQUEST_TIMEOUT,
+        || build_nip98_auth_header(&Method::POST, &url, &body_bytes, state),
     )
     .await
 }
@@ -405,8 +411,9 @@ pub async fn query_relay_at_with_keys(
         &url,
         &auth,
         auth_tag,
-        body_bytes,
+        &body_bytes,
         QUERY_REQUEST_TIMEOUT,
+        || build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes),
     )
     .await
 }
@@ -419,14 +426,18 @@ pub async fn query_relay_at_with_keys(
 /// can drive the real send/timeout/classify path with a short deadline against
 /// a stalled loopback. A timeout surfaces through `classify_request_error` as
 /// the stable `"relay unreachable: request timed out"` string.
-async fn send_query_request(
-    http_client: &reqwest::Client,
+async fn send_query_request<A>(
+    http_client: &AppHttpClient,
     url: &str,
     auth: &str,
     auth_tag: Option<&str>,
-    body_bytes: Vec<u8>,
+    body_bytes: &[u8],
     timeout: std::time::Duration,
-) -> Result<Vec<nostr::Event>, String> {
+    refresh_auth: A,
+) -> Result<Vec<nostr::Event>, String>
+where
+    A: FnOnce() -> Result<String, String>,
+{
     let mut request = http_client
         .post(url)
         .header("Authorization", auth)
@@ -435,11 +446,8 @@ async fn send_query_request(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response =
+        send_relay_request(http_client, request.body(body_bytes.to_vec()), refresh_auth).await?;
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
@@ -543,11 +551,10 @@ pub async fn sync_managed_agent_profile(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes.clone()), || {
+        build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -670,11 +677,10 @@ pub async fn submit_signed_event_with_keys(
         request = request.header("x-auth-tag", tag);
     }
 
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes.clone()), || {
+        build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

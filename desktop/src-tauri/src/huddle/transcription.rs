@@ -62,7 +62,7 @@ pub async fn set_huddle_transcription_enabled(
 
     if enabled {
         if let Some(manager) = models::global_model_manager() {
-            manager.start_stt_download(state.http_client.clone());
+            manager.start_stt_download(state.http_client.current());
         }
         if let Err(e) = maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
             eprintln!("buzz-desktop: STT transcript start failed: {e}");
