@@ -14,6 +14,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
+import '../channels/message_actions.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/utils/string_utils.dart';
@@ -137,6 +138,15 @@ class ForumThreadPage extends HookConsumerWidget {
                   onTap: () {
                     Navigator.of(sheetContext).pop();
                     Clipboard.setData(ClipboardData(text: thread.post.content));
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.textCursorInput),
+                  title: const Text('Select text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    ref.read(messageTextSelectionIdProvider.notifier).state =
+                        thread.post.eventId;
                   },
                 ),
                 ListTile(
@@ -350,67 +360,122 @@ class _OriginalPost extends ConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
-    return Padding(
-      padding: const EdgeInsets.all(Grid.xs),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              GestureDetector(
-                onTap: () => showUserProfileSheet(context, post.pubkey),
-                child: _Avatar(
-                  key: ValueKey('forum-original-avatar-${post.eventId}'),
-                  profile: profile,
-                  pubkey: post.pubkey,
-                  radius: 16,
-                  isAgent: agentMentionPubkeys.contains(pk),
+    final selecting = ref.watch(messageTextSelectionIdProvider) == post.eventId;
+
+    return GestureDetector(
+      onLongPress: selecting ? null : () => _showActions(context, ref),
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.xs),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                GestureDetector(
+                  onTap: () => showUserProfileSheet(context, post.pubkey),
+                  child: _Avatar(
+                    key: ValueKey('forum-original-avatar-${post.eventId}'),
+                    profile: profile,
+                    pubkey: post.pubkey,
+                    radius: 16,
+                    isAgent: agentMentionPubkeys.contains(pk),
+                  ),
                 ),
-              ),
-              const SizedBox(width: Grid.xxs),
-              Expanded(
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => showUserProfileSheet(context, post.pubkey),
+                const SizedBox(width: Grid.xxs),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () =>
+                              showUserProfileSheet(context, post.pubkey),
+                          child: Text(
+                            displayName,
+                            maxLines: 1,
+                            style: messageUsernameTextStyle,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: Grid.xxs),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: Grid.xxl),
                         child: Text(
-                          displayName,
+                          formatRelativeTime(post.createdAt),
                           maxLines: 1,
-                          style: messageUsernameTextStyle,
                           overflow: TextOverflow.ellipsis,
+                          style: messageTimestampTextStyle.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: Grid.xxs),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: Grid.xxl),
-                      child: Text(
-                        formatRelativeTime(post.createdAt),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: messageTimestampTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  ],
+                      if (selecting) ...[
+                        const SizedBox(width: Grid.half),
+                        const MessageTextSelectionDoneButton(),
+                      ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: Grid.xxs),
-          MessageContent(
-            content: post.content,
-            mentionNames: mentionNames,
-            agentMentionPubkeys: agentMentionPubkeys,
-            tags: post.tags,
-            baseStyle: messageBodyTextStyle.copyWith(
-              color: context.colors.onSurface,
+              ],
             ),
-            onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+            const SizedBox(height: Grid.xxs),
+            MessageContent(
+              content: post.content,
+              mentionNames: mentionNames,
+              agentMentionPubkeys: agentMentionPubkeys,
+              tags: post.tags,
+              baseStyle: messageBodyTextStyle.copyWith(
+                color: context.colors.onSurface,
+              ),
+              onMentionTap: selecting
+                  ? null
+                  : (pubkey) => showUserProfileSheet(context, pubkey),
+              selectable: selecting,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showActions(BuildContext context, WidgetRef ref) {
+    showBuzzModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    Clipboard.setData(ClipboardData(text: post.content));
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.textCursorInput),
+                  title: const Text('Select text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    ref.read(messageTextSelectionIdProvider.notifier).state =
+                        post.eventId;
+                  },
+                ),
+              ],
+            ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -451,6 +516,9 @@ class _ReplyRow extends ConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+
+    final selecting =
+        ref.watch(messageTextSelectionIdProvider) == reply.eventId;
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -503,20 +571,23 @@ class _ReplyRow extends ConsumerWidget {
                   ],
                 ),
               ),
-              SizedBox(
-                width: 28,
-                height: 28,
-                child: IconButton(
-                  onPressed: () => _showActions(context, ref),
-                  icon: Icon(
-                    LucideIcons.ellipsis,
-                    size: 16,
-                    color: context.colors.onSurfaceVariant,
+              if (selecting)
+                const MessageTextSelectionDoneButton()
+              else
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    onPressed: () => _showActions(context, ref),
+                    icon: Icon(
+                      LucideIcons.ellipsis,
+                      size: 16,
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
                   ),
-                  padding: EdgeInsets.zero,
-                  visualDensity: VisualDensity.compact,
                 ),
-              ),
             ],
           ),
           Padding(
@@ -529,7 +600,10 @@ class _ReplyRow extends ConsumerWidget {
               baseStyle: messageBodyTextStyle.copyWith(
                 color: context.colors.onSurface,
               ),
-              onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+              onMentionTap: selecting
+                  ? null
+                  : (pubkey) => showUserProfileSheet(context, pubkey),
+              selectable: selecting,
             ),
           ),
         ],
@@ -564,6 +638,15 @@ class _ReplyRow extends ConsumerWidget {
                   onTap: () {
                     Navigator.of(sheetContext).pop();
                     Clipboard.setData(ClipboardData(text: reply.content));
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.textCursorInput),
+                  title: const Text('Select text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    ref.read(messageTextSelectionIdProvider.notifier).state =
+                        reply.eventId;
                   },
                 ),
                 if (isOwn)
