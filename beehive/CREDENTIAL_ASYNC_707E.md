@@ -63,9 +63,34 @@ wrong identity, standby addition, retained deletion refusing recovery/recreation
 and byte-identical sibling journal. These are isolated fixtures, no OS operations.
 
 Independent async semantic review and actual owner-present OS verification remain.
-No new v3 local provisioning CLI process journey is claimed yet (API tests only).
+Workspace `cli-journey.ts` additionally exercises actual v3 CLI processes with the
+existing explicit isolated-file credential loader: first-provision reconciliation,
+new agent, hidden standby import, removal, refusal to recover an active manifest,
+and hidden same-key import. Three public slots and unchanged original journal.
+Its initial harness omitted import confirmation (`cli-first.log`); the corrected
+harness passes (`cli-second.log`) without changing production to conceal failure.
 Existing installed owner-TUI private-wire reply journey remains separate evidence.
 Direct ordinary membership is approved; source contract is now available in
 `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/DIRECT_MEMBER_EVIDENCE_AA0B3F26.md`; runtime
 implementation remains. Private profile distribution, reconnect and new-wire Move
 also remain. This is not the completed usable milestone or an install candidate.
+
+## Failed full gate and targeted repair (do not erase this result)
+
+One default-concurrent installed-enabled full suite at exact
+`1bf0d11749909c1fc1b0a15e58d212bd8fb05fa7` exited naturally after 321723.795417ms:
+**137 passed / 4 failed / 0 skipped**, strict passed. Assignment/Restart expected
+the existing missing-key/setup receipt, but the new async path leaked raw ENOENT;
+Move recovery waits on that same receipt. Repair restores only filesystem-missing
+classification, preserving distinct credential unavailable/timeout/cancel errors.
+The new helper-host test failed its PID-absence assertion. Its readiness file was
+published before PID bytes were written, allowing cancellation to observe an empty
+file as PID 0. Repair publishes the fixture PID atomically and explicitly rejects
+invalid/PID-0 observations. The old failure did not capture the PID, so its exact
+runtime cause is not retrospectively proven. Both the failed full log and the
+original test remain available in commit history.
+
+After these changes strict and the focused assignment/Move/Restart/helper set pass
+12/12, default concurrency. No deadline increase, serialized suite, forced exit,
+or second full rerun-to-green. **The repaired source has not passed a full suite.**
+The full run did pass the installed owner-public v3 TUI signed-reply journey.

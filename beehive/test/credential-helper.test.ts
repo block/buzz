@@ -21,11 +21,12 @@ function blocker(directory: string) {
   const pidFile = join(directory, 'helper.pid'), script = join(directory, 'helper.mjs');
   // PID-only fixture evidence, never credential material. Blocking JS cannot run
   // an abort callback, approximating a native call's event-loop unresponsiveness.
-  writeFileSync(script, `import {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile)},String(process.pid));\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);\n`);
+  writeFileSync(script, `import {writeFileSync,renameSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile + '.pending')},String(process.pid));\nrenameSync(${JSON.stringify(pidFile + '.pending')},${JSON.stringify(pidFile)});\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);\n`);
   return { pidFile, helper: pathToFileURL(script) };
 }
 function gone(pidFile: string) {
   const pid = Number(readFileSync(pidFile, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, 'Atomic fixture readiness must contain the owned PID, not an empty file/process group');
   assert.throws(() => process.kill(pid, 0), (e: NodeJS.ErrnoException) => e.code === 'ESRCH');
 }
 

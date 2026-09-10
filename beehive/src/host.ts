@@ -226,6 +226,11 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       controller.signal.throwIfAborted();
       if (closing || retracting(revision) || state.revision !== revision || hash(state.assignment) !== assignment || hash(state.selected) !== selectionBefore) throw Error('Credential admission invalidated');
       if (semanticHash(fresh) !== semanticHash(setup)) throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment');
+    } catch (error) {
+      // Keep the existing missing-setup receipt contract without hiding a native
+      // unavailable/denied/timeout result as an absent key. Never relay FS paths.
+      if (['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException)?.code))) throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment');
+      throw error;
     } finally { if (credentialRead === controller) credentialRead = undefined; }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
