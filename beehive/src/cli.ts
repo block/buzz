@@ -1,4 +1,5 @@
 import { readAgentSecret } from './key-input.ts';
+import { localSetup } from './local-setup.ts';
 import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -19,6 +20,7 @@ const [command, ...args] = process.argv.slice(2);
 const help = `Beehive — isolated development preview (loopback relay only)
   identity <new-directory>                  Create a NEW local owner identity
   setup <new-host-directory> <identity-file> Guided local harness + key setup
+  local-setup <host-directory>              List/reuse/add binding; new/reuse/restore identity
   migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
   add-agent <host-directory>                New identity using shared local harness
   remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
@@ -75,6 +77,9 @@ async function main() {
       console.log('Local setup saved. Start the host separately; the TUI never owns its lifetime.');
       if (mode === '2') console.log(`Not authenticated. Run auth-info ${shellQuote(dir)} for the exact local host/service-user login command. Start uses an ACP greeting probe, not yet a Buzz relay conversation agent.`);
     } finally { ui.close(); }
+  } else if (command === 'local-setup') {
+    if (args.length !== 1) throw Error('Use host directory only; no private key arguments');
+    await localSetup(resolve(text(args[0])));
   } else if (command === 'migrate-slots') {
     const dir = resolve(text(args[0]));
     const ui = createInterface({ input: stdin, output: stdout });

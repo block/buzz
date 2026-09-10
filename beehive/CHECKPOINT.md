@@ -5,6 +5,59 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Startup / local wizard 7b70 checkpoint
+
+Continuation from clean published `6a28b390db2caca6d45699f91709a2d9a277b053`.
+Evidence directory: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/STARTUP_7B70/`.
+Predecessor BINDINGS_FD5123 logs are untouched. Strict + initial transport/reconnect
+5/5 and local wizard/binding 3/3 focused passed before final gate.
+
+Proved: configured `ws` handshake timeout is 2000ms. Its initial error rejects
+`client.ready`; host catch closes the client and removes the owned lock; CLI prints
+that error and exits 1. Initial failure is deliberately NOT established recovery.
+The slots child driver awaits asynchronous 20ms polling; it does not synchronously
+wait on its relay process. Relay awaits listening before the child is launched.
+Relay verification/persistence/history delivery are synchronous work on the test
+process event loop, but the captured run has no timing/upgrade trace proving that
+work delayed this handshake. Contention/readiness/event-loop cause remains
+**unclassified**, as do unrelated historical timeouts. No production retry,
+timeout inflation, serial default or rerun-to-green was introduced. Deterministic
+withheld-upgrade, cancellation and HTTP denial probes bind the actual client/host.
+Transport-level close aborts startup; CLI signals are still installed only after
+host readiness, so signal-during-startup lock cleanup is not claimed by this test.
+
+Product increment: `local-setup` lists/reuses bindings/identities, adds compatible
+immutable binding IDs, creates independent keys on a selected binding, or restores
+an exact retained key through the hidden reader. Mutation APIs revalidate draft
+source fingerprints under atomic host.lock; no key goes into binding data. New
+binding and subsequent agent creation are two separately confirmed actions, not a
+torn multi-write wizard transaction. Real CLI setup -> binding B -> remote A/B
+Restart/Move test preserves existing identity/profile/history/sibling guarantees.
+No edit/delete, second real harness, provider form, live auth, current production
+kind-40002 or full-product acceptance. Initial setup/unknown standby key import
+still use their existing separate flows. K1/F1/F2 closed prior reviews remain
+reusable, not reopened or claimed as independent review of this increment.
+
+Final strict passes. Exactly one final FULL DEFAULT concurrent installed-enabled
+run naturally completed **59/61, two failures, no skips/cancellations, 35.513s**.
+All new startup/wizard probes and the real CLI->remote A/B journey passed. Failures:
+(1) slots.test.ts:131 standby host PID 88992 exited 1 before online, bounded stderr
+`Opening handshake has timed out`; underlying cause still unclassified, NOT fixed;
+(2) admission-cancel.test.ts:126 `Controls must resolve without waiting on a run`
+asserted elapsed time <2500ms; this run exceeded that bound, cause unclassified.
+Neither failure was rerun, suppressed or attributed to contention without evidence.
+Full-suite acceptance remains OPEN; natural full log and focused logs are retained.
+Self-review checked one-action writes, private key exclusion, hidden reader ownership,
+stale-input lock checks, unchanged history and no new provider claims. Installed
+binaries were read-only/hashed separately; source hashes saved beside logs. No
+repo-wide CI, production/provider activity, dependency or persistent git config change.
+
+One next diagnostic: instrument the actual slots relay's upgrade/event-loop timing
+in a bounded fixture-owned trace to distinguish parent work from transport delay;
+do not change retry/deadline policy on this evidence. Product remaining: initial
+new/standby-import unification and startup-signal cleanup ownership, followed by
+properly grounded real harness/provider parity.
+
 ## Binding fd5123 — published-candidate partial handoff
 
 Executable candidate is the commit containing this section; remote verification is

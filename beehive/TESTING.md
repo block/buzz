@@ -406,3 +406,19 @@ This is deterministic external-runner/profile evidence, not Goose, live provider
 production protocol or integrated binding CRUD/wizard acceptance. Existing K1 and
 F1/F2 independent reviews stay closed; this new delta has author self-review only.
 Exact full-suite results and iteration failures are in CHECKPOINT and workspace logs.
+
+## Initial transport and local wizard probes (7b70)
+
+`startup-transport.test.ts` owns a fresh loopback HTTP listener and deliberately
+withholds WebSocket upgrade without blocking the server event loop. The unchanged
+production 2000ms handshake timeout rejects host startup, releases its installation
+lock, preserves the journal and does not auto-retry. A subsequent explicit host
+start succeeds. Other probes close an outstanding initial client handshake and
+return HTTP 403 with recovery enabled: ready rejects, no silent retry/recovery.
+Established recovery remains separately covered by `reconnect.test.ts`.
+These probes explain the failure path, not the cause of the historical slots timeout.
+
+`bindings.test.ts` now provisions B through the actual local wizard before its
+remote A/B journey. Additional actual CLI new/reuse/hidden-restore acceptance
+asserts unchanged journals, independent keys, chosen binding and no secret output.
+API stale fingerprint checks run under the same atomic lock as host start.

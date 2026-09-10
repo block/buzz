@@ -43,9 +43,9 @@ The fixture has one allowed model. Named behavior profiles are authored remotely
 with `profile-new`, `profiles`, `profile-edit <number>`, and `apply <number|default>`.
 Use `binding <local-id>` to save an advertised local binding into the selected
 named candidate, then explicit `restart` to apply it. `show` lists binding IDs
-and definition fingerprints. Private definitions are provisioned locally through
-`addHarnessBinding` (immutable add under the installation lock); integrated local
-CRUD/wizard remains deferred. Legacy configurations keep their original slot binding.
+and definition fingerprints. Private definitions are provisioned through `local-setup` (immutable add under
+the installation lock); see the small local wizard section below. Destructive
+edit/remove and full initial import unification remain deferred. Legacy configurations keep their original slot binding.
 `show` separates selected-next and immutable actual-run snapshot. Save does not
 restart. `quit` leaves the host running. Reopen TUI to inspect it; `stop` confirms
 the owned process group is absent and leaves the agent assigned to this host.
@@ -610,3 +610,37 @@ wizard, manage multiple local harness bindings, or add Goose. Those, remote A/B
 selection with immutable applied inputs, and remaining Claude/Codex/preset/custom/
 mesh/compute parity remain unfinished. Existing file-based standby enrollment is
 unchanged; no provider login/cache access or live-provider acceptance is claimed.
+
+## Small local binding / identity wizard
+
+After initial `setup`, run `node src/cli.ts local-setup <host-directory>` offline.
+It lists existing binding IDs/fingerprints and public identities (never keys), then
+performs **one** chosen action:
+
+- `reuse`: choose an existing identity without any mutation or key recreation;
+  use the remote TUI for normal public selection/configuration/lifecycle.
+- `new-agent`: choose an existing binding and confirm an independent NEW identity.
+- `restore-key`: select a retained public-only identity and enter its exact key at
+  the existing hidden prompt. Assignment/history stay unchanged; no standby Start
+  authority is created. Unknown-identity enrollment still uses the explicit public
+  genesis/file-based standby path, not this restoration action.
+- `add-binding`: select a compatible existing harness definition, enter a NEW ID,
+  local executable and allowed workspace (fixture additionally asks for its script).
+  The existing harness mode, service-user auth context and conversation authority
+  are retained. This does not add another provider/harness or authenticate anything.
+  Confirming saves only the binding; reopen the wizard to create an agent using it,
+  or select it remotely for an existing identity. Cancel leaves no draft writes.
+
+Edits deliberately create NEW binding IDs/revisions; no in-place edit or removal
+is advertised. Historical/current references remain valid. Each mutation takes
+atomic `host.lock`, including exclusion against a competing host start; changed
+source definitions reject under that lock rather than saving a stale draft.
+No long-held lock during prompts. New agent journal staging remains inert until
+its atomic manifest activation; interrupted staging requires local reconciliation.
+
+Actual CLI acceptance now follows initial setup → local binding B wizard → remote
+TUI A/B selection → explicit Restart B with the same identity/profile, stable A
+history and unchanged sibling journal. A separate CLI journey covers new/reuse and
+hidden exact-key restoration. This is a small existing-installation wizard, not a
+universal provider form or complete initial-setup/import unification. Goose, Claude,
+Codex, other providers, presets/custom/mesh/compute and live auth remain unfinished.

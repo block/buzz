@@ -78,7 +78,7 @@ export function migrateSlots(directory: string): void {
   } finally { rmdirSync(lock); }
 }
 /** Local key enrollment reuses a host-owned harness, never another agent's key. */
-export function addSlot(directory: string, secret: string, genesis: Genesis, setupName = 'default'): void {
+export function addSlot(directory: string, secret: string, genesis: Genesis, setupName = 'default', expectedFingerprint?: string): void {
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
     const i = readInstallation(directory); const key = publicKey(secret);
@@ -86,6 +86,7 @@ export function addSlot(directory: string, secret: string, genesis: Genesis, set
     if (existing?.secret === null) throw Error('Public-only slot retains this identity; local key repair is explicit local reconciliation, never slot re-creation');
     if (Object.keys(i.agents).length >= 32 || existing) throw Error('Slot exists or installation full');
     if (!Object.hasOwn(i.setups, setupName)) throw Error('Unknown host harness setup');
+    if (expectedFingerprint !== undefined && semanticHash(i.setups[setupName]) !== expectedFingerprint) throw Error('Binding definition changed; reopen local setup');
     const setup = validateSetup({ ...i.setups[setupName], host: i.host, ownerSecret: i.ownerSecret, agentSecret: secret });
     const slotDirectory = join(directory, 'agents', key);
     if (existsSync(slotDirectory)) throw Error('Partial slot requires local reconciliation; cannot reset');
@@ -160,12 +161,13 @@ export function saveDefaultHarness(directory: string, setup: Setup): void {
 
 /** Provision an immutable reusable local binding under the service-start lock.
  * No identity, journal, selected configuration or running process is changed. */
-export function addHarnessBinding(directory: string, id: string, value: Harness): void {
+export function addHarnessBinding(directory: string, id: string, value: Harness, source?: { id: string; fingerprint: string }): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || ['constructor', 'prototype', '__proto__'].includes(id)) throw Error('Invalid binding ID');
   const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
   try {
     const i = readInstallation(directory);
     if (Object.hasOwn(i.setups, id) || Object.keys(i.setups).length >= 32) throw Error('Binding exists or inventory full');
+    if (source && (!Object.hasOwn(i.setups, source.id) || semanticHash(i.setups[source.id]) !== source.fingerprint)) throw Error('Binding definition changed; reopen local setup');
     const raw = object(value);
     if (['host', 'ownerSecret', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
     validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });

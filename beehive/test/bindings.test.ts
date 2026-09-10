@@ -11,7 +11,8 @@ import { readPrivate, writePrivate } from '../src/storage.ts';
 import { provision } from '../src/host.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
-import { installationSlots, addHarnessBinding, migrateSlots } from '../src/slots.ts';
+import { installationSlots, addHarnessBinding, addSlot, migrateSlots, removeSlotKey } from '../src/slots.ts';
+import { createGenesis } from '../src/assignment.ts';
 import { hostReady } from './host-driver.ts';
 import { provisionSetup } from './provision.ts';
 import { profileRevision } from '../src/profiles.ts';
@@ -78,7 +79,18 @@ test('reusable A/B bindings: real remote named TUI and external Restart, stable 
   assert.equal(manifest.agents[X].setup, manifest.agents[Y].setup);
   for (const key of [secret, manifest.agents[X].secret, manifest.agents[Y].secret]) assert.ok(!setupOutput.includes(key));
   const binding = { ...manifest.setups.default, workspace, allowedWorkspaces: [workspace], args: [resolve('test/binding-runner.ts')] };
-  addHarnessBinding(source, 'B', binding);
+  const localOutput = await terminal(['local-setup', source], [
+    { prompt: 'Local action [', answer: 'add-binding' },
+    { prompt: 'Existing binding ID to reuse: ', answer: 'default' },
+    { prompt: 'NEW immutable binding ID: ', answer: 'B' },
+    { prompt: 'Absolute compatible executable: ', answer: realpathSync(process.execPath) },
+    { prompt: 'Allowed workspace (absolute directory): ', answer: workspace },
+    { prompt: 'Absolute fixture TypeScript script: ', answer: resolve('test/binding-runner.ts') },
+    { prompt: 'Save NEW binding only (no selection, key change or restart)? [yes/no]: ', answer: 'yes' },
+  ]);
+  assert.match(localOutput, /Binding B saved/);
+  assert.deepEqual((readPrivate(join(source, 'setup.json')) as any).setups.B, binding);
+  for (const key of [secret, manifest.agents[X].secret, manifest.agents[Y].secret]) assert.ok(!localOutput.includes(key));
   const slots = installationSlots(source), first = slots.find(s => s.agent === X)!;
   const journal = (key: string) => JSON.parse(readFileSync(slots.find(s => s.agent === key)!.path, 'utf8'));
   for (const path of [join(source, 'setup.json'), ...slots.map(s => s.path)]) assert.equal(statSync(path).mode & 0o777, 0o600);
@@ -202,11 +214,53 @@ test('local binding API shares atomic host.lock with competing service start; id
     } finally { rmdirSync(lock); }
     assert.throws(() => addHarnessBinding(dir, 'B', { ...binding, ownerSecret: newKey() } as any), /identity/);
     assert.throws(() => addHarnessBinding(dir, 'B', { ...binding, conversation: {} } as any), /conversation authority/);
+    assert.throws(() => addHarnessBinding(dir, 'B', binding, { id: 'default', fingerprint: '0'.repeat(64) }), /definition changed/);
+    const fresh = newKey();
+    assert.throws(() => addSlot(dir, fresh, createGenesis(publicKey(_owner), publicKey(fresh), _host), 'default', '0'.repeat(64)), /definition changed/);
+    assert.deepEqual(readFileSync(join(dir, 'setup.json')), before, 'stale wizard inputs do not write');
     addHarnessBinding(dir, 'B', binding);
     assert.throws(() => addHarnessBinding(dir, 'B', binding), /exists/);
     const after = readPrivate(join(dir, 'setup.json')) as any, old = JSON.parse(before.toString());
     assert.deepEqual(after.agents, old.agents); assert.equal(after.ownerSecret, old.ownerSecret); assert.equal(after.host, old.host);
     assert.deepEqual(readFileSync(join(dir, 'journal.json')), journal);
     assert.equal(statSync(join(dir, 'setup.json')).mode & 0o777, 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('local wizard reuses an identity without mutation, creates independent key on chosen binding, restores exact retained key hidden', { timeout: 15000 }, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-local-wizard-')));
+  const secret = newKey(), key = newKey();
+  try {
+    provisionSetup(join(dir, 'setup.json'), { host: 'local', ownerSecret: secret, agentSecret: key, runner: realpathSync(process.execPath), args: [resolve('test/runner.ts')], workspace: dir, mode: 'fixture' });
+    migrateSlots(dir);
+    const original = installationSlots(dir)[0]!;
+    const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...binding } = original.setup;
+    addHarnessBinding(dir, 'B', binding);
+    const before = readFileSync(join(dir, 'setup.json')), journal = readFileSync(original.path);
+    const reuse = await terminal(['local-setup', dir], [
+      { prompt: 'Local action [', answer: 'reuse' },
+      { prompt: 'Existing agent public key: ', answer: original.agent },
+    ]);
+    assert.match(reuse, /no local mutation/); assert.deepEqual(readFileSync(join(dir, 'setup.json')), before);
+    const added = await terminal(['local-setup', dir], [
+      { prompt: 'Local action [', answer: 'new-agent' },
+      { prompt: 'Existing binding ID to reuse: ', answer: 'B' },
+      { prompt: 'Create NEW independent identity using B? [yes/no]: ', answer: 'yes' },
+    ]);
+    const entries = installationSlots(dir); assert.equal(entries.length, 2);
+    const second = entries.find(e => e.agent !== original.agent)!;
+    assert.equal(second.setupId, 'B'); assert.notEqual(second.setup.agentSecret, key);
+    assert.deepEqual(readFileSync(original.path), journal);
+    const sibling = readFileSync(second.path);
+    removeSlotKey(dir, original.agent);
+    const restored = await terminal(['local-setup', dir], [
+      { prompt: 'Local action [', answer: 'restore-key' },
+      { prompt: 'Existing agent public key: ', answer: original.agent },
+      { prompt: 'Restore exact retained key only, preserving assignment/history? [yes/no]: ', answer: 'yes' },
+      { prompt: 'Agent private key (64 hex; hidden, never passed as an argument): ', answer: key },
+    ]);
+    assert.equal(installationSlots(dir)[0]!.setup.agentSecret, key);
+    assert.deepEqual(readFileSync(original.path), journal); assert.deepEqual(readFileSync(second.path), sibling);
+    for (const output of [reuse, added, restored]) for (const value of [secret, key, second.setup.agentSecret!]) assert.ok(!output.includes(value));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
