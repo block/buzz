@@ -22,6 +22,9 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Package and binary name used by Buzz's Pi ACP fork.
+pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -461,7 +464,7 @@ impl AcpClient {
 
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args);
-        if crate::config::normalize_agent_command_identity(command) == "pi-acp" {
+        if crate::config::normalize_agent_command_identity(command) == BUZZ_PI_ACP_NAME {
             if !args.iter().any(|arg| arg == "--") {
                 cmd.arg("--");
             }

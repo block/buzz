@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport,
+    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -299,7 +299,7 @@ fn has_system_prompt_support(
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
-    } else if agent_name == "pi-acp" || agent_name == CLAUDE_AGENT_ACP_NAME {
+    } else if agent_name == BUZZ_PI_ACP_NAME || agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
         protocol_version >= 2
@@ -314,7 +314,7 @@ fn session_new_system_prompt<'a>(
 ) -> Option<SystemPromptTransport<'a>> {
     if is_goose {
         None
-    } else if agent_name == "pi-acp" {
+    } else if agent_name == BUZZ_PI_ACP_NAME {
         prompt.map(SystemPromptTransport::PiMeta)
     } else if protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME {
         None
