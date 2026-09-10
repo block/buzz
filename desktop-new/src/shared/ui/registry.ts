@@ -356,6 +356,29 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     composes: [],
   },
   {
+    slug: "text-field",
+    name: "TextField",
+    purpose:
+      "A labeled, single-line form control with optional supporting or error text.",
+    behavior: "Base UI Field and Input",
+    variants: [
+      "inset",
+      "soft",
+      "text",
+      "email",
+      "password",
+      "description",
+      "error",
+      "disabled",
+    ],
+    status: "proposed",
+    collection: "components",
+    owner: "desktop-new Onboarding",
+    source: "shared/ui/TextField.tsx",
+    baseUi: [BASE_UI_PARTS.field, BASE_UI_PARTS.input],
+    composes: [],
+  },
+  {
     slug: "search-field",
     name: "SearchField",
     purpose: "A compact filter field with a search cue and clear action.",
@@ -489,6 +512,25 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     source: "features/agent-activity/ui/AgentActivityRail.tsx",
     baseUi: [],
     composes: [],
+  },
+  {
+    slug: "onboarding",
+    name: "Onboarding",
+    purpose:
+      "The account, identity, and profile moments that introduce Buzz on the product backdrop.",
+    behavior: "Composes shared Buzz fields, actions, and panels",
+    variants: [
+      "create account",
+      "welcome back",
+      "create identity key",
+      "build profile",
+    ],
+    status: "proposed",
+    collection: "product-ui",
+    owner: "desktop-new Onboarding",
+    source: "features/onboarding/ui/OnboardingShowcase.tsx",
+    baseUi: [],
+    composes: ["text-field", "button", "icon-button", "panel"],
   },
 ];
 

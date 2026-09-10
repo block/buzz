@@ -12,7 +12,7 @@ import {
  * paths resolve the same way the app resolves them and no Node types are needed.
  */
 const SOURCES = import.meta.glob(
-  "/src/{shared/ui,features/composer/ui,features/agent-activity/ui,features/conversation/ui}/*.tsx",
+  "/src/{shared/ui,features/composer/ui,features/agent-activity/ui,features/conversation/ui,features/onboarding/ui}/*.tsx",
   {
     query: "?raw",
     import: "default",
@@ -105,6 +105,16 @@ describe("component registry — Base UI backing", () => {
     const searchField = resolveBaseUiBacking("search-field");
     expect(searchField.own).toEqual([BASE_UI_PARTS.field, BASE_UI_PARTS.input]);
     expect(searchField.inherited.map((entry) => entry.part.name)).toEqual([
+      "Button",
+    ]);
+
+    // Onboarding owns no primitives now: its form controls and actions all
+    // arrive through shared Buzz components.
+    const onboarding = resolveBaseUiBacking("onboarding");
+    expect(onboarding.own).toEqual([]);
+    expect(onboarding.inherited.map((entry) => entry.part.name)).toEqual([
+      "Field",
+      "Input",
       "Button",
     ]);
 

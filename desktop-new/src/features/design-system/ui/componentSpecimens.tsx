@@ -20,9 +20,11 @@ import { useState } from "react";
 import { Switch } from "@/shared/ui/Switch";
 import { Accordion } from "@/shared/ui/Accordion";
 import { Select } from "@/shared/ui/Select";
+import { OnboardingShowcase } from "@/features/onboarding/ui/OnboardingShowcase";
 import { Avatar } from "@/shared/ui/Avatar";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import { Button } from "@/shared/ui/Button";
+import { CodeInput } from "@/shared/ui/CodeInput";
 import { ConversationHeader } from "@/shared/ui/ConversationHeader";
 import { IconButton } from "@/shared/ui/IconButton";
 import { NavigationItem } from "@/shared/ui/NavigationItem";
@@ -30,6 +32,7 @@ import { NavigationSection } from "@/shared/ui/NavigationSection";
 import { PanelHeader } from "@/shared/ui/PanelHeader";
 import { SearchField } from "@/shared/ui/SearchField";
 import { Tabs } from "@/shared/ui/Tabs";
+import { TextField } from "@/shared/ui/TextField";
 
 import { ComponentAnatomy } from "./ComponentAnatomy";
 import {
@@ -345,6 +348,75 @@ function PanelSpecimen() {
             designed to sit on, not content supplied by the specimen. */}
         <div className="component-single-surface-demo">
           <Panel aria-label="Panel surface" />
+        </div>
+      </SpecimenGroup>
+    </div>
+  );
+}
+
+function TextFieldSpecimen() {
+  return (
+    <div className="component-specimen-stack">
+      <SpecimenGroup label="Inset — content">
+        <div className="component-specimen-stack w-full max-w-sm">
+          <TextField
+            label="Email address"
+            placeholder="name@example.com"
+            description="We’ll use this to help you sign in."
+            type="email"
+          />
+          <TextField
+            label="Password"
+            defaultValue="buzz-password"
+            type="password"
+          />
+          <CodeInput label="Verification code" defaultValue="28" autoFocus />
+        </div>
+      </SpecimenGroup>
+      <SpecimenGroup label="Inset — states">
+        <div className="component-specimen-stack w-full max-w-sm">
+          <Specimen>
+            <TextField label="Name" placeholder="Enter your name" />
+          </Specimen>
+          <Specimen prop='error="Enter a valid email address"'>
+            <TextField
+              label="Email address"
+              defaultValue="not-an-email"
+              error="Enter a valid email address"
+              type="email"
+            />
+          </Specimen>
+          <Specimen prop="disabled">
+            <TextField label="Workspace" defaultValue="Buzz" disabled />
+          </Specimen>
+        </div>
+      </SpecimenGroup>
+      <SpecimenGroup label="Soft — neutral fill and focus ring">
+        <div className="component-specimen-stack w-full max-w-sm">
+          <Specimen prop='variant="soft"'>
+            <TextField
+              label="Name"
+              placeholder="Enter your name"
+              variant="soft"
+            />
+          </Specimen>
+          <Specimen prop='variant="soft" error="Enter a valid email address"'>
+            <TextField
+              label="Email address"
+              defaultValue="not-an-email"
+              error="Enter a valid email address"
+              type="email"
+              variant="soft"
+            />
+          </Specimen>
+          <Specimen prop='variant="soft" disabled'>
+            <TextField
+              label="Workspace"
+              defaultValue="Buzz"
+              disabled
+              variant="soft"
+            />
+          </Specimen>
         </div>
       </SpecimenGroup>
     </div>
@@ -936,10 +1008,12 @@ export const COMPONENT_SPECIMENS: Record<string, () => ReactNode> = {
   ),
   "conversation-header": ConversationHeaderSpecimen,
   "panel-header": PanelHeaderSpecimen,
+  "text-field": TextFieldSpecimen,
   "search-field": SearchFieldSpecimen,
   "navigation-section": NavigationSectionSpecimen,
   "navigation-item": NavigationItemSpecimen,
   composer: MessageComposerSpecimen,
   "composer-formatting-bar": FormattingBarSpecimen,
   "activity-rail": ActivityRailSpecimen,
+  onboarding: OnboardingShowcase,
 };

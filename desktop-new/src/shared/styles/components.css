@@ -562,6 +562,210 @@
     display: none;
   }
 
+  .text-field {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .text-field-label,
+  .text-field-description,
+  .text-field-error {
+    margin: 0;
+  }
+
+  .text-field-control {
+    width: 100%;
+    height: 3rem;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: 0 var(--space-control-inset);
+    background: var(--bg-inset);
+    color: var(--text-primary);
+    font: inherit;
+    transition:
+      border-color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
+  }
+
+  .text-field-control::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .text-field-control:hover:not(:disabled) {
+    border-color: var(--neutral-7);
+  }
+
+  html[data-keyboard-navigation] .text-field-control:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  .text-field[data-invalid] .text-field-control {
+    border-color: var(--red-9);
+    background: var(--red-3);
+  }
+
+  /* A quieter filled field for dense forms. Unlike the inset variant, focus is
+     visible for pointer and keyboard entry because the ring is the proposed
+     interaction treatment being compared in the design-system specimen. */
+  .text-field[data-variant="soft"] .text-field-control {
+    border: 0;
+    background: var(--neutral-2);
+    box-shadow: 0 0 0 1px var(--neutral-2);
+    transition:
+      opacity 0.1s ease,
+      background 0.1s ease,
+      box-shadow 0.1s ease;
+  }
+
+  .text-field[data-variant="soft"] .text-field-control:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--neutral-7);
+  }
+
+  .text-field[data-variant="soft"][data-invalid] .text-field-control {
+    background: var(--neutral-2);
+    box-shadow: 0 0 0 2px var(--red-9);
+  }
+
+  .text-field-error {
+    color: var(--red-11);
+  }
+
+  .text-field[data-disabled] .text-field-control {
+    background: var(--neutral-2);
+    color: var(--text-disabled);
+    -webkit-text-fill-color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+
+  .text-field[data-disabled] .text-field-control::placeholder {
+    color: var(--text-disabled);
+  }
+
+  .text-field[data-variant="soft"][data-disabled] .text-field-control {
+    background: var(--neutral-2);
+    box-shadow: none;
+  }
+
+  .code-input {
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    padding: 0;
+  }
+
+  .code-input-label {
+    margin: 0 0 var(--space-2);
+    padding: 0;
+  }
+
+  .code-input-group {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .code-input-slot {
+    position: relative;
+    width: 3rem;
+    height: 3rem;
+    flex: 0 0 auto;
+  }
+
+  .code-input-control {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-control);
+    padding: 0;
+    background: var(--bg-inset);
+    color: transparent;
+    caret-color: transparent;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    transition:
+      border-color var(--duration-state) var(--easing-state),
+      background-color var(--duration-state) var(--easing-state),
+      box-shadow var(--duration-state) var(--easing-state);
+  }
+
+  .code-input-control::selection {
+    background: transparent;
+    color: transparent;
+  }
+
+  .code-input-control:focus {
+    border-color: var(--neutral-7);
+  }
+
+  html[data-keyboard-navigation] .code-input-control:focus-visible {
+    outline: 2px solid var(--purple-8);
+    outline-offset: 2px;
+  }
+
+  .code-input-control:disabled {
+    background: var(--neutral-2);
+    cursor: not-allowed;
+  }
+
+  .code-input-digit {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--text-primary);
+    pointer-events: none;
+  }
+
+  .code-input-digit[data-motion="enter"] {
+    animation: code-input-digit-enter var(--duration-state) ease-out both;
+  }
+
+  .code-input-digit[data-motion="exit"] {
+    animation: code-input-digit-exit var(--duration-state) ease-out both;
+  }
+
+  .code-input:disabled .code-input-digit {
+    color: var(--text-disabled);
+  }
+
+  @keyframes code-input-digit-enter {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes code-input-digit-exit {
+    from {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    to {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .code-input-digit[data-motion="enter"],
+    .code-input-digit[data-motion="exit"] {
+      animation-duration: 1ms;
+    }
+  }
+
   .navigation-section {
     display: flex;
     flex-direction: column;
