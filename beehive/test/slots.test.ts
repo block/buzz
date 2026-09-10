@@ -14,6 +14,7 @@ import { writePrivate } from '../src/storage.ts';
 import { relay } from '../src/relay.ts';
 import { connect } from '../src/client.ts';
 import { managementClient } from '../src/intents.ts';
+import { hostReady } from './host-driver.ts';
 
 async function until(predicate: () => boolean) {
   for (let i = 0; i < 400; i++) { if (predicate()) return; await delay(20); }
@@ -46,8 +47,7 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
   const journal = (agent: string) => JSON.parse(readFileSync(agent === X ? join(source, 'journal.json') : join(source, 'agents', agent, 'journal.json'), 'utf8'));
   async function launch(path: string) {
     const child = spawn(process.execPath, ['src/cli.ts', 'host', path, url], { stdio: ['ignore', 'pipe', 'pipe'] }); children.push(child);
-    let output = ''; child.stdout?.on('data', chunk => { output += chunk.toString(); }); child.stderr?.resume();
-    await until(() => output.includes('Host online')); return child;
+    await hostReady(child, path); return child;
   }
   async function receipt(m: Message) { ui.send(m); await until(() => seen.some(r => r.type === 'receipt' && r.body.operation === m.id && r.agent === m.agent)); return seen.find(r => r.type === 'receipt' && r.body.operation === m.id && r.agent === m.agent)!; }
   try {

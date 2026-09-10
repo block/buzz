@@ -372,3 +372,15 @@ actual wizard inside `/usr/bin/script`'s PTY and asserts no key echo. The fixed
 stdin; it does not inject key argv. Other platforms exercise the subprocess but
 not that macOS PTY. A real host and loopback relay then deny imported standby Start
 without spawning or remotely mutating the manifest. No provider calls are involved.
+
+## Standby startup diagnostic driver (d8fe)
+
+`host-driver.ts` replaces discarded child stderr in the slots TUI workflow with
+bounded 8 KiB stdout/stderr tails and reports spawn error, PID, exit code and signal
+on early exit or readiness failure. Its original 400 × 20 ms observation bound is
+unchanged. `host-driver.test.ts` falsifies lost stderr/exit status and unbounded
+retention using a 20 KiB failure stream, and verifies spawn-error propagation.
+Use this driver only with fresh fixture identities, not secret-bearing owner
+processes. Focused driver/slots 6/6 and final DEFAULT concurrent installed-enabled
+53/53 pass. The prior 50/51 standby timeout did not recur and remains unclassified;
+this is diagnostic coverage, not evidence of a production startup fix.

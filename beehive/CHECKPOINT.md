@@ -5,6 +5,36 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Startup diagnostic continuation d8fe — tested partial handoff
+
+Starting clean published 6a5a459246cbeba4647fde6572569f93ea952291. The slots
+subprocess driver now keeps bounded 8 KiB stdout/stderr tails and reports actual
+exit/signal/spawn error when readiness fails, instead of discarding stderr and
+emitting only a polling timeout. Same 400 × 20 ms readiness bound; no timeout
+inflation, serial default or assertion weakening. Early-exit and spawn-error
+regressions bind this driver. Strict + driver/slots focused 6/6 pass (19.95s),
+including the formerly failing standby launch. Historical cause remains
+**unclassified**; this non-recurrence is not a diagnosis. Final executable candidate:
+strict passes; full DEFAULT concurrent installed-enabled package **53/53 pass,
+zero skips**, natural 32.062s on Node 24.15.0. The former standby workflow passes
+in 19.53s within that full shape. No production startup cause was established or
+patched. Evidence (focused/full logs, exact source and separate installed binary
+hashes) lives in
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BINDINGS_D8FE/`.
+
+Concrete binding decision from source inspection: keep identity/authority solely
+in installation agents + retained journals, reuse installation `setups` as local
+named definitions, and add an explicit setup reference/fingerprint to nonsecret
+selected configuration at the existing selection/preflight owner (not a new
+registry/controller). Local mutations must acquire `mkdir host.lock` across
+read/validate/write, the same exclusion owner as host startup; absence checks
+alone are insufficient. Referenced edits must not relabel actual/history; stale
+selection/preparation must refuse without fallback. Current host captures ONE
+setup and mode in its slot closure, and Save/cancellation/Move all consult it:
+merely adding CRUD or inventory options would falsely advertise A/B support.
+This continuation has not yet changed that boundary or implemented the integrated
+wizard/Goose path; no new binding/provider parity claim.
+
 ## Secure local key reuse increment — intentionally partial second phase
 
 Published K1 separately as 08be5d6eb4c1a367363e16b36bb4e2824c138b0e.
