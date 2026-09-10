@@ -71,13 +71,17 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
 
 - Exact operation ID/fingerprint and revision preconditions; durable admission
   before effects, persistent replies/outbox, idempotent replay. No exactly-once
-  claim. Successful Start means process spawned, **not model/conversation ready**.
+  claim. Fixture Start means process spawned; ACP Start additionally requires probe evidence, **not Buzz conversation readiness**.
 - Immutable captured selection/executable digest; executable and workspace
   prerequisites checked immediately before fixture launch. Executable replacement
   between check and spawn is outside this trusted-operator preview; full prepared
   launch must pin all setup/credential/script generations and close that gap.
-- Stop uses an in-lifetime child handle plus process group exit confirmation.
-  PID alone is never used for recovery. Failed/unexpected exit quarantines.
+- Stop uses a live TypeScript group anchor and private in-lifetime IPC channel.
+  The anchor outlives the external runner, preserving group identity if its leader
+  exits. Stop asks that anchor to signal its own group, then confirms group absence;
+  it never sends a kill to a recovered or possibly reused numeric ID. Quarantine
+  preserves this teardown route. A lost anchor fails closed and retains the lock.
+  This is POSIX in-group supervision, not containment of escaping descendants.
 - Interrupted operation replies report reconciliation required. Abrupt host death
   leaves an exclusive lock: restart is blocked, not an automatic PID-based
   takeover. Local recovery tooling and crash-injection coverage remain pending.
@@ -95,28 +99,57 @@ assumes non-cloned, non-rollback, exclusively supervised installations.
 
 ## Real target: Buzz Agent + Databricks v2
 
-Local setup option 2 captures installed adapter path and HTTPS workspace URL,
-creates a separate local agent identity, and advertises the target selection
-`databricks-claude-haiku-4-5` as **blocked**, not discovered/model-ready. Start
-fails closed because exact-model application evidence is not implemented.
-
-Under the intended dedicated host-service OS user (not your Desktop context),
-use an isolated configuration directory and the installed executable:
+Local setup option 2 now takes **buzz-agent**, not buzz-acp. It creates fresh
+owner-only `service-home` and `agent-config` directories beneath the new host
+directory. Existing option-2 setups need deliberate local reprovisioning of the
+runner and these paths; there is no automatic migration or credential import.
+Never substitute an old Desktop configuration/cache.
 
 ```sh
-BUZZ_AGENT_CONFIG_DIR=<isolated-service-config-dir> \
-DATABRICKS_HOST=https://<your-workspace> buzz-agent auth databricks
+node src/cli.ts auth-info /absolute/host-directory
 ```
 
-Buzz Agent owns its normal browser OAuth ceremony, workspace/client/scopes cache
-and refresh. No static token is required. The actual workspace/account is a
-human input; no login URL or successful authentication was observed in this
-milestone. `buzz-acp models --json` is the next external catalog seam, but it
-spawns an ACP session and does not prove exact-model application. Current main
-has no strict `BUZZ_ACP_REQUIRED_MODEL` capability to assume. Neither owner nor
-historical credential files were read/copied. An installed `buzz-agent auth
-databricks --help` invocation in a scrubbed environment returned
-`DATABRICKS_HOST required`; it was not a login/authentication test.
+This prints the exact shell-quoted executable, HOME, BUZZ_AGENT_CONFIG_DIR and
+DATABRICKS_HOST context, with the host name and current OS uid. **The operator
+must run that command as the same OS user that runs the host service.** It does
+not perform login. Buzz Agent owns normal browser OAuth, cache, client/scopes and
+headless refresh; Beehive does not broker tokens or inherit DATABRICKS_TOKEN.
+No actual account/workspace is preconfigured here. Save and Stop never log in.
+
+Start in this preview launches a bounded TypeScript ACP boundary directly to the
+locally selected external executable. It negotiates ACP v1, creates one session,
+reads the catalog, requires `session/set_model` to acknowledge the exact selected
+`databricks-claude-haiku-4-5` **and session ID**, then requests a short greeting on
+that same session/process. Only a completed `end_turn` with same-session text
+produces evidence: session ID, exact model, executable SHA-256 and response hash.
+Text, raw diagnostics, names/descriptions and credentials are not published.
+Selected-next is independent of the running session; the process remains owned
+until Stop. Auth/protocol failures do not become accepted Start.
+
+**This is an ACP integration probe, NOT yet a conversational Buzz relay agent.**
+The persistent Beehive agent key binds host authority but is not supplied to this
+stdio-only probe, and there is no relay prompt/conversation bridge yet. Model
+acknowledgement is the trusted external executable's claim, not cryptographic
+provider/model attestation. Only deterministic external ACP fixtures have passed;
+no credentialed Databricks response, live account or installed binary ACP
+capability negotiation was observed. Installed `/Applications/Buzz.app/Contents/
+MacOS/buzz-agent --help` with a fresh isolated HOME/config returned provider-required
+(exit 2); that is executable discovery, not an ACP capability test.
+
+The narrow protocol seam is grounded in pinned main `051c3a2`:
+`crates/buzz-agent/src/lib.rs` initialize (349), session/new (500–610),
+session/set_model (633–682); `config.rs` BUZZ_AGENT_MODEL (642), Databricks token
+optional (676), `databricks_v2` selector (939); `llm.rs` effective-model request
+routing (85–147). No unmerged `BUZZ_ACP_REQUIRED_MODEL` flag is used.
+
+**Catalog uncertainty is explicit.** `not-probed`, `reported`, `empty`, `filtered`
+and `failed` are distinct, but all currently carry authentication `unverified`:
+main's session/new can return a configured-model fallback after an OAuth or
+network discovery failure. A reported/empty catalog cannot establish authenticated
+availability or distinguish refresh-expired/denied/no-credential. That diagnostic
+seam remains missing in the external protocol; do not relabel it authenticated.
+An empty/filtered catalog does not prevent trying an explicitly saved exact model;
+only same-session acknowledgement plus completed response establishes probe evidence.
 
 ## Supported / remaining parity
 
@@ -126,7 +159,7 @@ databricks --help` invocation in a scrubbed environment returned
 | Host inventory | Real relay, fixed authority, freshness | multiple setups/agents, service install, reconnect/reconciliation |
 | Remote configuration | CAS model/workspace/default profile selection | reusable profiles, metadata, config history, setup revision pinning |
 | Lifecycle | fixture Start/Stop, UI-independent host | strict real launch, Restart, host-owned irreversible Move |
-| Buzz Agent Databricks v2 | Local setup + explicit blocked target | normal OAuth/capability/catalog bridge, exact-model evidence |
+| Buzz Agent Databricks v2 | Local setup + TypeScript ACP probe boundary | live OAuth/model proof, full conversation bridge and diagnostic catalog provenance |
 | Other Buzz Agent providers | Not implemented | Anthropic, OpenAI-compatible, Databricks legacy, OpenRouter |
 | Goose / Claude Code / Codex | Not implemented | harness-specific local auth and adapters/catalog/launch |
 | Ten presets / custom ACP | Not implemented | explicit executable/env trust, preset-specific capability grounding |

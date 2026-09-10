@@ -30,6 +30,11 @@ test('real websocket relay, external runner, durable retry, UI close/reopen, hos
   const server = await relay(0,publicKey(secret),log);
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const url = `ws://127.0.0.1:${address.port}`;
+  await assert.rejects(host(hostDir, 'http://127.0.0.1:1'), /Development transport/);
+  const unused = await relay(0,publicKey(secret),join(dir,'unused.json'));
+  const unavailable = unused.address(); assert.ok(unavailable && typeof unavailable !== 'string');
+  await new Promise<void>(resolve => unused.close(() => resolve()));
+  await assert.rejects(host(hostDir, `ws://127.0.0.1:${unavailable.port}`), /ECONNREFUSED/);
   const running = await host(hostDir,url);
   await assert.rejects(host(hostDir,url),/EEXIST/);
   let seen: Message[] = [];
@@ -59,7 +64,7 @@ test('real websocket relay, external runner, durable retry, UI close/reopen, hos
         }
       });
       const code = await new Promise(resolve => terminal.once('exit',resolve));
-      assert.equal(code,0); assert.match(output,/actualRun/); assert.match(output,/running/);
+      assert.equal(code,0); assert.match(output,/actualRun/); assert.match(output,/running/); assert.doesNotMatch(output,/UNKNOWN/);
     }
     ui.close(); seen = [];
     ui = connect(url,secret,m => seen.push(m)); await ui.ready;
@@ -87,5 +92,40 @@ test('real websocket relay, external runner, durable retry, UI close/reopen, hos
     ui.close(); for (const c of server.clients) c.terminate();
     await new Promise<void>(resolve => server.close(() => resolve()));
     rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+test('quarantined leader exit retains Stop and close teardown for owned descendants', async () => {
+  for (const action of ['stop', 'close']) {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-orphan-')));
+    const secret = newKey(); const agentSecret = newKey(); const agent = publicKey(agentSecret);
+    const hd = join(dir, 'host'); mkdirSync(hd);
+    writePrivate(join(hd, 'setup.json'), { host: 'orphan-host', ownerSecret: secret, agentSecret, runner: process.execPath, args: [resolve('test/orphan-fixture.ts')], workspace: dir, mode: 'fixture' });
+    const server = await relay(0, publicKey(secret), join(dir, 'relay.json'));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const url = `ws://127.0.0.1:${address.port}`;
+    const h = await host(hd, url); const seen: Message[] = [];
+    const ui = connect(url, secret, m => seen.push(m)); await ui.ready;
+    async function wait(predicate: (m: Message) => boolean) {
+      for (let i = 0; i < 200; i++) { const m = seen.find(predicate); if (m) return m; await delay(25); }
+      throw Error('Missing quarantine/teardown receipt');
+    }
+    try {
+      ui.send(message('start', 'orphan-host', agent, 0));
+      await wait(m => m.type === 'inventory' && m.body.phase === 'quarantined');
+      const pid = Number(readFileSync(join(dir, 'descendant.pid'), 'utf8'));
+      process.kill(pid, 0);
+      const anchor = Number(readFileSync(join(dir, 'anchor.pid'), 'utf8'));
+      assert.notEqual(anchor, process.pid); process.kill(anchor, 0); // Live anchor pins the group after runner exit.
+      if (action === 'stop') {
+        const stop = message('stop', 'orphan-host', agent, 1); ui.send(stop);
+        const receipt = await wait(m => m.type === 'receipt' && m.body.operation === stop.id);
+        assert.equal(receipt.body.result, 'accepted');
+      } else await h.close();
+      assert.throws(() => process.kill(pid, 0), (e: unknown) => (e as NodeJS.ErrnoException).code === 'ESRCH');
+    } finally {
+      await h.close(); ui.close(); for (const c of server.clients) c.terminate();
+      await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
