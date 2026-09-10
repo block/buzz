@@ -995,7 +995,7 @@ export function AgentCreationPreview({
                     {isRoundedSquare ? null : (
                       <svg
                         aria-hidden="true"
-                        className="pointer-events-none absolute inset-0 h-full w-full rounded-squircle bg-background text-border transition-colors duration-150 ease-out group-hover/add-avatar:bg-primary/5 group-hover/add-avatar:text-primary/60"
+                        className="pointer-events-none absolute inset-0 z-0 h-full w-full rounded-squircle bg-background text-border transition-colors duration-150 ease-out group-hover/add-avatar:bg-primary/5 group-hover/add-avatar:text-primary/60"
                         data-testid={`${testIdPrefix}-empty-outline`}
                         preserveAspectRatio="none"
                         viewBox="0 0 1 1"
@@ -1013,12 +1013,15 @@ export function AgentCreationPreview({
                     {isUploading ? (
                       <Spinner
                         aria-label={`Uploading ${assetLabel}`}
-                        className="h-4 w-4 border-2"
+                        className="relative z-10 h-4 w-4 border-2"
                       />
                     ) : (
                       <Plus
                         aria-hidden="true"
-                        className={isCompact ? "h-6 w-6" : "h-14 w-14"}
+                        className={cn(
+                          "relative z-10",
+                          isCompact ? "h-6 w-6" : "h-14 w-14",
+                        )}
                       />
                     )}
                   </button>

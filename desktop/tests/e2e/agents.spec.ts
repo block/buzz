@@ -347,13 +347,33 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   const addAvatarButton = page.getByLabel("Add avatar");
   await expect(addAvatarButton).toHaveCSS("border-top-width", "0px");
+  const idleShadow = await addAvatarButton.evaluate(
+    (button) => getComputedStyle(button).boxShadow,
+  );
+  const emptyOutline = page.getByTestId("agent-avatar-empty-outline");
+  const idlePlus = addAvatarButton.locator("svg.lucide-plus");
+  await expect(idlePlus).toBeVisible();
+  await expect(emptyOutline).toHaveCSS("z-index", "0");
+  await expect(idlePlus).toHaveCSS("z-index", "10");
+  const centerElement = await addAvatarButton.evaluate((button) => {
+    const bounds = button.getBoundingClientRect();
+    const center = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return center?.closest("svg.lucide-plus") !== null;
+  });
+  expect(centerElement).toBe(true);
   await addAvatarButton.focus();
   await page.keyboard.press("Tab");
   await page.keyboard.press("Shift+Tab");
   await expect(addAvatarButton).toBeFocused();
   await expect(addAvatarButton).toHaveCSS("clip-path", "none");
-  await expect(addAvatarButton).not.toHaveCSS("box-shadow", "none");
-  const emptyOutline = page.getByTestId("agent-avatar-empty-outline");
+  expect(
+    await addAvatarButton.evaluate(
+      (button) => getComputedStyle(button).boxShadow,
+    ),
+  ).not.toBe(idleShadow);
   await expect(emptyOutline).toHaveCSS(
     "clip-path",
     /url\(["']?#rounded-squircle-clip["']?\)/,
