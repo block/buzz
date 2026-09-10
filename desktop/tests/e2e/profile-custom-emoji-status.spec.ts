@@ -196,8 +196,14 @@ test("set status dialog uses the desktop modal with shared status choices", asyn
 test("keeps an open status draft when the saved status expires", async ({
   page,
 }) => {
+  // Freeze the browser clock before navigation so the seeded two-second
+  // status cannot expire while the popover/editor setup runs, and so the
+  // seeded node-side timestamps match the browser clock exactly. Expiry is
+  // crossed deliberately below, after the editor owns the saved draft.
+  const seededAt = new Date("2026-09-10T12:00:00.000Z");
+  const nowSeconds = Math.floor(seededAt.getTime() / 1_000);
+  await page.clock.install({ time: seededAt });
   await page.goto("/");
-  const nowSeconds = Math.floor(Date.now() / 1_000);
   await seedMockStatus(page, {
     text: "Original draft",
     emoji: "📝",
@@ -206,7 +212,20 @@ test("keeps an open status draft when the saved status expires", async ({
   });
   await page.getByTestId("profile-popover-set-status").click();
   const dialog = page.getByTestId("set-status-dialog");
+  // The editor opened on the still-saved status, not on a fresh one.
+  await expect(dialog.getByTestId("set-status-input")).toHaveValue(
+    "Original draft",
+  );
+  await expect(dialog.getByTestId("set-status-duration")).toContainText(
+    "Custom",
+  );
+  await expect(dialog.getByLabel("Choose a status emoji")).toContainText("📝");
+  await expect(dialog.getByTestId("set-status-clear")).toBeVisible();
+  await expect(dialog.getByText("Quick statuses", { exact: true })).toHaveCount(
+    0,
+  );
   await dialog.getByTestId("set-status-input").fill("Unsaved draft");
+  await page.clock.fastForward(2_500);
   await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0, {
     timeout: 5_000,
   });
@@ -225,6 +244,37 @@ test("keeps an open status draft when the saved status expires", async ({
     0,
   );
   await expect(dialog.getByTestId("set-status-clear")).toBeVisible();
+});
+
+test("opens a fresh editor when the saved status expired before opening", async ({
+  page,
+}) => {
+  // Causal control for the setup ordering above: the same frozen clock and
+  // seed, but the deadline is crossed before the editor opens. The dialog
+  // must then be a new-status editor — the saved-editor precondition
+  // assertions above would fail under this wrong ordering.
+  const seededAt = new Date("2026-09-10T12:00:00.000Z");
+  const nowSeconds = Math.floor(seededAt.getTime() / 1_000);
+  await page.clock.install({ time: seededAt });
+  await page.goto("/");
+  await seedMockStatus(page, {
+    text: "Original draft",
+    emoji: "📝",
+    expiresAt: nowSeconds + 2,
+    createdAt: nowSeconds,
+  });
+  await page.clock.fastForward(5_000);
+  await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0);
+  await page.getByTestId("profile-popover-set-status").click();
+  const dialog = page.getByTestId("set-status-dialog");
+  await expect(dialog.getByTestId("set-status-input")).toHaveValue("");
+  await expect(dialog.getByTestId("set-status-duration")).toContainText(
+    "Today",
+  );
+  await expect(
+    dialog.getByText("Quick statuses", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByTestId("set-status-clear")).toHaveCount(0);
 });
 
 test("new statuses default to expiring at local midnight", async ({ page }) => {
