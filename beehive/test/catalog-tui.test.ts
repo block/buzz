@@ -1,3 +1,5 @@
+import { isolatedFileCredentials } from './isolated-file-credentials.ts';
+import { credentialReference } from '../src/credential-store.ts';
 import { importSlotKey, installationSlots } from '../src/slots.ts';
 import { conversationRelayFixture } from './conversation-relay-fixture.ts';
 import test from 'node:test';
@@ -10,15 +12,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { newKey, publicKey, message } from '../src/protocol.ts';
 import { hostPairing, registerHost } from '../src/host-registration.ts';
 import { verifyHostCatalog, catalogResponse, HostInventory } from '../src/host-catalog.ts';
-import { privateHostTransport } from '../src/host-transport.ts';
-import { host } from '../src/host.ts';
 import { writePrivate } from '../src/storage.ts';
 import { provisionCredentialSlot } from '../src/credential-slots.ts';
 import { createGenesis } from '../src/assignment.ts';
-import { memoryCredentials } from './credential-fixture.ts';
 import { nostrFixture } from './nostr-fixture.ts';
 import { connectNostr } from '../src/nostr-client.ts';
-import { productionAdmission, type ScopedRelayAdmission } from '../src/relay-admission.ts';
+import { productionAdmission } from '../src/relay-admission.ts';
 
 function registration(owner: string, key: string, relay: string, label = 'same label') {
   return registerHost(hostPairing({ version: 1, purpose: 'beehive-host-registration', host: publicKey(key), owner: publicKey(owner), label, relay, nonce: newKey() }), owner, Math.floor(Date.now() / 1000) + 600);
@@ -56,9 +55,11 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   const relay = await nostrFixture(publicKey(owner), members);
   const one = registration(owner, a, relay.url), two = registration(owner, b, relay.url);
   const catalog = verifyHostCatalog({ version: 1, owner: publicKey(owner), relay: relay.url, registrations: [one, two] }, publicKey(owner), relay.url);
-  const admission: ScopedRelayAdmission = { admit(scope) { assert.equal(scope.relay, relay.url); assert.equal(scope.ownerDelegation, false); assert.ok(members.has(scope.publicKey)); } };
   const directory = join(root, 'host'); mkdirSync(directory);
-  const credentials = memoryCredentials();
+  const credentialFile = join(root, 'credentials.json');
+  const credentials = isolatedFileCredentials(credentialFile);
+  credentials.create(credentialReference('host', publicKey(a)), a);
+  writePrivate(join(directory, 'host-identity.json'), { version: 3, pairing: one.request, key: credentialReference('host', publicKey(a)), registration: one });
   const conversation = installed ? await conversationRelayFixture(root, owner, publicKey(agent)) : undefined;
   provisionCredentialSlot(directory, { host: publicKey(a), ownerPublic: publicKey(owner), runner: realpathSync(process.execPath), args: [resolve(installed ? 'test/conversation-harness-fixture.ts' : 'test/runner.ts')], workspace: root, mode: installed ? 'buzz-agent-databricks-v2' : 'fixture', ...(conversation ? { serviceHome: root, configDirectory: root, databricksHost: 'https://fixture.invalid', ...(!converting ? { conversation: { executable: realpathSync(process.env.BEEHIVE_REAL_BUZZ_ACP!), relay: conversation.url, replyTool: { executable: realpathSync(join(process.env.BEEHIVE_REAL_BUZZ_ACP!, '..', 'buzz')) } } } : {}) } : {}) }, agent, createGenesis(publicKey(owner), publicKey(agent), publicKey(a)), credentials);
   const journalPath = join(directory, 'agents', publicKey(agent), 'journal.json');
@@ -80,16 +81,22 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
   }
   const manifest = readFileSync(join(directory, 'setup.json'), 'utf8');
   assert.ok(!manifest.includes(owner) && !manifest.includes(agent));
-  const running = await host(directory, relay.url, undefined, privateHostTransport(one, a, admission), credentials);
+  const helper = join(root, 'credential-child.mjs');
+  writeFileSync(helper, `import { readFileSync } from 'node:fs'; let input=''; for await (const b of process.stdin) input+=b; const secret=JSON.parse(readFileSync(${JSON.stringify(credentialFile)},'utf8'))[JSON.stringify(JSON.parse(input))]; process.stdout.write(JSON.stringify(secret ? {status:'present',secret} : {status:'missing'}));`);
+  const loader = join(root, 'credential-helper-loader.mjs');
+  writeFileSync(loader, `import { registerHooks } from 'node:module'; registerHooks({load(url,ctx,next){const r=next(url,ctx); if(!url.endsWith('/src/credential-helper.ts'))return r;return {...r,source:String(r.source).replace("new URL('./credential-helper-child.ts', import.meta.url)", ${JSON.stringify(`new URL(${JSON.stringify('file://' + helper)})`)})};}});`);
+  const hostChild = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'host', directory, relay.url, '--owner-present'], { env: { PATH: '/usr/bin:/bin', HOME: root }, stdio: ['ignore','pipe','pipe'] });
+  let hostOutput = ''; hostChild.stdout.on('data', b => hostOutput += b); hostChild.stderr.on('data', b => hostOutput += b);
+  const hostExit = new Promise<number | null>(resolve => hostChild.on('close', resolve));
+  const running = { async close() { if (hostChild.exitCode === null && hostChild.signalCode === null) hostChild.kill('SIGTERM'); assert.equal(await hostExit, 0, hostOutput); } };
+  for (let n=0; n<400 && !hostOutput.includes('Host online'); n++) { if (hostChild.exitCode !== null) break; await delay(20); }
+  assert.match(hostOutput, /Host online/);
   const foreignMessages: unknown[] = [];
   const foreign = connectNostr(relay.url, Buffer.from(b, 'hex'), undefined, m => foreignMessages.push(m), () => {});
   await foreign.ready;
   const path = join(root, 'catalog.json'); writePrivate(path, catalog);
-  // Replace only the admission dependency, not CLI, catalog, transport, journal or executor.
-  const loader = join(root, 'admission-loader.mjs');
-  writeFileSync(loader, `import { registerHooks } from 'node:module'; registerHooks({load(url,ctx,next){const r=next(url,ctx); if(!url.endsWith('/src/relay-admission.ts'))return r;return {...r,source:'export const productionAdmission = { admit(s) { if(s.relay !== '+${JSON.stringify(JSON.stringify(relay.url))}+' || s.publicKey !== '+${JSON.stringify(JSON.stringify(publicKey(owner)))}+' || s.ownerDelegation !== false) throw Error("fixture admission scope"); } };'};}});`);
   const env: NodeJS.ProcessEnv = { ...process.env }; delete env.BUZZ_PRIVATE_KEY; delete env.BUZZ_AUTH_TAG; delete env.BUZZ_RELAY_URL;
-  const child = spawn(process.execPath, ['--import', loader, 'src/cli.ts', 'tui', path, relay.url], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['src/cli.ts', 'tui', path, relay.url], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', b => output += b.toString()); child.stderr.on('data', b => output += b.toString());
   const exit = new Promise<number | null>((done, reject) => { child.on('exit', done); child.on('error', reject); });
   async function wait(predicate: () => boolean) { for (let n = 0; n < (installed ? 3000 : 400); n++) { if (predicate()) return; if (child.exitCode !== null) throw Error(output); await delay(20); } throw Error(`TUI observation timeout: ${output}`); }
@@ -106,8 +113,8 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
     if (converting) {
       await command('binding normal');
       let selected = '';
-      for (let n = 0; n < 80; n++) { selected = await command('show'); if (selected.includes('"revision": 1')) break; await delay(25); }
-      assert.match(selected, /"revision": 1/);
+      for (let n = 0; n < 80; n++) { selected = await command('show'); if (selected.includes('"revision": 1,\n  "body"')) break; await delay(25); }
+      assert.ok(selected.includes('"revision": 1,\n  "body"'), selected);
       const saved = JSON.parse(readFileSync(journalPath, 'utf8'));
       assert.equal(saved.selected.harnessSetup.id, 'normal'); assert.equal(saved.actual, null);
     }
@@ -130,6 +137,11 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
     await wait(() => output.slice(stopAt).includes('accepted'));
     for (let n = 0; n < 80; n++) { shown = await command('show'); if (shown.includes('"phase": "stopped"')) break; await delay(25); }
     assert.match(shown, /"phase": "stopped"/);
+    if (conversation) for (const file of ['harness-pid', 'descendant-pid', 'tool-shim-pid']) {
+      const pid = Number(readFileSync(join(root, file), 'utf8'));
+      assert.ok(Number.isSafeInteger(pid) && pid > 0);
+      assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH', `${file} survives accepted Stop`);
+    }
     const beforeReplay = readFileSync(journalPath, 'utf8');
     await foreign.publish(message('start', publicKey(a), publicKey(agent), 2), publicKey(a));
     await foreign.publish(message('inventory', publicKey(a), publicKey(agent), 999, { phase: 'FORGED', observedAt: Date.now() + 500 }), publicKey(owner));
@@ -144,7 +156,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       const scope = join(intentDirectory, readdirSync(intentDirectory)[0]!);
       const intent = readdirSync(scope).filter(n => n.endsWith('.intent')).map(n => JSON.parse(readFileSync(join(scope, n), 'utf8'))).map(v => open(v.envelope, owner)).find(m => m.type === 'start')!;
       await ownerWire.publish(intent, publicKey(a));
-      await command('reconcile');
+      assert.match(await command('reconcile'), /Fresh membership required/);
       await delay(100);
       shown = await command('show');
       assert.ok(!shown.includes('FORGED'));
@@ -153,6 +165,7 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       assert.equal(Object.keys(journal.operations).length, converting ? 3 : 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
+    assert.deepEqual(relay.liveChecks.sort(), [publicKey(a), publicKey(owner)].sort());
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
     const state = JSON.parse(readFileSync(journalPath, 'utf8'));

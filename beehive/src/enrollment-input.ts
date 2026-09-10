@@ -33,7 +33,7 @@ export async function enrollmentInput(directory: string): Promise<void> {
       console.log('Registration signed. Owner secret not persisted. Transfer approval privately back to host. Relay admission remains pending.');
     } else if (action === 'import') {
       enrollHostIdentity(directory, readPrivate(resolve(text(await ui.question('Private approval file: ')))));
-      console.log('Host registered. Pending/no network: narrow relay admission is not implemented. No agent authorized or started.');
+      console.log('Host registered offline. Host startup requires an already-enrolled direct relay member and a fresh live row check. No agent authorized or started.');
     } else throw Error('Unknown enrollment action');
   } finally { ui.close(); }
 }

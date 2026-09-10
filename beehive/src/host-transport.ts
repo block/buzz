@@ -14,10 +14,10 @@ export function privateHostTransport(registration: HostRegistration, secret: str
     validate(url: string) {
       verifyHostRegistration(retained, retained.request);
       if (url !== retained.request.relay) throw Error('Wrong host relay');
-      admission.admit({ relay: url, publicKey: retained.request.host, transport: 'nip42-nip59', ownerDelegation: false });
     },
     connect(url: string, _legacyOwnerSecret: string, receive: (m: Message) => void, _recovered?: () => void) {
       this.validate(url);
+      admission.admit({ relay: url, publicKey: retained.request.host, transport: 'nip42-nip59', ownerDelegation: false });
       const wire = connectNostr(url, Buffer.from(secret, 'hex'), undefined, input => {
         try { verifyHostRegistration(retained, retained.request); } catch { return; }
         const m = input.message;

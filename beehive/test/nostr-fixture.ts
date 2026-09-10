@@ -1,6 +1,8 @@
+import { createServer } from 'node:http';
+import { newKey, publicKey, digest } from '../src/protocol.ts';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { verifyEvent, type Event } from 'nostr-tools/pure';
+import { finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure';
 import { verifyHostAttestation } from '../src/host-attestation.ts';
 
 /** Narrow executable model of Buzz 051c3a2 admission, NOT a deployed/Rust relay.
@@ -13,9 +15,26 @@ export async function nostrFixture(owner: string, independentMembers?: ReadonlyS
   // api/mod.rs direct membership is distinct from ViaOwner. This is fixture
   // policy only, NOT evidence that deployed membership has narrow permissions.
   const members = independentMembers ? new Set(independentMembers) : undefined;
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 300000 });
-  await new Promise<void>(resolve => server.once('listening', resolve));
-  const address = server.address();
+  const self = newKey();
+  const liveChecks: string[] = [];
+  const http = createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.method === 'GET' && req.url === '/') { res.end(JSON.stringify({ self: publicKey(self), supported_nips: members ? [43] : [] })); return; }
+    let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) { res.writeHead(413).end(); return; } }
+    try {
+      const auth = JSON.parse(Buffer.from((req.headers.authorization ?? '').replace(/^Nostr /, ''), 'base64').toString());
+      if (!verifyEvent(auth) || auth.kind !== 27235 || auth.content !== '' || Math.abs(auth.created_at - Math.floor(Date.now()/1000)) > 60 ||
+        JSON.stringify(auth.tags) !== JSON.stringify([['u', url.replace('ws:', 'http:') + req.url], ['method', 'POST'], ['payload', digest(body).toString('hex')]])) throw Error('auth');
+      if (!members?.has(auth.pubkey)) { res.writeHead(403).end(JSON.stringify({ error: 'relay_membership_required' })); return; }
+      if (req.url !== '/query' || req.method !== 'POST') throw Error('route');
+      liveChecks.push(auth.pubkey);
+      // Deliberately lagging signed roster: fresh row proof does not depend on it.
+      res.end(JSON.stringify([finalizeEvent({ kind: 13534, created_at: 1, content: '', tags: [['-']] }, Buffer.from(self, 'hex'))]));
+    } catch { res.writeHead(401).end('{}'); }
+  });
+  const server = new WebSocketServer({ server: http, maxPayload: 300000 });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const address = http.address();
   if (!address || typeof address === 'string') throw Error('Missing fixture address');
   const url = `ws://127.0.0.1:${address.port}`;
   const history: Event[] = [];
@@ -59,5 +78,5 @@ export async function nostrFixture(owner: string, independentMembers?: ReadonlyS
       }
     });
   });
-  return { url, history, get independentWraps() { return independentWraps; }, async close() { for (const peer of connections.keys()) peer.terminate(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
+  return { url, history, liveChecks, get independentWraps() { return independentWraps; }, async close() { for (const peer of connections.keys()) peer.terminate(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); } };
 }

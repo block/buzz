@@ -9,10 +9,10 @@ import { open, publicKey, type Envelope, type Message } from './protocol.ts';
 export function catalogTransport(catalog: HostCatalog, admission: ScopedRelayAdmission = productionAdmission) {
   return (url: string, secret: string, receive: (m: Message) => void, recovered?: () => void, disconnected?: (code: number) => void) => {
     const retained = structuredClone(verifyHostCatalog(catalog, publicKey(secret), url));
-    admission.admit({ relay: url, publicKey: retained.owner, transport: 'nip42-nip59', ownerDelegation: false });
     let closed = false;
     let generation = 0;
     function dial() {
+      admission.admit({ relay: url, publicKey: retained.owner, transport: 'nip42-nip59', ownerDelegation: false });
       const current = ++generation;
       return connectNostr(url, Buffer.from(secret, 'hex'), undefined, input => {
         if (closed || current !== generation) return;

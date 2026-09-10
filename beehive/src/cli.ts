@@ -1,6 +1,10 @@
+import { credentialHelperReader } from './credential-helper.ts';
+import { systemCredentials } from './credential-store.ts';
+import { privateHostTransport } from './host-transport.ts';
+import { verifyProductionAdmission } from './relay-admission.ts';
 import { installationPublicSlots } from './slots.ts';
 import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
-import { readHostIdentity } from './host-identity.ts';
+import { readHostIdentity, readHostIdentityAsync } from './host-identity.ts';
 import { verifyHostRegistration } from './host-registration.ts';
 import { setupOwner } from './host.ts';
 import { buzzProviderInput, buzzProviderGuidance, databricksOAuthGuidance } from './buzz-provider.ts';
@@ -32,7 +36,7 @@ import { prepareConversation } from './conversation.ts';
 const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
 const [command, ...args] = process.argv.slice(2);
-const help = `Beehive — isolated development preview (loopback relay only)
+const help = `Beehive — private host preview (explicit direct relay membership required)
   identity                                 Disabled: use your existing owner signer
   setup <host-directory>                     Offline host pairing/owner approval/import
   setup <host-directory> <identity-file>     LEGACY loopback diagnostic setup (owner key copied)
@@ -51,12 +55,12 @@ const help = `Beehive — isolated development preview (loopback relay only)
   auth-info <host-directory> [binding-id]   Print local harness service context (no login)
   conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
   relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
-  host <host-directory> <ws://127.0.0.1:port> Persistent foreground host
-  tui <identity-file> <ws://127.0.0.1:port>   Relay-connected terminal UI
+  host <host-directory> <relay> --owner-present Private foreground host; bounded OS key reads
+  tui <catalog-file> <relay>                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
 reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
 assignment-export accepts agent public key after filename when several slots exist.
-Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC or production relay support.`;
+Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog requires fresh membership-enforced relay verification; no automatic private reconnect.`;
 async function main() {
   if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
@@ -316,7 +320,15 @@ async function main() {
     const stop = () => controller.abort();
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     try {
-      const running = await host(resolve(text(args[0])), text(args[1]), controller.signal);
+      const directory = resolve(text(args[0])), url = text(args[1]);
+      const privateInstallation = existsSync(join(directory, 'host-identity.json'));
+      if (privateInstallation && args[2] !== '--owner-present') throw Error('Private host requires --owner-present: OS credential access may prompt. Run deliberately as the host OS user; Stop cancels and awaits the bounded helper.');
+      const credentials = privateInstallation ? { ...systemCredentials, readAsync: credentialHelperReader({ operatorApproved: true }) } : systemCredentials;
+      const identity = privateInstallation ? await readHostIdentityAsync(directory, credentials, controller.signal) : undefined;
+      if (identity && identity.pairing.relay !== url) throw Error('Wrong registered host relay; no network request sent');
+      const admission = identity ? await verifyProductionAdmission(url, identity.secret, controller.signal) : undefined;
+      const transport = identity ? privateHostTransport(verifyHostRegistration(identity.registration, identity.pairing), identity.secret, admission) : undefined;
+      const running = await host(directory, url, controller.signal, transport, credentials);
       console.log(`Host online; agents ${running.agents.join(', ')}. Ctrl-C stops owned runner before host exits.`);
       // The host owns teardown both before and after ready. Observe its one
       // completion promise so uncertain teardown cannot disappear as a rejection.
@@ -335,12 +347,13 @@ async function main() {
     const first = object(object(registrations[0]).request);
     const catalog = verifyHostCatalog({ version: 1, owner: first.owner, relay: first.relay, registrations }, text(first.owner), text(first.relay));
     writePrivate(resolve(text(args[0])), catalog, true);
-    console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; admission pending. Labels are not authority.`);
+    console.log(`Retained ${catalog.registrations.length} verified host registrations. Public keys only; fresh direct membership verification required when opening tui. Labels are not authority.`);
   } else if (command === 'tui') {
     const identity = object(readPrivate(resolve(text(args[0]))));
     const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;
     const secret = catalog ? await readAgentSecret('Owner') : text(identity.secret);
     if (catalog && publicKey(secret) !== catalog.owner) throw Error('Wrong catalog owner signer');
+    const admission = catalog ? await verifyProductionAdmission(text(args[1]), secret) : undefined;
     const inventory = new Map<string,Message>();
     const profiles = new Profiles();
     const client = managementClient(join(dirname(resolve(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
@@ -354,7 +367,7 @@ async function main() {
     }, () => {
       console.log(client.connected ? '\nManagement relay connected.' : '\nRelay disconnected: pending results UNKNOWN; automatic reconnect is bounded (disabled on policy refusal). Use reconcile after checking relay policy.');
       for (const operation of client.status()) console.log(`${operationLabel(operation.request)}: ${operation.state} | ${operation.result ?? operation.publication}`);
-    }, catalog ? { catalog } : undefined);
+    }, catalog ? { catalog, admission } : undefined);
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
     console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
@@ -368,7 +381,7 @@ async function main() {
           client.status().forEach((o, index) => console.log(`${index + 1}. ${operationLabel(o.request)} at revision ${o.request.revision}: ${o.state} | ${o.result ?? o.publication}${o.retryAvailable ? ` | reconcile, then retry ${index + 1}` : ''}`));
           console.log('Historical results are not current host state. Reconcile queries receipts without retrying blocked work.'); continue;
         }
-        if (line === 'reconcile') { client.reconcile(); console.log('Reconnecting/querying host results; blocked work stays blocked. Connection alone proves neither policy repair nor completion.'); continue; }
+        if (line === 'reconcile') { try { client.reconcile(); console.log('Reconnecting/querying host results; blocked work stays blocked. Connection alone proves neither policy repair nor completion.'); } catch (error) { console.log(error instanceof Error ? error.message : 'Reconnect refused'); } continue; }
         if (line.startsWith('retry ')) {
           const number = line.slice(6);
           const operation = /^[1-9][0-9]*$/.test(number) ? client.status()[Number(number) - 1] : undefined;

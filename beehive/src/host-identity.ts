@@ -34,8 +34,24 @@ export function readHostIdentity(directory: string, credentials: CredentialBacke
   const pairing = hostPairing(value.pairing);
   const key = credentialReference('host', pairing.host);
   if (JSON.stringify(value.key) !== JSON.stringify(key)) throw Error('Invalid host credential reference');
-  const secret = readCredential(key, credentials);
-  return { version: 3, pairing, secret, registration: value.registration as HostRegistration | null };
+  return { version: 3, pairing, secret: readCredential(key, credentials), registration: value.registration as HostRegistration | null };
+}
+/** Live startup uses the owner-approved bounded helper, never a synchronous OS call. */
+export async function readHostIdentityAsync(directory: string, credentials: CredentialBackend, signal?: AbortSignal): Promise<HostIdentity> {
+  signal?.throwIfAborted();
+  const value = object(readPrivate(join(directory, 'host-identity.json')));
+  fields(value, ['version', 'pairing', 'key', 'registration']);
+  if (value.version !== 3) throw Error('Legacy identity retained; explicit consent required for migration');
+  const pairing = hostPairing(value.pairing);
+  const key = credentialReference('host', pairing.host);
+  if (JSON.stringify(value.key) !== JSON.stringify(key)) throw Error('Invalid host credential reference');
+  verifyHostRegistration(value.registration, pairing);
+  if (!credentials.readAsync) throw Error('Bounded asynchronous host credential reader required');
+  const secret = await credentials.readAsync(key, signal);
+  signal?.throwIfAborted();
+  if (secret === null) throw Error('Local host key missing; explicit matching import required');
+  if (publicKey(secret) !== pairing.host) throw Error('Credential identity mismatch');
+  return { version: 3, pairing, secret, registration: value.registration as HostRegistration };
 }
 /** Atomically import only an owner registration matching the exact retained request. */
 export function enrollHostIdentity(directory: string, registration: unknown, now = Math.floor(Date.now() / 1000), credentials: CredentialBackend = systemCredentials): void {
