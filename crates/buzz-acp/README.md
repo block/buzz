@@ -11,6 +11,25 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
 
 Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
+## Failure notifications
+
+When a request exhausts retries or hits a terminal error, the harness posts a
+signed failure notice in the triggering thread and mentions the distinct request
+authors (up to 50, newest first). A delegating agent subscribed to mentions can
+therefore inspect the failure using the existing author and membership gates.
+The notice does not copy the original request's mentions or mention itself.
+
+Native notices carry `buzz:agent-failure=1`. Such events are excluded when
+collecting recipients for another failure notice, so two unavailable agents do
+not bounce failure notifications back and forth. Fresh ordinary requests in a
+mixed batch can still receive a notification.
+
+This is a best-effort recovery signal, not automatic model substitution or a
+durable task queue. A human-originated request notifies that human; it does not
+invent a reserve coordinator. A recipient must check the original task and any
+uncertain side effects before taking over. Publication failure or process exit
+can still prevent notification delivery.
+
 ## Prerequisites
 
 - A running Buzz relay (`just relay` starts Docker services automatically, or use a hosted instance)

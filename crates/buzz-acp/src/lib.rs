@@ -3,6 +3,9 @@
 mod acp;
 mod config;
 mod engram_fetch;
+mod failure_notice;
+#[cfg(test)]
+mod failure_notice_tests;
 mod filter;
 mod observer;
 mod pi_launcher;
@@ -4670,15 +4673,10 @@ fn spawn_failure_notice(
     content: String,
 ) {
     if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
+        let batch = batch.clone();
         let rest = rest.clone();
-        let channel_id = batch.channel_id;
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            pool::post_failure_notice(&rest, &batch, &content).await;
         });
     }
 }
