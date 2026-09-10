@@ -242,11 +242,11 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await page.getByTestId("encrypted-backup-create").click();
 
   // Only a successful save (the mock "picks" a path) advances to the
-  // "Optionally, test your backup" flow: a select-file button for the saved file
+  // "Your backup is ready" flow: a select-file button for the saved file
   // (a composer-style drop overlay takes over the card while a file drag is
   // over the window), then the password to unlock it.
   await expect(
-    page.getByRole("heading", { name: "Optionally, test your backup" }),
+    page.getByRole("heading", { name: "Your backup is ready" }),
   ).toBeVisible();
   const dropzone = page.getByTestId("backup-test-dropzone");
   await expect(dropzone).toBeVisible();
@@ -350,7 +350,7 @@ test("returning to onboarding resets password-backup progress", async ({
   await input.fill("mock-horse-battery-staple");
   await page.getByTestId("encrypted-backup-create").click();
   await expect(
-    page.getByRole("heading", { name: "Optionally, test your backup" }),
+    page.getByRole("heading", { name: "Your backup is ready" }),
   ).toBeVisible();
 
   await page.getByTestId("backup-return-to-onboarding").click();
@@ -360,7 +360,7 @@ test("returning to onboarding resets password-backup progress", async ({
   // backup session so no password or completed state leaks across navigation.
   await openPasswordBackup(page);
   await expect(
-    page.getByRole("heading", { name: "Backup your key with a password" }),
+    page.getByRole("heading", { name: "Create a secure backup file" }),
   ).toBeVisible();
   await expect(page.getByTestId("backup-passphrase-input")).toHaveValue("");
   await expect(page.getByTestId("encrypted-backup-create")).toBeDisabled();

@@ -531,19 +531,22 @@ export function BackupTestFlow({
             tabIndex={-1}
             type="file"
           />
-          <Button
-            className={cn(
-              "mx-auto",
-              isSpotlight
-                ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
-                : "h-9 px-6 text-primary-foreground",
-            )}
-            data-testid="backup-test-dropzone"
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            <span className="font-medium text-sm">Select your backup file</span>
-          </Button>
+          <div className="flex justify-center">
+            <Button
+              className={cn(
+                isSpotlight
+                  ? ONBOARDING_SECURITY_PRIMARY_CTA_CLASS
+                  : "h-9 px-6 text-primary-foreground",
+              )}
+              data-testid="backup-test-dropzone"
+              onClick={() => fileInputRef.current?.click()}
+              type="button"
+            >
+              <span className="font-medium text-sm">
+                Select your backup file
+              </span>
+            </Button>
+          </div>
           {isWindowDragging ? (
             /*
              * Composer-style takeover: fills the nearest positioned host
@@ -583,7 +586,7 @@ export function BackupTestFlow({
             </p>
           ) : null}
           {onSaveCopy ? (
-            <div className="flex flex-col items-center gap-2">
+            <div className="flex justify-center">
               <Button
                 className={cn(
                   "gap-1.5",

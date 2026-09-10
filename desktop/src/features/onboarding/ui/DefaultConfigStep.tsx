@@ -337,7 +337,7 @@ function AgentDefaultsSection({
 /**
  * Machine onboarding page 4 — default model configuration. Presents the
  * global agent defaults (provider, model, effort, env vars) centered under
- * the mock's "Configure your default model settings" heading.
+ * the onboarding card's "Choose your model settings" heading.
  */
 export function DefaultConfigStep({
   actions,
@@ -396,14 +396,14 @@ export function DefaultConfigStep({
         <h1 className="text-title font-normal text-foreground">
           {actions.useDifferentHarness
             ? "Connect with an API key"
-            : "Configure your default model settings"}
+            : "Choose your model settings"}
         </h1>
         <p
           className={`w-full text-foreground/80 ${cardLayout ? "mt-2 text-base leading-6" : "mx-auto mt-3 max-w-[440px] text-sm leading-5"}`}
         >
           {actions.useDifferentHarness
             ? "Choose your provider and enter an API key to connect to the Buzz harness."
-            : "This will be set as your default model configuration across Buzz. You can always change this in your Settings or give specific agents a different configuration."}
+            : "Select the model and effort level your agents will use by default."}
         </p>
       </div>
 

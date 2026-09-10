@@ -821,7 +821,7 @@ export function EncryptedBackupCreator({
               ) : state.savedPassword ? (
                 "Download backup again"
               ) : (
-                "Backup key"
+                "Save backup"
               )}
             </Button>
           </div>

@@ -71,7 +71,7 @@ export function OnboardingCard({
       >
         <OnboardingCardLayoutContext.Provider value>
           <OnboardingFooterProvider backAction={backAction} placement="card">
-            <div className="buzz-onboarding-step-frame relative -mx-6 flex min-h-0 w-[calc(100%+3rem)] flex-1 flex-col items-stretch overflow-x-hidden overflow-y-auto overscroll-contain px-6 text-left min-[44rem]:-mx-12 min-[44rem]:w-[calc(100%+6rem)] min-[44rem]:px-12">
+            <div className="buzz-onboarding-step-frame relative -mx-6 flex min-h-0! w-[calc(100%+3rem)] flex-1 flex-col items-stretch overflow-x-hidden overflow-y-auto overscroll-contain px-6 text-left min-[44rem]:-mx-12 min-[44rem]:w-[calc(100%+6rem)] min-[44rem]:px-12">
               {children}
             </div>
           </OnboardingFooterProvider>

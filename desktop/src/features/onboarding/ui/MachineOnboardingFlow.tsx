@@ -463,7 +463,7 @@ export function MachineOnboardingFlow({
               </h1>
               <p className="mt-2 w-full text-base leading-6 text-foreground/80">
                 {phoneRecoveryStep === "loading" || phoneRecoveryStep === "qr"
-                  ? "On your phone, open Settings → Send identity to desktop. This code expires shortly and works once."
+                  ? "Scan this code with a device where you’re currently signed in to Buzz."
                   : "Confirm the code before sharing your identity."}
               </p>
               <div

@@ -88,10 +88,10 @@ export function DownloadKeyStep({
           {hasVerifiedBackup
             ? "Your backup is verified"
             : hasSelectedBackup
-              ? "That’s your backup file"
+              ? "Verify your backup"
               : hasCreated
-                ? "Optionally, test your backup"
-                : "Backup your key with a password"}
+                ? "Your backup is ready"
+                : "Create a secure backup file"}
         </h1>
         <p
           className={cn(
@@ -102,10 +102,10 @@ export function DownloadKeyStep({
           {hasVerifiedBackup
             ? "Your file and password can restore your identity."
             : hasSelectedBackup
-              ? "Now enter your password to prove you can unlock it."
+              ? "Enter your password to make sure you can unlock this file."
               : hasCreated
-                ? "Learn how your backup works. Drop the file you just saved and unlock it with your password."
-                : "Keep the downloaded file private — you need both it and your password to restore your identity. Save the backup password somewhere safe; Buzz cannot reset it if lost."}
+                ? "Test your backup to make sure it works, or continue without testing."
+                : "This creates a password-protected file with your private key. Remember, Buzz can’t recover your key if you lose it."}
         </p>
       </motion.div>
 
@@ -173,7 +173,7 @@ export function DownloadKeyStep({
             type="button"
             variant="ghost"
           >
-            {hasVerifiedBackup ? "Finish" : "Skip for now"}
+            {hasVerifiedBackup ? "Continue" : "Skip for now"}
           </Button>
         ) : null}
       </OnboardingFooter>
