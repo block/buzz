@@ -77,6 +77,17 @@ were rerun for this wording-only change.
 
 Publication state recorded at the commit boundary below.
 
+## Publication record (updated at commit boundary)
+
+- Delta commit `41f45d59e` (restore pending offline import guidance + this file).
+- Pushed `beehive/demo-transport-473233b8` to approved origin
+  `https://github.com/block/buzz.git`: `6caa4150d..41f45d59e` (six commits:
+  3dbf9aaaa, 1315af75c, ac781fd95, 7176028b7, ac32ae0d2, 41f45d59e).
+- Verified remote head `41f45d59ec2693530b2dcb6bb55b137dc06823ed` == local HEAD;
+  working tree clean. No other branch, PR, merge or release action taken.
+- This publication-record edit is committed as a follow-up commit on the same
+  branch so handoff evidence survives cancellation.
+
 ## FIRST_DEMO.md review against implemented CLI
 
 Verified commands and guards exist as documented: `setup` (create/approve/import),
