@@ -587,6 +587,39 @@ type MockBridgeOptions = {
    * (`applyProbeResult` in whereToRunIntent.test.mjs).
    */
   backendProviderProbeDelayMs?: number;
+  // BW (P4D) mocks — see e2eBridge.ts's `MockBwSnapshotOverride` and the
+  // "get_project_bw" / "submit_project_bw_record" cases for semantics.
+  /** Overrides the `get_project_bw` response. Omitted = no BW policy in
+   *  force for any repository (the legacy, non-BW issue path is used). */
+  bwSnapshot?: {
+    activation?: { policy: string; genesis: string } | null;
+    records?: Record<string, RelayEvent>;
+    decisions?: Record<
+      string,
+      { outcome: string; stage: string; code: string }
+    >;
+    notices?: Record<
+      string,
+      Array<{
+        event_id: string | null;
+        outcome: string;
+        stage: string;
+        code: string;
+      }>
+    >;
+    projection?: {
+      issues?: Record<string, string>;
+      issue_fields?: Record<string, Record<string, unknown>>;
+      conflicts?: string[];
+      children?: Record<string, string[]>;
+      relations?: unknown[];
+      artifact_verdicts?: Record<string, unknown>;
+    };
+  };
+  /** Sequenced `submit_project_bw_record` failures: a string throws that
+   *  message for that call; `null` succeeds. The last entry repeats once
+   *  the array is exhausted. */
+  bwSubmitErrors?: (string | null)[];
 };
 
 type BridgeOptions = {

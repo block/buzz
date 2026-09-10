@@ -269,6 +269,11 @@ function IssueListRow({
 
 const ISSUE_STATUS_SECTIONS = [
   { status: "Triage", label: "Triage", terminal: false },
+  {
+    status: "Needs Clarification",
+    label: "Needs Clarification",
+    terminal: false,
+  },
   { status: "Backlog", label: "Backlog", terminal: false },
   { status: "In Development", label: "In Development", terminal: false },
   { status: "Implemented", label: "Implemented", terminal: false },

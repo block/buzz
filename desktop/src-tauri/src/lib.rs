@@ -661,6 +661,7 @@ pub fn run() {
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
             get_project_bw,
+            submit_project_bw_record,
             sign_project_issue_status,
             sign_project_issue_assignment,
             sign_project_issue_unassignment,

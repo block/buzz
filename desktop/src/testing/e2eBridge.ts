@@ -174,6 +174,35 @@ type MockHuddleSeed = {
   isCreator?: boolean;
 };
 
+/** Mirrors the shape `bw_projection::snapshot` (desktop Rust side) returns
+ * from `get_project_bw`. A spec supplies only the pieces it needs; the mock
+ * fills the rest with an "inactive, no history" baseline so unrelated tests
+ * are unaffected. `activation` defaults to `null` (no BW policy in force) —
+ * set it to seed a genesis/policy so the desktop UI takes the BW issue path
+ * instead of the legacy one. */
+type MockBwSnapshotOverride = {
+  activation?: { policy: string; genesis: string } | null;
+  records?: Record<string, RelayEvent>;
+  decisions?: Record<string, { outcome: string; stage: string; code: string }>;
+  notices?: Record<
+    string,
+    Array<{
+      event_id: string | null;
+      outcome: string;
+      stage: string;
+      code: string;
+    }>
+  >;
+  projection?: {
+    issues?: Record<string, string>;
+    issue_fields?: Record<string, Record<string, unknown>>;
+    conflicts?: string[];
+    children?: Record<string, string[]>;
+    relations?: unknown[];
+    artifact_verdicts?: Record<string, unknown>;
+  };
+};
+
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
@@ -594,6 +623,14 @@ type E2eConfig = {
     backendProviders?: Array<{ id: string; binaryPath: string }>;
     backendProviderProbeResult?: Record<string, unknown>;
     backendProviderProbeDelayMs?: number;
+    // BW (P4D) mocks. See tests/helpers/bridge.ts:MockBridgeOptions for semantics.
+    /** Overrides the `get_project_bw` response. Omitted = no BW policy in
+     *  force for any repository (the legacy, non-BW issue path is used). */
+    bwSnapshot?: MockBwSnapshotOverride;
+    /** Sequenced `submit_project_bw_record` failures: a string throws that
+     *  message for that call; `null` succeeds. The last entry repeats once
+     *  the array is exhausted. */
+    bwSubmitErrors?: (string | null)[];
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -11534,14 +11571,41 @@ export function maybeInstallE2eTauriMocks() {
         // Matches the "Thomas P" author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.
         return { name: "Thomas P", email: "thomasp@example.com" };
-      case "get_project_bw":
+      case "get_project_bw": {
+        const override = activeConfig?.mock?.bwSnapshot;
         return {
           repo: (payload as { repo: string }).repo,
-          activation: null,
-          records: {},
-          decisions: {},
-          notices: {},
+          activation: override?.activation ?? null,
+          records: override?.records ?? {},
+          decisions: override?.decisions ?? {},
+          notices: override?.notices ?? {},
           projection: {
+            issues: override?.projection?.issues ?? {},
+            issue_fields: override?.projection?.issue_fields ?? {},
+            conflicts: override?.projection?.conflicts ?? [],
+            children: override?.projection?.children ?? {},
+            relations: override?.projection?.relations ?? [],
+            artifact_verdicts: override?.projection?.artifact_verdicts ?? {},
+          },
+        };
+      }
+      // P4D: signs and "submits" one of the three creation/triage-scoped BW
+      // records (issue-state, issue-update, triage-action). Unlike the real
+      // Tauri command, this mock performs no Core validation of its own —
+      // that authority lives exclusively in `buzz-core`/`buzz-sdk` and is
+      // covered by the pinned NIP-BW fixture corpus (see
+      // `crates/buzz-sdk/src/bw.rs`, `desktop/src-tauri/src/commands/project_bw_write.rs`).
+      // This mock only proves the desktop UI calls the command with the
+      // right shape and surfaces a refusal instead of silently swallowing
+      // or retrying it. Use `bwSubmitErrors` to script a refusal.
+      case "submit_project_bw_record": {
+        const error = activeConfig?.mock?.bwSubmitErrors?.shift();
+        if (error) {
+          throw new Error(error);
+        }
+        return {
+          eventId: `mock-bw-record-${window.__BUZZ_E2E_COMMAND_PAYLOADS__?.length ?? 0}`,
+          projection: activeConfig?.mock?.bwSnapshot?.projection ?? {
             issues: {},
             issue_fields: {},
             conflicts: [],
@@ -11550,6 +11614,7 @@ export function maybeInstallE2eTauriMocks() {
             artifact_verdicts: {},
           },
         };
+      }
       case "get_project_repo_snapshot":
         return {
           latest_commit: {

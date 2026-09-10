@@ -2,6 +2,7 @@ import type { RelayEvent } from "@/shared/api/types";
 
 export type ProjectIssueStatus =
   | "Triage"
+  | "Needs Clarification"
   | "Backlog"
   | "In Development"
   | "Implemented"

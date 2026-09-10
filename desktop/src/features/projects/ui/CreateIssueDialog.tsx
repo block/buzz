@@ -1,3 +1,4 @@
+import type { BwIssueTemplate } from "@/features/projects/bwIssueTemplates";
 import {
   CreateProjectWorkItemDialog,
   type CreateProjectWorkItemDialogInput,
@@ -11,12 +12,14 @@ export function CreateIssueDialog({
   onOpenChange,
   open,
   projectName,
+  templates,
 }: {
   isCreating: boolean;
   onCreate: (input: CreateIssueDialogInput) => Promise<void>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   projectName: string;
+  templates?: BwIssueTemplate[];
 }) {
   return (
     <CreateProjectWorkItemDialog
@@ -27,6 +30,7 @@ export function CreateIssueDialog({
       onCreate={onCreate}
       onOpenChange={onOpenChange}
       open={open}
+      templates={templates}
       title="Create an issue"
       titlePlaceholder="Describe the issue"
     />

@@ -2,6 +2,12 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import type { Project, Repository } from "@/features/projects/hooks";
+import {
+  BwIssueCreatedButNotEnrolledError,
+  useCreateProjectBwIssueMutation,
+  useProjectBwActivation,
+} from "@/features/projects/bwIssueCreation";
+import { BW_ISSUE_TEMPLATES } from "@/features/projects/bwIssueTemplates";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import {
@@ -44,7 +50,11 @@ export function CreateProjectIssueDialog({
     ) ?? repositoryOptions[0];
   const project = selection?.project;
   const repository = selection?.repository;
-  const createMutation = useCreateProjectIssueMutation(repository);
+  const bwActivation = useProjectBwActivation(repository?.repoAddress);
+  const bwActive = bwActivation.data === true;
+  const legacyMutation = useCreateProjectIssueMutation(repository);
+  const bwMutation = useCreateProjectBwIssueMutation(repository);
+  const createMutation = bwActive ? bwMutation : legacyMutation;
 
   React.useEffect(() => {
     if (!open) return;
@@ -56,9 +66,23 @@ export function CreateProjectIssueDialog({
 
   async function handleCreate(input: CreateProjectWorkItemDialogInput) {
     if (!project || !repository) throw new Error("Choose a repository.");
-    const issueId = await createMutation.mutateAsync(input);
-    toast.success("Issue created.");
-    await onCreated(project, repository, issueId);
+    try {
+      const issueId = await createMutation.mutateAsync(input);
+      toast.success("Issue created.");
+      await onCreated(project, repository, issueId);
+    } catch (error) {
+      // The root itself was already published and is real history; only the
+      // enroll/patch attempt failed. Do not let a retry create a second
+      // root — surface the reason and still navigate to the created issue.
+      if (error instanceof BwIssueCreatedButNotEnrolledError) {
+        toast.warning(
+          `Issue created, but not yet a BW issue: ${error.message}`,
+        );
+        await onCreated(project, repository, error.issueId);
+        return;
+      }
+      throw error;
+    }
   }
 
   return (
@@ -75,6 +99,7 @@ export function CreateProjectIssueDialog({
       onOpenChange={onOpenChange}
       open={open}
       submitDisabled={!repository}
+      templates={bwActive ? BW_ISSUE_TEMPLATES : undefined}
       title="Create an issue"
       titlePlaceholder="Describe the issue"
     >

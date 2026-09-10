@@ -1,6 +1,12 @@
 import { ArrowLeft, Plus, X } from "lucide-react";
 import * as React from "react";
 
+import {
+  BwIssueCreatedButNotEnrolledError,
+  useCreateProjectBwIssueMutation,
+  useProjectBwActivation,
+} from "@/features/projects/bwIssueCreation";
+import { BW_ISSUE_TEMPLATES } from "@/features/projects/bwIssueTemplates";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import { CreateIssueDialog } from "@/features/projects/ui/CreateIssueDialog";
@@ -104,11 +110,34 @@ function ChannelIssuesAuxiliaryPanelForChannel({
     null,
   );
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
-  const createIssueMutation = useCreateProjectIssueMutation(repository);
+  const bwActivation = useProjectBwActivation(repository?.repoAddress);
+  const bwActive = bwActivation.data === true;
+  const legacyIssueMutation = useCreateProjectIssueMutation(repository);
+  const bwIssueMutation = useCreateProjectBwIssueMutation(repository);
+  const createIssueMutation = bwActive ? bwIssueMutation : legacyIssueMutation;
 
   const handleCreateIssue = React.useCallback(
-    async ({ body, title }: { body: string; title: string }) => {
-      await createIssueMutation.mutateAsync({ body, title });
+    async ({
+      acceptanceCriteria,
+      body,
+      nonGoals,
+      title,
+    }: {
+      acceptanceCriteria?: string[];
+      body: string;
+      nonGoals?: string[];
+      title: string;
+    }) => {
+      try {
+        await createIssueMutation.mutateAsync({
+          acceptanceCriteria,
+          body,
+          nonGoals,
+          title,
+        });
+      } catch (error) {
+        if (!(error instanceof BwIssueCreatedButNotEnrolledError)) throw error;
+      }
       await projectsQuery.refetch();
       setCreateIssueOpen(false);
     },
@@ -159,6 +188,7 @@ function ChannelIssuesAuxiliaryPanelForChannel({
                 onOpenChange={setCreateIssueOpen}
                 open={createIssueOpen}
                 projectName={repository.name}
+                templates={bwActive ? BW_ISSUE_TEMPLATES : undefined}
               />
             </>
           ) : (

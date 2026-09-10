@@ -37,6 +37,7 @@ import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { BwIssueActions } from "./BwIssueActions";
 import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
 import {
   ProjectFeedRow,
@@ -85,6 +86,11 @@ export function reviewSectionState(
 
 const ISSUE_STATUS_SECTIONS = [
   { status: "Triage", label: "Triage", terminal: false },
+  {
+    status: "Needs Clarification",
+    label: "Needs Clarification",
+    terminal: false,
+  },
   { status: "Backlog", label: "Backlog", terminal: false },
   { status: "In Development", label: "In Development", terminal: false },
   { status: "Implemented", label: "Implemented", terminal: false },
@@ -613,7 +619,7 @@ function IssueMetaRail({
       {issue.bw ? (
         <OverviewRailSection title="Workflow">
           <p className="text-sm">{issue.bw.nextActor}</p>
-          {!issue.bw.enrolled ? (
+          {!issue.bw.enrolled && issue.bw.notices.length > 0 ? (
             <p className="text-sm">Enrollment pending</p>
           ) : null}
           {issue.bw.notices.map((notice) => (
@@ -621,6 +627,9 @@ function IssueMetaRail({
               {notice.outcome}: {notice.stage} / {notice.code}
             </p>
           ))}
+          <div className="mt-3">
+            <BwIssueActions issue={issue} project={project} />
+          </div>
         </OverviewRailSection>
       ) : null}
       {issue.currentReview ? (
