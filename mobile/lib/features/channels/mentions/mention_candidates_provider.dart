@@ -77,9 +77,9 @@ final mentionCandidatesProvider = Provider.family
         sessionStatus: sessionStatus,
         cachedMembers: cachedMembers,
       );
+      final directory = ref.watch(agentDirectoryProvider);
       final relayAgents =
-          ref.watch(agentDirectoryProvider).asData?.value ??
-          const <AgentDirectoryEntry>[];
+          directory.asData?.value ?? const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
@@ -96,6 +96,7 @@ final mentionCandidatesProvider = Provider.family
       final candidates = buildMentionCandidates(
         members: members,
         relayAgents: relayAgents,
+        directoryReady: !directory.isLoading && !directory.hasError,
         sharedChannelIds: sharedChannelIds,
         userCache: userCache,
         ownerByAgentPubkey: owners,

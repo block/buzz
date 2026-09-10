@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/crypto/nip_oa.dart';
 import '../../shared/crypto/signed_event.dart';
 import '../../shared/relay/relay.dart';
+import '../profile/user_cache_provider.dart';
 
 part 'agent_policy.dart';
 part 'agent_authorization.dart';
@@ -92,9 +93,26 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   if (!current()) return [];
   return readAgentAuthorization(
     session,
-    {...owned, ...events.map((event) => event.pubkey)},
+    {
+      ...owned, ...events.map((event) => event.pubkey),
+      // Refresh previously authenticated owners even after runtime/policy
+      // discovery stops returning them (for example across reconnect).
+      for (final profile in ref.read(userCacheProvider).values)
+        if (profile.ownerPubkey != null) profile.pubkey,
+    },
     viewer: viewer,
     isCurrent: current,
+    resolveProfileOwners: (profiles) {
+      if (!current()) throw StateError('Profile authority scope changed');
+      final cache = ref.read(userCacheProvider.notifier);
+      for (final profile in profiles) {
+        cache.cacheProfileEvent(profile);
+      }
+      return {
+        for (final profile in ref.read(userCacheProvider).values)
+          if (profile.ownerPubkey != null) profile.pubkey: profile.ownerPubkey!,
+      };
+    },
   );
 });
 
@@ -102,18 +120,14 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
 /// profiles. An entry exists only when the `auth` tag verifies — mirrors
 /// desktop's `profile_valid_oa_owner_pubkey`.
 final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
-  final agents = await ref.watch(agentDirectoryProvider.future);
-  if (agents.isEmpty) return const {};
-  final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.profilesBatch([for (final agent in agents) agent.pubkey]),
-  );
-  final owners = <String, String>{};
-  for (final event in latestProfileEvents(events).values) {
-    final owner = verifiedOaOwnerPubkey(event);
-    if (owner != null) owners[event.pubkey.toLowerCase()] = owner;
-  }
-  return owners;
+  await ref.watch(agentDirectoryProvider.future);
+  // The profile cache is the single ordered ownership source for lifecycle,
+  // provenance and mention fallbacks; never re-query a parallel owner snapshot.
+  final profiles = ref.watch(userCacheProvider);
+  return {
+    for (final profile in profiles.values)
+      if (profile.ownerPubkey != null) profile.pubkey: profile.ownerPubkey!,
+  };
 });
 
 /// Pubkeys currently known to represent agents across the active relay.

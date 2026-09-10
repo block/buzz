@@ -23,11 +23,16 @@ Future<List<NostrEvent>> _queryAgentFilters(
 }
 
 /// Overlay current owner-authenticated policy onto the existing runtime
-/// directory. This does not expand discovery to owner-only coordinates yet.
+/// directory, optionally including exact [requestedKeys] without a runtime.
+/// [resolveProfileOwners] receives snapshot profiles after [checkCurrent] and
+/// returns verified owners from the caller's ordered authority cache, so an
+/// older snapshot cannot undo a newer live revocation. Without the callback,
+/// ownership derives solely from this fresh query; no cache writes occur.
 Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
   RelaySessionNotifier session,
   List<NostrEvent> runtimeEvents, {
   Set<String>? requestedKeys,
+  Map<String, String> Function(Iterable<NostrEvent>)? resolveProfileOwners,
   void Function()? checkCurrent,
 }) async {
   final latest = <String, NostrEvent>{};
@@ -44,12 +49,19 @@ Future<List<AgentDirectoryEntry>> resolveAgentPolicies(
         NostrFilter(kinds: const [0], authors: [key], limit: 1),
     ], checkCurrent: checkCurrent),
   );
+  checkCurrent?.call();
   final owners = <String, String>{};
   for (final profile in profiles.values) {
     final owner = verifiedOaOwnerPubkey(profile);
     if (owner != null && keys.contains(profile.pubkey)) {
       owners[profile.pubkey] = owner;
     }
+  }
+  if (resolveProfileOwners != null) {
+    final currentOwners = resolveProfileOwners(profiles.values);
+    owners
+      ..clear()
+      ..addEntries(currentOwners.entries.where((e) => keys.contains(e.key)));
   }
   checkCurrent?.call();
   final policies = await _queryAgentFilters(session, [

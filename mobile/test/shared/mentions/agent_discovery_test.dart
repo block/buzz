@@ -1,6 +1,8 @@
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -274,6 +276,64 @@ void main() {
       c2.dispose();
       await tester.pump(const Duration(milliseconds: 300));
       expect(retired.attempts, 1);
+    },
+  );
+
+  test(
+    'live revocation advances shared profiles and owners; replay cannot restore',
+    () async {
+      final events = [owned, policy];
+      final session = _Session(events, relay.public);
+      final c = container(session);
+      final ownerSubscription = c.listen(agentOwnersProvider, (_, _) {});
+      addTearDown(ownerSubscription.close);
+      addTearDown(c.dispose);
+      expect(await c.read(agentOwnersProvider.future), {
+        agent.public: owner.public,
+      });
+      expect(
+        c.read(userCacheProvider)[agent.public]?.ownerPubkey,
+        owner.public,
+      );
+      final revoked = profile(agent, [], createdAt: 101);
+      events.add(revoked);
+      session.deliver(revoked);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(await c.read(agentOwnersProvider.future), isEmpty);
+      expect(c.read(userCacheProvider)[agent.public]?.ownerPubkey, isNull);
+      events.remove(
+        revoked,
+      ); // stale snapshot must lose to delivered revocation
+      session.deliver(owned);
+      session.status!(RelaySubscriptionStatus.ready);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(await c.read(agentOwnersProvider.future), isEmpty);
+      expect(c.read(userCacheProvider)[agent.public]?.ownerPubkey, isNull);
+      // Ordinary-channel member fallback must not resurrect revoked ownership.
+      final choices = buildMentionCandidates(
+        members: [
+          ChannelMember(
+            pubkey: agent.public,
+            role: 'bot',
+            joinedAt: DateTime(2024),
+          ),
+        ],
+        relayAgents: await c.read(agentDirectoryProvider.future),
+        sharedChannelIds: {'room'},
+        userCache: c.read(userCacheProvider),
+        ownerByAgentPubkey: await c.read(agentOwnersProvider.future),
+        currentPubkey: owner.public,
+      );
+      expect(choices.single.ownerPubkey, isNull);
+      final retiredCallback = session.changed!;
+      c.updateOverrides([
+        relaySessionProvider.overrideWith(() => session),
+        myPubkeyProvider.overrideWithValue(relay.public),
+      ]);
+      c.read(agentDirectoryProvider);
+      expect(c.read(userCacheProvider), isEmpty);
+      retiredCallback(owned);
+      expect(c.read(userCacheProvider), isEmpty);
     },
   );
 

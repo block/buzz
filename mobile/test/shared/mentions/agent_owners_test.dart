@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -29,6 +30,10 @@ void main() {
       ],
     );
     try {
+      final cache = container.read(userCacheProvider.notifier);
+      for (final event in events) {
+        cache.cacheProfileEvent(event);
+      }
       return await container.read(agentOwnersProvider.future);
     } finally {
       container.dispose();

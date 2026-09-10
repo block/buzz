@@ -77,6 +77,89 @@ void main() {
     );
   });
 
+  test(
+    'late confirmed publication retains newer cache authority and metadata',
+    () async {
+      final keys = nostr.Keys.generate();
+      final owner = nostr.Keys.generate();
+      final initial = NostrEvent.fromJson(
+        nostr.Event.from(
+          secretKey: keys.secret,
+          createdAt: 1,
+          kind: 0,
+          tags: [_authTag(owner, keys.public)],
+          content: jsonEncode({'display_name': 'Owned'}),
+        ).toMap(),
+      );
+      final session = _ProfileRelaySession(initial);
+      final container = _profileContainer(keys.nsec, session);
+      addTearDown(container.dispose);
+      final cache = container.read(userCacheProvider.notifier);
+      await container.read(profileProvider.future);
+      expect(cache.profileEvent(keys.public)?.id, initial.id);
+      NostrEvent? revoked;
+      session.beforeHistoryReturn = () {
+        if (session.published.length != 1) return;
+        revoked = NostrEvent.fromJson(
+          nostr.Event.from(
+            secretKey: keys.secret,
+            createdAt: session.published.single.createdAt + 1,
+            kind: 0,
+            tags: const [],
+            content: jsonEncode({'display_name': 'Revoked', 'custom': 'new'}),
+          ).toMap(),
+        );
+        cache.cacheProfileEvent(revoked!);
+      };
+      await container.read(profileProvider.notifier).updateAbout('Late');
+      expect(
+        container.read(profileProvider).requireValue?.displayName,
+        'Revoked',
+      );
+      final submitted = session.published.single;
+      cache.put(
+        UserProfile(
+          pubkey: keys.public,
+          displayName: 'Unordered',
+          ownerPubkey: owner.public,
+        ),
+      );
+      cache.cacheProfileEvent(submitted);
+      cache.cacheProfileEvent(revoked!);
+      expect(cache.profileEvent(keys.public)?.id, revoked!.id);
+      expect(
+        container.read(userCacheProvider)[keys.public]?.ownerPubkey,
+        isNull,
+      );
+      expect(
+        container.read(profileProvider).requireValue?.displayName,
+        'Revoked',
+      );
+      // A stale hydration response must use the same governing event, not
+      // recreate detached state or lower the metadata used by the next edit.
+      session.beforeHistoryReturn = null;
+      await container.read(profileProvider.notifier).refresh();
+      expect(
+        container.read(profileProvider).requireValue?.displayName,
+        'Revoked',
+      );
+      await expectLater(
+        container.read(profileProvider.notifier).updateAbout('Unsafe'),
+        throwsStateError,
+      );
+      expect(session.published, hasLength(1));
+      session.profile = revoked!;
+      await container.read(profileProvider.notifier).updateAbout('Safe');
+      final next = session.published.last;
+      expect(next.createdAt, greaterThan(revoked!.createdAt));
+      expect(next.tags, isEmpty);
+      expect(jsonDecode(next.content)['custom'], 'new');
+      expect(cache.profileEvent(keys.public)?.id, next.id);
+      cache.cacheProfileEvent(revoked!);
+      expect(cache.profileEvent(keys.public)?.id, next.id);
+    },
+  );
+
   test('clearing a display name restores the pubkey label fallback', () async {
     final keys = nostr.Keys.generate();
     final relaySession = _ProfileRelaySession(
@@ -607,7 +690,8 @@ class _MutableRelayConfigNotifier extends RelayConfigNotifier {
 class _ProfileRelaySession extends RelaySessionNotifier {
   _ProfileRelaySession(this.profile);
 
-  final NostrEvent profile;
+  NostrEvent profile;
+  void Function()? beforeHistoryReturn;
   final List<NostrEvent> published = [];
 
   @override
@@ -617,7 +701,11 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [profile, ...published];
+  }) async {
+    final result = [profile, ...published];
+    beforeHistoryReturn?.call();
+    return result;
+  }
 
   @override
   Future<NostrEvent> publish(

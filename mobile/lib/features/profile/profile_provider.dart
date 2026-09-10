@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/crypto/nip_oa.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
@@ -69,9 +68,7 @@ final profileAvatarHandoffProvider =
 /// WebSocket. Returns null when no nsec is configured or when the user has
 /// not yet published a profile.
 class ProfileNotifier extends AsyncNotifier<UserProfile?> {
-  Map<String, dynamic> _metadata = {};
   bool _hasHydrated = false;
-  int _lastCreatedAt = 0;
   Future<void> _patchQueue = Future.value();
 
   @override
@@ -92,37 +89,19 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final myPk = context.pubkey;
     if (myPk == null) {
       _requireCurrentWriteContext(context);
-      _metadata = {};
-      _lastCreatedAt = 0;
       _hasHydrated = true;
       return null;
     }
 
     final session = context.session;
     final events = await session.fetchHistory(NostrFilters.profile(myPk));
-    if (events.isEmpty) {
-      _requireCurrentWriteContext(context);
-      _metadata = {};
-      _lastCreatedAt = 0;
-      _hasHydrated = true;
-      return null;
-    }
-    final latest = _latestProfileEvent(events)!;
-    final metadata = _decodeProfileMetadata(latest);
-    final data = ProfileData.fromEvent(latest);
-    final profile = UserProfile(
-      pubkey: data.pubkey,
-      displayName: data.displayName,
-      avatarUrl: data.avatarUrl,
-      about: data.about,
-      nip05Handle: data.nip05,
-      ownerPubkey: verifiedOaOwnerPubkey(latest),
-    );
     _requireCurrentWriteContext(context);
-    _metadata = metadata;
-    _lastCreatedAt = latest.createdAt;
+    final cache = ref.read(userCacheProvider.notifier);
+    for (final event in events) {
+      cache.cacheProfileEvent(event);
+    }
     _hasHydrated = true;
-    return profile;
+    return ref.read(userCacheProvider)[myPk.toLowerCase()];
   }
 
   Future<void> refresh() async {
@@ -182,9 +161,12 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       NostrFilters.profile(pubkey),
     );
     _requireCurrentWriteContext(context);
-    final currentHead = _latestProfileEvent(currentEvents);
-    if (_lastCreatedAt > 0 &&
-        (currentHead == null || currentHead.createdAt < _lastCreatedAt)) {
+    final cache = ref.read(userCacheProvider.notifier);
+    for (final event in currentEvents) {
+      cache.cacheProfileEvent(event);
+    }
+    final currentHead = cache.profileEvent(pubkey);
+    if (currentHead?.id != _latestProfileEvent(currentEvents)?.id) {
       throw StateError('Cannot confirm the latest profile metadata.');
     }
     final currentMetadata = currentHead == null
@@ -199,10 +181,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final relay = SignedEventRelay(session: session, nsec: context.config.nsec);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final currentCreatedAt = currentHead?.createdAt ?? 0;
-    final previousCreatedAt = currentCreatedAt > _lastCreatedAt
-        ? currentCreatedAt
-        : _lastCreatedAt;
-    final createdAt = now > previousCreatedAt ? now : previousCreatedAt + 1;
+    final createdAt = now > currentCreatedAt ? now : currentCreatedAt + 1;
     NostrEvent? signedEvent;
     await relay.submit(
       kind: EventKind.profile,
@@ -216,27 +195,20 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     if (submittedEvent == null) {
       throw StateError('Profile update was not signed.');
     }
-    final verifiedHead = _latestProfileEvent(
-      await session.fetchHistory(NostrFilters.profile(pubkey)),
+    final verification = await session.fetchHistory(
+      NostrFilters.profile(pubkey),
     );
     _requireCurrentWriteContext(context);
+    for (final event in verification) {
+      cache.cacheProfileEvent(event);
+    }
+    final verifiedHead = _latestProfileEvent(verification);
     if (verifiedHead?.id != submittedEvent.id) {
       throw StateError('Profile changed before the update could be confirmed.');
     }
 
-    _metadata = nextMetadata;
-    _lastCreatedAt = createdAt;
-    final profile = UserProfile(
-      pubkey: pubkey,
-      displayName:
-          _metadata['display_name'] as String? ?? _metadata['name'] as String?,
-      avatarUrl: _metadata['picture'] as String?,
-      about: _metadata['about'] as String?,
-      nip05Handle: _metadata['nip05'] as String?,
-      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent),
-    );
-    state = AsyncData(profile);
-    ref.read(userCacheProvider.notifier).put(profile);
+    cache.cacheProfileEvent(submittedEvent);
+    state = AsyncData(ref.read(userCacheProvider)[pubkey.toLowerCase()]);
   }
 
   void _requireCurrentWriteContext(_ProfileWriteContext context) {

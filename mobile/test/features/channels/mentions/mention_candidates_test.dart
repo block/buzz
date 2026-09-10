@@ -169,7 +169,13 @@ void main() {
       final ownedAgent = '2' * 64;
       final candidates = buildMentionCandidates(
         members: const [],
-        relayAgents: const [],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: ownedAgent,
+            ownerPubkey: userPubkey,
+            respondTo: 'owner-only',
+          ),
+        ],
         sharedChannelIds: const {},
         userCache: const {},
         ownerByAgentPubkey: const {},
@@ -186,6 +192,41 @@ void main() {
       expect(candidates, hasLength(1));
       expect(candidates.single.isAgent, isTrue);
       expect(candidates.single.ownerPubkey, userPubkey);
+    });
+
+    test('owned members and search fail closed without ready policy', () {
+      final ownedAgent = '2' * 64;
+      for (final ready in [false, true]) {
+        for (final isMember in [false, true]) {
+          final candidates = buildMentionCandidates(
+            members: isMember ? [member(ownedAgent)] : [],
+            relayAgents: [],
+            directoryReady: ready,
+            sharedChannelIds: {},
+            userCache: {},
+            ownerByAgentPubkey: {ownedAgent: userPubkey},
+            searchResults: isMember ? [] : [UserProfile(pubkey: ownedAgent)],
+            currentPubkey: userPubkey,
+          );
+          expect(candidates, isEmpty);
+        }
+      }
+      final denied = buildMentionCandidates(
+        members: [member(ownedAgent)],
+        directoryReady: false,
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: ownedAgent,
+            ownerPubkey: userPubkey,
+            respondTo: 'owner-only',
+          ),
+        ],
+        sharedChannelIds: {},
+        userCache: {},
+        ownerByAgentPubkey: {ownedAgent: userPubkey},
+        currentPubkey: userPubkey,
+      );
+      expect(denied, isEmpty);
     });
 
     test('search results hide non-shared agents owned by someone else', () {
