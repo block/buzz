@@ -1113,6 +1113,7 @@ dependencies = [
  "image",
  "nix 0.31.3",
  "nostr 0.44.7",
+ "regex",
  "reqwest 0.13.4",
  "rmcp",
  "rustls",
