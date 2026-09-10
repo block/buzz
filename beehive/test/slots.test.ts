@@ -60,7 +60,7 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
     // Actual remote TUI selects numbered slots, saves and starts both, then stops X.
     const terminal = spawn(process.execPath, ['src/cli.ts', 'tui', join(dir, 'identity.json'), url], { stdio: ['pipe', 'pipe', 'pipe'] }); children.push(terminal);
     let output = ''; let index = 0; let yBeforeRestart: Buffer | undefined; let oldRun = ''; let oldActual: any;
-    const steps: { prompt: string; value: string; gate?: () => boolean }[] = [
+    const steps: { prompt: string; value: string; gate?: () => boolean; observedRevision?: number }[] = [
       { prompt: 'beehive> ', value: 'hosts' }, { prompt: 'beehive> ', value: 'select source' },
       { prompt: 'beehive> ', value: 'profile-new' },
       { prompt: 'Profile name: ', value: 'Careful' }, { prompt: 'Nonsecret behavior instructions (no provider/model/credentials): ', value: 'Explain assumptions before acting.' },
@@ -68,10 +68,10 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
       { prompt: 'beehive> ', value: 'profiles' },
       { prompt: 'beehive> ', value: 'select 1' }, { prompt: 'beehive> ', value: 'save' },
       { prompt: 'Model: ', value: 'fixture-model' }, { prompt: 'Workspace: ', value: dir }, { prompt: 'Behavior profile: ', value: '1' },
-      { prompt: 'beehive> ', value: 'start', gate: () => journal(X).revision === 1 },
+      { prompt: 'beehive> ', value: 'start', observedRevision: 1, gate: () => journal(X).revision === 1 },
       { prompt: 'beehive> ', value: 'select 2', gate: () => journal(X).phase === 'running' },
       { prompt: 'beehive> ', value: 'save' }, { prompt: 'Model: ', value: 'fixture-model' }, { prompt: 'Workspace: ', value: dir }, { prompt: 'Behavior profile: ', value: 'default' },
-      { prompt: 'beehive> ', value: 'start', gate: () => journal(Y).revision === 1 },
+      { prompt: 'beehive> ', value: 'start', observedRevision: 1, gate: () => journal(Y).revision === 1 },
       { prompt: 'beehive> ', value: 'show', gate: () => journal(Y).phase === 'running' },
       { prompt: 'beehive> ', value: 'select 1' },
       { prompt: 'beehive> ', value: 'profile-edit 1', gate: () => { oldActual = journal(X).actual; yBeforeRestart = readFileSync(join(source, 'agents', Y, 'journal.json')); return true; } },
@@ -79,18 +79,34 @@ test('one real host process/connection: X and Y TUI lifecycle, independent recei
       { prompt: 'Publish immutable revision? [yes/no]: ', value: 'yes' },
       { prompt: 'beehive> ', value: 'profiles' },
       { prompt: 'beehive> ', value: 'apply 2' },
-      { prompt: 'beehive> ', value: 'restart', gate: () => { if (journal(X).revision !== 3) return false; assert.deepEqual(journal(X).actual, oldActual); assert.equal(journal(X).selected.behavior.instructions, 'Ask for evidence before conclusions.'); assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBeforeRestart); oldRun = journal(X).actual.run; return true; } },
-      { prompt: 'beehive> ', value: 'stop', gate: () => { if (journal(X).revision !== 4) return false; assert.equal(journal(X).actual.selection.behavior.instructions, 'Ask for evidence before conclusions.'); assert.notEqual(journal(X).actual.run, oldRun); assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBeforeRestart); return true; } },
+      { prompt: 'beehive> ', value: 'restart', observedRevision: 3, gate: () => { if (journal(X).revision !== 3) return false; assert.deepEqual(journal(X).actual, oldActual); assert.equal(journal(X).selected.behavior.instructions, 'Ask for evidence before conclusions.'); assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBeforeRestart); oldRun = journal(X).actual.run; return true; } },
+      { prompt: 'beehive> ', value: 'stop', observedRevision: 4, gate: () => { if (journal(X).revision !== 4) return false; assert.equal(journal(X).actual.selection.behavior.instructions, 'Ask for evidence before conclusions.'); assert.notEqual(journal(X).actual.run, oldRun); assert.deepEqual(readFileSync(join(source, 'agents', Y, 'journal.json')), yBeforeRestart); return true; } },
       { prompt: 'beehive> ', value: 'agents', gate: () => journal(X).phase === 'stopped' }, { prompt: 'beehive> ', value: 'quit' },
     ];
-    let pending = false; let cursor = 0;
+    let pending = false; let cursor = 0; let driverFailure: unknown;
     terminal.stdout.on('data', chunk => {
       output += chunk.toString(); const step = steps[index];
       if (pending || !step || !output.slice(cursor).includes(step.prompt)) return;
       pending = true;
-      void (async () => { if (step.gate) await until(step.gate); await delay(100); index++; cursor = output.length; pending = false; terminal.stdin.write(`${step.value}\n`); })();
+      void (async () => {
+        if (step.gate) await until(step.gate);
+        if (step.observedRevision !== undefined) {
+          // Private journal commit is not TUI inventory observation. Ask the real
+          // UI until it actually displays the revision this next action requires,
+          // rather than relying on a sleep between receipt and inventory delivery.
+          const deadline = Date.now() + 8000;
+          for (;;) {
+            const from = output.length; terminal.stdin.write('show\n');
+            await until(() => output.indexOf('beehive> ', from) >= 0);
+            if (output.slice(from).includes(`\n  "revision": ${step.observedRevision},\n`)) break;
+            assert.ok(Date.now() < deadline, 'TUI did not observe committed revision');
+            await delay(20);
+          }
+        }
+        await delay(100); index++; cursor = output.length; pending = false; terminal.stdin.write(`${step.value}\n`);
+      })().catch(error => { driverFailure = error; terminal.kill('SIGTERM'); });
     }); terminal.stderr.resume();
-    const [code] = await once(terminal, 'exit'); assert.equal(code, 0);
+    const [code] = await once(terminal, 'exit'); if (driverFailure) throw driverFailure; assert.equal(code, 0);
     assert.match(output, /Unknown or ambiguous host/);
     assert.match(output, new RegExp(`Selected source agent ${X}`)); assert.match(output, new RegExp(`Selected source agent ${Y}`));
     assert.match(output, /"phase": "running"/);

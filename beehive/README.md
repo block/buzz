@@ -569,3 +569,19 @@ management authority — the destination launches with its own local key, no
 secret transfer or recreation. This is a local copy removal, not a global
 cryptographic revocation: no nsec is transferred, and no remote key CRUD exists.
 Local re-provisioning requires explicit local reconciliation.
+
+### Named Move identity contract
+
+Profiles are independent behavior revisions; a named launch configuration identifies
+an exact per-agent effective snapshot. Move takes source-selected public behavior and
+target-local launch settings. A `named-v1` grant binds the derived new named revision
+and the exact prepared snapshot, not merely the destination's previous display label.
+Preparation durably reserves `max(target revision + 1, old named revision + 1)` before
+replying; cancelled preparations can leave gaps. The legacy implicit default@1 is
+materialized by this same rule, rather than leaving an unnamed selection divergent
+from its projected named inventory. The previous target definition stays
+in immutable preparation evidence. Acceptance atomically materializes inventory and
+selected-next, and actual/history retain full snapshots. A later Save gets a later
+revision, is never overwritten, and forces consumed-grant acceptance to remain stopped.
+Reservations alone never confer Start authority. Legacy saved grant/event identity hashes
+are not changed or re-signed; new materialization requires compatible host versions.

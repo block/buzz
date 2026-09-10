@@ -331,3 +331,28 @@ a Move to a missing-key destination fails preflight and preserves the running so
 (manifest unchanged), and a public-only source still consumes its retained
 management authority so the destination launches with its own local key (source
 manifest byte-identical, consumed source denied Start).
+
+## Named Move F1/F2 regression combination
+
+`named-move.test.ts` adapts the independent review's original real relay/host/TUI probe:
+profiled source to named/default destination, no manual property-order workaround,
+consistent named grant/inventory/selected/actual, preserved prior definition and history,
+reselect + Restart, both host reopens, once-only duplicate grants and reordered wire
+inputs. It also retains the original nine rejection controls and actual-referenced removal.
+`named-move-recovery.test.ts` adds profiled/named versions of dropped-grant target restart
+and later standby Save: reserved @2 cannot collide with later same-name @3, stale CAS
+rejects, original preparations persist and source never resurrects. `handoff-selection`
+checks strict semantic grant equality, legacy identity hashes, extra/missing/different
+fields, unknown materialization and ordered-array negatives. Original `move.test.ts`
+M1/replay/restart/later-Save/cancellation cases remain; reverse named Move now explicitly
+expects reservation revision 4 then Start revision 5. The first legacy implicit-default
+Move now asserts default@2, selected/inventory/actual equality, and Start revision 3;
+later Save and cancelled-preparation retry use the explicitly reserved CAS revision.
+No timeout/assertion relaxation.
+
+The concurrent slots TUI driver observes committed revisions through actual `show`
+output before subsequent lifecycle commands, rather than assuming its private host
+journal gate means the separate TUI has consumed inventory. Gate failures close the
+owned UI and propagate; existing assertions and observation/test deadlines are unchanged.
+Retained direct diagnostic captured a stale-observation Restart revision-conflict;
+other older timeout observations lacking that trace remain unclassified.

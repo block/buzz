@@ -52,3 +52,12 @@ export function configure(saved: Configurations | undefined, selected: Selection
   if (Buffer.byteLength(JSON.stringify(entries)) > 8000) throw Error('Configuration inventory size limit');
   return { entries, selected: structuredClone(next) };
 }
+
+/** Materialize an already validated/prepared Move snapshot without altering any run
+ * history. Called before preparation and in the atomic assignment acceptance write. */
+export function materializeMove(saved: Configurations | undefined, selected: Selection, effective: Selection) {
+  const entries = configurations(saved, selected);
+  const next = selection(effective);
+  if (next.configuration) entries[nameOf(next.configuration.name)] = next;
+  return { entries: configurations(entries, next), selected: next };
+}

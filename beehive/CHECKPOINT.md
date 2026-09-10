@@ -5,6 +5,96 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Named Move F1/F2 — implemented; final validation/publication below
+
+Starting verified clean published `7ad542080d72f5e04692a207286d20a87646269f`.
+Consumed final independent NAMED_SETUP_REVIEW_4D26C2E1.md and original recovery
+TUI/wire probes (not the superseded candidate-comparison hypothesis).
+
+**F1 owner:** strict `selection` codec equality, including nested configuration and
+profile fields; adjacent target-local comparison validates before separating behavior.
+Local setup/prepared-input hashes canonicalize object members but preserve arrays.
+Raw hash-chain/predecessor/operation/retry identity hashes are deliberately unchanged;
+no saved events are reserialized/re-signed. Historical grant meaning remains readable.
+
+**F2 governing model:** profiles stay independent immutable behavior revisions;
+named launch configurations are per-agent effective snapshots, not display labels.
+`named-v1` grant materialization derives source-selected public behavior + target-local
+model/workspace/name as a NEW named revision: max(target CAS revision + 1, previous
+named revision + 1). Legacy implicit default@1 is materialized by new Moves too;
+there is no separate unnamed inventory/selected behavior path. Even unchanged behavior
+receives a new revision for this Move.
+Preparation validates/bounds the resulting inventory before source effects and atomically
+reserves that revision with its immutable token/reply and original target candidate.
+This captures the prior destination definition and prevents a concurrent later Save
+from assigning different content to the reserved reference. Cancelled preparations can
+leave revision gaps; reservations are not Start/assignment authority. A retry cannot
+renew the token, candidate or reservation, including after restart.
+
+Source validates/derives that same effective snapshot before Stop; its consumed grant
+and outbox remain one durable write. Target compares against the reserved revision,
+then commits assignment + named inventory + selected-next together, before ordinary
+Start. Later standby Save retains its later candidate, advances the fence and leaves
+accepted authority assigned/stopped. Legacy grants that would redefine an old
+reference instead preserve the candidate and stop; historical accepted grants and
+actual/history snapshots are never rewritten. Both sides need this development
+materialization contract for new named Moves; no mixed-version rollout claim.
+
+**Regressions:** original reviewer actual TUI profiled source → Destination@1/default
+now succeeds WITHOUT an object-order workaround; actual, selected-next, inventory and
+versioned grant all use Destination@2/Source. Original Destination@1/default remains
+in preparation evidence. Reselect + Restart, both service reopens, duplicate Move/grant,
+former source/target actual/history and recursively reordered real wire Move are checked.
+Fresh profiled/named dropped-grant cases exercise target restart with changed inputs,
+stale reservation CAS, later same-name Save allocating @3 rather than overwriting @2,
+assigned/stopped acceptance, original preparation preservation and source non-resurrection.
+Unit negatives reject extra/missing/different grant/selection fields and unknown versions;
+arrays remain order-sensitive. Existing installed conversation fixture remains deterministic.
+
+**Iteration evidence (not hidden):** first focused Move run 1/6: validating the local
+behavior-stripped comparison still passed an explicit undefined behavior property to
+`fields`; fixed at shared validated comparator by omitting that property after codec
+validation. Next original Move run 6/6. First new TUI probe passed at runtime but strict
+reported an unknown receipt result in the adapted test; corrected String conversion.
+Focused combinations then 4/4, 3/3 and named recovery 2/2. First full DEFAULT concurrent
+installed-enabled run 47/49 (34.38s): reverse Move's old revision-4 wait was obsolete
+because its named preparation now reserves 4 and Start commits 5; exact wait/Stop
+assertions updated to 5, not removed. Separate slots standby-launch evidence timeout
+remains unclassified; no attribution to pre-existing/contention/removal without causal
+logs. Focused original Move + slots 10/10 passed subsequently, not proof of that cause.
+Prior removal 43/45 failures likewise remain scoped observations despite green reruns.
+
+An intermediate final-tree strict + full DEFAULT concurrent installed-enabled run passed
+49/49, zero skips/cancellations, natural 32.08s. Subsequent self-review extended the same
+materialization rule to legacy implicit default@1 (otherwise that projected inventory
+could still split from selected-next). Original Move tests now assert default@2 / Start
+revision 3 explicitly, later-Save @3, and cancelled-reservation CAS 2. Focused original
+Move + strict semantic codec 7/7 pass; existing M1/replay/Stop/Save assertions retained.
+Four full attempts after implicit-default self-review were interrupted at the unchanged
+110s tool bound without a package summary (`full-installed-exact`, `full-installed-publication`,
+`full-diagnostic`, `full-direct-diagnostic`). Two were diagnostic-only runs; temporary
+instrumentation is removed. Each reported passing installed Move/new/Move/M1/key cases
+before output stopped ahead of slots. These are NOT completed/green suites. A direct
+fixture-owned diagnostic finally captured slots TUI pending at step 27 waiting for
+Restart revision 4 after its Restart received **revision-conflict**. The driver had
+gated on private host journal revision 3, not the TUI's inventory observation; its
+unhandled rejected gate also left the child UI alive until the outer tool deadline.
+The bounded driver now uses actual `show` responses to observe the exact committed
+revision before Start/Restart/Stop, retains all original assertions/8s observation bound,
+and propagates gate errors after closing its own UI. No product CAS bypass, longer
+sleep/deadline, serial masking or force-exit. This explains the captured diagnostic
+journey, NOT every earlier timeout from logs lacking that evidence. Isolated slots
+4/4 had also passed and is not causal proof.
+Strict + DEFAULT concurrent installed-enabled full after this driver correction passed
+49/49, zero skips/cancellations, natural 33.28s (`full-ui-observation.log`). Final exact-tree
+strict/full validation and source publication are recorded in terminal evidence/logs.
+Logs: `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/NAMED_MOVE_6AFE/`. Independent prior named
+review consumed; this delta has self-review and executable evidence, NOT independent
+approval, production admission, live-provider or full-product acceptance. No secrets
+in output/relay; public-only key removal, local harness credentials and sibling isolation
+are unchanged. **ONE next executable action:** multiple local harness bindings and
+import/reuse wizard/Desktop parity, after independent confirmation of these blocker fixes.
+
 ## RECOVERED removal-public-slots — recovered clean; implementation begins
 
 Recovered sole-writer worktree `/Users/loganj/.buzz/REPOS/beehive-cbfd9440` branch

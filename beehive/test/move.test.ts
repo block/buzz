@@ -78,6 +78,10 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
     assert.equal(journal('source').assignment.assignedHost,'target'); assert.equal(journal('source').phase,'stopped'); assert.equal(journal('source').actual,null);
     assert.equal(journal('target').assignment.assignedHost,'target'); assert.equal(journal('target').actual.run,move.id);
     assert.deepEqual(journal('target').actual.selection.behavior, behavior);
+    assert.deepEqual(journal('target').configurations.default, journal('target').actual.selection);
+    assert.deepEqual(journal('target').selected, journal('target').actual.selection);
+    assert.deepEqual(journal('target').selected.configuration, { name: 'default', revision: 2 });
+    assert.equal(journal('target').revision, 3, 'implicit default@1 reserves @2 before Start commits 3');
     for (let i = 0; i < 200 && readFileSync(join(dir, 'received-instructions.jsonl'), 'utf8').trim().split('\n').length < 3; i++) await delay(10);
     const received = readFileSync(join(dir, 'received-instructions.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line).instructions);
     assert.deepEqual(received, [behavior.instructions, null, behavior.instructions]);
@@ -86,12 +90,13 @@ test('two real hosts: source-consumed Move, sibling isolation, preflight refusal
     ui.send(move); ui.send(grant); await delay(100); assert.equal(readFileSync(join(dir,'target','journal.json'),'utf8'),before);
     assert.equal((await request('start','source',3)).body.result,'not-authority');
     // Move back is a NEW successor; historical forward grant cannot seize it.
-    assert.equal((await request('move','target',1,{ target: 'source', targetRevision: 3, selection: journal('source').selected })).body.result,'accepted');
-    await wait(m => m.type === 'inventory' && m.host === 'source' && m.revision === 4 && m.body.phase === 'running');
+    // Source now has a named configuration: preparation reserves revision 4, Start commits 5.
+    assert.equal((await request('move','target',3,{ target: 'source', targetRevision: 3, selection: journal('source').selected })).body.result,'accepted');
+    await wait(m => m.type === 'inventory' && m.host === 'source' && m.revision === 5 && m.body.phase === 'running');
     ui.send(grant); await delay(100);
     assert.equal(journal('target').assignment.assignedHost,'source'); assert.equal(journal('target').phase,'stopped');
     assert.equal(journal('source').assignment.chain.length,2);
-    assert.equal((await request('stop','source',4)).body.result,'accepted');
+    assert.equal((await request('stop','source',5)).body.result,'accepted');
     assert.equal((await request('stop','source',1,{},publicKey(y))).body.result,'accepted');
   } finally {
     for (const child of children) { if (child.exitCode === null && child.signalCode === null) { const exit = once(child,'exit'); child.kill('SIGTERM'); await exit; } }
@@ -135,8 +140,8 @@ for (const failure of ['missing-key', 'changed-prepared-input', 'changed-across-
     if (failure === 'changed-across-target-restart') await target.close();
     const targetSetup = join(dir,'target','setup.json');
     if (failure === 'remote-candidate-save') {
-      const edit = message('save', 'target', agent, 0, { configurationAction: 'create', name: 'Later candidate' }); ui.send(edit);
-      await until(() => journal('target').revision === 1);
+      const edit = message('save', 'target', agent, 2, { configurationAction: 'create', name: 'Later candidate' }); ui.send(edit);
+      await until(() => journal('target').revision === 3);
       assert.equal(journal('target').selected.configuration.name, 'Later candidate');
     } else if (failure === 'missing-key') unlinkSync(targetSetup);
     else writePrivate(targetSetup, { ...JSON.parse(readFileSync(targetSetup,'utf8')), args: [resolve('test/runner.ts'), 'changed-after-preparation'] });
@@ -185,7 +190,7 @@ test('Stop and Save retract exact source reservation while destination preflight
     ui.send(message('start','source',agent)); await until(() => journal().phase === 'running');
     const actual = journal().actual;
     for (const [revision,action] of [[1,'save'],[2,'stop']] as const) {
-      const move = message('move','source',agent,revision,{ target:'target',targetRevision:0,selection:selected }); ui.send(move);
+      const move = message('move','source',agent,revision,{ target:'target',targetRevision:revision === 1 ? 0 : 2,selection:selected }); ui.send(move);
       await until(() => held.length > 0);
       ui.send(move); await until(() => held.length > 1);
       assert.equal(seen.some(m => m.type === 'receipt' && m.body.operation === move.id),false, 'exact pending retry must not publish a terminal interrupted receipt');

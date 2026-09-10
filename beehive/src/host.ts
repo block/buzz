@@ -1,9 +1,9 @@
-import { configurations, configure, type Configurations } from './configurations.ts';
+import { configurations, configure, materializeMove, type Configurations } from './configurations.ts';
 import { Profiles } from './profiles.ts';
 import { accessSync, constants, existsSync, mkdirSync, rmdirSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
-import { hash, selection, validateAssignment, extendsAssignment, type Assignment, type Grant } from './handoff.ts';
+import { hash, semanticHash, selection, sameSelection, sameLaunchSelection, moveSelection, validateAssignment, extendsAssignment, type Assignment, type Grant } from './handoff.ts';
 import { installationSlots } from './slots.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 import { connect, validateRelayURL } from './client.ts';
@@ -17,7 +17,7 @@ import { prepareConversation, conversationSummary, type ConversationSetup } from
 export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
-type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
+type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
   for (const key of ['host','ownerSecret','runner','workspace']) text(s[key]);
@@ -142,13 +142,13 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
     await owned.stop(); owned = undefined; acp = undefined;
   }
   function prepareLocal(selected: Selection) {
-    selection(selected);
+    selected = selection(selected);
     if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
     // The optional execution credential is absent for a public-only slot: reject before
     // any spawn or source effect. The secret is never regenerated or inferred.
     if (executionSecret === undefined) throw Error('Local agent key removed; this public slot cannot launch; repair locally without resetting assignment');
     try {
-      if (hash(currentSetup()) !== hash(setup)) throw Error('changed');
+      if (semanticHash(currentSetup()) !== semanticHash(setup)) throw Error('changed');
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
@@ -160,7 +160,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
     const scripts = setup.args.filter(a => isAbsolute(a) && existsSync(a)).map(a => createHash('sha256').update(readFileSync(a)).digest('hex'));
     const workspace = statSync(selected.workspace);
     const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
-    return { launch, credential: executionSecret, harnessSetup: { id: setupId, fingerprint: hash(harness) }, token: hash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
+    return { launch, credential: executionSecret, harnessSetup: { id: setupId, fingerprint: semanticHash(harness) }, token: semanticHash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
   }
   /** Identity-free executable contract check, never conversation admission evidence. */
   async function inspectExecutable(executable: string, args: string[], required: string[]) {
@@ -206,10 +206,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         const assignment = m.body.assignment as Assignment; validateAssignment(assignment);
         const op = m.body.operation as Message;
         // Validate the proposed grant shape through the same chain validator.
-        const g: Grant = { root: hash(assignment.genesis), predecessor: hash(assignment.chain?.at(-1) ?? assignment.genesis), source: op.host, target: setup.host, agent, operation: op, prepared: 'pending', selection: selection(op.body.selection), targetRevision: m.revision, sourceRun: null };
+        const g: Grant = { root: hash(assignment.genesis), predecessor: hash(assignment.chain?.at(-1) ?? assignment.genesis), source: op.host, target: setup.host, agent, operation: op, prepared: 'pending', selection: moveSelection(op.body.selection, m.revision, 'named-v1'), materialization: 'named-v1', targetRevision: m.revision, sourceRun: null };
         validateAssignment({ ...assignment, assignedHost: setup.host, chain: [...(assignment.chain ?? []), g] });
-        if (hash(assignment.genesis) !== hash(genesis) || !((state.assignment.chain ?? []).every((g, i) => hash(g) === hash(assignment.chain?.[i]))) || state.phase !== 'stopped' || state.assignment.assignedHost === setup.host || m.revision !== state.revision) throw Error('Destination authority/revision conflict');
         const prior = state.preparations?.[op.id];
+        if (hash(assignment.genesis) !== hash(genesis) || !((state.assignment.chain ?? []).every((g, i) => hash(g) === hash(assignment.chain?.[i]))) || state.phase !== 'stopped' || state.assignment.assignedHost === setup.host || (prior?.reservedRevision ?? m.revision) !== state.revision) throw Error('Destination authority/revision conflict');
         if (prior) {
           if (hash(prior.request) !== hash(m)) throw Error('Preparation ID conflict');
           // Grant-acceptance evidence is immutable, even after restart. Replayed
@@ -218,9 +218,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
           if (prepareLocal(g.selection).token !== prior.token) throw Error('Prepared inputs changed');
           publish(prior.reply); return;
         }
-        if (!prior && hash({ ...g.selection, profile: 'default', behavior: undefined }) !== hash({ ...state.selected, profile: 'default', behavior: undefined })) throw Error('Destination candidate changed');
+        if (!prior && !sameLaunchSelection(op.body.selection, state.selected)) throw Error('Destination candidate changed');
         if (!prior && Object.keys(state.preparations ?? {}).length >= 1000) throw Error('Preparation journal full; local reconciliation needed');
         preparationStage = 'checking-local-prerequisites; not conversation readiness'; publish(inventory());
+        materializeMove(state.configurations, state.selected, g.selection); // Bound inventory before source can consume.
         const prepared = prepareLocal(g.selection);
         // Independent, identity-free prerequisite probe. It receives neither agent
         // signer nor conversation relay/tool configuration. A successful probe is
@@ -240,13 +241,19 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         }
         if (closing || prepareLocal(g.selection).token !== prepared.token) throw Error('Preparation changed or host closing');
         const token = prepared.token;
-        const reply = message('prepared', op.host, agent, op.revision, { prepare: m, token });
-        state.preparations ??= {}; state.preparations[op.id] = { request: m, token, reply }; livePreparations.add(op.id); preparationStage = 'prepared; future actual conversation still unverified'; save(); publish(reply); publish(inventory());
+        const reply = message('prepared', op.host, agent, op.revision, { prepare: m, token, materialization: g.materialization });
+        state.preparations ??= {}; state.preparations[op.id] = { request: m, token, reply, candidate: structuredClone(state.selected), ...(g.selection.configuration ? { reservedRevision: g.selection.configuration.revision } : {}) };
+        // Reserve the immutable named revision before publishing preparation. Later
+        // Saves allocate beyond it, even if this Move never consumes or launches.
+        if (g.selection.configuration) state.revision = g.selection.configuration.revision;
+        livePreparations.add(op.id); preparationStage = 'prepared; future actual conversation still unverified'; save(); publish(reply); publish(inventory());
       } else if (m.type === 'prepared') {
         const pending = state.move;
         if (!pending || hash(m.body.prepare) !== hash(pending.prepare) || m.revision !== pending.request.revision || state.revision !== m.revision || state.assignment.assignedHost !== setup.host) return;
         if (m.body.error) { finishMove(String(m.body.error)); return; }
-        fields(m.body, ['prepare','token']); const token = text(m.body.token);
+        fields(m.body, ['prepare','token', ...(m.body.materialization === undefined ? [] : ['materialization'])]); const token = text(m.body.token);
+        const materialization = m.body.materialization as Grant['materialization'];
+        const effective = moveSelection(pending.request.body.selection, Number(pending.request.body.targetRevision), materialization);
         if (state.phase !== 'stopped') {
           if (state.phase !== 'running' || !owned) throw Error('Source ownership unknown; no grant');
           state.phase = 'transitioning'; save(); await stopOwned();
@@ -255,7 +262,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         state.phase = 'stopped'; const sourceRun = state.actual?.run ?? null; state.actual = null;
         if (retracting(m.revision) || closing) { finishMove('Move cancelled after source Stop; no grant'); return; }
         const op = pending.request;
-        const grant: Grant = { root: hash(genesis), predecessor: hash(state.assignment.chain?.at(-1) ?? genesis), source: setup.host, target: text(op.body.target), agent, operation: op, prepared: token, selection: selection(op.body.selection), targetRevision: Number(op.body.targetRevision), sourceRun };
+        const grant: Grant = { root: hash(genesis), predecessor: hash(state.assignment.chain?.at(-1) ?? genesis), source: setup.host, target: text(op.body.target), agent, operation: op, prepared: token, selection: effective, ...(materialization ? { materialization } : {}), targetRevision: Number(op.body.targetRevision), sourceRun };
         const assignment: Assignment = { genesis, assignedHost: grant.target, chain: [...(state.assignment.chain ?? []), grant] }; validateAssignment(assignment);
         const delivery = message('grant', grant.target, agent, grant.targetRevision, { assignment });
         // Irreversible authority consumption + exact grant outbox precede publication.
@@ -269,7 +276,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         if (prior) { publish(prior); return; }
         if (!extendsAssignment(state.assignment, next) || state.assignment.assignedHost === setup.host || state.phase !== 'stopped') return;
         const prep = state.preparations?.[g.operation.id];
-        if (!prep || hash(prep.request.body.operation) !== hash(g.operation) || prep.token !== g.prepared) return;
+        if (!prep || hash(prep.request.body.operation) !== hash(g.operation) || prep.token !== g.prepared || prep.reply.body.materialization !== g.materialization) return;
         if (hash(prep.request.body.assignment) !== hash({ genesis: next.genesis, assignedHost: g.source, ...(next.chain!.length > 1 ? { chain: next.chain!.slice(0,-1) } : {}) })) {
           // Genesis-only journals may explicitly retain an empty chain.
           const before = prep.request.body.assignment as Assignment;
@@ -277,11 +284,16 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         }
         // Accept before validating launch again: a stale/missing prerequisite can
         // fail launch but must never return authority to the consumed source.
-        const candidateChanged = state.revision !== g.targetRevision;
+        const candidateChanged = state.revision !== (prep.reservedRevision ?? g.targetRevision)
+          || (!g.materialization && !sameSelection(state.selected, g.selection));
         state.assignment = next;
         // A public standby edit cannot strand a consumed grant or overwrite a later
         // accepted candidate. Accept authority, but never launch mixed inputs.
-        if (!candidateChanged) state.selected = g.selection;
+        if (!candidateChanged) {
+          const candidate = materializeMove(state.configurations, state.selected, g.selection);
+          state.selected = candidate.selected; state.configurations = candidate.entries;
+          if (g.materialization && g.selection.configuration) state.revision = g.selection.configuration.revision;
+        }
         else state.revision++; // Fence commands signed for the pre-grant standby revision.
         const receipt = message('receipt', setup.host, agent, state.revision, { operation: m.id, fingerprint: hash(m), result: 'destination assigned; launch pending' });
         state.incoming ??= {}; state.incoming[hash(g)] = receipt; state.outbox.push(receipt); save(); publish(receipt);
