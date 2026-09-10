@@ -208,13 +208,18 @@ void main() {
       expect(find.text('Hello forum'), findsOneWidget);
     });
 
-    testWidgets('shows truncated pubkey when no profile', (tester) async {
+    testWidgets('shows compact npub when no profile', (tester) async {
       await tester.pumpWidget(
-        _buildPostCard(post: _makePost(pubkey: 'abcdef1234567890')),
+        _buildPostCard(
+          post: _makePost(
+            pubkey:
+                'abcdef0000000000000000000000000000000000000000000000000000000000',
+          ),
+        ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('abcdef12\u2026'), findsOneWidget);
+      expect(find.text('npub140x\u2026etzk'), findsOneWidget);
     });
 
     testWidgets('uses directory classification for uncached author avatar', (

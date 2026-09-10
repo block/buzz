@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 
 import {
@@ -4534,7 +4535,8 @@ test("clicking author name opens user profile panel", async ({ page }) => {
   // Click now opens the full profile panel instead of the popover
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText("deadbeef");
+  await expect(panel).toContainText(truncateNpub(MOCK_VIEWER_PUBKEY));
+  await expect(panel).not.toContainText("deadbeefdeadbeef");
 });
 
 test("hovering avatar opens popover, clicking opens profile panel", async ({
@@ -4757,7 +4759,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("managed by 11111111…1111");
+  ).toHaveText(`managed by ${truncateNpub(CASEY_PROFILE_PUBKEY)}`);
 });
 
 test("human profile popover does not show an owner", async ({ page }) => {
