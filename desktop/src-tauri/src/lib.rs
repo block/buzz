@@ -600,6 +600,8 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
+            cancel_link_preview_metadata,
+            release_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,

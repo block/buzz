@@ -576,8 +576,85 @@ void main() {
       expect(name.style?.fontWeight, FontWeight.w500);
       expect(presence.style?.fontSize, 14);
       expect(presence.style?.fontWeight, FontWeight.w400);
+      // Named counterpart: the avatar initial comes from the authored name.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('keys unnamed DM header avatars to the hex participant key', (
+      tester,
+    ) async {
+      // A valid unnamed counterpart: the compact-npub label would render `N`
+      // for every unnamed DM, so the header avatar stays keyed to the hex
+      // public key instead.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: [shortPubkey(a11ce), 'Self'],
+        participantPubkeys: const [a11ce, 'self'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(a11ce),
+      );
+      // The named counterpart in the test above keeps its authored initial
+      // ('A' from 'Alice'); this unnamed one gets the hex-key-derived 'A',
+      // not the `N` its npub label starts with.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
+    });
+
+    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
+      tester,
+    ) async {
+      // Member order does not guarantee the counterpart is listed first:
+      // the current user (self, from the fake profile) comes FIRST, so an
+      // avatar keyed to the first participant would render the current
+      // user's initial while the header label names the counterpart.
+      const b0b =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: ['Self', shortPubkey(b0b)],
+        participantPubkeys: const ['self', b0b],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      // Label and avatar agree on the counterpart's key: the compact npub
+      // names the unnamed counterpart, and the avatar initial is keyed to
+      // that same hex key — never the current user's `S`.
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(b0b),
+      );
+      expect(_dmHeaderAvatarInitial(tester), 'B');
     });
 
     testWidgets('uses a fallback squircle for bot-role DM participants', (
@@ -2291,16 +2368,36 @@ void main() {
     testWidgets('previews five members before an icon-free See all row', (
       tester,
     ) async {
+      // Valid fixture keys whose npub encodings were verified against the
+      // NIP-19 codec independently of the code under test.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const carol =
+          'c010100000000000000000000000000000000000000000000000000000000000';
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          users: {
+            carol: const UserProfile(pubkey: carol, displayName: 'Carol'),
+          },
           members: [
             ChannelMember(
               pubkey: 'self',
               role: 'owner',
               joinedAt: DateTime(2025),
             ),
-            for (var index = 0; index < 5; index++)
+            ChannelMember(
+              pubkey: a11ce,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: carol,
+              role: 'member',
+              joinedAt: DateTime(2025),
+              displayName: 'Carol',
+            ),
+            for (var index = 0; index < 3; index++)
               ChannelMember(
                 pubkey: 'member-$index',
                 role: 'member',
@@ -2359,6 +2456,31 @@ void main() {
         closeTo(tester.getTopLeft(firstMemberTitle).dx, 0.1),
       );
       expect(tester.getSize(seeAllRow).height, 40 + (Grid.xxs * 2));
+
+      // Identity display in the preview rows: unnamed members keep distinct
+      // hex-keyed avatar initials (the compact-npub label would render `N`
+      // for everyone), while self and named rows keep their label initials.
+      final unnamedRow = find.byKey(ValueKey('channel-details-member-$a11ce'));
+      expect(
+        find.descendant(
+          of: unnamedRow,
+          matching: find.textContaining(shortPubkey(a11ce)),
+        ),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, a11ce), 'A');
+      final namedRow = find.byKey(ValueKey('channel-details-member-$carol'));
+      expect(
+        find.descendant(of: namedRow, matching: find.textContaining('Carol')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, carol), 'C');
+      final selfRow = find.byKey(const ValueKey('channel-details-member-self'));
+      expect(
+        find.descendant(of: selfRow, matching: find.textContaining('You')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
       await tester.ensureVisible(seeAllRow);
       await tester.pumpAndSettle();
@@ -5287,11 +5409,12 @@ void main() {
       expect(find.text('Alice'), findsNWidgets(2));
     });
 
-    testWidgets('shows pubkey fallback when no profile', (tester) async {
+    testWidgets('shows compact npub fallback when no profile', (tester) async {
       final messages = [
         _textMsg(
           id: 'msg1',
-          pubkey: 'abcdef1234567890',
+          pubkey:
+              'abcdef0000000000000000000000000000000000000000000000000000000000',
           content: 'Hi',
           createdAt: 1000,
         ),
@@ -5301,8 +5424,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Hi'), findsOneWidget);
-      // Should show first 8 chars of pubkey + ellipsis
-      expect(find.text('abcdef12…'), findsOneWidget);
+      // Should show the compact npub form of the author's public key
+      expect(find.text('npub140x…etzk'), findsOneWidget);
     });
   });
 
@@ -8363,21 +8486,60 @@ void main() {
     testWidgets('opens a profile sheet from a membership system avatar', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        _buildTestable(
+      const alicePubkey =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const bobPubkey =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      // Not a valid hex public key — the sheet must surface a neutral label
+      // and refuse to copy it rather than leaking the raw string.
+      const invalidPubkey = 'bob-not-a-real-pubkey';
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      // Both scenarios share this sheet workflow — a keyed remount so the
+      // second [ProviderScope] (and its user-cache override) is fresh.
+      Widget sheetHost(
+        String scenario,
+        String target, {
+        Map<String, UserProfile> users = const {},
+      }) => KeyedSubtree(
+        key: ValueKey('sheet-$scenario'),
+        child: _buildTestable(
           messages: [
             _systemMsg(
-              id: 'sys-membership-avatar',
+              id: 'sys-membership-avatar-$scenario',
               payload: {
                 'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'bob',
+                'actor': alicePubkey,
+                'target': target,
               },
             ),
           ],
+          users: users,
+        ),
+      );
+
+      // A valid identity: the sheet copies the full canonical npub.
+      await tester.pumpWidget(
+        sheetHost(
+          'valid',
+          bobPubkey,
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+            bobPubkey: const UserProfile(pubkey: bobPubkey, displayName: 'Bob'),
           },
         ),
       );
@@ -8387,15 +8549,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
-      expect(find.text('alice'), findsNothing);
+      // The full hex key is never rendered in the sheet.
+      expect(find.text(alicePubkey), findsNothing);
+      expect(find.text(bobPubkey), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(SystemChannels.platform, null),
-      );
       await tester.ensureVisible(find.text('Copy public key'));
       await tester.pumpAndSettle();
       final copyAction = find
@@ -8408,6 +8566,68 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsOneWidget);
+      // The clipboard receives the full canonical npub — never the raw hex.
+      expect(clipboardTexts, [
+        'npub1kzcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0euyv8',
+      ]);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
+
+      // An invalid identity through the same workflow: neutral label,
+      // disabled copy, and no second clipboard write.
+      await tester.pumpWidget(
+        sheetHost(
+          'invalid',
+          invalidPubkey,
+          users: {
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      // Malformed identity → neutral label, never truncated raw input.
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Unknown identity'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(invalidPubkey), findsNothing);
+      // The copy tile is disabled and exposes no tap handler.
+      final disabledCopyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      expect(tester.widget<GestureDetector>(disabledCopyAction).onTap, isNull);
+      final copySemantics = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(Semantics),
+          )
+          .first;
+      expect(
+        tester.widget<Semantics>(copySemantics).properties.enabled,
+        isFalse,
+      );
+
+      await tester.tap(disabledCopyAction, warnIfMissed: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsNothing);
+      // The valid scenario's npub is still the only clipboard write.
+      expect(clipboardTexts, hasLength(1));
 
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
@@ -8415,6 +8635,79 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets(
+      'profile sheet heading falls back to the compact npub for blank cached names',
+      (tester) async {
+        const alicePubkey =
+            'a11ce00000000000000000000000000000000000000000000000000000000000';
+        const bobPubkey =
+            'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+        // The membership row opens the sheet for the joined member (bob).
+        // His cached display name is relay-valid but blank (empty and
+        // whitespace-only), so the heading must resolve through the shared
+        // nonblank-name label contract — the compact npub of the b0b key,
+        // never a blank heading. Keyed remounts keep each ProviderScope
+        // (and its user-cache override) fresh between scenarios.
+        for (final blankName in const ['', '   ']) {
+          await tester.pumpWidget(
+            KeyedSubtree(
+              key: ValueKey('blank-name-sheet-${blankName.length}'),
+              child: _buildTestable(
+                messages: [
+                  _systemMsg(
+                    id: 'sys-membership-blank-${blankName.length}',
+                    payload: {
+                      'type': 'member_joined',
+                      'actor': alicePubkey,
+                      'target': bobPubkey,
+                    },
+                  ),
+                ],
+                users: {
+                  alicePubkey: const UserProfile(
+                    pubkey: alicePubkey,
+                    displayName: 'Alice',
+                  ),
+                  bobPubkey: UserProfile(
+                    pubkey: bobPubkey,
+                    displayName: blankName,
+                  ),
+                },
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.byType(CircleAvatar));
+          await tester.pumpAndSettle();
+
+          expect(find.byType(UserProfileSheet), findsOneWidget);
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text(blankName),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text('npub1kzc…uyv8'),
+            ),
+            findsOneWidget,
+          );
+          // The full hex key is never rendered either.
+          expect(find.text(bobPubkey), findsNothing);
+
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('opens a profile sheet from a huddle system avatar', (
       tester,
@@ -14894,4 +15187,26 @@ class _TestNavigatorObserver extends NavigatorObserver {
     pushCount += 1;
     super.didPush(route, previousRoute);
   }
+}
+
+/// Avatar fallback initial in the DM header — asserts at the production
+/// seam (the masked `dm-header-avatar` badge), not the label helper.
+String _dmHeaderAvatarInitial(WidgetTester tester) {
+  final avatar = find.byKey(const ValueKey('dm-header-avatar'));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
+}
+
+/// Avatar fallback initial in the channel-details member preview row keyed
+/// to [pubkey] — asserts at the production seam (the rendered
+/// `_ChannelMemberPreviewRow`), not the label helper.
+String _previewRowAvatarInitial(WidgetTester tester, String pubkey) {
+  final row = find.byKey(ValueKey('channel-details-member-$pubkey'));
+  final avatar = find.descendant(of: row, matching: find.byType(AvatarImage));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
 }
