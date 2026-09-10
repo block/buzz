@@ -58,6 +58,19 @@ export function migrateAssignment(directory: string, genesis: Genesis): void {
     writePrivate(join(directory, 'journal.json'), state);
   } finally { rmdirSync(lock); }
 }
+/** Read the retained public slot using host admission rules, without writes or
+ * requiring this host to hold execution authority (standby/consumed sources are valid). */
+export function loadSlotState(setup: Setup, path: string, agent: string): State {
+  if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
+  const state = readPrivate(path) as State;
+  if (state.binding.host !== setup.host || state.binding.owner !== publicKey(setup.ownerSecret) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
+  if (!state.assignment) throw Error('Legacy assignment requires explicit local migrate-assignment while stopped');
+  const genesis = validateGenesis(state.assignment.genesis);
+  if (genesis.owner !== state.binding.owner || genesis.agent !== agent) throw Error('Saved assignment mismatch');
+  validateAssignment(state.assignment);
+  selection(state.selected); configurations(state.configurations, state.selected);
+  return state;
+}
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
 function slot(setup: Setup, path: string, agent: string, currentSetup: () => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string) {
   // Optional execution credential: a public-only slot (local key copy deliberately
@@ -66,14 +79,8 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
   const executionSecret: string | undefined = setup.agentSecret;
   if (executionSecret !== undefined && publicKey(executionSecret) !== agent) throw Error('Slot key/identity mismatch');
   const keyPresent = executionSecret !== undefined;
-  if (!existsSync(path)) throw Error('Authority journal missing; restore/reconcile locally, never re-enroll from key possession');
-  let state = readPrivate(path) as State;
-  if (state.binding.host !== setup.host || state.binding.owner !== publicKey(setup.ownerSecret) || state.binding.agent !== agent) throw Error('Saved ownership/assignment mismatch');
-  if (!state.assignment) throw Error('Legacy assignment requires explicit local migrate-assignment while stopped');
-  const genesis = validateGenesis(state.assignment.genesis);
-  if (genesis.owner !== state.binding.owner || genesis.agent !== agent) throw Error('Saved assignment mismatch');
-  validateAssignment(state.assignment);
-  selection(state.selected); configurations(state.configurations, state.selected);
+  let state = loadSlotState(setup, path, agent);
+  const genesis = state.assignment.genesis;
   if (state.phase !== 'stopped') state.phase = 'quarantined';
   let persistenceFailed = false;
   const save = () => { try { writePrivate(path,state); } catch (e) { persistenceFailed = true; throw e; } };

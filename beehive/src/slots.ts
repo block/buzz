@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { validateSetup, initialState, type Setup } from './host.ts';
+import { validateSetup, initialState, loadSlotState, type Setup } from './host.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { object, publicKey } from './protocol.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
@@ -119,9 +119,8 @@ export function removeSlotKey(directory: string, agentKey: string): void {
     const entry = i.agents[agentKey];
     if (!entry) throw Error('Unknown agent slot on this installation');
     if (entry.secret === null) throw Error('Agent key already removed locally; public slot retained');
-    const state = object(readPrivate(slotPath(directory, agentKey, entry.legacy)));
-    const binding = object(state.binding);
-    if (binding.host !== i.host || binding.owner !== publicKey(i.ownerSecret) || binding.agent !== agentKey) throw Error('Slot journal identity mismatch');
+    const setup = validateSetup({ ...i.setups[entry.setup], host: i.host, ownerSecret: i.ownerSecret });
+    const state = loadSlotState(setup, slotPath(directory, agentKey, entry.legacy), agentKey);
     if (state.phase !== 'stopped' || state.actual !== null) throw Error('Key removal requires a stopped slot with no actual run');
     entry.secret = null;
     writePrivate(join(directory, 'setup.json'), i);

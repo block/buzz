@@ -291,3 +291,54 @@ test('public-only source still consumes its assignment through Move; the destina
     await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('K1 actual removal CLI validates retained host authority before destructive writes', { timeout: 30000 }, async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-k1-')));
+  const ownerSecret = newKey(), x = newKey(), y = newKey(), X = publicKey(x), Y = publicKey(y);
+  try {
+    for (const mutation of ['missing-assignment', 'agent', 'owner', 'assigned-host', 'malformed-chain', 'root', 'predecessor', 'grant-agent', 'operation', 'stopped', 'standby', 'consumed-source']) {
+      const d = join(dir, mutation);
+      const genesis = createGenesis(publicKey(ownerSecret), X, 'source');
+      provision(d, { host: 'source', ownerSecret, agentSecret: x, runner: process.execPath, args: [], workspace: dir, mode: 'fixture' }, genesis);
+      migrateSlots(d); addSlot(d, y, createGenesis(publicKey(ownerSecret), Y, 'source'));
+      const jp = join(d, 'journal.json'), mp = join(d, 'setup.json'), yp = join(d, 'agents', Y, 'journal.json');
+      const state = JSON.parse(readFileSync(jp, 'utf8'));
+      if (mutation === 'missing-assignment') delete state.assignment;
+      if (mutation === 'agent') state.assignment.genesis.agent = Y;
+      if (mutation === 'owner') state.assignment.genesis.owner = Y;
+      if (mutation === 'assigned-host') state.assignment.assignedHost = 'other';
+      if (mutation === 'malformed-chain') state.assignment.chain = {};
+      if (mutation === 'standby') { state.assignment.genesis.initialHost = 'other'; state.assignment.assignedHost = 'other'; }
+      if (['root', 'predecessor', 'grant-agent', 'operation', 'consumed-source'].includes(mutation)) {
+        const { hash } = await import('../src/handoff.ts');
+        const op = message('move', 'source', X, 0, { target: 'target', targetRevision: 0, selection: state.selected });
+        const grant = { root: hash(genesis), predecessor: hash(genesis), source: 'source', target: 'target', agent: X, operation: op, prepared: 'fixture-token', selection: state.selected, targetRevision: 0, sourceRun: null };
+        if (mutation === 'root') grant.root = 'wrong';
+        if (mutation === 'predecessor') grant.predecessor = 'wrong';
+        if (mutation === 'grant-agent') grant.agent = Y;
+        if (mutation === 'operation') grant.operation = { ...op, host: 'wrong' };
+        state.assignment.chain = [grant]; state.assignment.assignedHost = 'target';
+      }
+      writePrivate(jp, state);
+      const journalBefore = readFileSync(jp), manifestBefore = readFileSync(mp), siblingBefore = readFileSync(yp);
+      const run = await cli(['remove-agent-key', d, X], [{ prompt: 'Remove this installation', answer: 'yes' }]);
+      const valid = ['stopped', 'standby', 'consumed-source'].includes(mutation);
+      assert.equal(run.code, valid ? 0 : 1, `${mutation}: ${run.err}`);
+      assert.equal(run.out.includes('Local key copy removed'), valid, mutation);
+      assert.ok(!run.out.includes(x) && !run.err.includes(x));
+      assert.deepEqual(readFileSync(jp), journalBefore, mutation);
+      assert.deepEqual(readFileSync(yp), siblingBefore, mutation);
+      assert.equal(existsSync(join(d, 'host.lock')), false);
+      if (!valid) {
+        assert.deepEqual(readFileSync(mp), manifestBefore, mutation);
+        assert.match(run.err, /assignment|grant|chain|fields|message/i);
+      } else {
+        assert.equal(JSON.parse(readFileSync(mp, 'utf8')).agents[X].secret, null);
+        const { loadSlotState } = await import('../src/host.ts');
+        const { installationSlots } = await import('../src/slots.ts');
+        const entry = installationSlots(d)[0]!;
+        loadSlotState(entry.setup, entry.path, X);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

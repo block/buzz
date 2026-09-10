@@ -5,6 +5,28 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## K1 retained-authority removal — explicit closure
+
+Inspected immutable 2151ea3a: K1 was NOT fixed by the named Move commit.
+`loadSlotState` now owns the existing host hydration validation (binding,
+owner/agent genesis, full assignment/grant chain, selected/configuration codec).
+Both host hydration and destructive local key removal use that same read-only
+loader. No new assignment synthesis, no execution-holder-equals-this-host gate.
+All validation precedes manifest mutation; retained journal is never written.
+
+Actual CLI regressions reproduce missing assignment and mismatched agent genesis,
+plus wrong owner/holder, malformed chain, wrong root/predecessor/grant agent and
+operation. All refuse exit 1 without success text and preserve manifest, selected
+journal and sibling bytes. Valid stopped, standby and consumed-source controls
+remove successfully and pass the same public reopen loader. Existing real host,
+relay, removal/reopen/lifecycle and both Move directions pass: focused 5/5,
+natural 12.98s. Strict passes. Initial extraction strict failure (genesis local
+scope) is retained in `WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/K1_928F/strict.log`;
+corrected strict2/focused logs alongside. No local deletion is global revocation.
+K1 is checkpointed separately before the reusable-binding/import continuation.
+Final full concurrent installed-enabled package validation remains due on the
+final candidate; prior timeout/failure history below is not reclassified.
+
 ## Named Move F1/F2 — implemented; final validation/publication below
 
 Starting verified clean published `7ad542080d72f5e04692a207286d20a87646269f`.
