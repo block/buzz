@@ -4647,6 +4647,13 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
 /// Returns `true` when the provider has rejected the turn for a terminal
 /// capacity/usage condition for the current retry window rather than a
 /// transient transport failure.
+///
+/// `You've hit your session limit` was observed in a Claude ACP AgentError.
+/// The other phrases are defensive, synthetically tested matches, not live
+/// coverage claims for Codex, Cursor, goose, or any particular subscription.
+/// An ordinary assistant message containing a limit phrase is not an ACP
+/// error and does not enter this classifier. Provider wording can change;
+/// unknown errors retain the existing bounded retry behavior.
 fn is_terminal_provider_error(error: &acp::AcpError) -> bool {
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;

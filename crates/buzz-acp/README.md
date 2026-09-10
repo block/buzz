@@ -30,6 +30,13 @@ invent a reserve coordinator. A recipient must check the original task and any
 uncertain side effects before taking over. Publication failure or process exit
 can still prevent notification delivery.
 
+The terminal capacity classifier has live evidence for Claude's
+`You've hit your session limit` ACP error. Its other phrases have synthetic
+test coverage only. It does not inspect ordinary assistant text, and provider
+wording changes or authentication failures expressed as assistant text can
+therefore remain outside this path. Do not infer provider availability or
+successful task completion from an Online indicator or a normal turn ending.
+
 ## Prerequisites
 
 - A running Buzz relay (`just relay` starts Docker services automatically, or use a hosted instance)
