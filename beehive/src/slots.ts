@@ -4,12 +4,13 @@ import { validateSetup, initialState, loadSlotState, type Setup } from './host.t
 import { readPrivate, writePrivate } from './storage.ts';
 import { object, publicKey } from './protocol.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
+import { semanticHash } from './handoff.ts';
 
 type Harness = Omit<Setup, 'host' | 'ownerSecret' | 'agentSecret'>;
 /** A removed local key copy leaves a public-only slot: `secret: null` retains identity. */
 type AgentEntry = { secret: string | null; setup: string; legacy?: true };
 type Installation = { version: 2; host: string; ownerSecret: string; setups: Record<string, Harness>; agents: Record<string, AgentEntry> };
-export type SlotEntry = { setup: Setup; path: string; setupId: string; agent: string; keyPresent: boolean };
+export type SlotEntry = { setup: Setup; path: string; setupId: string; agent: string; keyPresent: boolean; bindings: Record<string, Setup> };
 function slotPath(directory: string, key: string, legacy: boolean | undefined) {
   return legacy ? join(directory, 'journal.json') : join(directory, 'agents', key, 'journal.json');
 }
@@ -47,11 +48,12 @@ export function installationSlots(directory: string): SlotEntry[] {
   if (raw.version !== 2) {
     const setup = validateSetup(raw);
     if (setup.agentSecret === undefined) throw Error('Legacy setup requires its agent key; explicit migrate-slots first');
-    return [{ setupId: 'default', setup, path: join(directory, 'journal.json'), agent: publicKey(setup.agentSecret), keyPresent: true }];
+    return [{ setupId: 'default', setup, path: join(directory, 'journal.json'), agent: publicKey(setup.agentSecret), keyPresent: true, bindings: { default: setup } }];
   }
   const i = readInstallation(directory);
   return Object.entries(i.agents).map(([key, a]) => ({
     setupId: a.setup,
+    bindings: Object.fromEntries(Object.entries(i.setups).map(([id, harness]) => [id, validateSetup({ ...harness, host: i.host, ownerSecret: i.ownerSecret, ...(a.secret === null ? {} : { agentSecret: a.secret }) })])),
     setup: validateSetup({ ...i.setups[a.setup], host: i.host, ownerSecret: i.ownerSecret, ...(a.secret === null ? {} : { agentSecret: a.secret }) }),
     path: a.legacy ? join(directory, 'journal.json') : join(directory, 'agents', key, 'journal.json'),
     agent: key,
@@ -154,4 +156,22 @@ export function saveDefaultHarness(directory: string, setup: Setup): void {
   const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
   i.setups.default = harness;
   writePrivate(join(directory, 'setup.json'), i);
+}
+
+/** Provision an immutable reusable local binding under the service-start lock.
+ * No identity, journal, selected configuration or running process is changed. */
+export function addHarnessBinding(directory: string, id: string, value: Harness): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || ['constructor', 'prototype', '__proto__'].includes(id)) throw Error('Invalid binding ID');
+  const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
+  try {
+    const i = readInstallation(directory);
+    if (Object.hasOwn(i.setups, id) || Object.keys(i.setups).length >= 32) throw Error('Binding exists or inventory full');
+    const raw = object(value);
+    if (['host', 'ownerSecret', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
+    validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
+    // Conversation authority is installation-owned, not a binding selector.
+    if (semanticHash(value.conversation ?? null) !== semanticHash(i.setups.default?.conversation ?? null)) throw Error('Binding cannot change conversation authority');
+    i.setups[id] = structuredClone(value);
+    writePrivate(join(directory, 'setup.json'), i);
+  } finally { rmdirSync(lock); }
 }

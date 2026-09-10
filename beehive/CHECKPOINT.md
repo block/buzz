@@ -5,6 +5,115 @@ Base `051c3a270be9c73da9ab06700bcab7d5552fceaa`; continuation starts at
 `023c9274767ef50fa0f5b37ef1883336f8be59fd`. Candidate is the commit containing
 this checkpoint (`git rev-parse HEAD`). No merge/release.
 
+## Binding fd5123 — published-candidate partial handoff
+
+Executable candidate is the commit containing this section; remote verification is
+reported in the terminal handoff. Recovered baseline was exact published
+`1e6ead550e0bbf6cf8f817d07732a9b88fc84160`. Final strict passes. Final FULL DEFAULT
+concurrent installed-enabled package: **56/57, one failure, zero skips/cancellations,
+natural exit 34.240s**. All four new binding tests passed in that full run. Failure
+is unchanged slots standby startup at slots.test.ts:131: host PID 75606 exited 1,
+stdout empty, stderr `Opening handshake has timed out`. This newly captured
+occurrence is a management transport opening-handshake timeout; underlying cause
+and relation to historical unclassified timeouts are not established. **Full-suite
+acceptance remains open.** No serial masking, timeout inflation or rerun-to-green.
+Earlier full 56/57 (33.129s) failed the new TUI driver observation gate, preserved
+separately; revision-observation correction is documented below.
+
+Final run evidence: X `35de98eee5ce7b9be24e5d11d96cb76365f118a396d487647979ee02073dc9bd`,
+Y `eeb07ddb3898d66c66f4031f9c7fb70e01297eed74ecf0bd24300a62cea85f2f`;
+A fingerprint `b0e30b92cfa4a24deea32d53252d5612b65e5f483f28a87dd14970752147ae92`,
+source B `77afae3f04095f15e778d9bd6a4c8c882663f49600eec0e0dd590db0dbdff80c`,
+target B `97aac17667d55c62d182fcb6ae67f38432170c9bb7fdd9996dbdb8c0465da75a`.
+B received exact profile marker/revision
+`fa46ad839d945ac1016e3f75d18eb1146aa5c12717f3111c96e514bb1c013717`.
+Named Alternative@4 applies only on explicit Restart; actual A and history retain
+A, same identity, Y whole journal byte-identical, both host-local manifests retain
+independent keys/authority. Target uses its different B fingerprint and preserved
+source behavior. Replay and explicit stale-definition refusal remain tested.
+
+Self-reviewed resolver use at Save/cancellation/preflight/actual launch; immutable
+binding API owns the same atomic mkdir lock as Start. No parallel controller/runtime,
+remote executable/env injection or key rewrite. K1/F1/F2 independent reviews are
+reused unchanged, not reopened and not claimed as independent review of this delta.
+Installed runtime/CLI hashes separately rechecked and match retained pins; source
+hashes, both failures and focused/full logs are in BINDINGS_FD5123. No dependency or
+global config changes. Logan Johnson author/committer + DCO, no crypto signer.
+
+**Next:** investigate the freshly captured management opening-handshake failure under
+the default concurrent installed-enabled shape without widening deadlines, then
+repeat final strict/full on any corrected candidate. Integrated setup wizard,
+full binding CRUD, Goose/provider path and full parity remain. This is actual
+fixture A/B execution, not full-product/live-provider/current production kind-40002,
+normal service-user OAuth, repo-wide CI, merge/release or production acceptance.
+
+## Binding fd5123 — concurrent validation correction
+
+First strict passed; FULL DEFAULT installed-enabled naturally exited **56/57**, one
+new A/B TUI driver gate failure (33.129s). Original failure log lacks the step/output,
+so its specific missed observation remains unclassified. The new driver copied an
+80ms sleep from configurations.test.ts as a supposed receipt→inventory fence. This
+is not a valid observation barrier; replaced it with existing slots-test actual TUI
+`show` revision observation before revision-sensitive commands. Failure now retains
+step and bounded TUI output. No test timeout inflation, removed assertion, changed
+product admission or serial run. Revised strict and focused TUI/lock **2/2** pass
+(10.570s). Final DEFAULT full run follows on this changed test candidate; original
+failure remains in `full-installed-default.log`, not overwritten or called diagnosed.
+
+## Binding fd5123 — pre-final-validation checkpoint
+
+Focused new tests pass **4/4** (9.445s): actual source/target host subprocesses,
+relay and named TUI A→B Restart with selected profile received by distinct runner,
+unchanged X identity/Y whole journal/A history, different target-local B fingerprint,
+manifest-neutral Save replay, unknown/stale binding rejection, standby B configuration,
+profile-preserving Move. Explicit-B recovery adds consumed-grant replay after changed
+local definition/restart, stale explicit Start refusal without fallback, late standby
+Save/CAS assigned-stopped behavior. Atomic host.lock excludes local mutation and real
+competing CLI Start; 0600/0700 and identity/authority injection refusal checked.
+Self-review retains old unreferenced configurations on their original slot default;
+explicit references never fallback. Conversation authority is equality-fenced across
+bindings, conservatively not independently editable. Changed add-binding comparison
+from JSON order to semantic equality; no runtime/controller added.
+
+Evidence: `/Users/loganj/.buzz/WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/BINDINGS_FD5123/`.
+Two test-extension failures are retained: stale Move fixture omitted source profile;
+extra standby probe wrongly expected non-authority after restart replayed grant.
+Corrected test inputs/sequencing, no production assertions/timeouts weakened.
+Final strict and FULL DEFAULT concurrent installed-enabled package are next; no
+suite acceptance yet. Integrated wizard/full CRUD/Goose/full parity/live provider,
+normal OAuth and current production kind-40002 acceptance remain outside this slice.
+
+## Recovery fd5123 — sole writer
+
+Recovered local HEAD and exact remote branch at `1e6ead550e0bbf6cf8f817d07732a9b88fc84160`;
+no intervening publication. Preserved seven modified files and two untracked A/B
+test files from retired worker; no reset/clean or private journals. Read applicable
+repository/package instructions and actual diff. Surviving delta wires selection
+references into local resolution and adds lock-protected immutable provisioning;
+it is not yet validated. Next: focused A/B execution, self-review, then strict and
+FULL DEFAULT concurrent installed-enabled package on final candidate. Earlier
+K1/F1/F2 reviews stay closed; historical startup timeout remains unclassified.
+
+## Reusable binding execution — active implementation boundary
+
+This continuation resolves an explicit public `harnessSetup {id,fingerprint}`
+through the existing slot preparation owner; the selected binding now supplies
+actual runner/ACP inputs, Save validation, cancellation and destination Move
+preflight. Local immutable binding provisioning acquires atomic `mkdir host.lock`;
+no key/authority copy, journal rewrite or remote executable/env provisioning.
+Legacy unreferenced selections retain their slot's original default binding.
+Remote `binding <id>` edits the current named configuration; Start/Restart remain
+explicit. A/B external-runner + actual TUI regression is being executed before
+full validation. CRUD/edit/removal wizard, integrated setup UX, Goose/live provider
+and full parity remain deferred. No diagnostic iteration.
+
+Correction: **K1 independently CLOSED at 6a5a4592**, per
+`KEY_IMPORT_VERIFICATION_6A5A4592.md`: original missing/mismatch guards, hidden
+exact-key import/public-only authority and real competing-start lock barriers
+passed strict + 6/6 + 3/3. F1/F2 closure remains independently recorded in
+`NAMED_MOVE_VERIFICATION_2151EA3A.md`. Historical review-pending text below does
+not reopen these findings.
+
 ## Startup diagnostic continuation d8fe — tested partial handoff
 
 Starting clean published 6a5a459246cbeba4647fde6572569f93ea952291. The slots

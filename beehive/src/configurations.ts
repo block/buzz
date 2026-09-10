@@ -45,6 +45,8 @@ export function configure(saved: Configurations | undefined, selected: Selection
     }
   } else {
     const value = selection(body);
+    // An ordinary field edit must never implicitly revert a selected binding.
+    if (!value.harnessSetup && selected.harnessSetup) value.harnessSetup = structuredClone(selected.harnessSetup);
     const name = selected.configuration?.name ?? 'default';
     next = { ...value, configuration: { name, revision } };
     entries[name] = next;

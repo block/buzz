@@ -15,6 +15,11 @@ import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Eviden
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
 export type Setup = { host: string; ownerSecret: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; mode: 'fixture' | 'buzz-agent-databricks-v2'; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+/** Definition-only fingerprint: common host authority and agent key are excluded. */
+export function bindingFingerprint(setup: Setup): string {
+  const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
+  return semanticHash(harness);
+}
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
 type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
@@ -72,7 +77,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: () => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string) => Setup, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -94,7 +99,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
   function inventory() {
     return message('inventory',setup.host,agent,state.revision, {
-      harnessSetups: [{ id: setupId, kind: setup.mode, models: [setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'], workspaces: setup.allowedWorkspaces ?? [setup.workspace] }],
+      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, fingerprint: bindingFingerprint(value), kind: value.mode, models: [value.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5'], workspaces: value.allowedWorkspaces ?? [value.workspace] })),
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
@@ -132,7 +137,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
     }
     if (first && state.move && m.type === 'save' && m.revision === state.revision && state.assignment.assignedHost === setup.host && !Object.hasOwn(state.operations, m.id)) {
-      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; if (v.model === state.selected.model && (setup.allowedWorkspaces ?? [setup.workspace]).includes(v.workspace) && (v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
+      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; resolveBinding(v); if ((v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
     }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
   }
@@ -148,14 +153,24 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
     if (!owned) throw Error('Unknown ownership; quarantined');
     await owned.stop(); owned = undefined; acp = undefined;
   }
+  function resolveBinding(selected: Selection) {
+    const id = selected.harnessSetup?.id ?? setupId;
+    if (!Object.hasOwn(bindings, id)) throw Error('Unknown local harness binding');
+    const value = bindings[id]!;
+    if (semanticHash(value.conversation ?? null) !== semanticHash(setup.conversation ?? null)) throw Error('Binding cannot switch conversation authority');
+    if (selected.harnessSetup && selected.harnessSetup.fingerprint !== bindingFingerprint(value)) throw Error('Binding definition changed');
+    if (selected.model !== (value.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(value.allowedWorkspaces ?? [value.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
+    return { setup: value, id };
+  }
   function prepareLocal(selected: Selection) {
     selected = selection(selected);
+    const { setup, id } = resolveBinding(selected);
     if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported destination selection');
     // The optional execution credential is absent for a public-only slot: reject before
     // any spawn or source effect. The secret is never regenerated or inferred.
     if (executionSecret === undefined) throw Error('Local agent key removed; this public slot cannot launch; repair locally without resetting assignment');
     try {
-      if (semanticHash(currentSetup()) !== semanticHash(setup)) throw Error('changed');
+      if (semanticHash(currentSetup(id)) !== semanticHash(setup)) throw Error('changed');
     } catch { throw Error('Local agent key/setup missing or changed; repair locally without resetting assignment'); }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
@@ -167,7 +182,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
     const scripts = setup.args.filter(a => isAbsolute(a) && existsSync(a)).map(a => createHash('sha256').update(readFileSync(a)).digest('hex'));
     const workspace = statSync(selected.workspace);
     const { host: _host, ownerSecret: _owner, agentSecret: _agent, ...harness } = setup;
-    return { launch, credential: executionSecret, harnessSetup: { id: setupId, fingerprint: semanticHash(harness) }, token: semanticHash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
+    return { setup, launch, credential: executionSecret, harnessSetup: { id, fingerprint: semanticHash(harness) }, token: semanticHash({ setup, selected, prepared, conversation, scripts, executable: createHash('sha256').update(readFileSync(setup.runner)).digest('hex'), workspace: [workspace.dev, workspace.ino] }) };
   }
   /** Identity-free executable contract check, never conversation admission evidence. */
   async function inspectExecutable(executable: string, args: string[], required: string[]) {
@@ -233,9 +248,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
         // Independent, identity-free prerequisite probe. It receives neither agent
         // signer nor conversation relay/tool configuration. A successful probe is
         // NOT readiness for the future conversation, which must be verified afresh.
-        if (setup.conversation) {
-          await inspectExecutable(setup.conversation.executable, ['--help'], ['--agent-command', '--agent-args', '--agent-owner', '--respond-to', '--model']);
-          if (setup.conversation.replyTool) await inspectExecutable(setup.conversation.replyTool.executable, ['messages', 'send', '--help'], ['--channel', '--reply-to', '--mention']);
+        const selectedSetup = prepared.setup;
+        if (selectedSetup.conversation) {
+          await inspectExecutable(selectedSetup.conversation.executable, ['--help'], ['--agent-command', '--agent-args', '--agent-owner', '--respond-to', '--model']);
+          if (selectedSetup.conversation.replyTool) await inspectExecutable(selectedSetup.conversation.replyTool.executable, ['messages', 'send', '--help'], ['--channel', '--reply-to', '--mention']);
         }
         if (prepared.launch) {
           state.phase = 'transitioning'; save();
@@ -370,7 +386,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
           const candidate = configure(state.configurations, state.selected, m.body, state.revision + 1);
           const selected = candidate.selected;
           if (selected.behavior && hash(profiles.resolve(selected.profile)) !== hash(selected.behavior)) throw Error('Profile revision conflict');
-          if (selected.model !== (setup.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5') || !(setup.allowedWorkspaces ?? [setup.workspace]).includes(selected.workspace)) throw Error('Unsupported selection');
+          resolveBinding(selected);
           if (state.move) finishMove('Move cancelled before grant by save');
           state.configurations = candidate.entries; state.selected = selected; result = 'saved; running configuration unchanged';
         } else if (m.type === 'start' || m.type === 'restart') {
@@ -382,7 +398,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: () => Set
           const phaseBeforePreparation = state.phase;
           const selected = structuredClone(state.selected);
           const prepared = prepareLocal(selected);
-          const { launch } = prepared;
+          const { launch, setup } = prepared;
           if (m.type === 'restart') {
             // Prerequisites are checked without replacing the old ownership handle
             // or passing the signer to a second identity-bearing runtime.
@@ -490,11 +506,13 @@ export async function host(directory: string, url: string) {
   try {
     const entries = installationSlots(directory);
     for (const entry of entries) {
-      slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, () => {
+      slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, (id) => {
         const current = installationSlots(directory).find(e => e.agent === entry.agent);
         if (!current) throw Error('Key removed');
-        return current.setup;
-      }, publish, profiles, entry.setupId));
+        const value = current.bindings[id];
+        if (!value) throw Error('Binding removed');
+        return value;
+      }, publish, profiles, entry.setupId, entry.bindings));
     }
     const setup = entries[0]!.setup;
     // Every slot is hydrated before dialing. Initial WS history may arrive in the

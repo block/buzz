@@ -41,7 +41,11 @@ TUI: `agents`, `operations`, `reconcile`, `retry <number>`, `hosts`, `select <nu
 Save asks for advertised model, workspace and independent behavior profile.
 The fixture has one allowed model. Named behavior profiles are authored remotely
 with `profile-new`, `profiles`, `profile-edit <number>`, and `apply <number|default>`.
-Useful multi-setup selection remains to build.
+Use `binding <local-id>` to save an advertised local binding into the selected
+named candidate, then explicit `restart` to apply it. `show` lists binding IDs
+and definition fingerprints. Private definitions are provisioned locally through
+`addHarnessBinding` (immutable add under the installation lock); integrated local
+CRUD/wizard remains deferred. Legacy configurations keep their original slot binding.
 `show` separates selected-next and immutable actual-run snapshot. Save does not
 restart. `quit` leaves the host running. Reopen TUI to inspect it; `stop` confirms
 the owned process group is absent and leaves the agent assigned to this host.

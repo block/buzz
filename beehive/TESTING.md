@@ -384,3 +384,25 @@ Use this driver only with fresh fixture identities, not secret-bearing owner
 processes. Focused driver/slots 6/6 and final DEFAULT concurrent installed-enabled
 53/53 pass. The prior 50/51 standby timeout did not recur and remains unclassified;
 this is diagnostic coverage, not evidence of a production startup fix.
+
+
+## Explicit reusable host-local bindings (fd5123)
+
+`bindings.test.ts` provisions immutable bindings through the lock-protected local API,
+then uses real host subprocesses, relay and TUI to select B in Alternative while X
+runs A and Y remains byte-identical. Explicit Restart starts the different B runner
+with received selected-profile bytes, same agent identity and immutable A history.
+The target config selects its independently fingerprinted local B while standby has
+no Start authority; Move preserves source behavior. Remote Save/select/replay never
+rewrite the key manifest. Unknown/mismatched binding references and incompatible
+models reject. Lock test denies local mutation and a real competing service Start
+under the same 0700 atomic mkdir lock; manifest remains 0600 and authority unchanged.
+`binding-recovery.test.ts` retains the original named Move recovery tests unchanged
+and adds explicit-B variants: changed prepared definition across target restart,
+immutable preparation/grant replay, stale explicit Start rejection, and late standby
+Save/CAS leaves target assigned stopped without overwriting newer selected-next.
+
+This is deterministic external-runner/profile evidence, not Goose, live provider,
+production protocol or integrated binding CRUD/wizard acceptance. Existing K1 and
+F1/F2 independent reviews stay closed; this new delta has author self-review only.
+Exact full-suite results and iteration failures are in CHECKPOINT and workspace logs.

@@ -196,7 +196,7 @@ async function main() {
     });
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     let profileRows: Profile[] = [];
     try {
@@ -280,15 +280,22 @@ async function main() {
           } catch (error) { console.log(error instanceof Error ? error.message : 'Configuration not submitted'); }
           continue;
         }
-        if (!line.startsWith('apply ') && !['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
+        if (!line.startsWith('binding ') && !line.startsWith('apply ') && !['save','start','restart','stop','move'].includes(line)) { console.log('Use operations/reconcile/retry <number>/hosts/select/show/save/start/restart/stop/move/quit.'); continue; }
         if (Date.now()-Number(current.body.observedAt) > 6000) { console.log('Host stale: status unknown; no action sent.'); continue; }
         let body: Record<string, unknown> = {};
         let action = line;
+        if (line.startsWith('binding ')) {
+          const binding = (current.body.harnessSetups as any[]).find(b => b.id === line.slice(8));
+          if (!binding) { console.log('Unknown binding; use show for advertised harnessSetups.'); continue; }
+          const next = current.body.selectedNext as Record<string, unknown>;
+          body = { ...next, harnessSetup: { id: binding.id, fingerprint: binding.fingerprint }, model: binding.models[0], workspace: binding.workspaces[0] };
+          action = 'save';
+        }
         if (line.startsWith('apply ')) {
           const choice = line.slice(6); const version = profileRows[Number(choice) - 1];
           if (choice !== 'default' && !version) { console.log('Choose a profile version number from profiles, or default.'); continue; }
           const next = current.body.selectedNext as Record<string, unknown>;
-          body = { model: next.model, workspace: next.workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
+          body = { ...(next.harnessSetup ? { harnessSetup: next.harnessSetup } : {}), model: next.model, workspace: next.workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
           action = 'save';
           console.log(`Apply selected-next to ${current.host} agent ${current.agent}: ${version?.name ?? 'default'} ${version?.revision.slice(0, 12) ?? ''}; actual run unchanged until Restart.`);
         }
@@ -297,7 +304,7 @@ async function main() {
           const model = await ui.question('Model: '), workspace = await ui.question('Workspace: '), choice = await ui.question('Behavior profile: ');
           const version = profileRows[Number(choice) - 1];
           if (choice !== 'default' && !version) { console.log('Use default or a version number from profiles.'); continue; }
-          body = { model, workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
+          body = { ...((current.body.selectedNext as any).harnessSetup ? { harnessSetup: (current.body.selectedNext as any).harnessSetup } : {}), model, workspace, profile: version?.revision ?? 'default', ...(version ? { behavior: version } : {}) };
         }
         if (line === 'move') {
           const destinations = [...inventory.values()].filter(m => m.agent === current.agent && m.host !== current.host);
