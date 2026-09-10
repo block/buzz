@@ -5,7 +5,7 @@ import { claudeGuidance } from './claude.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { realpathSync } from 'node:fs';
-import { installationSlots, bindingConfirmation, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
+import { installationSlots, bindingPreview, retireHarnessBinding, addHarnessBinding, addSlot, importSlotKey } from './slots.ts';
 import { bindingFingerprint } from './host.ts';
 import { newKey, publicKey, text } from './protocol.ts';
 import { readPrivate } from './storage.ts';
@@ -67,10 +67,11 @@ export async function localSetup(directory: string): Promise<void> {
     if (!Object.hasOwn(first.bindings, id)) throw Error('Unknown local binding');
     const setup = first.bindings[id]!, fingerprint = bindingFingerprint(setup);
     if (first.retiredBindings?.[id]) throw Error('Binding retired; choose an available source');
-    const confirmation = action === 'replace-binding' || action === 'retire-binding' ? bindingConfirmation(directory) : undefined;
-    if (action === 'replace-binding' || action === 'retire-binding') {
-      for (const entry of entries) {
-        const state = readPrivate(entry.path) as { selected: { harnessSetup?: { id: string } }; configurations?: Record<string, { harnessSetup?: { id: string } }> };
+    const preview = action === 'replace-binding' || action === 'retire-binding' ? bindingPreview(directory) : undefined;
+    const confirmation = preview?.confirmation;
+    if (preview) {
+      for (const entry of preview.entries) {
+        const state = entry.state as { selected: { harnessSetup?: { id: string } }; configurations?: Record<string, { harnessSetup?: { id: string } }> };
         const affected = Object.entries(state.configurations ?? { default: state.selected }).filter(([, selection]) => (selection.harnessSetup?.id ?? entry.setupId) === id).map(([name]) => name);
         console.log(`Agent ${entry.agent}: affected choices ${affected.join(', ') || 'none'}; selected ${(state.selected.harnessSetup?.id ?? entry.setupId) === id}. History retained; no automatic selection/Restart.`);
       }

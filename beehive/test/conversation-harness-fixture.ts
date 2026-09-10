@@ -58,7 +58,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     tool = m.params.mcpServers[0]; selected = model;
     result = { sessionId, ...(mode === 'missing-model' ? {} : { models: { currentModelId: mode === 'wrong-model' ? 'other' : model, availableModels: [{ modelId: model }] } }) };
   }
-  else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? 'goose' : 'buzz-agent' } };
+  else if (m.method === 'initialize') result = { protocolVersion: 1, agentInfo: { name: claude ? (mode === 'missing-native' ? 'claude-code-acp' : '@agentclientprotocol/claude-agent-acp') : goose ? (mode === 'missing-native' ? 'unknown-adapter' : 'goose') : 'buzz-agent' } };
   else if (m.method === 'session/new' && claude) {
     if (mode === 'auth-rejected') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'fixture auth rejected' } }); continue; }
     sessionId = `claude-${process.pid}-${++sessionNumber}`; gooseSessions.add(sessionId);
@@ -69,6 +69,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   else if (m.method === 'session/new') { if (goose) sessionId = `goose-${process.pid}-${++sessionNumber}`; if (goose) gooseSessions.add(sessionId); tool = m.params.mcpServers[0]; selected = goose ? model! : ''; result = goose ? { sessionId, ...nativeModel() } : { sessionId, models: { currentModelId: 'default', availableModels: [] } }; }
   else if (goose && m.method === '_goose/unstable/session/system-prompt/set') {
+    if (mode === 'missing-profile') { send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'unsupported' } }); continue; }
     if (m.params.sessionId !== sessionId || m.params.mode !== 'set' || m.params.key !== 'buzz' || typeof m.params.text !== 'string') throw Error('Invalid Goose prompt request');
     writeFileSync('received-system-instructions', m.params.text); result = {};
   }

@@ -1926,3 +1926,41 @@ Implementation exists; strict passes; user-shaped installed validation still pen
 Closed Codex/Claude/NORMAL/CLI reviews remain closed in their prior scopes; historical
 broker/tool failures remain unclassified. Full remaining provider/mesh/compute and
 live-vendor gaps are not narrowed by source-shaped fixture claims.
+
+## Recovery fcd99859 — recovered CODE, next executable step
+
+Recovered HEAD 811ba471d2bb5144bb9c9faf7b37c1b42e189b32 (one local preset
+commit after published 8bf1c7d9), plus ten modified TS files, custom-acp.test.ts
+and PRESET_CUSTOM_SOURCE_8D6D.md. Preserved all work. Surviving public
+PRESET_CUSTOM_8D6D logs show strict iteration 8, diagnostics 5/5 and custom
+installed focused 1/1 (19.217s); no surviving final-full log. Earlier iteration
+failures remain preserved, not erased or reclassified. Binding review R1 remains
+OPEN: local-setup still pairs cached entries with a later confirmation hash.
+Next executable step: capture affected journal preview and fence in one short
+host.lock snapshot, reuse for both replacement and retirement, and turn the
+reviewer's real-wizard sibling repro into a safety regression. Then focused
+binding tests, strict, and one default concurrent installed-enabled full gate.
+Prior Codex/Claude/NORMAL/CLI scoped reviews remain CLOSED. Historical broker/tool
+report COMPLETE, causes UNCLASSIFIED. No vendor authentication inferred.
+
+## Recovery fcd99859 — R1 fixed candidate before final gate
+
+R1 implementation FIXED, focused VERIFIED: shared replacement/retirement preview
+now captures entries + journal state and hashes those exact objects under a short
+host.lock; no lock spans human input. Commit validates the same snapshot under
+its existing mutation lock. Four actual-wizard regressions adapt the reviewer's
+first-prompt sibling repro for both actions, showing the added affected sibling,
+accepting unchanged confirmation, and rejecting post-preview additions inertly.
+Old definition fingerprints and both existing journals remain byte-identical;
+existing stopped/Move/retirement guards unchanged. Strict passes; binding focused
+11/11, 13.020s, no skip/failure. This closes the implementation finding, not an
+independent re-review claim.
+
+Recovered custom work retained, including private direct structured argv transport,
+Goose-native initialize/exact fresh model/native-profile acknowledgement checks,
+actual custom fixture installed journey and ten diagnostic-only presets. Reviewed
+source notes against pinned upstream preset definitions and consumers; no arbitrary
+ACP/Codex-native fallback, vendor readiness claim, login or install execution.
+Next: ONE final strict + FULL DEFAULT concurrent installed-enabled suite on this
+candidate; source/binary identities and raw outcome in RECOVERY_FCD9. Prior focused
+custom 1/1 and diagnostics 5/5 are surviving evidence, not repeated-to-green tests.

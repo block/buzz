@@ -183,6 +183,7 @@ export function addHarnessBinding(directory: string, id: string, value: Harness,
     const raw = object(value);
     if (['host', 'ownerSecret', 'agentSecret'].some(k => Object.hasOwn(raw, k))) throw Error('Binding cannot carry identity');
     const setup = validateSetup({ ...raw, host: i.host, ownerSecret: i.ownerSecret });
+    if (setup.custom?.contract === 'goose-native') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'goose', provider: setup.gooseProvider, custom: setup.custom, model: setupModels(setup)[0]! });
     if (setup.mode === 'codex') prepareAgent({ executable: setup.runner, args: setup.args, workspace: setup.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), databricksHost: '', harness: 'codex', codex: setup.codex, model: setupModels(setup)[0]! });
     // Conversation authority is installation-owned, not a binding selector.
     if (value.conversation && semanticHash(value.conversation) !== semanticHash(i.conversation ?? i.setups.default?.conversation ?? null)) throw Error('Binding cannot change conversation authority');
@@ -249,7 +250,20 @@ export function retireHarnessBinding(directory: string, source: { id: string; fi
   } finally { rmdirSync(lock); }
 }
 
-/** Opaque confirmation fence for the local wizard's affected choices and authority. */
+function bindingSnapshot(directory: string) {
+  return installationSlots(directory).map(entry => ({ agent: entry.agent, setupId: entry.setupId, state: readPrivate(entry.path) }));
+}
+
+/** Capture preview and fence together under the mutation lock, never during human input. */
+export function bindingPreview(directory: string) {
+  const lock = join(directory, 'host.lock'); mkdirSync(lock, { mode: 0o700 });
+  try {
+    const entries = bindingSnapshot(directory);
+    return { entries, confirmation: semanticHash(entries) };
+  } finally { rmdirSync(lock); }
+}
+
+/** Opaque confirmation fence; mutation callers already hold the startup lock. */
 export function bindingConfirmation(directory: string): string {
-  return semanticHash(installationSlots(directory).map(entry => ({ agent: entry.agent, state: readPrivate(entry.path) })));
+  return semanticHash(bindingSnapshot(directory));
 }

@@ -20,10 +20,10 @@ import { profileRevision } from '../src/profiles.ts';
 import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
 
 // Explicitly opt-in installed executable; never opens an owner profile or provider.
-for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false, true]) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
-  const goose = kind === 'goose', claude = kind === 'claude', codex = kind === 'codex';
+for (const kind of ['goose', 'claude', 'codex', 'custom']) for (const converting of (kind === 'custom' ? [false] : [false, true])) test(`${kind} normal wizard + TUI Start/Restart + host CLI service subprocess + installed CLI signed replies (${converting ? 'selected diagnostic B conversion and immutable replacement' : 'initial normal default'})`, { skip: !process.env.BEEHIVE_REAL_BUZZ_ACP }, async t => {
+  const custom = kind === 'custom', goose = kind === 'goose' || custom, claude = kind === 'claude', codex = kind === 'codex';
   const title = codex ? 'Codex' : 'Claude';
-  const model = `${kind}-model-a`;
+  const model = goose ? 'goose-model-a' : `${kind}-model-a`;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bh-installed-')));
   writeFileSync(join(dir, 'mode'), 'ok');
   const ownerSecret = newKey(); const owner = publicKey(ownerSecret);
@@ -33,12 +33,20 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
   writeFileSync(keyFile, `fixture-${codex ? 'codex' : 'claude'}-private-key`, { mode: 0o600 });
   const runner = join(dir, codex ? 'codex-acp' : claude ? 'claude-agent-acp' : 'goose');
   writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (${!goose ? 'process.argv.length !== 2' : "process.argv[2] !== 'acp'"}) throw Error('adapter argv mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
+  const customFile = join(dir, 'custom.json');
+  const literal = `$(touch ${join(dir, 'shell-was-invoked')}); a,b`;
+  if (custom) {
+    writePrivate(customFile, { id: 'fixture-custom', label: 'CUSTOM Goose-native TS fixture (not a vendor)', executable: runner,
+      args: ['acp', literal], env: { CUSTOM_PRIVATE: 'owner-only-custom-value' }, installHint: 'Fixture only', installInstructionsUrl: '', contract: 'goose-native' });
+    writeFileSync(runner, `#!${realpathSync(process.execPath)}\nif (process.argv.length !== 4 || process.argv[2] !== 'acp' || process.argv[3] !== ${JSON.stringify(literal)} || process.env.CUSTOM_PRIVATE !== 'owner-only-custom-value') throw Error('custom argv/env mismatch');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/conversation-harness-fixture.ts')).href)});\n`, { mode: 0o700 });
+  }
   const http = createServer();
+  t.after(async () => { http.closeAllConnections(); if (http.listening) await new Promise<void>(resolve => http.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const address = http.address(); assert.ok(address && typeof address !== 'string');
   const setupOutput = await terminal(['setup', installation, identity], [
-    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: codex ? '5' : claude ? '4' : '3' },
-    { prompt: codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner },
+    { prompt: 'Host name: ', answer: 'journey' }, { prompt: 'Setup [', answer: custom ? '6' : codex ? '5' : claude ? '4' : '3' },
+    ...(custom ? [{ prompt: 'Absolute owner-only custom definition JSON file: ', answer: customFile }] : [{ prompt: codex ? 'Absolute installed codex-acp adapter: ' : claude ? 'Absolute installed claude-agent-acp adapter: ' : 'Absolute installed Goose executable (runs acp): ', answer: runner }]),
     ...(!goose ? [
       { prompt: `Absolute installed ${kind} CLI: `, answer: realpathSync(process.execPath) },
       { prompt: `Absolute owner-only local ${codex ? 'OPENAI' : 'ANTHROPIC'}_API_KEY file`, answer: keyFile },
@@ -83,6 +91,8 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
     { prompt: !goose ? `Save NEW ${title} binding only` : 'Save NEW Goose binding only', answer: 'yes' },
   ]);
   assert.ok(!setupOutput.includes(ownerSecret));
+  if (custom) { assert.ok(!setupOutput.includes('owner-only-custom-value')); assert.ok(!setupOutput.includes(literal)); }
+
   // Lifecycle decisions come from signed public inventory, not a private journal.
   let inventory: Message | undefined;
   const state = () => {
@@ -260,6 +270,10 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
     assert.ok(authenticated, 'installed executable must authenticate with the provisioned key');
     assert.ok(subscriptions > 0, 'installed executable must enter subscription loop');
     const evidence = await session.verify();
+    if (custom) {
+      for (const privateValue of ['owner-only-custom-value', literal, customFile, entry.setup.serviceHome!]) assert.ok(!JSON.stringify(inventory).includes(privateValue), 'custom local input never advertised');
+      assert.ok(!existsSync(join(dir, 'shell-was-invoked')), 'structured argv never invokes shell');
+    }
     if (!goose) {
       assert.ok(existsSync(join(dir, `${kind}-env-checked`)));
       assert.ok(!readFileSync(join(dir, `${kind}-rpc-methods`), 'utf8').includes('session/set_model'));
@@ -326,12 +340,14 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
       const rejected = message('restart', 'journey', agent, state().revision, {});
       assert.notEqual((await request(rejected)).body.result, 'accepted');
       assert.deepEqual(state().actual, actual, 'wrong model preflight preserves actual');
-      if (!goose) {
-        for (const failure of ['missing-native', 'auth-rejected', ...(codex ? ['wrong-protocol', 'missing-model'] : [])]) {
+      if (!goose || custom) {
+        for (const failure of ['missing-native', ...(!custom ? ['auth-rejected'] : ['missing-profile']), ...(codex ? ['wrong-protocol', 'missing-model'] : [])]) {
           writeFileSync(join(dir, 'mode'), failure);
           assert.notEqual((await request(message('restart', 'journey', agent, state().revision, {}))).body.result, 'accepted');
           assert.deepEqual(state().actual, actual);
         }
+      }
+      if (!goose) {
         rmSync(keyFile);
         const failedAuth = await request(message('restart', 'journey', agent, state().revision, {}));
         assert.match(String(failedAuth.body.result), new RegExp(`${title} API key prerequisite`));
@@ -348,9 +364,9 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
       assert.equal(state().phase, 'stopped'); assert.equal(state().actual, null);
       assert.deepEqual(readFileSync(sibling.path), originalY);
       assert.deepEqual(readFileSync(join(installation, 'setup.json')), convertedManifest);
-      if (codex) {
+      if (codex || custom) {
         await h.close();
-        const methodsBefore = readFileSync(join(dir, 'codex-rpc-methods'));
+        const methodsBefore = readFileSync(join(dir, custom ? 'goose-rpc-methods' : 'codex-rpc-methods'));
         const historyBefore = readFileSync(entry.path);
         await terminal(['remove-agent-key', installation, agent], [{ prompt: 'Remove this installation', answer: 'yes' }]);
         assert.deepEqual(readFileSync(entry.path), historyBefore);
@@ -362,7 +378,7 @@ for (const kind of ['goose', 'claude', 'codex']) for (const converting of [false
           assert.match(String(receipt.body.result), /key removed/);
         }
         assert.equal((await request(message('stop', 'journey', agent, state().revision, {}))).body.result, 'accepted');
-        assert.deepEqual(readFileSync(join(dir, 'codex-rpc-methods')), methodsBefore, 'missing key cannot spawn another adapter');
+        assert.deepEqual(readFileSync(join(dir, custom ? 'goose-rpc-methods' : 'codex-rpc-methods')), methodsBefore, 'missing key cannot spawn another adapter');
         assert.deepEqual(readFileSync(join(installation, 'setup.json')), keylessManifest, 'no key recreation');
         assert.deepEqual(readFileSync(sibling.path), originalY);
       }

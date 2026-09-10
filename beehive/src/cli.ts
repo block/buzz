@@ -205,6 +205,7 @@ async function main() {
     const entries = installationSlots(resolve(text(args[0])));
     const setup = args[1] ? entries[0]!.bindings[text(args[1])] : entries[0]!.setup;
     if (!setup) throw Error('Unknown local binding');
+    if (setup.mode === 'diagnostic-acp') { console.log('Setup/diagnostic only: authentication unverified, no model/native profile contract. Configure locally as the service user; no login/probe was run.'); return; }
     if (setup.mode === 'codex') {
       console.log(codexGuidance);
       console.log(`Dedicated HOME=${setup.serviceHome}; CODEX_HOME=${setup.configDirectory}. Save/Stop need no provider login.`); return;
@@ -359,6 +360,7 @@ async function main() {
         if (line.startsWith('binding ')) {
           const binding = (current.body.harnessSetups as any[]).find(b => b.id === line.slice(8));
           if (binding?.availability === 'retired') { console.log('Binding retired; choose an available binding.'); continue; }
+          if (binding?.availability === 'diagnostic-only') { console.log(binding.reason); continue; }
           if (!binding) { console.log('Unknown binding; use show for advertised harnessSetups.'); continue; }
           const next = current.body.selectedNext as Record<string, unknown>;
           body = { ...next, harnessSetup: { id: binding.id, fingerprint: binding.fingerprint }, model: binding.models[0], workspace: binding.workspaces[0] };

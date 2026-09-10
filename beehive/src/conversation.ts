@@ -24,8 +24,9 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
   const url = new URL(input.relay);
   if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw Error('Invalid conversation relay URL');
   if (url.protocol === 'ws:' && !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) throw Error('Non-loopback conversation transport requires TLS');
-  // Upstream uses comma-delimited arguments, not shell parsing. Reject lossy encoding.
-  if (prepared.plan.args.some(a => a.includes(',') || a.includes('\0') || !a.length)) throw Error('ACP arguments cannot contain commas, NUL or empty values');
+  // Configured argv goes directly to the owned broker child as an array. Only the
+  // fixed shim argv uses the installed runtime's historical comma transport.
+  if (prepared.plan.args.some(a => a.includes('\0'))) throw Error('ACP arguments cannot contain NUL');
   if (input.authTag !== undefined && (typeof input.authTag !== 'string' || input.authTag.length > 16384 || !input.authTag.length)) throw Error('Invalid local owner attestation');
   return Object.freeze({
     replyTool: input.replyTool ? prepareReplyTool(input.replyTool) : undefined,
@@ -42,8 +43,6 @@ export function prepareConversation(input: ConversationSetup, agent: AgentLaunch
       BUZZ_RELAY_URL: url.href,
       BUZZ_ACP_AGENT_OWNER: owner,
       ...(input.authTag === undefined ? {} : { BUZZ_AUTH_TAG: input.authTag }),
-      BUZZ_ACP_AGENT_COMMAND: prepared.plan.executable,
-      BUZZ_ACP_AGENT_ARGS: prepared.plan.args.join(','),
       ...((prepared.plan.harness === 'claude' || prepared.plan.harness === 'codex') ? {} : { BUZZ_ACP_MODEL: prepared.plan.model }),
       ...(prepared.plan.instructions === undefined ? {} : { BUZZ_ACP_SYSTEM_PROMPT: prepared.plan.instructions }),
       BUZZ_ACP_MCP_COMMAND: '',

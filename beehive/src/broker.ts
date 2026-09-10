@@ -158,6 +158,7 @@ export class ConversationSession {
     if (tool) this.tools.push(tool);
     const pending = new Map<string | number, Pending>();
     const sessions = new Set<string>();
+    const customProfiles = new Set<string>();
     const modelConfigs = new Set<string>(['model']);
     const prompts = new Map<string, { id: string | number; hash: ReturnType<typeof createHash>; text: boolean; cancelled: boolean }>();
     this.cancellations.push(() => {
@@ -179,6 +180,12 @@ export class ConversationSession {
       } else if (msg.id === undefined || (Object.hasOwn(msg, 'result') === Object.hasOwn(msg, 'error'))) throw Error();
       if (!fromHarness && msg.method) {
         const p = msg.params;
+        if (this.prepared.plan.custom) {
+          if (['session/load', 'session/resume'].includes(msg.method)) throw Error('Custom contract requires fresh session/Restart');
+          if (msg.method === '_goose/unstable/session/system-prompt/set' && this.prepared.plan.instructions !== undefined) {
+            if (p?.mode !== 'set' || p.key !== 'buzz' || typeof p.text !== 'string' || !p.text.includes(this.prepared.plan.instructions)) throw Error('Custom exact native profile missing');
+          }
+        }
         if (this.prepared.plan.harness === 'codex') {
           if (msg.method === 'initialize') p.protocolVersion = 2;
           if (['session/load', 'session/resume', 'session/set_model', 'session/set_config_option'].includes(msg.method)) throw Error('Codex requires fresh session/Restart');
@@ -214,6 +221,7 @@ export class ConversationSession {
         if (msg.method === 'session/set_config_option' && modelConfigs.has(p?.configId) && p.value !== this.prepared.plan.model) throw Error();
         if (['session/set_model', 'session/set_config_option'].includes(msg.method)) sessions.delete(p?.sessionId);
         if (msg.method === 'session/prompt') {
+          if (this.prepared.plan.custom && this.prepared.plan.instructions !== undefined && !customProfiles.has(p?.sessionId)) throw Error('Custom native profile not acknowledged');
           if (!sessions.has(p?.sessionId) || prompts.has(p.sessionId) || msg.id === undefined) throw Error();
           if (tool && prompts.size) throw Error();
           tool?.setActive(true);
@@ -233,6 +241,10 @@ export class ConversationSession {
         const request = pending.get(msg.id);
         if (!request) throw Error();
         pending.delete(msg.id);
+        if (this.prepared.plan.custom && request.method === '_goose/unstable/session/system-prompt/set') {
+          if (msg.error !== undefined || !validID(request.params?.sessionId) || customProfiles.size >= 128) throw Error('Custom native profile rejected');
+          customProfiles.add(request.params.sessionId);
+        }
         if (request.method === 'initialize' && this.prepared.plan.custom) {
           if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== 'goose') throw Error('Custom Goose-native contract unavailable');
         }

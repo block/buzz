@@ -17,13 +17,19 @@ export function validateCustom(value: unknown): CustomAcp {
     if (!/^[A-Z_][A-Z0-9_]{0,99}$/.test(k) || /^(BUZZ_|GOOSE_|CODEX_|ANTHROPIC_|CLAUDE_|NODE_|LD_|DYLD_)/.test(k) || ['HOME','PATH','SHELL','ENV','BASH_ENV','NODE_OPTIONS','OPENAI_API_KEY'].includes(k) || !string(v, 8192)) throw Error('Custom env contains reserved/invalid key or value');
   }
   if (!string(d.installHint, 4096) || !string(d.installInstructionsUrl, 2048) || !['diagnostic','goose-native'].includes(d.contract)) throw Error('Unsupported custom contract or setup hints');
-  if (d.installInstructionsUrl) { const u = new URL(d.installInstructionsUrl); if (u.protocol !== 'https:' || u.username || u.password) throw Error('Setup documentation must be credential-free HTTPS'); }
+  if (d.installInstructionsUrl) {
+    let u: URL; try { u = new URL(d.installInstructionsUrl); } catch { throw Error('Invalid setup documentation URL'); }
+    if (u.protocol !== 'https:' || u.username || u.password) throw Error('Setup documentation must be credential-free HTTPS');
+  }
   if (Buffer.byteLength(JSON.stringify(d)) > 65536) throw Error('Custom definition too large');
   return structuredClone(d);
 }
 /** Only fresh owner-controlled regular 0600 input; no credential contents displayed. */
 export function readCustom(path: string): CustomAcp {
+  if (!isAbsolute(path)) throw Error('Custom definition file must be absolute');
   const s = lstatSync(path);
   if (s.size > 65536 || (process.getuid && s.uid !== process.getuid())) throw Error('Custom input must be bounded and owned by the service user');
-  return validateCustom(readPrivate(path));
+  let value: unknown;
+  try { value = readPrivate(path); } catch (e) { if (e instanceof SyntaxError) throw Error('Malformed custom JSON (contents withheld)'); throw e; }
+  return validateCustom(value);
 }

@@ -30,8 +30,8 @@ test('external buzz-acp launch contract preserves identity and rejects lossy/uns
     assert.equal(p.env.BUZZ_ACP_MODEL, model);
     assert.equal(p.env.BUZZ_AGENT_MODEL, model);
     assert.equal(p.env.BUZZ_ACP_RESPOND_TO, 'owner-only');
-    assert.equal(p.env.BUZZ_ACP_AGENT_COMMAND, executable);
-    assert.equal(p.env.BUZZ_ACP_AGENT_ARGS, agent(dir).args.join(','));
+    assert.equal(p.env.BUZZ_ACP_AGENT_COMMAND, undefined);
+    assert.equal(p.env.BUZZ_ACP_AGENT_ARGS, undefined, 'broker owns shim transport; configured argv is never serialized');
     assert.equal(p.env.BUZZ_RELAY_URL, 'wss://conversation.invalid/');
     assert.equal(Object.hasOwn(p.env, 'DATABRICKS_TOKEN'), false);
     assert.equal(Object.hasOwn(p.env, 'BUZZ_ACP_REQUIRED_MODEL'), false);
@@ -41,7 +41,8 @@ test('external buzz-acp launch contract preserves identity and rejects lossy/uns
     for (const relay of ['ws://example.com', 'wss://user:password@example.com', 'https://example.com', 'wss://example.com/?secret=x']) {
       assert.throws(() => prepareConversation({ ...setup, relay }, agent(dir), secret, owner));
     }
-    for (const args of [['a,b'], [''], ['a\0b']]) assert.throws(() => prepareConversation(setup, { ...agent(dir), args }, secret, owner));
+    for (const args of [['a,b'], ['']]) assert.doesNotThrow(() => prepareConversation(setup, { ...agent(dir), args }, secret, owner));
+    for (const args of [['a\0b']]) assert.throws(() => prepareConversation(setup, { ...agent(dir), args }, secret, owner));
     const summary = JSON.stringify(conversationSummary(setup));
     for (const value of [secret, setup.authTag, executable]) assert.ok(!summary.includes(value));
     assert.match(summary, /unverified/);

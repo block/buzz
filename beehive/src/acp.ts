@@ -30,6 +30,10 @@ export function prepareAgent(input: AgentLaunch) {
   }
   accessSync(plan.executable, constants.X_OK);
   for (const p of [plan.workspace, plan.home, plan.configDirectory]) if (!statSync(p).isDirectory()) throw Error('Harness setup directory unavailable');
+  if (plan.custom) {
+    const d = validateCustom(plan.custom);
+    if (plan.harness !== 'goose' || d.contract !== 'goose-native' || d.executable !== plan.executable || JSON.stringify(d.args) !== JSON.stringify(plan.args)) throw Error('Unsupported custom launch contract');
+  }
   if (plan.harness === 'codex') {
     identifier(plan.model);
     if (plan.args.length || !plan.codex || !plan.codex.models.includes(plan.model) || plan.home === plan.configDirectory) throw Error('Codex requires zero-argument adapter, approved model and distinct HOME/CODEX_HOME');
@@ -39,10 +43,6 @@ export function prepareAgent(input: AgentLaunch) {
     identifier(plan.model);
     if (plan.args.length || !plan.claude) throw Error('Claude requires a zero-argument ACP adapter and local CLI/key binding');
     return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(claudeEnvironment(plan.claude, plan.home, plan.model)), cliExecutableHash: hash(readFileSync(plan.claude.cli)) });
-  }
-  if (plan.custom) {
-    const d = validateCustom(plan.custom);
-    if (plan.harness !== 'goose' || d.contract !== 'goose-native' || d.executable !== plan.executable || JSON.stringify(d.args) !== JSON.stringify(plan.args)) throw Error('Unsupported custom launch contract');
   }
   if (plan.harness === 'goose') {
     identifier(plan.provider);

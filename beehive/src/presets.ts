@@ -12,7 +12,8 @@ export const presets = [
     "env": {},
     "installInstructionsUrl": "https://github.com/svkozak/pi-acp",
     "installHint": "Install Pi with npm install -g --ignore-scripts @earendil-works/pi-coding-agent. Install the Pi ACP adapter with npm install -g pi-acp.",
-    "underlyingCli": "pi"
+    "underlyingCli": "pi",
+    "underlyingCliInstallInstructionsUrl": "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent"
   },
   {
     "id": "devin",
@@ -89,7 +90,7 @@ export const presets = [
     "args": [],
     "env": {},
     "installInstructionsUrl": "https://github.com/tao12345666333/amp-acp",
-    "installHint": "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
+    "installHint": "Install the Amp CLI and make sure amp is on your PATH. Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
     "underlyingCli": "amp"
   },
   {
@@ -110,8 +111,7 @@ export const presets = [
     ],
     "env": {},
     "installInstructionsUrl": "https://docs.openclaw.ai/start/getting-started",
-    "installHint": "Install the amp-acp npm adapter.",
-    "underlyingCli": "amp"
+    "installHint": "Buzz talks to OpenClaw through openclaw acp, which requires the OpenClaw Gateway daemon. Install both using the setup guide. Tools execute inside Gateway, not the host child: child BUZZ_* environment does NOT automatically reach Gateway. Beehive does not configure Gateway credentials."
   }
 ] as const;
 /** Process-free discovery in explicit local PATH only; never a login shell. */
@@ -135,6 +135,6 @@ export function discoverPresets(path: string = process.env.PATH ?? '') {
 }
 /** Local display only: no execution, install scripts or remote credentials. */
 export function showPresets(): void {
-  for (const p of discoverPresets()) console.log(`${p.id} | ${p.label} | ${p.availability} | ${p.command} ${JSON.stringify(p.args)} | env {}\n${p.installHint} ${p.installInstructionsUrl}\n${p.reason}`);
+  for (const p of discoverPresets()) console.log(`${p.id} | ${p.label} | ${p.availability} | ${p.command} ${JSON.stringify(p.args)} | env {}\n${p.installHint} ${p.installInstructionsUrl}${'underlyingCliInstallInstructionsUrl' in p ? ` CLI: ${p.underlyingCliInstallInstructionsUrl}` : ''}\n${p.reason}`);
   console.log('Sign in/configure locally as the dedicated host service user, not Desktop HOME. No login or ACP process was launched.');
 }
