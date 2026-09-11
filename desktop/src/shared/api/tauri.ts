@@ -16,6 +16,8 @@ import type {
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
+  AgentReadinessDraft,
+  AgentReadinessEvaluation,
   ManagedAgentBackend,
   RelayAgent,
   RelayMember,
@@ -940,6 +942,16 @@ export async function getAgentConfigSurface(
   return invokeTauri<RuntimeConfigSurface>("get_agent_config_surface", {
     pubkey,
   });
+}
+
+/** Evaluate an unsaved new-agent config or exact saved-agent patch. */
+export async function evaluateAgentReadinessDraft(
+  draft: AgentReadinessDraft,
+): Promise<AgentReadinessEvaluation> {
+  return invokeTauri<AgentReadinessEvaluation>(
+    "evaluate_agent_readiness_draft",
+    { draft },
+  );
 }
 
 export async function putAgentSessionConfig(

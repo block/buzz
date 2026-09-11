@@ -3,6 +3,39 @@
 
 use crate::managed_agents::{managed_agent_avatar_url, BackendKind, RelayMeshConfig};
 
+pub(crate) struct CreatedInferenceConfig {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub relay_mesh: Option<RelayMeshConfig>,
+}
+
+/// Normalize the provider/model fields written by Create.
+///
+/// Kept as one pure projection so readiness preview and persistence cannot
+/// disagree about implicit provider defaults such as relay-mesh's `auto` model.
+pub(crate) fn resolve_created_inference_config(
+    provider: Option<&str>,
+    model: Option<&str>,
+    relay_mesh: Option<RelayMeshConfig>,
+) -> CreatedInferenceConfig {
+    let provider = provider.and_then(trim_to_optional_string);
+    let mut model = model.and_then(trim_to_optional_string);
+    if provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) && model.is_none()
+    {
+        model = Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string());
+    }
+    let relay_mesh = if provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) {
+        model.clone().map(|model_ref| RelayMeshConfig { model_ref })
+    } else {
+        relay_mesh
+    };
+    CreatedInferenceConfig {
+        provider,
+        model,
+        relay_mesh,
+    }
+}
+
 pub(super) fn normalize_relay_mesh(
     config: Option<&RelayMeshConfig>,
     backend: &BackendKind,

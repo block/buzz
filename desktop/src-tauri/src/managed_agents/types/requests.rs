@@ -211,7 +211,7 @@ pub struct UpdateManagedAgentRequest {
     #[serde(default)]
     pub name: Option<String>,
     /// Absent = don't touch. null = clear to agent default. "id" = set.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::util::double_option")]
     pub model: Option<Option<String>>,
     #[serde(default)]
     pub system_prompt: Option<Option<String>>,

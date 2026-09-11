@@ -1,5 +1,9 @@
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
+
+#[path = "agent_config_readiness.rs"]
+mod readiness_preview;
+pub use readiness_preview::{AgentReadinessDraft, AgentReadinessEvaluation};
 
 use crate::{
     app_state::AppState,
@@ -245,6 +249,38 @@ pub fn get_baked_build_env() -> Vec<BakedEnvEntry> {
             }
         })
         .collect()
+}
+
+/// Evaluate a proposed managed-agent configuration without persisting it.
+///
+/// The request explicitly distinguishes a complete new-agent proposal from a
+/// patch to one exact saved agent. Projection reuses the production create,
+/// update, effective-config, harness, and readiness owners.
+#[tauri::command]
+pub async fn evaluate_agent_readiness_draft<R: tauri::Runtime>(
+    draft: AgentReadinessDraft,
+    app: tauri::AppHandle<R>,
+    _state: State<'_, AppState>,
+) -> Result<AgentReadinessEvaluation, String> {
+    tokio::task::spawn_blocking(move || {
+        // Snapshot persisted inputs while holding the store lock; readiness may
+        // probe an external CLI and therefore runs only after this scope exits.
+        let (records, definitions, global) = {
+            let state = app.state::<AppState>();
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            (
+                load_managed_agents(&app)?,
+                load_personas(&app)?,
+                crate::managed_agents::load_global_agent_config(&app)?,
+            )
+        };
+        readiness_preview::evaluate_draft(draft, &records, &definitions, &global)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 /// Get the full config surface for a managed agent.

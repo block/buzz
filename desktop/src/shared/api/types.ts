@@ -286,6 +286,53 @@ export type ManagedAgentRuntimeLifecycle =
   | "failed"
   | "stopped";
 
+export type AgentReadinessRequirement =
+  | { surface: "normalized_field"; field: string }
+  | { surface: "env_key"; key: string }
+  | {
+      surface: "cli_login";
+      probe_args: string[];
+      setup_copy: string;
+      availability: AcpAvailabilityStatus;
+    }
+  | {
+      surface: "cli_config_invalid";
+      probe_args: string[];
+      setup_copy: string;
+      diagnostic: string;
+    }
+  | { surface: "git_bash" }
+  | { surface: "missing_binary"; command: string };
+
+export type AgentReadinessEvaluation = {
+  ready: boolean;
+  requirements: AgentReadinessRequirement[];
+};
+
+export type AgentReadinessDraft =
+  | {
+      kind: "new";
+      config: {
+        /** Same authoritative harness command submitted by Create. */
+        agentCommand?: string;
+        model?: string;
+        provider?: string;
+        envVars?: Record<string, string>;
+      };
+    }
+  | {
+      kind: "existing";
+      config: {
+        pubkey: string;
+        /** Same command or inheritance sentinel submitted by Save. */
+        agentCommand?: string;
+        harnessOverride?: boolean;
+        model?: string | null;
+        provider?: string | null;
+        envVars?: Record<string, string>;
+      };
+    };
+
 export type ManagedAgentRuntimeStatus = {
   pubkey: string;
   /** Exact submitted descriptor, present only on startup reconcile results. */

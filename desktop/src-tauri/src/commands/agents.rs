@@ -13,8 +13,8 @@ use crate::{
         save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
         stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
         validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::relay_ws_url_with_override,
     util::now_iso,
@@ -56,8 +56,10 @@ pub(super) fn summarize_from_disk(
 }
 
 #[path = "agents_create_fields.rs"]
-mod create_fields;
-use create_fields::{normalize_relay_mesh, resolve_created_avatar_url, trim_to_optional_string};
+pub(super) mod create_fields;
+use create_fields::{
+    normalize_relay_mesh, resolve_created_avatar_url, resolve_created_inference_config,
+};
 
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record(
@@ -579,15 +581,13 @@ pub async fn create_managed_agent(
         let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
         let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
-        let effective_provider = snapshot_provider
-            .or_else(|| input.provider.as_deref().and_then(trim_to_optional_string));
-        let mut effective_model =
-            snapshot_model.or_else(|| input.model.as_deref().and_then(trim_to_optional_string));
-        if effective_provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
-            && effective_model.is_none()
-        {
-            effective_model = Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string());
-        }
+        let inference = resolve_created_inference_config(
+            snapshot_provider.as_deref().or(input.provider.as_deref()),
+            snapshot_model.as_deref().or(input.model.as_deref()),
+            relay_mesh.clone(),
+        );
+        let effective_provider = inference.provider;
+        let effective_model = inference.model;
 
         // Mint-time behavioral quad: explicit input wins, then the linked
         // definition's NIP-AP defaults, then client defaults. The ONLY parse
@@ -677,15 +677,7 @@ pub async fn create_managed_agent(
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
-            relay_mesh: if effective_provider.as_deref()
-                == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
-            {
-                effective_model
-                    .clone()
-                    .map(|model_ref| RelayMeshConfig { model_ref })
-            } else {
-                relay_mesh.clone()
-            },
+            relay_mesh: inference.relay_mesh,
             effort_level: None,
         };
 

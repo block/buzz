@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::AgentDefinition;
+use crate::managed_agents::{AgentDefinition, RelayMeshConfig};
 
 fn bare_agent_record(
     persona_id: Option<&str>,
@@ -268,6 +268,26 @@ fn deploy_resolver_returns_none_for_orphaned_instance() {
     assert!(
         provider.is_none(),
         "orphaned instance must not resolve to any provider"
+    );
+}
+
+#[test]
+fn created_inference_config_defaults_relay_mesh_model() {
+    let config = resolve_created_inference_config(
+        Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID),
+        None,
+        None,
+    );
+
+    assert_eq!(
+        config.model.as_deref(),
+        Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID)
+    );
+    assert_eq!(
+        config.relay_mesh,
+        Some(RelayMeshConfig {
+            model_ref: crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string(),
+        })
     );
 }
 

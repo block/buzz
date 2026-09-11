@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use crate::managed_agents::runtime::build_augmented_path;
 
@@ -53,6 +54,11 @@ const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown 
 /// bypassed. Injects the same augmented PATH used for launched agents so
 /// script shims with `/usr/bin/env <interpreter>` shebangs can find runtimes
 /// such as node/python when the app was launched with a bare GUI PATH.
+///
+/// The shared discovery runner owns the process tree and bounds wall-clock time
+/// and captured output. Draft readiness can run while someone is editing, so a
+/// broken external CLI must never stall agent operations or grow memory without
+/// bound.
 pub(crate) fn login_probe(
     binary_path: &Path,
     probe_args: &[&str],
@@ -63,13 +69,13 @@ pub(crate) fn login_probe(
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
-    crate::util::configure_no_window(&mut command);
+    let Some(output) =
+        crate::managed_agents::discovery::bounded_probe_output(command, Duration::from_secs(10))
+    else {
+        return ProbeOutcome::LoggedOut;
+    };
 
-    match command.output() {
-        Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => classify_probe_output(&o.stderr, false),
-        Err(_) => ProbeOutcome::LoggedOut,
-    }
+    classify_probe_output(&output.stderr, output.status.success())
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
@@ -200,6 +206,29 @@ mod tests {
                 "stderr_excerpt should contain the parse error: {stderr_excerpt}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_fails_closed_when_success_output_exceeds_bound() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("noisy-login-probe");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nhead -c 1100000 /dev/zero\nexit 0\n",
+        )
+        .expect("write noisy probe");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod noisy probe");
+
+        assert_eq!(
+            super::login_probe(&script_path, &["noisy-login-probe"], None),
+            ProbeOutcome::LoggedOut,
+            "login readiness must stay bound even when a successful CLI floods output"
+        );
     }
 
     #[cfg(unix)]

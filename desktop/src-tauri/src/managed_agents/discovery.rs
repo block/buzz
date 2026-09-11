@@ -706,6 +706,13 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 /// On timeout or spawn failure the child is killed and `Unknown` is returned;
 /// no orphaned threads or processes are left behind (see
 /// [`bounded_command::output_with_timeout`]).
+pub(crate) fn bounded_probe_output(
+    command: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    bounded_command::output_with_timeout(command, timeout)
+}
+
 fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 

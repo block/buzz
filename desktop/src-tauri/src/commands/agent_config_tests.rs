@@ -12,6 +12,36 @@ use std::sync::Mutex;
 
 static GOOSE_PATH_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
+struct TestAppDataGuard(std::path::PathBuf);
+
+impl Drop for TestAppDataGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct ReadinessIpcFixture {
+    app: tauri::App<tauri::test::MockRuntime>,
+    _data: TestAppDataGuard,
+}
+
+fn readiness_ipc_fixture() -> ReadinessIpcFixture {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let suffix = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = format!(
+        "com.block.buzz.readiness-test-{}-{suffix}",
+        std::process::id()
+    );
+    let app = tauri::test::mock_builder()
+        .manage(crate::app_state::build_app_state())
+        .invoke_handler(tauri::generate_handler![evaluate_agent_readiness_draft])
+        .build(context)
+        .expect("mock app builds");
+    let data = TestAppDataGuard(app.path().app_data_dir().expect("test app data dir"));
+    ReadinessIpcFixture { app, _data: data }
+}
+
 /// Run a test body with GOOSE_PATH_ROOT set to a non-existent path so that the
 /// goose config file read returns `None`. Restores the prior value on exit.
 fn with_no_goose_config<T>(body: impl FnOnce() -> T) -> T {
@@ -130,6 +160,12 @@ fn agent_record() -> ManagedAgentRecord {
 }
 
 fn persona_with_model(model: &str) -> AgentDefinition {
+    let mut persona = persona_without_model();
+    persona.model = Some(model.to_string());
+    persona
+}
+
+fn persona_without_model() -> AgentDefinition {
     AgentDefinition {
         description: None,
         id: "persona-1".to_string(),
@@ -137,7 +173,7 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         avatar_url: None,
         system_prompt: "You are a persona.".to_string(),
         runtime: None,
-        model: Some(model.to_string()),
+        model: None,
         provider: None,
         name_pool: Vec::new(),
         is_builtin: false,
@@ -154,6 +190,105 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
+}
+
+#[test]
+fn production_handler_registers_readiness_command() {
+    let lib = include_str!("../lib.rs");
+    let handler_start = lib
+        .find(".invoke_handler(tauri::generate_handler![")
+        .expect("production invoke handler exists");
+    let handler = &lib[handler_start..];
+    assert!(
+        handler.contains("evaluate_agent_readiness_draft,"),
+        "removing readiness from the production Tauri handler must fail this test"
+    );
+}
+
+#[test]
+fn readiness_command_is_registered_and_never_persists_its_draft() {
+    let fixture = readiness_ipc_fixture();
+    let mut saved = agent_record();
+    saved.pubkey = "a".repeat(64);
+    saved.persona_id = None;
+    saved.agent_command = "buzz-agent".to_string();
+    saved.model = None;
+    saved.provider = None;
+    crate::managed_agents::save_managed_agents(fixture.app.handle(), &[saved.clone()])
+        .expect("seed saved agent");
+    let global = GlobalAgentConfig {
+        provider: Some("openrouter".to_string()),
+        model: Some("openrouter/model".to_string()),
+        env_vars: std::collections::BTreeMap::from([(
+            "OPENROUTER_API_KEY".to_string(),
+            "sk-global".to_string(),
+        )]),
+        preferred_runtime: None,
+    };
+    let global_path = crate::managed_agents::managed_agents_base_dir(fixture.app.handle())
+        .expect("managed agents dir")
+        .join("global-agent-config.json");
+    std::fs::write(
+        global_path,
+        serde_json::to_vec_pretty(&global).expect("serialize global config"),
+    )
+    .expect("seed global config");
+    // Stabilize the store's ordinary built-in-definition reconciliation before
+    // measuring the readiness command's own persistence behavior.
+    crate::managed_agents::load_personas(fixture.app.handle()).expect("warm built-in definitions");
+    let before = std::fs::read(
+        crate::managed_agents::storage::managed_agents_store_path(fixture.app.handle())
+            .expect("store path"),
+    )
+    .expect("seeded store bytes");
+
+    let webview = tauri::WebviewWindowBuilder::new(
+        &fixture.app,
+        "main",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("mock webview");
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        tauri::webview::InvokeRequest {
+            cmd: "evaluate_agent_readiness_draft".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: if cfg!(any(windows, target_os = "android")) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .expect("invoke url"),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "draft": {
+                    "kind": "existing",
+                    "config": {
+                        "pubkey": saved.pubkey
+                    }
+                }
+            })),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        },
+    )
+    .expect("registered readiness command succeeds")
+    .deserialize::<serde_json::Value>()
+    .expect("structured readiness response");
+
+    assert_eq!(response["ready"], true);
+    assert_eq!(response["requirements"], serde_json::json!([]));
+    let after = std::fs::read(
+        crate::managed_agents::storage::managed_agents_store_path(fixture.app.handle())
+            .expect("store path"),
+    )
+    .expect("store bytes after preview");
+    assert_eq!(
+        after, before,
+        "readiness preview must not persist the patch"
+    );
 }
 
 /// A post-spawn session cache whose live model is `current_model` and whose

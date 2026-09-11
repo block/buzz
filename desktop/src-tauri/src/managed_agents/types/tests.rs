@@ -210,6 +210,20 @@ fn validate_respond_to_allowlist_accepts_empty() {
 }
 
 #[test]
+fn update_request_model_tristate_matches_provider_contract() {
+    let absent: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"agent"}"#).expect("absent model");
+    let clear: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"agent","model":null}"#).expect("null model");
+    let set: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"agent","model":"model-id"}"#).expect("model value");
+
+    assert_eq!(absent.model, None);
+    assert_eq!(clear.model, Some(None));
+    assert_eq!(set.model, Some(Some("model-id".to_string())));
+}
+
+#[test]
 fn update_request_provider_tristate_absent_means_no_touch() {
     // A JSON payload with no "provider" key deserialized with `None` —
     // the backend must leave the record's existing provider unchanged.
