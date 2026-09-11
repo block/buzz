@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { schnorr } from '@noble/curves/secp256k1';
 import { finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure';
 import { digest, newKey, publicKey, message, type Message } from '../src/protocol.ts';
-import { publicMetadata, metadataRevision, metadataAuthorization } from '../src/public-metadata.ts';
+import { publicMetadata, metadataRevision, metadataAuthorization, publishPublicMetadata, metadataPublicationInterrupted } from '../src/public-metadata.ts';
 import { metadataDrafts } from '../src/metadata-drafts.ts';
 import { profile, profileRevision } from '../src/profiles.ts';
 import { profileDrafts } from '../src/profile-drafts.ts';
@@ -60,7 +60,8 @@ test('private owner authorizes stopped-agent kind0 with agent NIP98, exact readb
   const owner = newKey(), hostSecret = newKey(), agentSecret = newKey(), siblingSecret = newKey(), stranger = newKey();
   const ownerKey = publicKey(owner), hostKey = publicKey(hostSecret), agent = publicKey(agentSecret), sibling = publicKey(siblingSecret);
   const authTag = association(owner, agent); const httpErrors: unknown[] = [], events: Event[] = [], authIds = new Set<string>();
-  let url = '', latest: Event | undefined, deny = false, hideReadback = false, reads = 0;
+  let url = '', latest: Event | undefined, deny = false, hideReadback = false, reads = 0, closeOnQuery = false, closeOnEvents = false;
+  let hostClosing: Promise<void> | undefined;
   const relay = await nostrFixture(ownerKey, new Set([ownerKey, hostKey, publicKey(stranger)]), {}, (req, res) => {
     if (req.method !== 'POST') return false;
     let body = ''; req.on('data', b => body += b);
@@ -74,13 +75,13 @@ test('private owner authorizes stopped-agent kind0 with agent NIP98, exact readb
         assert(auth.tags.some(t => t[0] === 'payload' && t[1] === digest(body).toString('hex')));
         assert.equal(req.headers['x-auth-tag'], authTag); assert(schnorr.verify(JSON.parse(authTag)[3], digest(`nostr:agent-auth:${agent}:`), ownerKey)); metadataAuthorization(authTag, agent, ownerKey, auth.created_at);
         res.setHeader('Content-Type', 'application/json');
-        if (req.url === '/query') { assert.deepEqual(JSON.parse(body), [{ authors: [agent], kinds: [0], limit: 1 }]); res.end(JSON.stringify(latest && !hideReadback ? [latest] : [])); }
+        if (req.url === '/query') { assert.deepEqual(JSON.parse(body), [{ authors: [agent], kinds: [0], limit: 1 }]); if (closeOnQuery) hostClosing = service?.close(); res.end(JSON.stringify(latest && !hideReadback ? [latest] : [])); }
         else {
           assert.equal(req.url, '/events'); const e = JSON.parse(body) as Event;
           assert(verifyEvent(e)); assert.equal(e.kind, 0); assert.equal(e.pubkey, agent); assert.deepEqual(e.tags, [JSON.parse(authTag)]);
           assert.deepEqual(Object.keys(JSON.parse(e.content)).sort(), ['about', 'display_name', 'picture']); assert(!body.includes('PRIVATE INSTRUCTIONS'));
           if (deny) { res.end(JSON.stringify({ event_id: e.id, accepted: false, message: 'refused' })); return; }
-          latest = e; events.push(e); res.end(JSON.stringify({ event_id: e.id, accepted: true, message: 'saved' }));
+          latest = e; events.push(e); if (closeOnEvents) hostClosing = service?.close(); res.end(JSON.stringify({ event_id: e.id, accepted: true, message: 'saved' }));
         }
       } catch (e) { httpErrors.push(e); res.writeHead(400).end('{}'); }
     }); return true;
@@ -157,6 +158,38 @@ test('private owner authorizes stopped-agent kind0 with agent NIP98, exact readb
     await service.close(); service = undefined;
     service = await host(directory, url, undefined, privateHostTransport(pairing, hostSecret), credentials);
     assert.deepEqual(state().publicMetadata, persisted); assert.equal(events.length, 2, 'host reopen never silently retries unknown public side effects');
+    // Authority interruption while a submission may be live is UNKNOWN, never a
+    // definitive failure: the relay may already hold the accepted kind0 event.
+    await until(() => Math.floor(Date.now() / 1000) > state().publicMetadata.event.created_at);
+    hideReadback = false; closeOnQuery = true;
+    const refused = op({ ...value, about: 'closed-before-send' });
+    client.submit(refused);
+    await until(() => hostClosing !== undefined); await hostClosing; hostClosing = undefined;
+    closeOnQuery = false;
+    service = await host(directory, url, undefined, privateHostTransport(pairing, hostSecret), credentials);
+    client.reconcile(); // Fresh <=6s host availability: reconcile immediately after reopen.
+    await until(() => client.status().some(s => s.request.id === refused.id && s.result === 'Metadata authority invalidated'));
+    const refusedRow = client.status().find(s => s.request.id === refused.id)!;
+    assert.equal(refusedRow.state, 'failed', 'pre-send close stays a definitive refusal');
+    assert.equal(events.length, 2, 'no event POST before the authority close');
+    // Accepted/stored event, then the host closes while reading the /events
+    // response: the receipt reports the dedicated unknown result, not failure.
+    await until(() => Math.floor(Date.now() / 1000) > state().publicMetadata.event.created_at);
+    closeOnEvents = true;
+    const interrupted = op({ ...value, about: 'interrupted-after-send' });
+    client.submit(interrupted);
+    await until(() => hostClosing !== undefined); await hostClosing; hostClosing = undefined;
+    closeOnEvents = false;
+    service = await host(directory, url, undefined, privateHostTransport(pairing, hostSecret), credentials);
+    reads = 0; // The reopened host already hydrated credentials during startup.
+    client.reconcile();
+    await until(() => client.status().some(s => s.request.id === interrupted.id && s.result === metadataPublicationInterrupted));
+    const interruptedRow = client.status().find(s => s.request.id === interrupted.id)!;
+    assert.equal(interruptedRow.state, 'unknown', 'post-send authority interruption must not be reported failed');
+    assert.equal(events.length, 3, 'exactly one event POST for the interrupted attempt');
+    assert.equal(state().publicMetadata.event.id, events[2]!.id, 'interrupted candidate retained durably');
+    assert.equal(state().publicMetadata.operation, interrupted.id);
+    assert.equal(reads, 0, 'replay/reconcile never duplicates the POST or the credential read');
     assert.deepEqual(httpErrors, []); assert.equal(readFileSync(journalPath(sibling), 'utf8'), other);
     assert.equal(metadataDrafts(root).list()[0]!.value.about, value.about);
   } finally { client.close(); attacker.close(); await service?.close(); await relay.close(); rmSync(root, { recursive: true, force: true }); }
@@ -169,4 +202,62 @@ test('existing OA association rejects wrong owner, agent, conditions and forged 
   assert.throws(() => metadataAuthorization(tag, agent, publicKey(newKey()), now));
   assert.throws(() => metadataAuthorization(association(owner, agent, 'kind=0'), agent, publicKey(owner), now));
   assert.throws(() => metadataAuthorization(association(owner, agent, 'created_at<1'), agent, publicKey(owner), now));
+});
+
+test('authority interruption is unknown only once a submission may be live, definitive before it', async () => {
+  const owner = newKey(), agentSecret = newKey(); const ownerKey = publicKey(owner), agent = publicKey(agentSecret);
+  const authTag = association(owner, agent);
+  const posted: Event[] = [], httpErrors: unknown[] = [];
+  let latest: Event | undefined;
+  const relay = await nostrFixture(ownerKey, new Set([ownerKey]), {}, (req, res) => {
+    if (req.method !== 'POST') return false;
+    let body = ''; req.on('data', b => body += b);
+    req.on('end', () => {
+      try {
+        const auth = JSON.parse(Buffer.from(String(req.headers.authorization).slice(6), 'base64').toString()) as Event;
+        assert(verifyEvent(auth)); assert.equal(auth.pubkey, agent); assert.equal(auth.kind, 27235);
+        assert.equal(req.headers['x-auth-tag'], authTag);
+        metadataAuthorization(authTag, agent, ownerKey, auth.created_at);
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url === '/query') { assert.deepEqual(JSON.parse(body), [{ authors: [agent], kinds: [0], limit: 1 }]); res.end(JSON.stringify(latest ? [latest] : [])); }
+        else {
+          assert.equal(req.url, '/events'); const e = JSON.parse(body) as Event;
+          assert(verifyEvent(e)); assert.equal(e.kind, 0); assert.equal(e.pubkey, agent); assert.deepEqual(e.tags, [JSON.parse(authTag)]);
+          latest = e; posted.push(e); res.end(JSON.stringify({ event_id: e.id, accepted: true, message: 'saved' }));
+        }
+      } catch (e) { httpErrors.push(e); res.writeHead(400).end('{}'); }
+    }); return true;
+  });
+  try {
+    /** Deterministic phase-indexed host guard: invalidates at exactly the Nth check
+     * (1 query entry, 2 query post-body, 3 pre-sign, 4 events entry, 5 events
+     * post-body, 6 final-query entry, 7 final-query post-body). */
+    async function attempt(invalidatedAt: number): Promise<[string, Event | undefined]> {
+      let checks = 0; let retained: Event | undefined;
+      let outcome: string;
+      try {
+        await publishPublicMetadata({ relay: relay.url, agent, owner: ownerKey, secret: agentSecret, authTag, value,
+          check: () => { if (++checks >= invalidatedAt) throw Error('Metadata authority invalidated'); },
+          retain: event => { retained = event; } });
+        outcome = 'published';
+      } catch (error) { outcome = (error as Error).message; }
+      return [outcome, retained];
+    }
+    // Pre-send query checks and the /events entry are definitive refusals: no POST.
+    for (const invalidatedAt of [2, 4]) {
+      assert.equal((await attempt(invalidatedAt))[0], 'Metadata authority invalidated');
+      assert.equal(posted.length, 0, 'definitive refusal never reaches the event POST');
+    }
+    // After the accepted /events response — its post-body check, the final-query
+    // entry check and the final-query post-body check — the relay outcome is
+    // unobserved: the dedicated unknown result, never a definitive failure.
+    for (const invalidatedAt of [5, 6, 7]) {
+      const [outcome, retained] = await attempt(invalidatedAt);
+      assert.equal(outcome, metadataPublicationInterrupted);
+      assert.equal(posted.length, invalidatedAt - 4, 'exactly one event POST per interrupted attempt');
+      assert.equal(retained!.id, posted.at(-1)!.id, 'durable candidate is the submitted event');
+      await until(() => Math.floor(Date.now() / 1000) > latest!.created_at);
+    }
+    assert.deepEqual(httpErrors, []);
+  } finally { await relay.close(); }
 });

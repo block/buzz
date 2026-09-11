@@ -41,6 +41,11 @@ export function metadataRelay(relay: string): string {
   u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
   return u.href.replace(/\/$/, '');
 }
+/** Post-submission authority interruption cannot observe the relay outcome. This
+ * dedicated metadata-only result keeps management states truthful: UNKNOWN, never
+ * a definitive failure. Pre-send and /events-entry refusals stay definitive.
+ */
+export const metadataPublicationInterrupted = 'metadata publication interrupted after submission; outcome unknown; reconcile locally';
 /** Publish only after governing consumer authorization. Query before signing to
  * avoid kind0 same-second tie ordering; exact signed readback is separate from ACK.
  * No retry loop, provider, ACP, or credential backend is opened here.
@@ -49,8 +54,11 @@ export async function publishPublicMetadata(input: { relay: string; agent: strin
   const value = publicMetadata(input.value), base = metadataRelay(input.relay);
   if (publicKey(input.secret) !== input.agent) throw Error('Agent signer mismatch');
   const tags = metadataAuthorization(input.authTag, input.agent, input.owner, Math.floor(Date.now() / 1000));
-  async function request(path: string, body: unknown): Promise<unknown> {
-    input.check();
+  /** Guard unchanged. An interruption while a submission may already be live on the
+   * relay is an unknown outcome; anything before that is a definitive refusal. */
+  const guard = (submissionLive: boolean) => { try { input.check(); } catch (error) { throw submissionLive ? Error(metadataPublicationInterrupted, { cause: error }) : error; } };
+  async function request(path: string, body: unknown, submitted = false): Promise<unknown> {
+    guard(submitted);
     const content = JSON.stringify(body), url = `${base}/${path}`, now = Math.floor(Date.now() / 1000);
     metadataAuthorization(input.authTag, input.agent, input.owner, now);
     const auth = finalizeEvent({ kind: 27235, created_at: now, tags: [['u', url], ['method', 'POST'], ['payload', digest(content).toString('hex')], ['nonce', randomUUID()]], content: '' }, Buffer.from(input.secret, 'hex'));
@@ -59,10 +67,11 @@ export async function publishPublicMetadata(input: { relay: string; agent: strin
     const reader = response.body?.getReader(); if (!reader) throw Error('Missing public relay response');
     const chunks: Uint8Array[] = []; let size = 0;
     try { for (;;) { const { done, value: part } = await reader.read(); if (done) break; size += part.length; if (size > 65536) throw Error('Public relay response too large'); chunks.push(part); } } finally { await reader.cancel(); }
-    input.check(); return JSON.parse(Buffer.concat(chunks).toString());
+    guard(submitted || path === 'events'); // Reading the /events response means this submission may be live.
+    return JSON.parse(Buffer.concat(chunks).toString());
   }
-  async function latest(): Promise<Event | undefined> {
-    const rows = await request('query', [{ authors: [input.agent], kinds: [0], limit: 1 }]);
+  async function latest(submitted = false): Promise<Event | undefined> {
+    const rows = await request('query', [{ authors: [input.agent], kinds: [0], limit: 1 }], submitted);
     if (!Array.isArray(rows) || rows.length > 1) throw Error('Invalid public metadata readback');
     if (!rows.length) return undefined;
     const event = rows[0] as Event;
@@ -77,7 +86,7 @@ export async function publishPublicMetadata(input: { relay: string; agent: strin
   input.retain(event); // Durable exact candidate before network effect, including unknown outcome.
   const ack = object(await request('events', event));
   if (ack.accepted !== true || ack.event_id !== event.id) throw Error('Public relay did not acknowledge this event; publication unknown');
-  const observed = await latest();
+  const observed = await latest(true);
   if (observed?.id !== event.id) throw Error('Public event submitted but latest readback differs; publication unknown');
   return `published; signed latest kind0 ${event.id}`;
 }

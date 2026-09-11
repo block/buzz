@@ -65,8 +65,15 @@ kind0 by the agent pubkey. Public readback never replaces the owner's draft.
 operations never repeat the public side effect, including after a host crash.
 If interruption loses the terminal observation, status remains unknown; this
 bounded slice does not automatically republish or turn queue persistence into
-success. Check the desired draft, wait for fresh host state, then deliberately
-submit a new publish attempt if needed. A same-second retained signed attempt or same-second/future-dated latest kind0
+success. An authority interruption (host close, revision/assignment change or
+persistence failure) **after the signed event POST** — while reading the /events
+response or during the final latest-kind0 query — reports the dedicated
+`metadata publication interrupted after submission; outcome unknown; reconcile
+locally` result with status **unknown**, never a definitive failure, because the
+relay may already hold the accepted event; the durable candidate and operation
+ID are retained. The same interruption before submission or at the /events entry
+is a definitive refusal. Check the desired draft, wait for fresh host state, then
+deliberately submit a new publish attempt if needed. A same-second retained signed attempt or same-second/future-dated latest kind0
 is refused rather than inventing a timestamp or gambling on Nostr event-ID tie
 ordering; wait until its timestamp is past before retrying. Stale host revisions
 and old operation IDs cannot overwrite a newer accepted edit. ACK refusal,
@@ -92,6 +99,12 @@ Beehive likewise never derives about from private behavior text.
 consumer and signature-enforcing loopback HTTP consumer with synthetic keys and
 an explicitly isolated credential adapter. It checks stopped publication with
 nonexistent ACP/provider executables, negative ACK/readback, wrong owner/relay,
-malformed public payload, stale revision, missing key and timestamp ordering.
-This is source-shaped relay evidence, not a production relay, OS credential,
+malformed public payload, stale revision, missing key and timestamp ordering,
+plus pre-send and post-submission host authority interruption: a preliminary-query
+or /events-entry close is a definitive refusal with no event POST, while a close
+after the accepted event POST leaves status unknown with the retained candidate,
+exactly one POST, and no duplicate POST or credential read across host reopen and
+owner reconcile. A phase-indexed direct publisher case covers the /events
+post-body, final-query entry and final-query post-body boundaries. This is
+source-shaped relay evidence, not a production relay, OS credential,
 installed-native or live-person profile publication claim.

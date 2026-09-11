@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs
 import { join } from 'node:path';
 import { connect, validateRelayURL } from './client.ts';
 import { digest, fields, message, object, open, publicKey, seal, type Envelope, type Message } from './protocol.ts';
+import { metadataPublicationInterrupted } from './public-metadata.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 
 type Intent = { envelope: Envelope; request: Message; receipt?: Message; published: boolean; blocked?: boolean };
@@ -129,7 +130,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     },
     status() {
       return [...intents.values()].map(i => ({ request: structuredClone(i.request),
-        state: i.request.type === 'profile' && i.published ? 'completed' : i.receipt ? ((['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) || (i.request.type === 'metadata' && /^published; signed latest kind0 [a-f0-9]{64}$/.test(String(i.receipt.body.result)))) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
+        state: i.request.type === 'profile' && i.published ? 'completed' : i.receipt ? ((['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) || (i.request.type === 'metadata' && /^published; signed latest kind0 [a-f0-9]{64}$/.test(String(i.receipt.body.result)))) ? 'completed' : (i.receipt.body.result === 'interrupted-reconcile-locally' || (i.request.type === 'metadata' && i.receipt.body.result === metadataPublicationInterrupted)) ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
         retryAvailable: !i.receipt && !(i.request.type === 'profile' && i.published) && !!i.blocked,
         publication: i.request.type === 'profile' && i.published ? 'immutable publication observed; no agent application' : i.receipt ? 'host terminal receipt' : i.blocked ? 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
         result: i.receipt?.body.result }));
