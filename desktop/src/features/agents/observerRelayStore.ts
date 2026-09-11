@@ -7,6 +7,7 @@ import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
+import { recordAvailableCommandsUpdate } from "./agentCommandCatalog";
 import {
   parseAgentManagementRequest,
   type AgentManagementRequest,
@@ -65,6 +66,7 @@ export type AgentObserverStoreUpdate = {
 type AgentObserverStoreListener = (update?: AgentObserverStoreUpdate) => void;
 
 const listeners = new Set<AgentObserverStoreListener>();
+let observerOwnerPubkey: string | null = null;
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
@@ -488,6 +490,9 @@ function processLiveObserverEvents(
   const accepted = appendAgentEvents(agentPubkey, events);
 
   for (const parsed of accepted ?? []) {
+    if (parsed.kind === "available_commands_captured" && observerOwnerPubkey) {
+      recordAvailableCommandsUpdate(observerOwnerPubkey, agentPubkey, parsed);
+    }
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -602,6 +607,8 @@ export function ensureRelayObserverSubscription() {
   setConnectionState("connecting", null);
   startPromise = (async () => {
     const identity = await getIdentity();
+    if (activeGeneration !== generation) return;
+    observerOwnerPubkey = normalizePubkey(identity.pubkey);
     const unsubscribe = await subscribeToAgentObserverFrames(
       identity.pubkey,
       (event) => {
@@ -847,7 +854,11 @@ export function useManagedAgentObserverBridge(
 export async function ingestArchivedObserverEvents(
   rawEvents: RelayEvent[],
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
+  _ownerPubkeyFn: () => Promise<string> = async () =>
+    (await getIdentity()).pubkey,
 ): Promise<void> {
+  const activeGeneration = generation;
+  let archiveOwnerPubkey: string | null = null;
   let archiveChanged = false;
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
@@ -863,7 +874,13 @@ export async function ingestArchivedObserverEvents(
     }
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
+      if (activeGeneration !== generation) return;
       for (const inner of unwrapObserverBatch(parsed)) {
+        if (inner.kind === "available_commands_captured") {
+          archiveOwnerPubkey ??= normalizePubkey(await _ownerPubkeyFn());
+          if (activeGeneration !== generation) return;
+          recordAvailableCommandsUpdate(archiveOwnerPubkey, agentPubkey, inner);
+        }
         // Route archived events to the channel-scoped archive window (no cap)
         // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
         // Events without a channelId fall through to the live store so they
@@ -927,6 +944,7 @@ export function syncAgentObserverEvents(
 
 export function resetAgentObserverStore() {
   generation += 1;
+  observerOwnerPubkey = null;
   const unsubscribe = unsubscribeRelay;
   unsubscribeRelay = null;
   startPromise = null;

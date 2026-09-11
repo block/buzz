@@ -8,6 +8,9 @@ import type {
   UseEmojiAutocompleteResult,
 } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
+import type { useSlashCommandAutocomplete } from "@/features/messages/lib/useSlashCommandAutocomplete";
+import type { SlashCommandSuggestion } from "@/features/messages/lib/slashCommandAutocomplete";
+import { SlashCommandAutocomplete } from "./SlashCommandAutocomplete";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
 import {
@@ -22,6 +25,8 @@ type MessageComposerAutocompletesProps = {
    */
   audienceControlsEnabled: boolean;
   channelLinks: UseChannelLinksResult;
+  slashCommands: ReturnType<typeof useSlashCommandAutocomplete>;
+  onSlashCommandSelect: (suggestion: SlashCommandSuggestion) => void;
   composerOwnsFocus: boolean;
   emojiAutocomplete: UseEmojiAutocompleteResult;
   keepMentionedAgentsPinned: boolean;
@@ -40,7 +45,7 @@ type MessageComposerAutocompletesProps = {
 };
 
 /**
- * The message composer's three suggestion overlays. Each one gates its own
+ * The message composer's suggestion overlays. Each one gates its own
  * rendering on `composerOwnsFocus`, so a background composer replaying a
  * stale update cannot resurrect a suggestion menu over the focused composer,
  * while keyboard focus moving into an overlay's own controls keeps that
@@ -49,6 +54,8 @@ type MessageComposerAutocompletesProps = {
 export function MessageComposerAutocompletes({
   audienceControlsEnabled,
   channelLinks,
+  slashCommands,
+  onSlashCommandSelect,
   composerOwnsFocus,
   emojiAutocomplete,
   keepMentionedAgentsPinned,
@@ -63,6 +70,13 @@ export function MessageComposerAutocompletes({
 }: MessageComposerAutocompletesProps) {
   return (
     <>
+      <SlashCommandAutocomplete
+        groups={
+          composerOwnsFocus && slashCommands.isOpen ? slashCommands.groups : []
+        }
+        onSelect={onSlashCommandSelect}
+        selectedIndex={slashCommands.selectedIndex}
+      />
       <EmojiAutocomplete
         composerOwnsFocus={composerOwnsFocus}
         onSelect={onEmojiSelect}
