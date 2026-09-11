@@ -379,7 +379,7 @@ struct EnforcementCtx<'a> {
 #[allow(clippy::too_many_arguments)]
 async fn drive_enforcement(
     state: &Arc<AppState>,
-    _tenant: &TenantContext,
+    tenant: &TenantContext,
     community_id: buzz_core::tenant::CommunityId,
     report_id: Uuid,
     action: &str,
@@ -564,8 +564,9 @@ async fn drive_enforcement(
 
             match mutation_result {
                 Ok(MutationOutcome::AlreadyCommitted) => {
-                    // step_marker already set by a concurrent driver;
-                    // reload and advance to finalization.
+                    // step_marker already set by a concurrent driver. Reload and
+                    // advance to finalization; live side effects fire at the
+                    // convergence point below (after the is_none block).
                     rec = state
                         .db
                         .get_admin_action(action_id)
@@ -589,7 +590,8 @@ async fn drive_enforcement(
                     )));
                 }
                 Ok(MutationOutcome::Committed) => {
-                    // Marker committed. Fall through to finalization below.
+                    // Marker committed. Fall through to the convergence point
+                    // below for live side effects and finalization.
                 }
                 Err(e) => {
                     if failure_lease_lost {
@@ -604,6 +606,53 @@ async fn drive_enforcement(
                         action_id,
                         error: e.to_string(),
                     });
+                }
+            }
+        }
+        // ── Convergence point ────────────────────────────────────────────────
+        // Reached on every path where the step marker is (or was just) committed:
+        // the fresh HTTP path (Committed above), a concurrent-driver path
+        // (AlreadyCommitted → reload → loop reaches here with marker set), and
+        // the crash-recovery path (process died after DB commit but before live
+        // effects; recovery worker re-enters here directly with marker set).
+        //
+        // Live side effects for kick use the target context persisted at claim
+        // time (enforcement_target_pubkey / enforcement_channel_id) rather than
+        // the function parameters, which on the recovery path are re-derived from
+        // mutable sources that may have changed or been purged since the kick
+        // committed.  Missing persisted context is an invariant failure: the
+        // INSERT that claimed the action required both values and stored them; if
+        // they are absent the row is corrupt and we must not silently succeed.
+        //
+        // Eviction and workflow-disable are fenced behind membership_removal_fence
+        // (which holds the per-channel advisory lock through both effects) so a
+        // kick-commit → re-add → re-drive race does not revoke a legitimately
+        // restored membership. Cache invalidation is unconditional because
+        // stale-positive is always safe to drop. The fence applies on every path
+        // (fresh and recovery) for a single consistent ordering guarantee.
+        if action == "kick" {
+            match (
+                rec.enforcement_target_pubkey.as_deref(),
+                rec.enforcement_channel_id,
+            ) {
+                (Some(target), Some(ch)) => {
+                    crate::handlers::side_effects::apply_kick_live_side_effects(
+                        tenant, state, ch, target,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ResolutionError::Internal(format!(
+                            "kick action {action_id} live side effects failed \
+                             (mutation_committed marker is recoverable; worker will retry): {e}"
+                        ))
+                    })?;
+                }
+                _ => {
+                    return Err(ResolutionError::Internal(format!(
+                        "kick action {action_id} reached convergence with missing \
+                         enforcement_target_pubkey or enforcement_channel_id — \
+                         action row is corrupt; refusing to finalize as succeeded"
+                    )));
                 }
             }
         }
@@ -1021,6 +1070,124 @@ mod tests {
             derive_enforcement_target(&d).unwrap(),
             derive_enforcement_target_pub(&d).unwrap(),
             "worker re-derive must match the HTTP claim derivation exactly"
+        );
+    }
+
+    /// Verify that `apply_kick_live_side_effects` drops the membership cache
+    /// entry and evicts the live channel subscription for the kicked user.
+    ///
+    /// Setup:
+    ///   1. Seed the membership cache with `true` so the cache claims the target
+    ///      is still a member.
+    ///   2. Register a connection authenticated as the target pubkey and add a
+    ///      channel-scoped subscription for them.
+    ///   3. Call `apply_kick_live_side_effects`.
+    ///
+    /// Assertions:
+    ///   - The membership cache entry is gone (cache returns `None`).
+    ///   - The channel subscription index no longer lists the connection.
+    ///
+    /// Redis-dependent work inside the helper (cross-pod cache invalidation
+    /// publish, pubsub topic release) hits an intentionally unreachable endpoint
+    /// and is silently dropped — this mirrors the production "best-effort"
+    /// contract and does not affect the in-process assertions.
+    #[tokio::test]
+    async fn kick_live_side_effects_clears_membership_cache_and_evicts_subscription() {
+        use buzz_core::tenant::CommunityId;
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        let state = crate::state::tests::test_state().await;
+
+        let community_id = CommunityId::from_uuid(Uuid::from_u128(0xCAFE_BABE));
+        let channel_id = Uuid::from_u128(0x1234_5678);
+        let target_pubkey: Vec<u8> = vec![0xABu8; 32];
+        let tenant = buzz_core::tenant::TenantContext::resolved(community_id, "kick-test.example");
+
+        // 1. Seed the membership cache — simulates a cache hit that would keep
+        //    the kicked user appearing as a member after the DB write.
+        state
+            .membership_cache
+            .insert((community_id, channel_id, target_pubkey.clone()), true);
+
+        // Confirm the entry is visible before the side effects run.
+        assert!(
+            state
+                .membership_cache
+                .get(&(community_id, channel_id, target_pubkey.clone()))
+                .is_some(),
+            "pre-condition: membership cache entry must exist before kick"
+        );
+
+        // 2. Register a connection authenticated as the target pubkey and add a
+        //    channel-scoped subscription so eviction has something to remove.
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
+        state.conn_manager.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            CancellationToken::new(),
+            community_id,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, target_pubkey.clone());
+
+        let sub_id = "kick-test-sub".to_string();
+        state.sub_registry.register_channels_scoped(
+            community_id,
+            conn_id,
+            sub_id,
+            // One unconstrained filter (no `kinds`) hits the wildcard index,
+            // making the subscription visible in channel_subscriber_conns_scoped.
+            vec![nostr::Filter::new()],
+            vec![channel_id],
+        );
+
+        // Confirm subscription is visible before side effects run.
+        assert!(
+            state
+                .sub_registry
+                .channel_subscriber_conns_scoped(community_id, channel_id)
+                .contains(&conn_id),
+            "pre-condition: subscription must be registered before kick"
+        );
+
+        // 3. Fire kick live side effects.
+        crate::handlers::side_effects::apply_kick_live_side_effects(
+            &tenant,
+            &state,
+            channel_id,
+            &target_pubkey,
+        )
+        .await
+        .expect("kick live side effects must succeed in test");
+
+        // Assert: membership cache entry is gone.
+        assert!(
+            state
+                .membership_cache
+                .get(&(community_id, channel_id, target_pubkey.clone()))
+                .is_none(),
+            "membership cache must not contain a stale entry after kick side effects"
+        );
+
+        // Assert: channel subscription is no longer indexed for this connection.
+        assert!(
+            !state
+                .sub_registry
+                .channel_subscriber_conns_scoped(community_id, channel_id)
+                .contains(&conn_id),
+            "kicked user's channel subscription must be evicted after kick side effects"
         );
     }
 }

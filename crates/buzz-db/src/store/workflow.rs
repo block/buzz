@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -737,6 +737,35 @@ pub async fn disable_workflows_for_owner_in_channel(
     .bind(channel_id)
     .bind(owner_pubkey)
     .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
+/// Connection-local variant: run the same workflow-disable UPDATE on the
+/// provided connection rather than acquiring a new one from the pool.
+///
+/// Used by [`buzz_db::channel_members::MembershipRemovalFence::commit_disabling_workflows`]
+/// so the disable executes on the fence's own connection, avoiding a second
+/// pool acquisition while the fence holds one connection.
+pub async fn disable_workflows_for_owner_in_channel_on_conn(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    owner_pubkey: &[u8],
+) -> Result<u64> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflows
+        SET enabled = FALSE
+        WHERE community_id = $1 AND channel_id = $2 AND owner_pubkey = $3 AND enabled = TRUE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(owner_pubkey)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
 
