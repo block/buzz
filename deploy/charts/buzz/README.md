@@ -188,6 +188,35 @@ families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
 
+### Physical database pool utilization contract
+
+Every physical Postgres pool the relay owns reports utilization under one
+role-labelled family. The role vocabulary is closed — `writer`, `reader`,
+`audit`, `search` — and all four roles are always present, so a series never
+appears or disappears when an optional pool is enabled or disabled. An
+unconfigured optional pool reports `buzz_db_pool_configured` `0` with zero
+utilization rather than going missing.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_connections` | gauge | `pool_role`, `state` |
+| `buzz_db_pool_configured` | gauge | `pool_role`; `1` configured, `0` not configured |
+
+States are `size`, `idle`, `active`, and `max`, where `active` is `size - idle`.
+The two families are fixed at 20 raw Prometheus series per pod
+(`4 × 4` utilization plus `4` configured). The `audit` and `search` roles are
+statistics-only: pool ownership, capacities, timeouts, and query routing are
+unchanged, and these roles emit no acquisition telemetry.
+
+The pre-existing unlabelled `buzz_db_pool_*` (writer) and `buzz_db_read_pool_*`
+(reader) gauges are still exported unchanged for dashboard compatibility. The
+reader family remains absent when no read replica is configured; use
+`buzz_db_pool_configured{pool_role="reader"}` for the explicit signal.
+
+Pool sizing and the aggregate connection budget across all four roles remain
+deployment configuration concerns. The relay does not enforce a combined
+connection ceiling.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
