@@ -4945,23 +4945,31 @@ fn handle_prompt_result(
                 }
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
-            emit_turn_error(&death_message, None, None, disposition);
-
             let index = result.agent.index;
-            let slot_history = &mut crash_history[index];
-            if !spawn_respawn_task(
+            let respawn_scheduled = spawn_respawn_task(
                 result.agent,
                 config,
-                slot_history,
+                &mut crash_history[index],
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
-            ) {
-                // Circuit open — slot stays empty until maintenance refill.
-                if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
-                    tracing::error!("all agents dead — exiting");
-                    return LoopAction::Exit;
-                }
+            );
+            let exiting = !respawn_scheduled
+                && pool.live_count() == 0
+                && !any_respawn_in_flight(crash_history);
+            emit_turn_error(
+                &death_message,
+                None,
+                Some(respawn_scheduled),
+                if exiting && disposition == "retrying" {
+                    "stopped"
+                } else {
+                    disposition
+                },
+            );
+            if exiting {
+                tracing::error!("all agents dead — exiting");
+                return LoopAction::Exit;
             }
         }
         // Cancel-drain expiry: a control-signal cancel (steer fallback,
@@ -5073,20 +5081,29 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string(), error_code, None, disposition);
-
                 let index = result.agent.index;
-                let slot_history = &mut crash_history[index];
-                if !spawn_respawn_task(
+                let respawn_scheduled = spawn_respawn_task(
                     result.agent,
                     config,
-                    slot_history,
+                    &mut crash_history[index],
                     respawn_tx,
                     respawn_tasks,
-                    observer,
-                ) && pool.live_count() == 0
-                    && !any_respawn_in_flight(crash_history)
-                {
+                    observer.clone(),
+                );
+                let exiting = !respawn_scheduled
+                    && pool.live_count() == 0
+                    && !any_respawn_in_flight(crash_history);
+                emit_turn_error(
+                    &e.to_string(),
+                    error_code,
+                    Some(respawn_scheduled),
+                    if exiting && disposition == "retrying" {
+                        "stopped"
+                    } else {
+                        disposition
+                    },
+                );
+                if exiting {
                     tracing::error!("all agents dead — exiting");
                     return LoopAction::Exit;
                 }
@@ -9908,6 +9925,200 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn agent_exited_emits_exactly_one_feed_event() {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
+    }
+
+    #[tokio::test]
+    async fn fatal_failure_reports_queue_fate_and_actual_respawn_decision() {
+        for outcome_kind in [
+            "exited",
+            "idle",
+            "hard_active",
+            "hard_inactive",
+            "transport",
+        ] {
+            for batch_fate in ["retry", "exhausted", "removed"] {
+                for capacity in ["none", "idle", "busy", "respawning", "scheduled"] {
+                    let case = format!("{outcome_kind}/{batch_fate}/{capacity}");
+                    let channel_id = Uuid::new_v4();
+                    let root = "a".repeat(64);
+                    let parent = "b".repeat(64);
+                    let event = EventBuilder::new(Kind::Custom(9), "fatal request")
+                        .tags([
+                            nostr::Tag::parse(["e", root.as_str(), "", "root"]).unwrap(),
+                            nostr::Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap(),
+                        ])
+                        .sign_with_keys(&Keys::generate())
+                        .unwrap();
+                    let scope = scope::SessionScope::Thread {
+                        channel_id,
+                        root_event_id: root.clone(),
+                    };
+                    let mut queue = EventQueue::new(config::DedupMode::Queue);
+                    queue.push(QueuedEvent {
+                        channel_id,
+                        scope: scope.clone(),
+                        event: event.clone(),
+                        received_at: std::time::Instant::now(),
+                        prompt_tag: "test".into(),
+                    });
+                    let batch = queue.flush_next().unwrap();
+                    if batch_fate == "exhausted" {
+                        queue.set_retry_count_for_test(scope.clone(), queue::MAX_RETRIES);
+                    }
+                    let agent = dummy_agent(0).await;
+                    let sibling = if capacity == "idle" {
+                        Some(dummy_agent(1).await)
+                    } else {
+                        None
+                    };
+                    let mut pool = AgentPool::from_slots(vec![None, sibling]);
+                    let task = pool.join_set.spawn(async {});
+                    pool.task_map_mut().insert(
+                        task.id(),
+                        pool::TaskMeta {
+                            agent_index: 0,
+                            channel_id: Some(channel_id),
+                            scope: Some(scope.clone()),
+                            turn_id: "fatal-turn".into(),
+                            triggering: queue::triggering_event_context(&batch),
+                            recoverable_batch: Some(batch.clone()),
+                            control_tx: None,
+                            steer_tx: None,
+                            successful_steer_deliveries: HashSet::new(),
+                        },
+                    );
+                    if capacity == "busy" {
+                        let sibling_task = pool.join_set.spawn(std::future::pending());
+                        pool.task_map_mut().insert(
+                            sibling_task.id(),
+                            pool::TaskMeta {
+                                agent_index: 1,
+                                channel_id: None,
+                                scope: None,
+                                turn_id: "sibling-turn".into(),
+                                triggering: Default::default(),
+                                recoverable_batch: None,
+                                control_tx: None,
+                                steer_tx: None,
+                                successful_steer_deliveries: HashSet::new(),
+                            },
+                        );
+                    }
+                    let mut crash_history = vec![
+                        SlotCircuit {
+                            crash_times: Vec::new(),
+                            open_until: None,
+                            respawn_in_flight: false,
+                        },
+                        SlotCircuit {
+                            crash_times: Vec::new(),
+                            open_until: None,
+                            respawn_in_flight: capacity == "respawning",
+                        },
+                    ];
+                    // The completing failure itself opens the circuit, while
+                    // the triggering batch can still have retry budget left.
+                    if capacity != "scheduled" {
+                        for _ in 0..CIRCUIT_BREAKER_THRESHOLD - 1 {
+                            assert!(matches!(
+                                crash_history[0].record_crash(),
+                                CrashVerdict::Respawn(_)
+                            ));
+                        }
+                    }
+                    let outcome = match outcome_kind {
+                        "exited" => PromptOutcome::AgentExited,
+                        "idle" => PromptOutcome::Timeout(TimeoutKind::Idle),
+                        "hard_active" => PromptOutcome::Timeout(TimeoutKind::Hard {
+                            recently_active: true,
+                        }),
+                        "hard_inactive" => PromptOutcome::Timeout(TimeoutKind::Hard {
+                            recently_active: false,
+                        }),
+                        "transport" => {
+                            PromptOutcome::Error(AcpError::Protocol("broken pipe".into()))
+                        }
+                        _ => unreachable!(),
+                    };
+                    let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+                    let mut respawn_tasks = tokio::task::JoinSet::new();
+                    let observer = ObserverHandle::in_process();
+                    let removed = batch_fate == "removed";
+                    let removed_channels = if removed {
+                        HashSet::from([channel_id])
+                    } else {
+                        HashSet::new()
+                    };
+                    let action = handle_prompt_result(
+                        &mut pool,
+                        &mut queue,
+                        &test_config(),
+                        PromptResult {
+                            agent,
+                            source: PromptSource::Channel(scope.clone()),
+                            turn_id: "fatal-turn".into(),
+                            outcome,
+                            batch: Some(batch),
+                        },
+                        &mut false,
+                        &removed_channels,
+                        &mut crash_history,
+                        &respawn_tx,
+                        &mut respawn_tasks,
+                        Some(observer.clone()),
+                        None,
+                    );
+                    let dead_lettered =
+                        !removed && (batch_fate == "exhausted" || outcome_kind == "hard_inactive");
+                    let exiting = capacity == "none";
+                    let scheduled = capacity == "scheduled";
+                    let events = observer.snapshot();
+                    let failures: Vec<_> = events
+                        .iter()
+                        .filter(|event| event.kind == "turn_error")
+                        .collect();
+                    assert_eq!(failures.len(), 1, "{case}");
+                    let failure = failures[0];
+                    assert_eq!(
+                        failure.payload["disposition"],
+                        if dead_lettered {
+                            "dead_lettered"
+                        } else if removed || exiting {
+                            "stopped"
+                        } else {
+                            "retrying"
+                        },
+                        "{case}"
+                    );
+                    assert_eq!(failure.payload["respawnScheduled"], scheduled, "{case}");
+                    assert_eq!(respawn_tasks.len(), usize::from(scheduled), "{case}");
+                    assert_eq!(crash_history[0].respawn_in_flight, scheduled, "{case}");
+                    assert_eq!(action == LoopAction::Exit, exiting, "{case}");
+                    assert_eq!(failure.turn_id.as_deref(), Some("fatal-turn"), "{case}");
+                    assert_eq!(failure.payload["triggeringRootEventId"], root, "{case}");
+                    assert_eq!(failure.payload["triggeringParentEventId"], parent, "{case}");
+                    assert_eq!(
+                        failure.payload["triggeringEventIds"],
+                        serde_json::json!([event.id.to_hex()]),
+                        "{case}"
+                    );
+                    assert!(!queue.is_scope_in_flight(&scope), "{case}");
+                    assert_eq!(
+                        queue.queued_event_count(scope.clone()),
+                        usize::from(!removed && !dead_lettered),
+                        "{case}"
+                    );
+                    if !removed && !dead_lettered {
+                        assert_eq!(queue.retry_count(scope), 1, "{case}");
+                        assert_eq!(
+                            queue.drain_channel(channel_id),
+                            vec![event.id.to_hex()],
+                            "{case}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // No turn_started frame is emitted in these tests: terminal context must
