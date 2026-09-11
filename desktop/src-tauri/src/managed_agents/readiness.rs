@@ -241,33 +241,29 @@ fn resolve_effective_agent_env_with_def(
         }
     }
 
-    // Layer 2b: definition env — the harness author's defaults (e.g. CURSOR_ACP=1).
-    // Applied as a floor below global so user env always wins on collision.
-    // Reserved keys are stripped by the shared `is_reserved_env_key` predicate.
-    if let Some(ref def) = harness_def {
-        for (key, value) in &def.env {
-            if !super::env_vars::is_reserved_env_key(key) {
-                env.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    // Layer 3a: global env vars — the lowest user-settable layer.
-    // Injected before persona/agent so per-agent values win on collision.
-    // `merged_user_env` with an empty "lower" map applies reserved/malformed-key
-    // filtering to the global map for free.
+    // Keep layers separate until runtime aliases are mirrored.
+    let definition_env = harness_def
+        .map(|def| merged_user_env(&BTreeMap::new(), &def.env))
+        .unwrap_or_default();
     let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
-    env.extend(global_env);
-
-    // Layer 3b: merged user env — live persona env under the record's own
-    // overrides (last-wins), after reserved/malformed-key filtering. Reading
-    // the persona live is what makes persona credential edits refresh on the
-    // next spawn instead of being frozen into the record.
-    let user_env = merged_user_env(
+    let persona_env = merged_user_env(
+        &BTreeMap::new(),
         &super::env_vars::live_persona_env(personas, record.persona_id.as_deref()),
-        &record.env_vars,
     );
-    env.extend(user_env);
+    let agent_env = merged_user_env(&BTreeMap::new(), &record.env_vars);
+
+    if let Some(rt) = runtime {
+        super::merge_runtime_provider_env_layers(
+            rt,
+            effective_provider.as_deref(),
+            &mut env,
+            [definition_env, global_env, persona_env, agent_env],
+        );
+    } else {
+        [definition_env, global_env, persona_env, agent_env]
+            .into_iter()
+            .for_each(|layer| env.extend(layer));
+    }
 
     // Single harness-agnostic effort authority (PR #4625): resolve effective
     // effort over the canonical column AND all env tiers, emit one destination

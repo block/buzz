@@ -140,6 +140,31 @@ fn snapshot_is_deterministic() {
 }
 
 #[test]
+fn openai_compatible_base_url_change_trips_spawn_snapshot() {
+    let mut before = record();
+    before.provider = Some("openai-compat".into());
+    before.model = Some("provider-model".into());
+    before.env_vars.insert(
+        "OPENAI_COMPAT_BASE_URL".into(),
+        "https://provider-a.example/v1".into(),
+    );
+    before
+        .env_vars
+        .insert("OPENAI_COMPAT_API_KEY".into(), "test-key".into());
+    let mut after = before.clone();
+    after.env_vars.insert(
+        "OPENAI_COMPAT_BASE_URL".into(),
+        "https://provider-b.example/v1".into(),
+    );
+
+    assert_ne!(
+        snapshot(&before, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&after, &[], &[], "wss://ws.example", &Default::default()),
+        "the restart badge must cover the mapped endpoint spawn receives"
+    );
+}
+
+#[test]
 fn materializing_runtime_keeps_snapshot_stable() {
     // Migration cutover invariant (Phase 1A): materializing the linked
     // persona's runtime onto the record must NOT change the spawn snapshot —

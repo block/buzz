@@ -182,6 +182,10 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
 pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
+    if let Some(provider) = record.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
+
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
     let content = persona_event_content(record);

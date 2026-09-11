@@ -139,6 +139,9 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
             // normalize_global_config_fields, called from save_global_agent_config.
         }
     }
+    if let Some(provider) = config.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
 
     Ok(())
 }

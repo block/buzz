@@ -89,8 +89,9 @@ pub(super) fn draft_agent_model_discovery_env(
     definition_env: &BTreeMap<String, String>,
     env_vars: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
+    let runtime = known_acp_runtime(agent_command);
     let mut derived_env = BTreeMap::new();
-    if let Some(meta) = known_acp_runtime(agent_command) {
+    if let Some(meta) = runtime {
         let provider = provider.map(str::trim).filter(|value| !value.is_empty());
         if !meta.provider_locked {
             if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
@@ -98,15 +99,20 @@ pub(super) fn draft_agent_model_discovery_env(
             }
         }
     }
-    // Reserved keys are stripped from definition env, matching the same filter
-    // applied at spawn.
-    let mut filtered_definition_env = BTreeMap::new();
-    for (key, value) in definition_env {
-        if !crate::managed_agents::is_reserved_env_key(key) {
-            filtered_definition_env.insert(key.clone(), value.clone());
-        }
+
+    let filtered_definition_env =
+        crate::managed_agents::merged_user_env(&BTreeMap::new(), definition_env);
+    let filtered_user_env = crate::managed_agents::merged_user_env(&BTreeMap::new(), env_vars);
+    if let Some(runtime) = runtime {
+        crate::managed_agents::merge_runtime_provider_env_layers(
+            runtime,
+            provider,
+            &mut derived_env,
+            [filtered_definition_env, filtered_user_env],
+        );
+    } else {
+        derived_env.extend(filtered_definition_env);
+        derived_env.extend(filtered_user_env);
     }
-    let merged_with_def =
-        crate::managed_agents::merged_user_env(&derived_env, &filtered_definition_env);
-    crate::managed_agents::merged_user_env(&merged_with_def, env_vars)
+    derived_env
 }

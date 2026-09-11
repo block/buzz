@@ -1,4 +1,4 @@
-//! Goose file-config-aware requirement tests.
+//! Goose file-config and provider-environment readiness tests.
 //!
 //! These tests call `goose_requirements` directly, injecting a synthetic
 //! `RuntimeFileConfig` so there is no disk I/O and tests are deterministic.
@@ -187,4 +187,118 @@ fn goose_goose_provider_databricks_flat_host_silences_databricks_host() {
         }),
         "DATABRICKS_HOST must be silenced when canonical key is in file extra"
     );
+}
+
+#[test]
+fn descriptor_maps_authoritative_openai_compatible_config_for_spawn_and_readiness() {
+    let record: crate::managed_agents::types::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "test-pubkey",
+            "name": "test-agent",
+            "private_key_nsec": "",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "runtime": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "system_prompt": null,
+            "model": "provider-model",
+            "provider": "openai-compat",
+            "env_vars": {
+                "GOOSE_PROVIDER": "anthropic",
+                "OPENAI_COMPAT_API_KEY": "test-key",
+                "OPENAI_COMPAT_BASE_URL": "https://provider.example/v1"
+            },
+            "created_at": "",
+            "updated_at": "",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("sample managed agent record");
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &[], &Default::default())
+        .expect("descriptor");
+
+    assert_eq!(
+        descriptor.env.get("GOOSE_PROVIDER").map(String::as_str),
+        Some("openai"),
+        "structured effective provider must beat arbitrary layered GOOSE_PROVIDER"
+    );
+    assert_eq!(
+        descriptor.env.get("OPENAI_API_KEY").map(String::as_str),
+        Some("test-key")
+    );
+    assert_eq!(
+        descriptor.env.get("OPENAI_HOST").map(String::as_str),
+        Some("https://provider.example/v1")
+    );
+    assert_eq!(
+        descriptor
+            .env
+            .get("GOOSE_PROVIDER__HOST")
+            .map(String::as_str),
+        Some("https://provider.example/v1")
+    );
+
+    let effective = EffectiveAgentEnv {
+        env: descriptor.env,
+        config_file_path: Some("~/.config/goose/config.yaml"),
+        effective_command: descriptor.command,
+    };
+    assert!(agent_readiness(&effective).is_ready());
+}
+
+#[test]
+fn descriptor_keeps_legacy_raw_provider_url_records_runnable() {
+    let record: crate::managed_agents::types::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "legacy-pubkey",
+            "name": "legacy-agent",
+            "private_key_nsec": "",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "runtime": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "system_prompt": null,
+            "model": "legacy-model",
+            "provider": "http://127.0.0.1:9337/v1",
+            "env_vars": {"OPENAI_COMPAT_API_KEY": "test-key"},
+            "created_at": "",
+            "updated_at": "",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("legacy managed agent record");
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &[], &Default::default())
+        .expect("descriptor");
+
+    assert_eq!(
+        descriptor.env.get("GOOSE_PROVIDER").map(String::as_str),
+        Some("openai")
+    );
+    for key in [
+        "OPENAI_COMPAT_BASE_URL",
+        "GOOSE_PROVIDER__HOST",
+        "OPENAI_HOST",
+        "OPENAI_BASE_URL",
+    ] {
+        assert_eq!(
+            descriptor.env.get(key).map(String::as_str),
+            Some("http://127.0.0.1:9337/v1")
+        );
+    }
 }
