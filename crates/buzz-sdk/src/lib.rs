@@ -16,6 +16,7 @@ pub mod broker;
 pub mod builders;
 pub mod mentions;
 pub mod nip_oa;
+pub mod reminders;
 
 pub use builders::*;
 

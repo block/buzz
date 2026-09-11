@@ -16,6 +16,7 @@ name = "buzz-acp"
 path = "src/main.rs"
 
 [dependencies]
+fs2 = "0.4"
 # Internal
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
@@ -77,5 +78,6 @@ evalexpr = { workspace = true }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"

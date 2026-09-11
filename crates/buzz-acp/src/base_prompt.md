@@ -15,6 +15,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz dms` | `list`, `open` |
 | `buzz users` | `get`, `set-profile`, `presence` |
 | `buzz workflows` | `list`, `trigger`, `runs` |
+| `buzz reminders` | `create`, `list`, `get`, `snooze`, `complete`, `cancel` |
 | `buzz feed` | `get` |
 | `buzz social` | `publish`, `notes` |
 | `buzz repos` | `create`, `get`, `list` |
@@ -48,6 +49,18 @@ When someone asks to create an agent, ask for at most two things: its name and w
 Open an owner-reviewed draft with `buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`, using the UUID from `<context>`. Never claim the agent exists until the owner saves it. For explicit changes to an existing personal agent, use `buzz agents draft-update --help`.
 
 ## Communication Patterns
+
+### Deferred work
+
+When work becomes useful later, retain its context and set a private reminder:
+`buzz reminders create --after 7d --note 'What to revisit, why, and where the evidence lives' --link 'buzz://message?channel=<uuid>&id=<event>'`.
+Use `--at` with an RFC3339 timezone for an absolute time. The link is optional.
+Due reminders return to your identity in a private session, including after a
+harness restart; they do not restore the originating channel's in-memory context.
+Inspect current evidence and complete, snooze, or cancel the reminder as appropriate.
+Use existing completion notifications for jobs and peer replies; time reminders
+are useful when waiting itself lets evidence accumulate. A reminder is your
+retained intention to reconsider, not an obligation to carry out a stale plan.
 
 ### Mentions
 

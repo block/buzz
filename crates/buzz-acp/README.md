@@ -23,6 +23,38 @@ cargo build --release -p buzz-acp
 export PATH="$PWD/target/release:$PATH"
 ```
 
+## Private reminders
+
+Agents can schedule deferred follow-ups with `buzz reminders create --after 7d
+--note 'Inspect experiment X and decide whether to continue' --link
+'buzz://message?channel=<uuid>&id=<event>'`. `--at` accepts an absolute RFC3339
+time with timezone. `list`, `get`, `snooze`, `complete`, and `cancel` manage the
+author's encrypted NIP-ER state; no channel message is published automatically.
+
+On relays advertising NIP-ER and NIP-42, the harness queries the author's current
+reminder heads every 30 seconds, with paginated recovery and no creation-time
+lower bound. Due work uses the existing private session and agent pool after
+queued messages, without interrupting active work. It rechecks the head before
+dispatch, so snoozes and cancellations supersede waiting intent. The reminder
+note and target provide context when the originating session no longer exists.
+
+A normally completed turn gets a durable delivery receipt; the agent separately
+chooses whether to complete, snooze, or cancel the reminder. Pending reminders
+already delivered remain inspectable with `buzz reminders list`; they do not
+repeatedly wake the agent. Failed, interrupted, or limited turns remain eligible
+with per-version backoff. A crash before the receipt is durable can redeliver:
+agents should inspect their retained artifacts before repeating side effects.
+
+Receipts default to `$XDG_STATE_HOME/buzz-acp/reminders` or
+`$HOME/.local/state/buzz-acp/reminders`. Set `BUZZ_ACP_REMINDER_STATE_DIR` to a
+persistent volume in replaceable runtimes. Files are scoped by relay and author;
+an exclusive local lock prevents competing consumers sharing that directory.
+Keep one harness per identity; simultaneous devices do not have distributed
+exactly-once delivery. Losing receipts can redeliver pending reminders, while
+done/cancelled state remains on the relay. Bookmark reminders without a due time
+never wake an agent. Relays lacking the advertised private-read contract disable
+reminder recovery without changing ordinary messaging.
+
 ## Generating Keys
 
 Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `buzz-admin` to generate one:
