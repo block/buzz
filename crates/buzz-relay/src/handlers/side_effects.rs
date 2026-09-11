@@ -1744,13 +1744,27 @@ async fn handle_delete_event_side_effect(
         return Ok(()); // No-op: skip system message to avoid false audit records.
     }
 
+    // Audit the deletion — mirrors enqueue_event_created_audit on the create
+    // path. The actor is the admin who sent the kind:9005 request.
+    let actor_hex = hex::encode(event.pubkey.to_bytes());
+    super::event::enqueue_event_deleted_audit(
+        tenant,
+        state,
+        &actor_hex,
+        &hex::encode(&target_id),
+        serde_json::json!({
+            "delete_kind": "nip29_admin",
+            "channel_id": channel_id,
+        }),
+    )
+    .await;
+
     // Thread counters were decremented in the same transaction — push a fresh
     // relay-signed 39005 so live badge counts also count *down*.
     if let Some(root_id) = root_id {
         emit_live_thread_summary(tenant, state, channel_id, root_id);
     }
 
-    let actor_hex = hex::encode(event.pubkey.to_bytes());
     let mut tombstone = serde_json::json!({
         "type": "message_deleted",
         "actor": actor_hex,
@@ -2209,6 +2223,20 @@ async fn handle_a_tag_deletion(
                     d_tag = d_tag,
                     "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
                 );
+                // Audit the deletion.
+                let a_tag_actor_hex = hex::encode(&actor_bytes);
+                super::event::enqueue_event_deleted_audit(
+                    tenant,
+                    state,
+                    &a_tag_actor_hex,
+                    &a_value,
+                    serde_json::json!({
+                        "delete_kind": "nip09_a_tag",
+                        "event_kind": k,
+                        "coordinate": a_value,
+                    }),
+                )
+                .await;
             } else {
                 tracing::debug!(
                     kind = k,
@@ -2279,6 +2307,21 @@ async fn handle_standard_deletion_event(
         if !deleted {
             continue;
         }
+
+        // Audit the deletion.
+        let nip09_actor_hex = hex::encode(event.pubkey.to_bytes());
+        super::event::enqueue_event_deleted_audit(
+            tenant,
+            state,
+            &nip09_actor_hex,
+            &hex::encode(&target_id),
+            serde_json::json!({
+                "delete_kind": "nip09_e_tag",
+                "event_kind": u32::from(target_event.event.kind.as_u16()),
+                "channel_id": target_event.channel_id,
+            }),
+        )
+        .await;
 
         // Thread counters were decremented in the same transaction — push a
         // fresh relay-signed 39005 so live badge counts also count *down*.
