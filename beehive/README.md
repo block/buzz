@@ -12,6 +12,14 @@ can close while the host/runner continues. No direct-host HTTP API or controller
 service exists. This package intentionally lives alongside, not inside, the
 native clients: it is a separately authorized product experiment.
 
+Configure and start the default host with `beehive host`. Running `beehive`
+opens a two-part manager: **Local Host** works without an owner signer and routes
+local runtime/agent-key provisioning through `manage-local`; **Agents** signs into
+the relay-backed management view. The owner key is entered once, verified against
+the configured owner npub and retained only in this managing computer's Beehive OS
+credential entry. Other hosts retain only the owner npub, host key and explicitly
+registered agent keys.
+
 ## Command launcher (one-time, reversible)
 
 `bin/beehive.cjs` is a plain launcher for this checkout: it checks Node

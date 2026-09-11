@@ -3,7 +3,7 @@ import { metadataRevision } from './public-metadata.ts';
 import { setupPath } from './setup-path.ts';
 import { randomUUID } from 'node:crypto';
 import { credentialHelperReader } from './credential-helper.ts';
-import { systemCredentials } from './credential-store.ts';
+import { systemCredentials, createCredential, credentialReference, readCredential } from './credential-store.ts';
 import { privateHostTransport } from './host-transport.ts';
 import { installationPublicSlots } from './slots.ts';
 import { provisionCredentialSlot, reconcileCredentialProvision, orphanCredentialSlots } from './credential-slots.ts';
@@ -19,7 +19,8 @@ import { claudeGuidance } from './claude.ts';
 import { readAgentSecret } from './key-input.ts';
 import { conversationInput } from './conversation-input.ts';
 import { localSetup } from './local-setup.ts';
-import { hostSetup } from './host-setup.ts';
+import { hostSetup, ownerPublicInput } from './host-setup.ts';
+import { createControllerConfig, readControllerConfig } from './controller-config.ts';
 import { enrollmentInput } from './enrollment-input.ts';
 import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
 import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
@@ -41,45 +42,81 @@ import { prepareConversation } from './conversation.ts';
 
 const operationLabel = (m: Message) => `${m.host} ${m.type}${m.type === 'move' ? ` → ${String(m.body.target)}` : ''} | agent ${m.agent} | operation ${m.id}`;
 const shellQuote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
-const [command, ...args] = process.argv.slice(2);
+let [command, ...args] = process.argv.slice(2);
 // Default HOST state only, resolved from the current user's home (never cwd).
 // Owner approval uses a separately chosen owner exchange folder. An occupied default is never reinitialized.
 const defaultHostDirectory = () => join(homedir(), '.beehive', 'host');
-const help = `Beehive — private host preview
-Command: beehive <command> from any directory once installed (one-time user link, reversible: ln -s <beehive-package>/bin/beehive.cjs <user bin on PATH>/beehive, e.g. ~/.local/bin); source fallback inside the package: node src/cli.ts <command>.
-  identity                                 Disabled: use your existing owner signer
-  setup                                    Configure/resume OWNER NPUB + RELAY on ~/.beehive/host; normal community join
-  setup <host-directory>                   Same configuration/join flow on an explicit retained host folder
-  setup <host-directory> <identity-file>  LEGACY loopback diagnostic setup (owner key copied)
-  provision-agent <host-directory> <binding-file> <genesis-file> Hidden matching agent import; OS credentials
-  reconcile-provision <host-directory> <binding-file> <genesis-file> Explicit exact first-provision recovery
-  catalog <approval-file>                  Automatic private catalog beside approval; prints tui command
-  catalog <new-file> <registration-files...> Retain verified public host registrations
-  legacy-enrollment <host-directory>       Explicit historical approval exchange (not required)
-  presets                                  Local process-free preset discovery/setup guidance
-  local-setup <host-directory>              Bindings; new/reuse/hidden standby/restore identity
-  migrate-slots <host-directory>            Explicit stopped upgrade, preserves journal
-  add-agent <host-directory>                New identity using shared local harness
-  reconcile-agent <host-directory> [agent-public-key] [public-genesis-file] Recover interrupted added slot
-  remove-agent-key <host-directory> [agent-public-key] Remove ONE local key copy (public slot retained)
-  import-agent-key <host-directory> <agent-public-key> Restore retained identity via hidden local entry
-  assignment-export <host-directory> <new-file> Export public pinned genesis locally
-  migrate-assignment <host-directory>       Explicit stopped legacy enrollment
-  auth-info <host-directory> [binding-id]   Print local harness service context (no login)
-  conversation-setup <host-directory>       Legacy guidance; use local-setup action normal
-  relay <port> <owner-public-key> <log-file> Dedicated ciphertext relay
-  host --owner-present                     Default host and retained configured relay
-  host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
-  host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
-  drafts <state-directory>                Offline public metadata + instruction drafts; no signer/network; same state directory as TUI
-  tui discover <relay> <state-directory>   Private availability discovery; no approval file
-  tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
-setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
-The default host folder resolves from your home (~/.beehive/host), never the current directory; setup displays it once and never reinitializes an existing installation. No approval files required. setup never starts the host or agents; host --owner-present is a deliberate foreground start. Legacy catalog <approval-file> remains available. Enrollment, provision-agent, auth-info, catalog, host and tui paths accept ~ and ~/. Explicit relay overrides must match retained local configuration.
-reconcile-agent derives the interrupted binding and genesis from the retained journal; an optional public genesis file must match it.
-assignment-export accepts agent public key after filename when several slots exist.
-Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog uses authenticated encrypted relay transport. Relay refusals are transport errors.`;
+const defaultControllerDirectory = () => join(homedir(), '.beehive', 'owner');
+let enteredOwnerSecret: string | undefined;
+const help = `Beehive — run and manage your agents
+
+Usage:
+  beehive                 Open Local Host / Agents manager (implicit setup)
+  beehive host            Configure if needed, then start this host
+
+The Local Host screen does not require owner sign-in. The Agents screen signs in
+with the owner key once and retains it in this computer's Beehive OS credential
+entry. Other hosts need only the configured owner npub.`;
+
+async function openManager(): Promise<boolean> {
+  const hostDirectory = defaultHostDirectory();
+  const controllerDirectory = defaultControllerDirectory();
+  const ui = createInterface({ input: stdin, output: stdout });
+  try {
+    console.log('Beehive | Local Host\nCommands: local, manage-local, agents, quit');
+    for (;;) {
+      const line = (await ui.question('beehive> ')).trim();
+      if (line === 'quit') return false;
+      if (line === 'local') {
+        if (!existsSync(join(hostDirectory, 'host-identity.json'))) {
+          console.log('This computer is not configured as a host. Run beehive host to configure and start it.');
+          continue;
+        }
+        const identity = readHostIdentityPublic(hostDirectory);
+        const slots = existsSync(join(hostDirectory, 'setup.json')) || existsSync(join(hostDirectory, 'agents')) ? installationPublicSlots(hostDirectory) : [];
+        console.log(`Local Host ${identity.pairing.label} | ${identity.pairing.host}\nRelay ${identity.pairing.relay}\nOwner ${identity.pairing.owner}`);
+        if (slots.length === 0) console.log('No locally registered agents or runtimes.');
+        for (const slot of slots) console.log(`Agent ${slot.agent} | runtimes ${Object.keys(slot.bindings).join(', ') || 'none'}`);
+        continue;
+      }
+      if (line === 'manage-local') {
+        ui.close();
+        if (!existsSync(join(hostDirectory, 'host-identity.json'))) {
+          await hostSetup(hostDirectory);
+          return false;
+        }
+        command = 'local-setup'; args = [hostDirectory]; return true;
+      }
+      if (line === 'agents') {
+        const retained = readControllerConfig(controllerDirectory);
+        const local = existsSync(join(hostDirectory, 'host-identity.json')) ? readHostIdentityPublic(hostDirectory).pairing : undefined;
+        const owner = retained?.owner ?? ownerPublicInput(await ui.question(`Owner PUBLIC npub${local ? ` [${local.owner}]` : ''}: `) || String(local?.owner ?? ''));
+        const relay = retained?.relay ?? ((await ui.question(`Management relay URL${local ? ` [${local.relay}]` : ''}: `)).trim() || String(local?.relay ?? ''));
+        const reference = credentialReference('owner', owner);
+        let secret = systemCredentials.read(reference);
+        if (secret === null) {
+          ui.close();
+          secret = await readAgentSecret('Owner');
+          if (publicKey(secret) !== owner) throw Error('Owner key does not match the configured owner npub');
+          createCredential('owner', secret);
+        } else {
+          secret = readCredential(reference);
+        }
+        if (!retained) createControllerConfig(controllerDirectory, owner, relay);
+        enteredOwnerSecret = secret;
+        command = 'tui';
+        args = ['discover', relay, controllerDirectory];
+        return true;
+      }
+      console.log('Use local, manage-local, agents, or quit. Local Host never requires owner sign-in; Agents does.');
+    }
+  } finally { ui.close(); }
+}
+
 async function main() {
+  if (command === undefined) {
+    if (!await openManager()) return;
+  }
   if (command === 'drafts') {
     const drafts = profileDrafts(setupPath(text(args[0])));
     const metadata = metadataDrafts(setupPath(text(args[0])));
@@ -377,6 +414,11 @@ async function main() {
     };
     process.on('SIGINT', close); process.on('SIGTERM', close);
   } else if (command === 'host') {
+    if (args.length === 0 && !existsSync(join(defaultHostDirectory(), 'host-identity.json'))) {
+      await hostSetup(defaultHostDirectory());
+      if (!existsSync(join(defaultHostDirectory(), 'host-identity.json'))) return;
+    }
+    if (args.length === 0) args.push('--owner-present');
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
@@ -419,7 +461,7 @@ async function main() {
     const discovering = args[0] === 'discover';
     const discoveryRelay = discovering ? text(args[1]) : undefined;
     if (discovering) { args[0] = join(setupPath(text(args[2])), 'discovery.json'); args[1] = discoveryRelay!; }
-    const discoverySecret = discovering ? await readAgentSecret('Owner') : undefined;
+    const discoverySecret = discovering ? enteredOwnerSecret ?? await readAgentSecret('Owner') : undefined;
     const identity = discovering ? { version: 1, owner: publicKey(discoverySecret!), relay: discoveryRelay!, registrations: [] } : object(readPrivate(setupPath(text(args[0]))));
     if (args[1] === undefined && 'registrations' in identity) args[1] = text(identity.relay);
     const catalog: HostCatalog | undefined = 'registrations' in identity ? verifyHostCatalog(identity, text(identity.owner), text(args[1])) : undefined;

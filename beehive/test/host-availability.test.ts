@@ -184,3 +184,36 @@ test('normal public owner inputs reject secrets', () => {
   assert.equal(ownerPublicInput(owner.toUpperCase()), owner);
   assert.throws(() => ownerPublicInput('nsec1invalid'));
 });
+
+test('default manager partitions unsigned Local Host from persisted owner Agents sign-in', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-manager-partition-'));
+  const owner = newKey();
+  const file = join(root, 'credentials.json');
+  const directory = join(root, '.beehive', 'host');
+  bootstrapHostIdentity(directory, 'Local machine', publicKey(owner), 'ws://127.0.0.1:1', isolatedFileCredentials(file));
+  const child = spawn(process.execPath, ['--import', resolve('test/isolated-credentials-loader.ts'), 'src/cli.ts'], {
+    env: { ...process.env, HOME: root, BEEHIVE_TEST_CREDENTIAL_FILE: file }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let output = ''; child.stdout!.on('data', b => output += b); child.stderr!.on('data', b => output += b);
+  const exit = new Promise<number | null>(done => child.on('close', done));
+  try {
+    await wait(() => output.includes('Beehive | Local Host'), () => output);
+    child.stdin!.write('local\n');
+    await wait(() => output.includes('Local Host Local machine'), () => output);
+    assert.ok(!output.includes('Owner private key'), 'local host inspection never asks for the owner signer');
+    child.stdin!.write('agents\n');
+    await wait(() => output.includes('Owner PUBLIC npub'), () => output);
+    child.stdin!.write('\n');
+    await wait(() => output.includes('Management relay URL'), () => output);
+    child.stdin!.write('\n');
+    await wait(() => output.includes('Owner private key'), () => output);
+    child.stdin!.write(owner + '\n');
+    await wait(() => existsSync(join(root, '.beehive', 'owner', 'controller.json')));
+    await wait(() => JSON.parse(readFileSync(file, 'utf8'))[JSON.stringify(credentialReference('owner', publicKey(owner)))] === owner);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, '.beehive', 'owner', 'controller.json'), 'utf8')), {
+      version: 1, owner: publicKey(owner), relay: 'ws://127.0.0.1:1',
+    });
+  } finally {
+    child.kill('SIGKILL'); await exit; rmSync(root, { recursive: true, force: true });
+  }
+});

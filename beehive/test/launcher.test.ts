@@ -61,11 +61,11 @@ test('installed launcher prints public help from an unrelated directory with spa
     const installed = installInto(root);
     const cwd = join(root, 'unrelated cwd dir');
     mkdirSync(cwd);
-    const help = await runLauncher(installed, [], baseEnv(home), [], cwd);
+    const help = await runLauncher(installed, ['--help'], baseEnv(home), [], cwd);
     assert.equal(help.code, 0, help.output);
-    assert.match(help.output, /^Beehive — private host preview/, help.output);
-    assert.ok(help.output.includes('setup'), help.output);
-    assert.ok(help.output.includes('~/.beehive/host'), help.output);
+    assert.match(help.output, /^Beehive — run and manage your agents/, help.output);
+    assert.ok(help.output.includes('beehive host'), help.output);
+    assert.ok(help.output.includes('Local Host screen'), help.output);
     assert.ok(!help.output.includes('Enrollment ['), help.output);
     assert.ok(!existsSync(join(home, '.beehive')), 'help must not create state');
   } finally { rmSync(root, { recursive: true, force: true }); }
