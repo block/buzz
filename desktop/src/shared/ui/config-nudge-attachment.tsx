@@ -81,14 +81,21 @@ function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
 }
 
 /**
- * Returns true when every requirement is a `cli_config_invalid` surface.
- * Config-invalid cards are purely informational — the user must edit an
- * external file; there is no in-app destination that can fix it.
+ * Returns true when the card has no in-app destination. Auth-only cards already
+ * contain the login command, while external config and PATH failures must be
+ * repaired outside Buzz. A mixed card remains actionable when at least one
+ * requirement maps to Edit Agent.
  */
-function isAllConfigInvalid(reqs: ConfigNudgePayload["requirements"]): boolean {
-  return (
-    reqs.length > 0 && reqs.every((r) => r.surface === "cli_config_invalid")
-  );
+export function isInformationalOnly(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  const allExternal =
+    reqs.length > 0 &&
+    reqs.every(
+      (r) =>
+        r.surface === "cli_config_invalid" || r.surface === "missing_binary",
+    );
+  return isAuthOnly(reqs) || allExternal;
 }
 
 /**
@@ -189,11 +196,7 @@ export function ConfigNudgeCard({
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
   const opensDoctor = shouldOpenDoctor(nudge.requirements);
-  const authOnly = isAuthOnly(nudge.requirements);
-  const allConfigInvalid = isAllConfigInvalid(nudge.requirements);
-  // Any card that is purely informational (auth-only or all-config-invalid)
-  // has no clickable destination — treat them the same for affordance/routing.
-  const informationalOnly = authOnly || allConfigInvalid;
+  const informationalOnly = isInformationalOnly(nudge.requirements);
 
   const openDoctor = () => {
     if (!onOpenSettings) {
