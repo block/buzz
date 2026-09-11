@@ -122,7 +122,7 @@ fn is_emittable_ref(name: &str) -> bool {
         return false;
     }
     name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
+        .all(|c| c.is_ascii_alphanumeric() || "/_.-+@".contains(c))
 }
 
 /// Accept SHA-1 (40 hex) and SHA-256 (64 hex) OIDs.
@@ -331,6 +331,47 @@ mod tests {
         assert!(first_tag(&ev, "refs/heads/non-hex").is_none());
         assert!(first_tag(&ev, "refs/heads/midlen").is_none());
         assert!(first_tag(&ev, "refs/heads/ok").is_some());
+    }
+
+    #[test]
+    fn emits_refs_with_plus_and_at_in_component() {
+        // `+` and `@` are git-legal ref characters now accepted by
+        // `is_safe_refname` (#4194). They must NOT be silently dropped from
+        // kind:30618 ref-state events, or those refs would push successfully
+        // but never appear in branch listers (desktop `projects/hooks.ts`,
+        // web `repos/use-repo-refs.ts`).
+        let oid = "0123456789012345678901234567890123456789";
+        let refs = refs_with(&[
+            ("refs/heads/test/842+841-devnet", oid),
+            ("refs/tags/release@v1", oid),
+        ]);
+        let inputs = RefStateInputs {
+            repo_id: "r",
+            head: "refs/heads/main",
+            refs: &refs,
+            actor_pubkey_hex: &owner_hex(),
+        };
+        let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
+        assert!(
+            first_tag(&ev, "refs/heads/test/842+841-devnet").is_some(),
+            "ref with `+` must be emitted in kind:30618 (#4194)"
+        );
+        assert!(
+            first_tag(&ev, "refs/tags/release@v1").is_some(),
+            "ref with `@` must be emitted in kind:30618 (#4194)"
+        );
+    }
+
+    #[test]
+    fn is_emittable_ref_widened_alphabet() {
+        // Direct portable test of the predicate — kept next to
+        // `rejects_malformed_ref_names` so both rejection and allowance
+        // live in one place.
+        assert!(is_emittable_ref("refs/heads/test/842+841-devnet"));
+        assert!(is_emittable_ref("refs/tags/release@v1"));
+        assert!(!is_emittable_ref("refs/heads/space ref"));
+        assert!(!is_emittable_ref("refs/heads//double"));
+        assert!(!is_emittable_ref("refs/heads/\n"));
     }
 
     #[test]
