@@ -405,13 +405,17 @@ function ActivityCard({
             <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
               <button
                 aria-label={`View ${actorLabel}'s profile`}
-                className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                className={cn(
+                  "pointer-events-auto relative z-10 shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                )}
                 type="button"
               >
                 <UserAvatar
                   accent={profile?.isAgent === true}
                   avatarUrl={profile?.avatarUrl ?? null}
                   displayName={actorLabel}
+                  shape={profile?.isAgent ? "squircle" : "circle"}
                   size={compact ? "xs" : "md"}
                 />
               </button>
@@ -422,6 +426,7 @@ function ActivityCard({
               avatarUrl={profile?.avatarUrl ?? null}
               className="relative z-10 shrink-0"
               displayName={actorLabel}
+              shape={profile?.isAgent ? "squircle" : "circle"}
               size={compact ? "xs" : "md"}
             />
           )}

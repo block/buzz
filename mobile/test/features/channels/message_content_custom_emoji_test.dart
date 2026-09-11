@@ -111,8 +111,12 @@ void main() {
   ) async {
     await tester.pumpWidget(_testable('`:wave:` :unknown:wave:'));
     expect(find.byType(CustomEmojiImage), findsOneWidget);
+    // A paragraph holding inline code renders through BidiRichText, a RichText
+    // subclass, and `find.byType` matches the exact runtime type only.
     final text = tester
-        .widgetList<RichText>(find.byType(RichText))
+        .widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )
         .map((widget) => widget.text.toPlainText())
         .join();
     expect(text, contains(':wave:'));

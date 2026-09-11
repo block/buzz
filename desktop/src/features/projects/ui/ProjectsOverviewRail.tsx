@@ -58,7 +58,10 @@ function OverviewPerson({
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          className="relative inline-flex rounded-full ring-2 ring-background"
+          className={cn(
+            "relative inline-flex ring-2 ring-background",
+            profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+          )}
           data-overview-person=""
           style={{ zIndex: stackSize - index }}
         >
@@ -66,6 +69,7 @@ function OverviewPerson({
             accent={profile?.isAgent === true}
             avatarUrl={profile?.avatarUrl ?? null}
             displayName={label}
+            shape={profile?.isAgent ? "squircle" : "circle"}
             size="sm"
           />
         </span>

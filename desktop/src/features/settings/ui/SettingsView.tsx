@@ -7,11 +7,11 @@ import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
-import { getFeature } from "@/shared/features/manifest";
 import {
+  getFeature,
   resolveEnabled,
   useFeatureSnapshot,
-} from "@/shared/features/useFeatureEnabled";
+} from "@/shared/features";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -137,7 +137,10 @@ export function SettingsView({
       // stable and renders unconditionally (fail-open).
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+        if (
+          feature &&
+          !resolveEnabled(s.featureGate, featureState, feature.defaultEnabled)
+        ) {
           return false;
         }
       }

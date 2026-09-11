@@ -170,6 +170,7 @@ export function FeedSection({
             const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
               item.tags,
               profiles,
+              item.content,
             );
 
             return (
@@ -206,6 +207,11 @@ export function FeedSection({
                         profiles,
                         preferResolvedSelfLabel: true,
                       })}
+                      shape={
+                        profiles?.[item.pubkey.toLowerCase()]?.isAgent === true
+                          ? "squircle"
+                          : "circle"
+                      }
                       size="xs"
                     />
                     {resolveUserLabel({

@@ -18,6 +18,11 @@ import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  setVideoPlaybackSpeed,
+  useVideoPlaybackSpeed,
+  VIDEO_PLAYBACK_SPEEDS,
+} from "@/shared/lib/videoPlaybackSpeedPreference";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
@@ -43,7 +48,6 @@ import {
   saveReviewPlaybackPosition,
   setVideoReviewOpen,
 } from "./videoPlayerState";
-
 type VideoReviewReaction = {
   emoji: string;
   emojiUrl?: string;
@@ -55,11 +59,11 @@ type VideoReviewReaction = {
     avatarUrl: string | null;
   }>;
 };
-
 export type VideoReviewComment = {
   id: string;
   author: string;
   avatarUrl?: string | null;
+  isAgent?: boolean;
   body: string;
   createdAt: number;
   time: string;
@@ -67,7 +71,6 @@ export type VideoReviewComment = {
   parentId?: string | null;
   reactions?: VideoReviewReaction[];
 };
-
 export type VideoReviewContext = {
   channelId?: string | null;
   channelName?: string;
@@ -91,7 +94,6 @@ export type VideoReviewContext = {
   rootEventId?: string;
   title?: string;
 };
-
 type VideoPlayerProps = {
   src: string;
   poster?: string;
@@ -108,18 +110,15 @@ type VideoPlayerProps = {
   /** imeta `filename`, used as the save-dialog name. */
   filename?: string;
 };
-
 type TimecodedComment = {
   comment: VideoReviewComment;
   seconds: number | null;
   timecode: string | null;
   text: string;
 };
-
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
-const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
-const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
+const PLAYBACK_SPEEDS = VIDEO_PLAYBACK_SPEEDS;
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -183,10 +182,6 @@ function formatCommentTimecode(seconds: number): string {
 
 function formatPlaybackSpeed(speed: number): string {
   return `${speed}x`;
-}
-
-function isPlaybackSpeedOption(speed: number): boolean {
-  return PLAYBACK_SPEEDS.some((option) => option === speed);
 }
 
 function parseTimecodedComment(comment: VideoReviewComment): TimecodedComment {
@@ -702,9 +697,9 @@ export function VideoPlayer({
   const [duration, setDuration] = React.useState(durationSeconds ?? 0);
   const [volume, setVolume] = React.useState(1);
   const [muted, setMuted] = React.useState(false);
-  const [playbackSpeed, setPlaybackSpeed] = React.useState(
-    DEFAULT_PLAYBACK_SPEED,
-  );
+  // Device-level preference, not per-player state: a speed chosen here is the
+  // speed every later video starts at.
+  const playbackSpeed = useVideoPlaybackSpeed();
   // Cache-seeded so a row evicted by the virtualized timeline remounts at the
   // ratio learned on first metadata load, not the 16/9 fallback.
   const [naturalAspectRatio, learnNaturalAspectRatio] =
@@ -743,7 +738,6 @@ export function VideoPlayer({
     setIsPlaying(false);
     setIsBuffering(false);
     setHasError(false);
-    setPlaybackSpeed(DEFAULT_PLAYBACK_SPEED);
     setReviewOpenState(isVideoReviewOpen(persistedReviewKey));
     setReviewCurrentTimeState(
       getReviewPlaybackPosition(persistedReviewKey) ?? 0,
@@ -834,9 +828,7 @@ export function VideoPlayer({
     return () => observer.disconnect();
   }, []);
   const handlePlaybackSpeedChange = React.useCallback((speed: number) => {
-    if (isPlaybackSpeedOption(speed)) {
-      setPlaybackSpeed(speed);
-    }
+    setVideoPlaybackSpeed(speed);
   }, []);
 
   useSmoothPlaybackTime(videoRef, isPlaying && !reviewOpen, setCurrentTime);
@@ -1813,6 +1805,9 @@ function VideoReviewDialog({
                                   avatarUrl={item.comment.avatarUrl ?? null}
                                   className="h-4 w-4 shadow-none"
                                   displayName={item.comment.author}
+                                  shape={
+                                    item.comment.isAgent ? "squircle" : "circle"
+                                  }
                                   size="xs"
                                 />
                               </button>
@@ -2143,6 +2138,7 @@ function VideoReviewCommentBody({
           avatarUrl={item.comment.avatarUrl ?? null}
           className="h-6 w-6 shadow-none"
           displayName={item.comment.author}
+          shape={item.comment.isAgent ? "squircle" : "circle"}
           size="xs"
         />
         <p className="truncate text-sm font-semibold text-foreground">

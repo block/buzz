@@ -41,6 +41,7 @@ export const KIND_HUDDLE_STARTED = 48100;
 export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
+export const KIND_HUDDLE_LIVENESS = 48104;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
 // "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").

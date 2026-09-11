@@ -668,6 +668,12 @@ pub struct AppState {
     pub workflow_engine: Arc<WorkflowEngine>,
     /// Relay signing keypair — used to sign system messages (kind 40099).
     pub relay_keypair: nostr::Keys,
+    /// Process-local generation advertised for non-mesh huddle liveness.
+    ///
+    /// A fresh value on every relay start lets desktop clients retire persisted
+    /// admissions when an in-memory audio room is recreated at the same roster
+    /// revision after a restart. Mesh rooms use their Redis-fenced generation.
+    pub huddle_liveness_generation: Uuid,
 
     /// Recently-published event IDs for local-echo deduplication, keyed by
     /// `(community_id, event_id)`. Events fanned out in-process are added here;
@@ -713,6 +719,8 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
+    /// Orders readiness gauge publication against terminal shutdown.
+    pub(crate) readiness: Arc<crate::readiness::ReadinessCoordinator>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -877,6 +885,7 @@ impl AppState {
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
             relay_keypair,
+            huddle_liveness_generation: Uuid::new_v4(),
 
             local_event_ids: Arc::new(
                 moka::sync::Cache::builder()
@@ -914,6 +923,7 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,
@@ -953,6 +963,23 @@ impl AppState {
                 handle: audit_worker_handle,
             },
         )
+    }
+
+    /// Atomically closes readiness publication before exposing shutdown to
+    /// the relay's other fast-path lifecycle checks.
+    pub fn begin_shutdown(&self) {
+        self.readiness.begin_shutdown();
+        self.shutting_down.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_readiness_evaluator(
+        &mut self,
+        evaluator: Arc<dyn crate::readiness::ReadinessEvaluator>,
+    ) {
+        self.readiness = Arc::new(crate::readiness::ReadinessCoordinator::with_evaluator(
+            evaluator,
+        ));
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
@@ -1224,7 +1251,7 @@ impl AppState {
     pub async fn revalidate_live_communities(&self) -> usize {
         let (closed, failures) =
             revalidate_registered_communities(&self.community_connections, |community_id| {
-                self.db.is_community_active(community_id)
+                self.db.is_community_active_for_maintenance(community_id)
             })
             .await;
         for (community_id, error) in failures {
@@ -1346,11 +1373,33 @@ impl AuditShutdownHandle {
 /// and the post-cancel drain share the same logic.
 async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
     let t = std::time::Instant::now();
-    if let Err(e) = audit.log(entry).await {
-        metrics::counter!("buzz_audit_log_errors_total").increment(1);
-        tracing::error!("Audit log failed: {e}");
-    } else {
-        metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
+    let mut retry_delay_ms = 50u64;
+    let mut retries = 0u64;
+    loop {
+        match audit.log(entry.clone()).await {
+            Ok(_) => {
+                metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
+                return;
+            }
+            Err(buzz_audit::AuditError::Database(sqlx::Error::Database(database_error)))
+                if database_error.code().as_deref() == Some("55P03") =>
+            {
+                retries += 1;
+                metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
+                tracing::warn!(
+                    retries,
+                    retry_delay_ms,
+                    "Audit advisory lock timed out; preserving entry for retry"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                retry_delay_ms = (retry_delay_ms * 2).min(1_000);
+            }
+            Err(error) => {
+                metrics::counter!("buzz_audit_log_errors_total").increment(1);
+                tracing::error!("Audit log failed: {error}");
+                return;
+            }
+        }
     }
 }
 
@@ -1364,7 +1413,7 @@ impl std::fmt::Debug for AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::connection::{AuthState, ConnectionState};
     use std::collections::HashMap;
@@ -1403,7 +1452,10 @@ mod tests {
         (mgr, conn_id, rx, ctrl_rx, cancel, bp)
     }
 
-    async fn test_state() -> Arc<AppState> {
+    /// A relay state whose Redis is deliberately unreachable, so admission
+    /// checks resolve to `AdmissionError::Unavailable` without any live
+    /// infrastructure. Shared with `crate::rejection`'s tests.
+    pub(crate) async fn test_state() -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -1438,6 +1490,137 @@ mod tests {
             media_storage,
         );
         Arc::new(state)
+    }
+
+    async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let observer = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect observer pool");
+        let application_name = format!("audit-retry-test-{}", Uuid::new_v4());
+        let hook_application_name = application_name.clone();
+        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |conn, _meta| {
+                let application_name = hook_application_name.clone();
+                Box::pin(async move {
+                    sqlx::query(
+                        "SELECT set_config('application_name', $1, false), \
+                                set_config('lock_timeout', '100', false)",
+                    )
+                    .bind(application_name)
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect audit pool");
+
+        let community_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("audit-retry-{community_id}.example"))
+            .execute(&observer)
+            .await
+            .expect("insert test community");
+        let object_id = format!("audit-retry-object-{}", Uuid::new_v4());
+        let entry = buzz_audit::NewAuditEntry {
+            community_id: CommunityId::from_uuid(community_id),
+            action: buzz_audit::AuditAction::EventCreated,
+            actor_pubkey: Some(vec![0xab; 32]),
+            object_id: Some(object_id.clone()),
+            detail: serde_json::json!({"test": "lock-timeout-retry"}),
+        };
+
+        // Mirrors buzz_audit::service::AUDIT_LOCK_NAMESPACE.
+        let lock_key = format!("buzz_audit:{community_id}");
+        let mut holder = observer.acquire().await.expect("acquire lock holder");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("hold community audit lock");
+
+        let audit = Arc::new(AuditService::new(audit_pool));
+        let worker = tokio::spawn({
+            let audit = Arc::clone(&audit);
+            async move { log_audit_entry(&audit, entry).await }
+        });
+
+        // Observe one timed-out advisory-lock attempt and then a second wait.
+        // Releasing during the first wait would not prove that the worker
+        // preserved and retried the original queue entry.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut saw_first_wait = false;
+            let mut saw_retry_gap = false;
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM pg_stat_activity \
+                         WHERE application_name = $1 \
+                           AND query LIKE 'SELECT pg_advisory_lock%' \
+                           AND wait_event = 'advisory'\
+                     )",
+                )
+                .bind(&application_name)
+                .fetch_one(&observer)
+                .await
+                .expect("inspect audit lock waiter");
+                if waiting {
+                    if saw_retry_gap {
+                        break;
+                    }
+                    saw_first_wait = true;
+                } else if saw_first_wait {
+                    saw_retry_gap = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("audit worker never retried after lock_timeout");
+
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("release community audit lock");
+        tokio::time::timeout(std::time::Duration::from_secs(3), worker)
+            .await
+            .expect("audit worker did not finish after lock release")
+            .expect("audit worker task panicked");
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+        )
+        .bind(community_id)
+        .bind(&object_id)
+        .fetch_one(&observer)
+        .await
+        .expect("count retried audit rows");
+        assert_eq!(rows, 1, "the preserved entry must be appended exactly once");
+
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1 AND object_id = $2")
+            .bind(community_id)
+            .bind(&object_id)
+            .execute(&observer)
+            .await
+            .expect("remove test audit row");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove test community");
+    }
+
+    mod postgres_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
+            super::audit_worker_retries_lock_timeout_until_original_entry_is_appended_once().await;
+        }
     }
 
     #[test]

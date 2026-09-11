@@ -97,7 +97,12 @@ pub async fn upsert(
     added_by: &[u8],
     config_operator_exists: bool,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // A demotion to moderator can drop the effective-operator count; serialize
     // it against every other operator-removing mutation via the roster-wide
@@ -193,7 +198,12 @@ pub async fn remove(
     actor: &[u8],
     config_operator_exists: bool,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // Serialize against every other operator-removing mutation before the
     // delete so the post-delete count reflects a stable roster.
@@ -235,11 +245,16 @@ pub async fn remove(
 
 /// Fetch one relay operator/moderator row by pubkey.
 pub async fn get(pool: &PgPool, pubkey: &[u8]) -> Result<Option<RelayOperatorRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT pubkey, role, added_by, created_at FROM relay_operators WHERE pubkey = $1",
     )
     .bind(pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     row.map(
@@ -258,10 +273,15 @@ pub async fn get(pool: &PgPool, pubkey: &[u8]) -> Result<Option<RelayOperatorRec
 
 /// List all relay operator/moderator rows, ordered by creation time.
 pub async fn list(pool: &PgPool) -> Result<Vec<RelayOperatorRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let rows = sqlx::query(
         "SELECT pubkey, role, added_by, created_at FROM relay_operators ORDER BY created_at ASC",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     rows.into_iter()
@@ -326,7 +346,7 @@ impl crate::Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use sqlx::PgPool;
 

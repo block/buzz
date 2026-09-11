@@ -23,10 +23,22 @@ type ProfileAvatarProps = {
   avatarUrl: string | null;
   avatarDataUrl?: string | null;
   label: string;
+  /**
+   * Label used to derive fallback initials; defaults to `label`.
+   *
+   * `label` stays the full visible/alt identity, but some callers build it
+   * as a generated role-prefixed key fallback ("Agent npub1abcd…wxyz"),
+   * which `getInitials` reads as ordinary words — collapsing every unnamed
+   * identity onto the same "AN"/"PN" initials. Identity-aware callers pass
+   * the unprefixed compact key here so key-fallback avatars keep distinct
+   * key-tail initials; authored display names keep their name initials.
+   */
+  initialsLabel?: string;
   className?: string;
   iconClassName?: string;
   imageClassName?: string;
   plain?: boolean;
+  shape?: "circle" | "squircle";
   testId?: string;
   /**
    * Suppress every network image request for a publisher-controlled avatar
@@ -45,14 +57,16 @@ export function ProfileAvatar({
   avatarUrl,
   avatarDataUrl,
   label,
+  initialsLabel,
   className,
   iconClassName,
   imageClassName,
   plain = false,
+  shape = "circle",
   testId,
   untrusted = false,
 }: ProfileAvatarProps) {
-  const initials = getInitials(label);
+  const initials = getInitials(initialsLabel ?? label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
 
@@ -94,6 +108,7 @@ export function ProfileAvatar({
     <Avatar
       className={cn(
         "shrink-0 text-primary shadow-xs",
+        shape === "squircle" && "rounded-[30%]",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
         plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",

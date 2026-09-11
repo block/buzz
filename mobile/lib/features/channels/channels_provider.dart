@@ -233,7 +233,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final dedupedMetas = latestMetaPerId.values.toList();
 
     // Resolve DM participant display names. Extracted into the part file so
-    // `channels_provider.dart` stays under the 1000-line ceiling enforced by
+    // `channels_provider.dart` stays under the 1200-line ceiling enforced by
     // `just file-size-check`.
     final displayNames = await _resolveDmDisplayNames(
       session,

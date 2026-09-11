@@ -464,6 +464,11 @@ pub async fn restriction_state(
     community: CommunityId,
     pubkey: &[u8],
 ) -> Result<RestrictionState> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         SELECT
@@ -475,7 +480,7 @@ pub async fn restriction_state(
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -814,7 +819,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use chrono::Duration;
     use uuid::Uuid;

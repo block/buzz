@@ -192,6 +192,9 @@ enum Cmd {
     /// Manage your custom emoji set (workspace palette is the union of all members' sets)
     #[command(subcommand)]
     Emoji(EmojiCmd),
+    /// Search and share GIFs via the relay's KLIPY proxy
+    #[command(subcommand)]
+    Gifs(GifsCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
@@ -807,6 +810,31 @@ pub enum EmojiCmd {
 }
 
 #[derive(Subcommand)]
+pub enum GifsCmd {
+    /// Search or browse trending GIFs via the relay's KLIPY proxy.
+    ///
+    /// Omitting --query returns trending GIFs. The output is a JSON array of
+    /// GIF objects; paste the `cdn_url` field directly into
+    /// `buzz messages send --content` to share a GIF.
+    Search {
+        /// Search text; omit or leave empty for trending
+        #[arg(long)]
+        query: Option<String>,
+        /// BCP 47 locale for provider results (default: $LANG or en_US)
+        #[arg(long)]
+        locale: Option<String>,
+    },
+    /// Report a selected GIF to the provider so it enters your Recents.
+    ///
+    /// The slug is the provider identifier in the search result objects.
+    Share {
+        /// Provider GIF slug from a search result
+        #[arg(long)]
+        slug: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DmsCmd {
     /// List direct message conversations
     List {
@@ -1209,6 +1237,38 @@ pub enum ReposCmd {
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
+    /// Inspect or change the relay-hosted repository's default branch.
+    #[command(subcommand)]
+    DefaultBranch(ReposDefaultBranchCmd),
+}
+
+/// Commands for the authoritative Git default branch, not announcement metadata.
+#[derive(Subcommand)]
+pub enum ReposDefaultBranchCmd {
+    /// Read the default branch and observed manifest version.
+    Get {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Select an existing branch without moving or deleting any refs.
+    Set {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Short branch name, e.g. main or release/v1 (not refs/heads/main).
+        #[arg(long)]
+        branch: String,
+        /// Manifest digest returned by get. Omit to read it before updating.
+        #[arg(long)]
+        expected_manifest: Option<String>,
+    },
 }
 
 /// Commands for inspecting and changing repository protection rules.
@@ -2080,6 +2140,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
+        Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
@@ -2229,6 +2290,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "gifs",
             "issues",
             "media",
             "mem",
@@ -2369,12 +2431,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "default-branch", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "repos")
             .expect("repos command");
+        assert_eq!(names(repos, "default-branch"), vec!["get", "set"]);
         let protect = repos
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "protect")
@@ -2446,7 +2509,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

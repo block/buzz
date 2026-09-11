@@ -82,9 +82,21 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
-        .await?
-        .detach();
+    let mut lock_conn = crate::observability::acquire_writer_with_legacy_metrics(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?
+    .detach();
+    // This dedicated connection intentionally waits for the current migration
+    // or schema-destruction owner and may then run long DDL. Exempt those two
+    // phases from runtime lock/statement budgets. Keep the idle-in-transaction
+    // timeout: a client wedged idle mid-migration is still a lock holder that
+    // should be reaped. The detached connection is closed below and never
+    // returns these session settings to the pool.
+    sqlx::raw_sql("SET lock_timeout = 0; SET statement_timeout = 0")
+        .execute(&mut lock_conn)
+        .await?;
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::MigrationSchemaSafety,
         sqlx::query("SELECT pg_advisory_lock($1)")
@@ -174,7 +186,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use std::{
         collections::BTreeSet,
@@ -184,8 +196,8 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
-    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
-    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// Connection parameters parsed out of a PostgreSQL URL so the parity test
+    /// can pass them to the `bin/pgschema` binary, which
     /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
     /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
     /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
@@ -690,7 +702,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 40);
+        assert_eq!(migrations.len(), 44);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1231,6 +1243,49 @@ mod tests {
         assert!(
             operator_audit.contains("_operator_global_tables"),
             "migration 39 must register relay_operator_audit in _operator_global_tables"
+        );
+
+        assert_eq!(migrations[40].version, 41);
+        let identity_foundation = migrations[40].sql.as_str();
+        assert!(identity_foundation.contains("CREATE TABLE identity_bindings"));
+        assert!(identity_foundation.contains("CREATE TABLE identity_lifecycle_history"));
+
+        assert_eq!(migrations[41].version, 42);
+        let authorization_foundation = migrations[41].sql.as_str();
+        assert!(authorization_foundation.contains("CREATE TABLE authorization_events"));
+        assert!(authorization_foundation.contains("CREATE TABLE protected_object_authority"));
+
+        // Brownfield relay databases created through SQLx still carry the
+        // production/sandbox constraint from 0015. Converge them to the same
+        // dogfood-only authority declared by the desired-state schema.
+        assert_eq!(migrations[42].version, 43);
+        let dogfood_profile = migrations[42].sql.as_str();
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_delegations"));
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_installations"));
+        assert!(dogfood_profile
+            .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
+        assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(desired_schema.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+
+        // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
+        // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
+        // ledger tables are dead code. Restores community_write_fence_excluded_table
+        // to its pre-0041 body so the deletion catalog no longer includes the
+        // removed relations.
+        assert_eq!(migrations[43].version, 44);
+        let ledger_removal = migrations[43].sql.as_str();
+        assert!(ledger_removal.contains("DROP TABLE authorization_operation_receipts"));
+        assert!(ledger_removal.contains("DROP TABLE identity_bindings"));
+        assert!(ledger_removal.contains("DROP TABLE authorization_events"));
+        assert!(ledger_removal
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        // The restored exclusion function must NOT list any NIP-FI relation.
+        assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
+        assert!(!ledger_removal.contains("'identity_bindings'"));
+        // schema.sql exclusion list must match the restored (pre-0041) body.
+        assert!(
+            desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
+            "schema.sql exclusion list must match the pre-0041 body after ledger removal"
         );
     }
 
@@ -2608,5 +2663,99 @@ mod tests {
             .execute(&pool)
             .await
             .expect("drop late-table fixtures");
+    }
+
+    /// Verify migration 0044 applies cleanly against a DB that has rows in
+    /// the NIP-FI 0041+0042 tables. The immutability guards (no_delete,
+    /// no_truncate) are enforced via triggers; DROP TABLE bypasses them and
+    /// must succeed even when rows are present.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0044_drops_populated_nip_fi_ledger_cleanly() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(42, &pool)
+            .await
+            .expect("apply migrations 1-42");
+
+        // Seed a community and minimal rows in a selection of 0041+0042 tables.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("drop-test-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("seed community");
+
+        // Seed a receipt (used as FK anchor for several 0042 tables).
+        let operation_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 12, $4, 1, $5)",
+        )
+        .bind(community_id)
+        .bind(operation_id)
+        .bind(vec![0xAA_u8; 32])
+        .bind(vec![0xBB_u8; 32])
+        .bind(vec![0xCC_u8; 32])
+        .execute(&pool)
+        .await
+        .expect("seed operation receipt");
+
+        // Seed an invalidation domain (0042 table with no FK to receipts).
+        sqlx::query(
+            "INSERT INTO authorization_invalidation_domains \
+             (community_id, current_generation) VALUES ($1, 0)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("seed invalidation domain");
+
+        // Apply migration 0043 (dogfood profile) and 0044 (ledger removal).
+        MIGRATOR
+            .run_to(44, &pool)
+            .await
+            .expect("migration 0044 must apply cleanly against a populated NIP-FI DB");
+
+        // All NIP-FI tables must be gone.
+        let nip_fi_tables = [
+            "authorization_admission_results",
+            "authorization_authentication_denial_attempts",
+            "authorization_authority_epochs",
+            "authorization_event_capacity",
+            "authorization_events",
+            "authorization_invalidation_domains",
+            "authorization_invalidation_floors",
+            "authorization_operation_receipts",
+            "authorization_operation_version_delta_manifests",
+            "authorization_operation_version_deltas",
+            "identity_bindings",
+            "identity_enrollment_policies",
+            "identity_lifecycle_history",
+            "identity_lifecycle_selectors",
+            "protected_object_authority",
+        ];
+        let present: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_name = ANY($1)",
+        )
+        .bind(&nip_fi_tables[..])
+        .fetch_all(&pool)
+        .await
+        .expect("catalog check after ledger removal");
+        assert!(
+            present.is_empty(),
+            "all NIP-FI tables must be absent after migration 0044: {present:?}"
+        );
+
+        // The deletion catalog must validate with ledger relations gone.
+        crate::deletion::DeletionStore::new(pool.clone())
+            .validate_catalog()
+            .await
+            .expect("deletion catalog validates after migration 0044");
     }
 }

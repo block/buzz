@@ -13,7 +13,9 @@ mod permission;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry};
+pub use catalog::{
+    discover_databricks_models, discover_databricks_models_with_cache_dir, ModelEntry,
+};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -161,10 +163,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Authenticate to Databricks and store credentials under an optional explicit
+/// cache root. `None` preserves buzz-agent's production cache location.
+pub async fn authenticate_databricks_with_cache_dir(
+    host: &str,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<(), AgentError> {
+    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(
+        host,
+        cache_dir.map(std::path::Path::to_path_buf),
+    ))?
+    .interactive_login()
+    .await
+}
+
 pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
-    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
-        .interactive_login()
-        .await
+    authenticate_databricks_with_cache_dir(host, None).await
 }
 
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a

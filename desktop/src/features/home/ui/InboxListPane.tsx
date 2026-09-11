@@ -386,13 +386,17 @@ export function InboxListPane({
                 triggerElement="span"
               >
                 <span
-                  className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  className={cn(
+                    "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                    isSenderAgent ? "rounded-[30%]" : "rounded-full",
+                  )}
                   data-testid={`home-inbox-avatar-${item.id}`}
                 >
                   <UserAvatar
                     avatarUrl={item.avatarUrl}
                     className="h-9 w-9"
                     displayName={item.senderLabel}
+                    shape={isSenderAgent ? "squircle" : "circle"}
                     size="md"
                   />
                 </span>

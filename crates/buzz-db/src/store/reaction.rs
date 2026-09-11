@@ -111,6 +111,11 @@ pub async fn add_reaction(
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(ADD_REACTION_SQL)
         .bind(community.as_uuid())
         .bind(event_created_at)
@@ -118,7 +123,7 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(pool)
+        .execute(&mut *connection)
         .await?;
 
     // Three cases:
@@ -173,7 +178,12 @@ pub async fn insert_reaction_event_with_thread_metadata(
     actor_pubkey: &[u8],
     emoji: &str,
 ) -> Result<ReactionEventInsertOutcome> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
@@ -236,6 +246,11 @@ pub async fn remove_reaction(
     pubkey: &[u8],
     emoji: &str,
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE reactions
@@ -253,7 +268,7 @@ pub async fn remove_reaction(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -267,6 +282,11 @@ pub async fn remove_reaction_by_source_event_id(
     community: CommunityId,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE reactions
@@ -278,7 +298,7 @@ pub async fn remove_reaction_by_source_event_id(
     )
     .bind(community.as_uuid())
     .bind(reaction_event_id)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -293,6 +313,11 @@ pub async fn get_active_reaction_record(
     pubkey: &[u8],
     emoji: &str,
 ) -> Result<Option<ActiveReactionRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         SELECT reaction_event_id
@@ -311,7 +336,7 @@ pub async fn get_active_reaction_record(
     .bind(event_created_at)
     .bind(pubkey)
     .bind(emoji)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     row.map(|row| -> Result<ActiveReactionRecord> {
@@ -335,6 +360,11 @@ pub async fn set_reaction_event_id(
     emoji: &str,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE reactions
@@ -353,7 +383,7 @@ pub async fn set_reaction_event_id(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -376,6 +406,11 @@ pub async fn get_reactions(
     limit: u32,
     _cursor: Option<&str>,
 ) -> Result<Vec<ReactionGroup>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     // Two-step query: first get the limited set of distinct emoji groups,
     // then fetch all rows for those groups. This ensures `limit` applies to
     // emoji groups (the API contract), not raw rows — so one busy emoji
@@ -405,7 +440,7 @@ pub async fn get_reactions(
     .bind(event_id)
     .bind(event_created_at)
     .bind(limit as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     // Group individual rows by emoji in Rust.
@@ -466,6 +501,11 @@ pub async fn get_reactions_bulk(
     // Run one query per event. For typical message-list sizes (<=100 events)
     // this is acceptable; a single-query approach with dynamic IN clauses over
     // composite keys can be added later if needed.
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     let mut entries = Vec::new();
 
     for (event_id, event_created_at) in event_ids {
@@ -484,7 +524,7 @@ pub async fn get_reactions_bulk(
         .bind(community.as_uuid())
         .bind(*event_id)
         .bind(event_created_at)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         if rows.is_empty() {
@@ -687,7 +727,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::{
         error::DbError,

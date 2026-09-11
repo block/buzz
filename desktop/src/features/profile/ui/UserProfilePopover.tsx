@@ -1,6 +1,8 @@
 import * as React from "react";
 import { Activity, Headphones, MessageSquare } from "lucide-react";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   useUserProfileQuery,
@@ -18,14 +20,17 @@ import {
   ownsAuthorAgent,
 } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
-import { usePresenceQuery } from "@/features/presence/hooks";
-import { useUserStatusQuery } from "@/features/user-status/hooks";
+import { useAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
+import {
+  useUserStatusQuery,
+  visibleUserStatus,
+} from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { useProfileInteractionActions } from "@/features/profile/ui/useProfileInteractionActions";
 
 import {
@@ -44,6 +49,12 @@ type UserProfilePopoverProps = {
   children: React.ReactNode;
   pubkey: string;
   triggerElement?: "div" | "span";
+  /**
+   * Extra classes for the trigger wrapper, which defaults to inline-flex.
+   * Use `min-w-0 max-w-full` when truncating flex content must shrink, or
+   * `inline` when prose content must fragment across lines.
+   */
+  triggerClassName?: string;
   /** Accessible name for interactive trigger content that is visually hidden. */
   triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
@@ -103,7 +114,7 @@ function HoverPubkeyName({
       <span
         className={`${TEXT_SWAP_BASE_CLASS} ${TEXT_SWAP_HIDDEN_CLASS} ${TEXT_SWAP_HOVER_VISIBLE_CLASS}`}
       >
-        {truncatePubkey(pubkey)}
+        {truncateNpub(pubkey)}
       </span>
     </span>
   );
@@ -124,6 +135,7 @@ export function UserProfilePopover({
   children,
   pubkey,
   triggerElement = "div",
+  triggerClassName,
   triggerAriaLabel,
   enableProfilePanel = true,
   enableHoverPopover = true,
@@ -208,6 +220,7 @@ export function UserProfilePopover({
           onMouseLeave={handleMouseLeave}
           className={cn(
             "inline-flex",
+            triggerClassName,
             canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
           )}
         >
@@ -262,7 +275,7 @@ function UserProfilePopoverBody({
   const usersBatchQuery = useUsersBatchQuery([pubkey]);
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  const presenceQuery = usePresenceQuery([pubkey]);
+  const { status: presenceStatus } = useAgentAvailability(pubkey);
   const userStatusQuery = useUserStatusQuery([pubkey]);
 
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
@@ -292,7 +305,7 @@ function UserProfilePopoverBody({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const displayName = profile?.displayName ?? truncateNpub(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows
@@ -331,8 +344,9 @@ function UserProfilePopoverBody({
     showHumanProfileActions || showMessageAction || showHuddleAction;
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
-  const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
-  const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
+  const userStatus = visibleUserStatus(
+    userStatusQuery.data?.[pubkey.toLowerCase()],
+  );
   const userStatusText = userStatus?.text.trim() ?? "";
   const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
   const profileDescription = profile?.about?.trim() ?? "";
@@ -381,8 +395,9 @@ function UserProfilePopoverBody({
         className="h-10 w-10"
         iconClassName="h-5 w-5"
         label={displayName}
+        shape={isBotProfile ? "squircle" : "circle"}
         size={40}
-        status={presenceStatus ?? "offline"}
+        status={presenceStatus}
         statusTestId="user-profile-popover-presence-badge"
         testId="user-profile-popover-avatar"
       />
@@ -390,6 +405,11 @@ function UserProfilePopoverBody({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
+          <AgentManagementMarker
+            pubkey={pubkey}
+            ownerPubkey={ownerPubkey}
+            testId="user-profile-popover-agent-provenance"
+          />
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}

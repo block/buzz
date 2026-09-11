@@ -535,6 +535,45 @@
     }
   },
   {
+    "id": "dbv2-goose-claude-4-6-sonnet-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-6-sonnet",
+    "_note": "Probes the discovered Goose Sonnet 4.6 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Sonnet 4.6"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-4-7-opus-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-7-opus",
+    "_note": "Probes the discovered Goose Opus 4.7 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 4.7"
+    }
+  },
+  {
     "id": "dbv2-team-prefix-probe",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-claude-opus-4-7",
@@ -721,6 +760,26 @@
     }
   },
   {
+    "id": "dbv2-claude-fable-5-1-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-fable-5-1",
+    "_note": "Probes the canonical Databricks Fable 5.1 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Fable 5.1"
+    }
+  },
+  {
     "id": "dbv2-claude-opus-4-8-exact-record-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-claude-opus-4-8",
@@ -838,6 +897,27 @@
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
       "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-kimi-2-7-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-kimi-2-7",
+    "_note": "Probes the canonical Databricks Kimi 2.7 endpoint record.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Kimi 2.7"
     }
   },
   {
@@ -2268,6 +2348,370 @@
     }
   },
   {
+    "_group": "Databricks FQN GPT-5+ Responses routing",
+    "_note": "Only the service component selects Responses; effort capabilities remain neutral."
+  },
+  {
+    "id": "dbv2-fqn-responses-0",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.goose-gpt-6-astra",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-1",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.goose-gpt-5",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-2",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-5-5",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-3",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-10",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-4",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.GOOSE-GPT-6-ASTRA",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-5",
+    "provider": "databricks_v2",
+    "raw_model_id": "gpt-6.schema.other",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-6",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.gpt-5.other",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-7",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.claude-gpt-6",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-8",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.my-gpt-6-astra",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-9",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.mygpt-6-astra",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-10",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-4",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-11",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-4o",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-12",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-6x",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-13",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-oss-120b",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-14",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-15",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-4294967296",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-16",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.gpt-６",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-fqn-responses-17",
+    "provider": "databricks_v2",
+    "raw_model_id": "catalog.schema.kimi-k3",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
     "_group": "Databricks UC model-family humanization probes (#6918 follow-up)",
     "_note": "Exact-record and UC-FQN strip probes for the Gemini/DeepSeek/GLM/Grok/Llama/Qwen/Gemma/Inkling families surfaced by UC discovery."
   },
@@ -2399,6 +2843,27 @@
       "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-standard",
       "registry_label": "DeepSeek V4 Pro"
+    }
+  },
+  {
+    "id": "dbv2-glm-5-3-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-glm-5-3",
+    "_note": "Probes the GLM-5.3 endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "GLM-5.3"
     }
   },
   {
@@ -2627,10 +3092,10 @@
     }
   },
   {
-    "id": "dbv2-uc-goose-deepseek-strip-probe",
+    "id": "dbv2-uc-fqn-deepseek-strip-probe",
     "provider": "databricks_v2",
-    "raw_model_id": "data_workflow_tools.goose.goose-deepseek-v4-pro-0813",
-    "_note": "Probes strip parity on a goose- prefixed UC FQN carrying the deepseek- token.",
+    "raw_model_id": "system.ai.deepseek-v4-pro-0813",
+    "_note": "Probes strip parity on a UC FQN carrying the deepseek- token.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [

@@ -10,6 +10,8 @@ export type CatalogPersonaShareLevel = "not-shared" | "none";
 type CatalogAgentProjection = {
   displayName: string;
   avatarUrl: string | null;
+  /** Optional public description (validated server-side; max 280 chars). */
+  description: string | null;
   systemPrompt: string;
   runtime: string | null;
   model: string | null;
@@ -69,6 +71,7 @@ function publicationToPersona(
       `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
     displayName: publication.agent.displayName,
     avatarUrl: publication.agent.avatarUrl,
+    description: publication.agent.description ?? null,
     systemPrompt: publication.agent.systemPrompt,
     runtime: publication.agent.runtime,
     model: publication.agent.model,

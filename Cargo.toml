@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/ifc-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
     "crates/buzz-db",
@@ -104,7 +105,7 @@ chrono  = { version = "0.4", features = ["serde"] }
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 
 # HTTP client (webhook delivery)
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 
 # Cryptography
 sha2      = "0.11"

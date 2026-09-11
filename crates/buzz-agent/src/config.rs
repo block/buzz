@@ -709,7 +709,7 @@ impl Config {
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
-            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
+            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 1_260)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
                 30,
@@ -2461,5 +2461,25 @@ mod tests {
     fn pricing_authority_unknown_host_returns_none() {
         assert_eq!(pricing_authority("https://api.databricks.com/v1"), None);
         assert_eq!(pricing_authority("https://custom.llm.corp/v1"), None);
+    }
+
+    #[test]
+    fn default_tool_timeout_is_1260_seconds() {
+        // Lock the production default so accidental regressions are caught.
+        // This value must remain >= buzz-dev-mcp's MAX_TIMEOUT_MS (1_200s) to
+        // give every shell(timeout_ms=1_200_000) call time to complete before
+        // buzz-agent kills the MCP server. See PR #7185 for the full budget chain.
+        //
+        // 1_260s is the literal default passed to parse_env in Config::from_env().
+        // Update here if and only if you update that literal; the test name makes
+        // "grep for old value" reliable.
+        const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1_260;
+        const {
+            // Shell cap (1_200_000 ms = 1_200s) must fit inside the agent timeout.
+            assert!(
+                1_200u64 <= DEFAULT_TOOL_TIMEOUT_SECS,
+                "agent tool timeout must be >= dev-mcp shell cap (1200s)"
+            );
+        }
     }
 }

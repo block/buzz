@@ -122,6 +122,9 @@ fn definition_from_snapshot(
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
         avatar_url: effective_avatar(member),
+        description: crate::managed_agents::effective_agent_description(
+            member.profile.about.as_deref(),
+        ),
         system_prompt: member.definition.system_prompt.clone().unwrap_or_default(),
         runtime: member.definition.runtime.clone(),
         model: member.definition.model.clone(),
@@ -559,6 +562,10 @@ pub async fn confirm_team_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            // Linked definitions remain the sole description authority. Do
+            // not persist a second instance copy that can go stale after an
+            // edit or survive a later definition deletion.
+            description: None,
             slug: None,
             persona_id: Some(definition.id.clone()),
             private_key_nsec: private_key_nsec.clone(),
@@ -771,12 +778,15 @@ pub async fn confirm_team_snapshot_import(
         let relay_url = effective_agent_relay_url(&m.record.relay_url, &relay_ws);
 
         // Phase 4: profile sync (best-effort).
+        let profile_about =
+            crate::managed_agents::effective_agent_description(m.definition.description.as_deref());
         let profile_sync_error = sync_managed_agent_profile(
             &state,
             &relay_url,
             &m.agent_keys,
             &m.display_name,
             m.effective_avatar.as_deref(),
+            profile_about.as_deref(),
             m.auth_tag.as_deref(),
         )
         .await

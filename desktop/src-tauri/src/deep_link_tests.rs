@@ -1,15 +1,45 @@
 use url::Url;
 
 use super::{
-    parse_add_community_deep_link, parse_channel_deep_link, parse_entity_deep_link,
-    parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link,
-    PendingCommunityDeepLink, PendingCommunityDeepLinks, PendingEntityDeepLinks,
-    PendingNavigationDeepLink, PendingNavigationDeepLinks, ENTITY_LINK_TABS,
+    canonical_entity_deep_link, parse_add_community_deep_link, parse_channel_deep_link,
+    parse_entity_deep_link, parse_join_deep_link, parse_message_deep_link,
+    parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+    PendingEntityDeepLinks, PendingNavigationDeepLink, PendingNavigationDeepLinks,
+    ENTITY_LINK_TABS,
 };
 
 fn entity_link_golden() -> serde_json::Value {
     serde_json::from_str(include_str!("../../../test-fixtures/entity-links.json"))
         .expect("valid entity-links golden fixture")
+}
+
+#[test]
+fn demo_entity_transport_produces_the_frontend_golden_contract() {
+    let golden = entity_link_golden();
+    let scheme = "buzz-demo-board-1234567812345678";
+    for canonical in golden["links"].as_object().unwrap().values() {
+        let canonical = canonical.as_str().unwrap();
+        let transport = Url::parse(&canonical.replacen("buzz:", &format!("{scheme}:"), 1)).unwrap();
+        let href = canonical_entity_deep_link(&transport, scheme).unwrap();
+        // This same fixture is parsed and routed by the frontend entity tests.
+        assert_eq!(href, canonical);
+        let queue = PendingEntityDeepLinks::default();
+        let pending = queue.enqueue(href);
+        assert_eq!(queue.first().unwrap().href, canonical);
+        assert!(queue.acknowledge(&pending.id));
+        assert!(queue.first().is_none());
+        assert!(canonical_entity_deep_link(&transport, "buzz").is_none());
+        assert!(
+            canonical_entity_deep_link(&transport, "buzz-demo-other-8765432187654321").is_none()
+        );
+        assert!(canonical_entity_deep_link(&Url::parse(canonical).unwrap(), scheme).is_none());
+        assert_eq!(
+            canonical_entity_deep_link(&Url::parse(canonical).unwrap(), "buzz").as_deref(),
+            Some(canonical)
+        );
+    }
+    let invalid = Url::parse(&format!("{scheme}://repo?owner=bad&d=repo")).unwrap();
+    assert!(canonical_entity_deep_link(&invalid, scheme).is_none());
 }
 
 #[test]

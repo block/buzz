@@ -8,6 +8,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "threadScopedAcpSessions",
+      "name": "Thread Scoped ACP Sessions",
+      "description": "Give each channel thread isolated agent context. Applies when managed agents next start; DMs stay conversation-scoped.",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",

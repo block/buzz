@@ -50,13 +50,18 @@ pub async fn repo_name_owner(
     community: CommunityId,
     repo_id: &str,
 ) -> Result<Option<String>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT owner_pubkey FROM git_repo_names \
          WHERE community_id = $1 AND repo_id = $2",
     )
     .bind(community.as_uuid())
     .bind(repo_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     row.map(|r| r.try_get("owner_pubkey"))
         .transpose()
@@ -85,6 +90,11 @@ pub async fn reserve_repo_name(
     repo_id: &str,
     owner_pubkey: &str,
 ) -> Result<ReserveOutcome> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     // Atomic claim: insert only if the (community, repo) is free. RETURNING is
     // non-empty exactly when *this* statement inserted the row, so it cleanly
     // distinguishes "I claimed it" from "someone already holds it" without a
@@ -98,7 +108,7 @@ pub async fn reserve_repo_name(
     .bind(community.as_uuid())
     .bind(repo_id)
     .bind(owner_pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     if inserted.is_some() {
@@ -113,7 +123,7 @@ pub async fn reserve_repo_name(
     )
     .bind(community.as_uuid())
     .bind(repo_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
 
     match existing {
@@ -145,13 +155,18 @@ pub async fn count_repos_for_owner(
     community: CommunityId,
     owner_pubkey: &str,
 ) -> Result<i64> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT COUNT(*) AS n FROM git_repo_names \
          WHERE community_id = $1 AND owner_pubkey = $2",
     )
     .bind(community.as_uuid())
     .bind(owner_pubkey)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     row.try_get("n").map_err(crate::error::DbError::from)
 }
@@ -168,6 +183,11 @@ pub async fn release_repo_name(
     repo_id: &str,
     owner_pubkey: &str,
 ) -> Result<u64> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "DELETE FROM git_repo_names \
          WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3",
@@ -175,7 +195,7 @@ pub async fn release_repo_name(
     .bind(community.as_uuid())
     .bind(repo_id)
     .bind(owner_pubkey)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected())
 }
@@ -231,7 +251,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use uuid::Uuid;
 
