@@ -220,6 +220,10 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
+    // A prior create, update, or inbound team write can have reached teams.json
+    // before its agent-store write failed. Replay it before accepting any next
+    // inbound event, so an identical retained event cannot consume that intent.
+    crate::commands::replay_pending_team_membership(&app)?;
 
     // Resolve inbound vs. any pending local edit before touching the store, in
     // the scope the event ARRIVED on. A workspace switch since arrival leaves
@@ -306,9 +310,11 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                     &mut teams,
                     d_tag,
                     team_content_from_event(&event)?,
+                    |pending| crate::commands::teams::save_pending_team_membership(&app, pending),
                     |teams| save_teams(&app, teams),
                     || load_managed_agents(&app),
                     |records| save_managed_agents(&app, records),
+                    || crate::commands::teams::clear_pending_team_membership(&app),
                 )
             })?;
             if outcome == InboundOutcome::Skipped {
@@ -755,29 +761,23 @@ fn apply_inbound_managed_agent(
     false
 }
 
-/// In-memory core of the inbound `KIND_TEAM` reconcile: capture the matched
-/// team's roster *before* applying the inbound projection, apply it, persist
-/// teams authoritatively, then propagate the prior→current membership delta to
-/// live instances best-effort — the same binding semantics the local
-/// create/update commands use. Without this, a 30176 team edit from another
-/// device lands on `teams.json` but never touches `ManagedAgentRecord.team_id`:
-/// an added persona's running instances stay unbound (member in roster, not in
-/// behavior) and a removed persona's instances keep drawing the old team's
-/// instructions at spawn until restart.
-///
-/// A no-match insert has no prior roster, so its whole roster is the added
-/// delta — symmetric with `commit_team_create`. Injected persistence keeps it
-/// `AppHandle`-free so the prior-roster capture and delta direction are
-/// unit-testable; a `persist_teams` error propagates, agent IO is best-effort
-/// (mirrors the local command path: the authoritative team write already
-/// landed, and boot repair is the designed retry for a stale binding).
+/// In-memory core of the inbound `KIND_TEAM` reconcile. It stages a changed
+/// roster before the team write, then commits the team and agent stores. It
+/// clears the stage only after both writes succeed. This makes an agent-store
+/// failure retryable when the team contains a persona shared by another team.
+/// The caller advances relay retention only after this function succeeds.
+#[allow(clippy::too_many_arguments)]
 fn commit_inbound_team(
     teams: &mut Vec<TeamRecord>,
     d_tag: String,
     inbound: TeamEventContent,
+    save_pending: impl FnOnce(
+        &crate::commands::teams::PendingTeamMembershipUpdate,
+    ) -> Result<(), String>,
     persist_teams: impl FnOnce(&[TeamRecord]) -> Result<(), String>,
     load_agents: impl FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
     save_agents: impl FnOnce(&[ManagedAgentRecord]) -> Result<(), String>,
+    clear_pending: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let team_id = d_tag.clone();
     let previous_persona_ids = teams
@@ -791,14 +791,33 @@ fn commit_inbound_team(
         .find(|record| record.id == team_id)
         .map(|record| record.persona_ids.clone())
         .unwrap_or_default();
-    persist_teams(teams)?;
-    crate::commands::teams::propagate_membership_best_effort(
-        &team_id,
-        &previous_persona_ids,
-        &current_persona_ids,
-        load_agents,
-        save_agents,
-    );
+    let membership_changed = previous_persona_ids != current_persona_ids;
+    if membership_changed {
+        save_pending(&crate::commands::teams::PendingTeamMembershipUpdate {
+            team_id: team_id.clone(),
+            previous_persona_ids: previous_persona_ids.clone(),
+            current_persona_ids: current_persona_ids.clone(),
+        })?;
+        persist_teams(teams)?;
+        crate::commands::teams::propagate_membership(
+            &team_id,
+            &previous_persona_ids,
+            &current_persona_ids,
+            load_agents,
+            save_agents,
+        )
+        .map_err(|error| format!("could not update inbound team agents: {error}"))?;
+        clear_pending()?;
+    } else {
+        persist_teams(teams)?;
+        crate::commands::teams::propagate_membership_best_effort(
+            &team_id,
+            &previous_persona_ids,
+            &current_persona_ids,
+            load_agents,
+            save_agents,
+        );
+    }
     Ok(())
 }
 

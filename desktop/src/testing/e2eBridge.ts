@@ -114,6 +114,8 @@ export type MockManagedAgentSeed = {
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
+  /** Team binding. Seed it to reproduce the native delete guard in a test. */
+  teamId?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -939,6 +941,9 @@ type RawManagedAgent = {
   persona_id: string | null;
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
+  /** Team this instance belongs to (`null` when unbound). The native delete
+   * guard refuses a team while an agent still carries its id. */
+  team_id: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -1936,6 +1941,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     name: agent.name,
     persona_id: agent.persona_id,
     runtime: agent.runtime ?? null,
+    team_id: agent.team_id ?? null,
     relay_url: agent.relay_url,
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
@@ -2497,6 +2503,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     // Native serde always emits this key (`null` when unpinned) — the bridge
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
+    team_id: seed.teamId ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: agentCommand,
@@ -9212,13 +9219,42 @@ async function handleUpdateTeam(args: {
   team.persona_ids = [...args.input.personaIds];
   team.updated_at = new Date().toISOString();
 
+  // Mirror the native `propagate_membership`: an instance bound to this team
+  // whose persona left the roster loses the binding. Without this, the mock
+  // keeps the binding and no e2e can reach the delete guard below.
+  const now = team.updated_at;
+  for (const agent of mockManagedAgents) {
+    if (agent.team_id !== team.id) continue;
+    if (agent.persona_id && team.persona_ids.includes(agent.persona_id)) {
+      continue;
+    }
+    agent.team_id = null;
+    agent.updated_at = now;
+  }
+
   return { ...team, persona_ids: [...team.persona_ids] };
+}
+
+/** Mirrors the native `agents_referencing_team` guard: names of the managed
+ * agents that still carry this team's id. */
+function mockAgentsReferencingTeam(teamId: string): string[] {
+  return mockManagedAgents
+    .filter((agent) => agent.team_id === teamId)
+    .map((agent) => agent.name);
 }
 
 async function handleDeleteTeam(args: { id: string }): Promise<void> {
   const team = mockTeams.find((candidate) => candidate.id === args.id);
   if (team?.is_builtin) {
     throw new Error("Built-in teams cannot be deleted.");
+  }
+  // Mirror `delete_team_with_cascade`: a bound agent blocks the delete. This is
+  // the contract the empty-team feature depends on, so the mock must hold it.
+  const referencing = mockAgentsReferencingTeam(args.id);
+  if (referencing.length > 0) {
+    throw new Error(
+      `Cannot delete team "${args.id}": ${referencing.length} agent(s) still reference it (${referencing.join(", ")}). Delete or reconfigure them first.`,
+    );
   }
   mockTeams = mockTeams.filter((candidate) => candidate.id !== args.id);
 }
@@ -9401,10 +9437,15 @@ async function handleAddTeamFromCatalog(args: {
   return { team: cloneMockTeam(team), alreadyPresent: false };
 }
 
-async function handleExportTeamToJson(args: { id: string }): Promise<boolean> {
-  const team = mockTeams.find((candidate) => candidate.id === args.id);
+function getMockTeamForExport(id: string): RawTeam {
+  const team = mockTeams.find((candidate) => candidate.id === id);
   if (!team) {
-    throw new Error(`Team ${args.id} not found.`);
+    throw new Error(`Team ${id} not found.`);
+  }
+  if (team.persona_ids.length === 0) {
+    throw new Error(
+      "This team has no agents. Add at least one agent before you share or export it.",
+    );
   }
 
   const missingPersonaIds = team.persona_ids.filter(
@@ -9417,6 +9458,11 @@ async function handleExportTeamToJson(args: { id: string }): Promise<boolean> {
     );
   }
 
+  return team;
+}
+
+async function handleExportTeamToJson(args: { id: string }): Promise<boolean> {
+  getMockTeamForExport(args.id);
   return true;
 }
 
@@ -9485,6 +9531,7 @@ async function handleCreateManagedAgent(
     input: {
       name: string;
       personaId?: string;
+      teamId?: string | null;
       relayUrl?: string;
       acpCommand?: string;
       agentCommand?: string;
@@ -9563,6 +9610,7 @@ async function handleCreateManagedAgent(
     persona_id: args.input.personaId ?? null,
     // Create never pins a harness id — the record inherits from the persona.
     runtime: null,
+    team_id: args.input.teamId ?? null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: args.input.acpCommand ?? "buzz-acp",
     agent_command: agentCommand,
@@ -13826,9 +13874,16 @@ export function maybeInstallE2eTauriMocks() {
         return importResult;
       }
       case "export_team_snapshot":
-        // Mimics the save-to-disk path: report success without a real dialog.
-        return true;
+        return handleExportTeamToJson(
+          payload as Parameters<typeof handleExportTeamToJson>[0],
+        );
       case "encode_team_snapshot_for_send": {
+        const input = payload as {
+          id: string;
+          memoryLevel: "none" | "core" | "everything";
+          format: "json" | "png";
+        };
+        getMockTeamForExport(input.id);
         // Return a minimal PNG-shaped payload so the send flow can proceed
         // through upload_media_bytes without a real Rust encode step.
         const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;

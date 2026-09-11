@@ -4,7 +4,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
+        save_managed_agents, save_personas, source_team_exists, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
         validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
     },
@@ -165,12 +165,14 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 .iter()
                 .find(|record| record.id == id)
                 .ok_or_else(|| format!("persona {id} not found"))?;
-            let referenced_by_team = load_teams(&app)?.iter().any(|team| {
+            let teams = load_teams(&app)?;
+            let referenced_by_team = teams.iter().any(|team| {
                 team.persona_ids
                     .iter()
                     .any(|persona_id| persona_id == id.as_str())
             });
-            validate_persona_deletion(persona, referenced_by_team)?;
+            let source_team_exists = source_team_exists(persona, &teams);
+            validate_persona_deletion(persona, referenced_by_team, source_team_exists)?;
             // Capture the coordinate before the record might leave the list. Only
             // reached for non-builtin, non-team personas (both rejected above),
             // so every deleted persona here is one this owner published.

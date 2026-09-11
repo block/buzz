@@ -8,6 +8,22 @@ export function copySelectedPersonaIds(personaIds: string[]): string[] {
   return [...personaIds];
 }
 
+/**
+ * Tells you if the submit button in the team dialog is enabled.
+ *
+ * A name is necessary. A member is not. A team with no members must be
+ * savable, because you must empty a team before you can delete it.
+ */
+export function canSubmitTeamDialog({
+  name,
+  isPending,
+}: {
+  name: string;
+  isPending: boolean;
+}): boolean {
+  return name.trim().length > 0 && !isPending;
+}
+
 export function countMissingPersonaIds(
   personaIds: string[],
   personas: AgentPersona[],

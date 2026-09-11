@@ -97,6 +97,7 @@ export function TeamsSection({
             const resolution = resolveTeamPersonas(team, personas);
             const missingPersonaCount = resolution.missingPersonaCount;
             const hasMissingPersonas = resolution.hasMissingPersonas;
+            const isEmptyTeam = team.personaIds.length === 0;
 
             return (
               <TeamIdentityCard
@@ -111,12 +112,14 @@ export function TeamsSection({
                         <EllipsisVertical className="h-4 w-4" />
                       </button>
                     </DropdownMenuTrigger>
+                    {/* Edit and Delete stay enabled for an unusable team on purpose. You use them
+                        to empty a team and then delete it. */}
                     <DropdownMenuContent
                       align="end"
                       onCloseAutoFocus={(event) => event.preventDefault()}
                     >
                       <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
+                        disabled={isPending || !resolution.isUsable}
                         onClick={() => onAddToChannel(team)}
                       >
                         <Rocket className="h-4 w-4" />
@@ -131,14 +134,14 @@ export function TeamsSection({
                         Edit
                       </DropdownMenuItem>
                       <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
+                        disabled={isPending || !resolution.isUsable}
                         onClick={() => onDuplicate(team)}
                       >
                         <CopyPlus className="h-4 w-4" />
                         Duplicate
                       </DropdownMenuItem>
                       <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
+                        disabled={isPending || !resolution.isUsable}
                         onClick={() => onShare(team)}
                       >
                         <Share2 className="h-4 w-4" />
@@ -173,6 +176,12 @@ export function TeamsSection({
                     {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
                     {missingPersonaCount === 1 ? "is" : "are"} no longer in your
                     agents. Edit the team to fix it before deploying or sharing.
+                  </p>
+                ) : null}
+                {isEmptyTeam ? (
+                  <p className="border-t border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    This team has no agents. Add one to deploy or share it, or
+                    delete the team.
                   </p>
                 ) : null}
               </TeamIdentityCard>

@@ -304,6 +304,45 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     assert!(snap_no_instance.members[0].memory.entries.is_empty());
 }
 
+/// The producer must refuse a team that has no members.
+///
+/// The importer rejects such a snapshot, so an export of it makes a file that
+/// nobody can import. `managed_agents::team_snapshot` pins that rejection in
+/// `validate_rejects_zero_members`. A disabled menu item does not stop the
+/// export: both export commands stay callable, and they read the team from disk
+/// at the time of the call. This test holds the guard in the producer, where
+/// both commands pass.
+#[test]
+fn empty_team_export_is_refused_before_any_bytes() {
+    let team = TeamRecord {
+        id: "empty".to_string(),
+        name: "Emptied Team".to_string(),
+        description: None,
+        instructions: None,
+        persona_ids: vec![],
+        is_builtin: false,
+        shared: false,
+        catalog_source: None,
+        source_dir: None,
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
+        created_at: "now".to_string(),
+        updated_at: "now".to_string(),
+    };
+
+    let err = build_team_export_snapshot(
+        &team,
+        &[],
+        &[],
+        MemoryLevel::None,
+        &std::collections::HashMap::new(),
+    )
+    .expect_err("an export of a team with no members must fail");
+
+    assert_eq!(err, EMPTY_TEAM_EXPORT_ERROR);
+}
+
 #[test]
 fn team_import_definitions_are_built_for_all_members() {
     let mut memory_bearing = member("Alice");
