@@ -1,9 +1,11 @@
 import * as React from "react";
 
+import type { ProfilePanelView } from "@/features/profile/ui/UserProfilePanelUtils";
 import type { AgentPersona } from "@/shared/api/types";
 
 export type ProfilePanelOpenOptions = {
   tab?: "info" | "runtime" | "channels" | "memories";
+  view?: ProfilePanelView;
 };
 
 type ProfilePanelContextValue = {
