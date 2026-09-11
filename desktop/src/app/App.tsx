@@ -22,6 +22,7 @@ import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
+import { QuickReactionProvider } from "@/features/messages/ui/QuickReactionProvider";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
@@ -299,9 +300,11 @@ function CommunityIdentityReplacementSentinel({
 }
 
 function AppReady({
+  communityScope,
   isSharedIdentity,
   isCommunitySwitch,
 }: {
+  communityScope: string | null;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
 }) {
@@ -343,9 +346,11 @@ function AppReady({
         })
       }
     >
-      <KnownAgentPubkeysProvider>
-        <RouterProvider router={router} />
-      </KnownAgentPubkeysProvider>
+      <QuickReactionProvider communityScope={communityScope}>
+        <KnownAgentPubkeysProvider>
+          <RouterProvider router={router} />
+        </KnownAgentPubkeysProvider>
+      </QuickReactionProvider>
     </EncryptedBackupProvider>
   );
 }
@@ -636,6 +641,7 @@ function CommunityApp({
         />
         <CommunityThemeController />
         <AppReady
+          communityScope={activeCommunity?.id ?? null}
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
           isSharedIdentity={sharedIdentity}
