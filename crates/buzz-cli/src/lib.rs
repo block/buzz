@@ -285,6 +285,8 @@ enum Cmd {
 pub enum RespondToArg {
     #[value(name = "owner-only")]
     OwnerOnly,
+    #[value(name = "allowlist")]
+    Allowlist,
     #[value(name = "anyone")]
     Anyone,
 }
@@ -293,6 +295,7 @@ impl RespondToArg {
     fn to_wire(self) -> String {
         match self {
             Self::OwnerOnly => "owner-only",
+            Self::Allowlist => "allowlist",
             Self::Anyone => "anyone",
         }
         .to_string()
@@ -334,6 +337,9 @@ pub enum AgentsCmd {
         model: Option<String>,
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
+        /// Comma-separated 64-char hex pubkeys. Required when `--respond-to allowlist`.
+        #[arg(long)]
+        respond_to_allowlist: Option<String>,
     },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(

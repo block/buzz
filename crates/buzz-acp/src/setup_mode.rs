@@ -430,8 +430,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Apply the same author gate as normal mode so the nudge only goes
-        // to authors the real agent would have answered. Same DM hardening:
-        // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
+        // to authors the real agent would have answered. Unknown channel
+        // types fail closed as DMs for classification; the author policy
+        // itself is the same in DMs and groups.
         let Some(authorized_event) = authorize_setup_listener_event(
             &mut author_gate_ctx,
             buzz_event,

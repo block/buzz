@@ -30,6 +30,7 @@ export type AgentManagementUpdateRequest = {
     provider?: string;
     model?: string;
     respondTo?: RespondToMode;
+    respondToAllowlist?: string[];
   };
 };
 
@@ -42,7 +43,29 @@ function isText(value: unknown): value is string {
 }
 
 function isRespondTo(value: unknown): value is RespondToMode | undefined {
-  return value === undefined || value === "owner-only" || value === "anyone";
+  return (
+    value === undefined ||
+    value === "owner-only" ||
+    value === "allowlist" ||
+    value === "anyone"
+  );
+}
+
+function parseRespondToAllowlist(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") return null;
+    const trimmed = entry.trim().toLowerCase();
+    if (trimmed.length !== 64 || !/^[0-9a-f]+$/.test(trimmed)) return null;
+    if (!seen.has(trimmed)) {
+      seen.add(trimmed);
+      out.push(trimmed);
+    }
+  }
+  return out;
 }
 
 function hasOnlyKeys(
@@ -103,10 +126,19 @@ export function parseAgentManagementRequest(
       "provider",
       "model",
       "respondTo",
+      "respondToAllowlist",
     ]) ||
     !isText(request.channelId) ||
     !isText(request.agentName)
   ) {
+    return null;
+  }
+  let allowlist: string[] | undefined;
+  if (request.respondTo === "allowlist") {
+    const parsed = parseRespondToAllowlist(request.respondToAllowlist);
+    if (parsed === null) return null;
+    allowlist = parsed;
+  } else if (request.respondToAllowlist !== undefined) {
     return null;
   }
   const changes = {
@@ -120,6 +152,7 @@ export function parseAgentManagementRequest(
     ...(isText(request.provider) ? { provider: request.provider } : {}),
     ...(isText(request.model) ? { model: request.model } : {}),
     ...(request.respondTo ? { respondTo: request.respondTo } : {}),
+    ...(allowlist !== undefined ? { respondToAllowlist: allowlist } : {}),
   };
   if (Object.keys(changes).length === 0) return null;
   return {

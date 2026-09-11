@@ -365,7 +365,23 @@ mod inbound_author_gate {
         }
     }
 
+    fn author_gate_drop_reason(respond_to: &RespondTo) -> &'static str {
+        match respond_to {
+            RespondTo::Nobody => "nobody",
+            RespondTo::OwnerOnly => "not-owner-or-sibling",
+            RespondTo::Allowlist => "not-on-allowlist",
+            RespondTo::Anyone => "unexpected-anyone-drop",
+        }
+    }
+
     /// Apply the configured raw-author policy after trusted workflow attribution.
+    ///
+    /// Channel type does not change author policy. DMs auto-p-tag every
+    /// participant, so the mention subscription already matches the
+    /// conversation; `respond-to` is what decides who may query. Owner-only,
+    /// allowlist, anyone, and nobody therefore mean the same thing in a 1:1
+    /// DM as they do in a group. `_is_dm` is accepted so call sites that
+    /// classify the channel can still pass it through for logging.
     ///
     /// This stays private to the gate module so neither listener can bypass
     /// workflow attribution by calling the raw-signer policy directly.
@@ -373,16 +389,10 @@ mod inbound_author_gate {
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
         author: &str,
-        is_dm: bool,
+        _is_dm: bool,
         owner_cache: &OwnerCache,
         rest_client: &relay::RestClient,
     ) -> bool {
-        if is_dm {
-            return match respond_to {
-                RespondTo::Nobody => false,
-                _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
-            };
-        }
         match respond_to {
             RespondTo::Anyone => true,
             RespondTo::Nobody => false,
@@ -541,12 +551,13 @@ mod inbound_author_gate {
                 )
                 .await;
             if !decision.allowed {
-                tracing::debug!(
+                tracing::info!(
                     channel_id = %buzz_event.channel_id,
                     raw_author = %buzz_event.event.pubkey.to_hex(),
                     effective_author = %decision.effective_author,
                     mode = %respond_to,
                     is_dm = decision.is_dm,
+                    reason = author_gate_drop_reason(respond_to),
                     "inbound author gate — dropping event"
                 );
                 return None;
@@ -597,13 +608,23 @@ impl AuthorizedNormalListenerEvent {
         agent_pubkey_hex: &str,
     ) -> Option<NormalListenerIngress> {
         let (buzz_event, effective_author) = self.0.into_parts();
-        let matched = filter::match_event(
+        let Some(matched) = filter::match_event(
             &buzz_event.event,
             buzz_event.channel_id,
             rules,
             agent_pubkey_hex,
         )
-        .await?;
+        .await
+        else {
+            tracing::info!(
+                channel_id = %buzz_event.channel_id,
+                author = %buzz_event.event.pubkey.to_hex(),
+                effective_author = %effective_author,
+                reason = "no-rule",
+                "authorized event matched no rule — dropping"
+            );
+            return None;
+        };
         Some(NormalListenerIngress {
             buzz_event,
             effective_author,
@@ -3507,7 +3528,6 @@ async fn tokio_main() -> Result<()> {
                                     .match_subscription(&rules, &pubkey_hex)
                                     .await
                             else {
-                                tracing::debug!("authorized event matched no rule — dropping");
                                 continue;
                             };
                             // Derive the session scope once, at admission, from
@@ -7032,10 +7052,10 @@ mod author_gate_tests {
         }
     }
 
-    /// Both production boundaries must retain DM classification when composing
-    /// trusted workflow attribution with configured author policy. External
-    /// allowlist entries and `Anyone` stay denied in a DM; owner and sibling
-    /// principals remain allowed; `Nobody` remains absolute.
+    /// Both production boundaries apply the same author policy in DMs as in
+    /// groups: allowlisted authors and `Anyone` are admitted; strangers are
+    /// still denied under Allowlist; owner and sibling principals remain
+    /// allowed; `Nobody` remains absolute.
     #[tokio::test]
     async fn production_listener_boundaries_enforce_dm_author_policy() {
         for listener in [ListenerBoundary::Normal, ListenerBoundary::Setup] {
@@ -7043,7 +7063,7 @@ mod author_gate_tests {
             let relay_hex = relay_keys.public_key().to_hex();
             let external = nostr::Keys::generate().public_key().to_hex();
             let external_allowlist = HashSet::from([external.clone()]);
-            let denied_external = listener_boundary_scenario(ListenerBoundaryScenario {
+            let admitted_external = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
                 relay_keys: &relay_keys,
                 workflow_owner: &external,
@@ -7059,15 +7079,15 @@ mod author_gate_tests {
             })
             .await;
             assert!(
-                !denied_external.1,
-                "{} listener must deny an external allowlist entry in a DM",
+                admitted_external.1,
+                "{} listener must admit an external allowlist entry in a DM",
                 listener.name()
             );
 
             let relay_keys = nostr::Keys::generate();
             let relay_hex = relay_keys.public_key().to_hex();
             let stranger = nostr::Keys::generate().public_key().to_hex();
-            let denied_stranger = listener_boundary_scenario(ListenerBoundaryScenario {
+            let admitted_stranger = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
                 relay_keys: &relay_keys,
                 workflow_owner: &stranger,
@@ -7083,8 +7103,32 @@ mod author_gate_tests {
             })
             .await;
             assert!(
-                !denied_stranger.1,
-                "{} listener must deny a stranger in a DM under Anyone",
+                admitted_stranger.1,
+                "{} listener must admit a stranger in a DM under Anyone",
+                listener.name()
+            );
+
+            let relay_keys = nostr::Keys::generate();
+            let relay_hex = relay_keys.public_key().to_hex();
+            let unlisted = nostr::Keys::generate().public_key().to_hex();
+            let denied_unlisted = listener_boundary_scenario(ListenerBoundaryScenario {
+                listener,
+                relay_keys: &relay_keys,
+                workflow_owner: &unlisted,
+                responses: std::collections::VecDeque::from([Ok(
+                    serde_json::json!({ "self": relay_hex }),
+                )]),
+                event_generation: 0,
+                channel_type: "dm",
+                respond_to: RespondTo::Allowlist,
+                allowlist: HashSet::from([external.clone()]),
+                cache_owner: false,
+                cache_sibling: false,
+            })
+            .await;
+            assert!(
+                !denied_unlisted.1,
+                "{} listener must deny a stranger in a DM under Allowlist",
                 listener.name()
             );
 
@@ -7838,19 +7882,20 @@ mod author_gate_tests {
         }
     }
 
-    // ── DM hardening ──────────────────────────────────────────────────────
+    // ── DMs use the same author policy as groups ──────────────────────────
     //
-    // In a DM, clients auto-p-tag every participant, and an agent can be
-    // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // Clients auto-p-tag every DM participant, so mention-subscription
+    // already matches the conversation. The inbound author gate is the
+    // access policy: allowlisted users (and `anyone`, when configured)
+    // may query the agent in a 1:1 DM. Owner + verified siblings remain
+    // implicit on every responding mode.
 
     #[tokio::test]
-    async fn test_dm_rejects_allowlisted_external_pubkey() {
+    async fn test_dm_admits_allowlisted_external_pubkey() {
         let cache = cache_with_sibling();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            !inbound_author_gate::test_author_allowed(
+            inbound_author_gate::test_author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -7859,15 +7904,33 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+            "an allowlisted external pubkey must fire a turn inside a DM"
         );
     }
 
     #[tokio::test]
-    async fn test_dm_rejects_stranger_under_anyone() {
+    async fn test_dm_rejects_stranger_under_allowlist() {
         let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
             !inbound_author_gate::test_author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a pubkey absent from the allowlist must not fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_admits_stranger_under_anyone() {
+        let cache = cache_with_sibling();
+        assert!(
+            inbound_author_gate::test_author_allowed(
                 &RespondTo::Anyone,
                 &HashSet::new(),
                 STRANGER,
@@ -7876,7 +7939,7 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "respond_to=anyone must still drop non-owner authors inside a DM"
+            "respond_to=anyone must admit non-owner authors inside a DM"
         );
     }
 
@@ -8052,13 +8115,25 @@ mod author_gate_tests {
             !inbound_author_gate::test_author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
+                STRANGER,
+                is_dm,
+                &owner_cache,
+                &dummy_rest_client(),
+            )
+            .await,
+            "an unknown author must not pass when startup discovery omitted metadata"
+        );
+        assert!(
+            inbound_author_gate::test_author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
                 EXTERNAL,
                 is_dm,
                 &owner_cache,
                 &dummy_rest_client(),
             )
             .await,
-            "an external author must not pass when startup discovery omitted metadata"
+            "an allowlisted author is still admitted when the channel type is unknown"
         );
     }
 
