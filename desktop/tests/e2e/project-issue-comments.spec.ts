@@ -24,6 +24,32 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
+test("project tasks can switch to a kanban board and open task activity", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Tasks", exact: true }).click();
+  await page.getByTestId("project-task-view-board").click();
+
+  const board = page.getByTestId("project-issue-kanban-board");
+  await expect(board).toBeVisible({ timeout: 10_000 });
+  await expect(board.getByTestId("project-issue-kanban-column")).toHaveCount(6);
+
+  const card = board.getByTestId("project-issue-kanban-card").first();
+  await expect(card).toBeVisible();
+  await card.click();
+
+  await expect(page.getByTestId("project-issue-detail")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Activity", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("project-issue-comment-composer"),
+  ).toBeVisible();
+});
+
 test("issue detail can open agent chat or seed a channel question", async ({
   page,
 }) => {
