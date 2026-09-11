@@ -158,7 +158,7 @@ Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.r
 | Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
-Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max historical results per filter: 500.
+Max WebSocket frame size: `512 * 1024` bytes (env-overridable via `MAX_FRAME_BYTES`). Max subscriptions per connection: 1024. Max historical results per filter: 1,000 (the relay advertises this same cap as NIP-11 `limitation.max_limit`; the separate `max_content_len: 65536` in `nip11.rs` covers a distinct content-payload constraint, not frame size — see relay config).
 
 ---
 
@@ -323,7 +323,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 1,000 per filter, hard cap; `DEFAULT_MAX_PAGE_LIMIT`). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
 **Client consumption invariant.** A client rebuilding channel state must
 open its live subscription before (or overlapping) the finite history
@@ -396,7 +396,7 @@ pub trait RateLimiter: Send + Sync { ... }
 - NIP-42 timestamp tolerance: ±60 seconds.
 - Dev-only key derivation: `SHA-256("buzz-test-key:{username}")` — gated behind `#[cfg(any(test, feature = "dev"))]`. The `dev` feature must not be enabled in production relay deployments.
 
-**Does NOT:** implement `RateLimiter` beyond a test stub (`AlwaysAllowRateLimiter`, gated behind `#[cfg(any(test, feature = "test-utils"))]`). No Redis-backed rate limiter exists anywhere in the codebase — rate limiting is not currently enforced. `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) as a design target.
+**Does NOT:** implement `RateLimiter` directly. A Redis-backed rate limiter (`RedisRateLimiter` in `buzz-pubsub/src/rate_limiter.rs`) is wired into `buzz-relay` as `admission_rate_limiter` (`crates/buzz-relay/src/state.rs:584, 713`) and enforced on WebSocket connect and per-message (`crates/buzz-relay/src/connection.rs:615, 638`) plus the HTTP bridge (`crates/buzz-relay/src/api/bridge.rs:30`). `RateLimitConfig` in `buzz-auth` still defines the 4-tier target shape (human, agent-standard, agent-elevated, agent-platform) but the live limiter is the Redis-backed one.
 
 ---
 
@@ -641,9 +641,9 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `MAX_FRAME_BYTES` | 65,536 | Max WebSocket frame size |
+| `MAX_FRAME_BYTES` | `512 * 1024` (env-overridable) | Max WebSocket frame size |
 | `MAX_SUBSCRIPTIONS` | 1024 | Per-connection subscription limit |
-| `MAX_HISTORICAL_LIMIT` | 500 | Per-filter historical query cap |
+| `MAX_HISTORICAL_LIMIT` | 1,000 | Per-filter historical query cap (`DEFAULT_MAX_PAGE_LIMIT` in `crates/buzz-db/src/event.rs:25`); also advertised as NIP-11 `limitation.max_limit` |
 | `handler_semaphore` capacity | 1024 | Concurrent EVENT/REQ handlers |
 
 **Does NOT:** implement business logic — delegates to the appropriate crate for every operation.
@@ -739,7 +739,7 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 |---------|-----------|
 | Schnorr signatures | `verify_event()` in `buzz-core` — every event verified before storage |
 | Event ID | SHA-256 of canonical serialization verified independently of signature |
-| Frame size | `MAX_FRAME_BYTES = 65,536` — oversized frames rejected, connection closed |
+| Frame size | `MAX_FRAME_BYTES = 512 * 1024` (env-overridable) — oversized frames rejected, connection closed |
 | Search event IDs | 64-char hex validation before URL construction — prevents path injection |
 | Workflow step IDs | Alphanumeric + underscore only — prevents evalexpr variable injection |
 | Partition names | Allowlist of table names + strict suffix/date validators — prevents DDL injection |
@@ -827,7 +827,7 @@ These are verified gaps in the current implementation — not design aspirations
 | # | Limitation | Detail |
 |---|-----------|--------|
 | 1 | **No sqlx offline query cache** | Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time). No `.sqlx/` directory. Queries are not validated at compile time. |
-| 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
+| 2 | **Rate limiter is Redis-backed, not in buzz-auth** | `RateLimiter` trait exists in `buzz-auth` (with `AlwaysAllowRateLimiter` as a test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`), but the **live enforced limiter** is `RedisRateLimiter` in `buzz-pubsub/src/rate_limiter.rs`, wired into `buzz-relay` and enforced on WS connect/per-message plus the HTTP bridge. The 4-tier `RateLimitConfig` (human, agent-standard, agent-elevated, agent-platform) remains as a design-target shape in `buzz-auth`. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
 | 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
