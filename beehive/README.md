@@ -13,19 +13,22 @@ service exists. This package intentionally lives alongside, not inside, the
 native clients: it is a separately authorized product experiment.
 
 Configure and start the default host with `beehive host`. Running `beehive`
-opens a two-part manager: **Local Host** works without an owner signer and routes
-local runtime/agent-key provisioning through `manage-local`; **Agents** signs into
-the relay-backed management view. The owner key is entered once, verified against
+opens the full-screen OpenTUI manager: **Local Host** works without an owner signer,
+inspects/saves local configuration and supports provisioning from prepared binding/genesis
+files; **Agents** signs into the relay-backed management view. See [prototype flows,
+runtime boundary and explicit cuts](OPENTUI_WIP.md). Bare launch requires app-local
+Bun 1.4.2 and Node 24.15.0; advanced Node CLI commands remain available. The owner key is entered once, verified against
 the configured owner npub and retained only in this managing computer's Beehive OS
 credential entry. Other hosts retain only the owner npub, host key and explicitly
 registered agent keys.
 
 ## Command launcher (one-time, reversible)
 
-`bin/beehive.cjs` is a plain launcher for this checkout: it checks Node
-(>= 22.18, with a short actionable error otherwise) and runs `src/cli.ts` from
-its own real location, so it works from any directory, through a user
-symlink, and with spaces in paths. Install once into a user-owned bin
+For the packaged prototype, link `bin/beehive`, which explicitly uses app-local
+`runtime/node` and `runtime/bun`. `bin/beehive.cjs` remains the Node bootstrap:
+it checks Node (>= 22.18 for advanced CLI commands; the full-screen controller pins
+24.15.0), routes bare launch to `src/manager-entry.ts`, and routes arguments to
+`src/cli.ts`, resolving from its own real location. Install once into a user-owned bin
 directory already on your PATH (matching no existing command):
 
 ```sh

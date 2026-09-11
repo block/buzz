@@ -1,0 +1,15 @@
+#!/bin/sh
+# Packaged entrypoint: app-local Node, independent of global/Hermit PATH.
+set -eu
+source=$0
+hops=0
+while [ -L "$source" ]; do
+  hops=$((hops + 1))
+  [ "$hops" -le 32 ] || { echo 'beehive: launcher symlink loop' >&2; exit 1; }
+  directory=$(CDPATH= cd -P "$(dirname "$source")" && pwd)
+  link=$(readlink "$source")
+  case "$link" in /*) source=$link ;; *) source=$directory/$link ;; esac
+done
+root=$(CDPATH= cd -P "$(dirname "$source")/.." && pwd)
+[ -x "$root/runtime/node" ] || { echo 'beehive: packaged Node 24.15.0 is missing; complete the prototype package installation.' >&2; exit 1; }
+exec "$root/runtime/node" "$root/bin/beehive.cjs" "$@"

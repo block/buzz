@@ -39,10 +39,10 @@ export class OpenTuiScreen {
     this.list = new SelectRenderable(renderer, { width: '32%', height: '100%', showDescription: false, showScrollIndicator: true, selectedBackgroundColor: '#245272', focusedBackgroundColor: '#172d3b', onMouseDown: event => {
       this.focusIndex = 0; this.list.focus();
       const delta = event.y - this.list.y;
-      const current = this.list.getSelectedIndex();
-      // Select's scrolling offset is private; use relative distance from its visible selection only for unscrolled lists.
+      // Pinned OpenTUI does not expose its scrolling offset. Never map a click
+      // to an unrelated row; keyboard navigation remains available for long lists.
       if (this.rows.length <= this.list.height && delta >= 0) this.list.setSelectedIndex(Math.min(this.rows.length - 1, delta));
-      else this.list.selectCurrent();
+      else this.notice('Scrolled list: use arrows to select the exact row. Mouse selection is not available in this build.');
     } });
     body.add(this.list);
     this.scroll = new ScrollBoxRenderable(renderer, { flexGrow: 1, height: '100%', border: true, title: 'Details', scrollY: true, onMouseDown: () => { this.focusIndex = 1; this.scroll.focus(); } });
@@ -52,8 +52,10 @@ export class OpenTuiScreen {
     this.actions = new SelectRenderable(renderer, { height: 5, showDescription: false, showScrollIndicator: true, selectedBackgroundColor: '#245272', onMouseDown: event => {
       this.focusIndex = 2; this.actions.focus();
       const delta = event.y - this.actions.y;
-      if (this.commands.length <= this.actions.height && delta >= 0) this.actions.setSelectedIndex(Math.min(this.commands.length - 1, delta));
-      this.actions.selectCurrent();
+      if (this.commands.length <= this.actions.height && delta >= 0) {
+        this.actions.setSelectedIndex(Math.min(this.commands.length - 1, delta));
+        this.actions.selectCurrent();
+      } else this.notice('Scrolled actions: use arrows then Enter. Mouse activation is not available in this build.');
     } });
     this.root.add(this.actions);
     this.status = new TextRenderable(renderer, { height: 2, fg: '#ffce75', content: 'Tab pane · arrows select · Enter action · F1 help · Ctrl-Q quit (not Stop)' });

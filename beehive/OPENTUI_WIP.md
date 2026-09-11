@@ -1,84 +1,119 @@
-# OpenTUI implementation checkpoint — NOT an install candidate
+# OpenTUI functional prototype
 
-Base: ec3a22f8ceb4d63d871287c8269a842184fc4ed9.
-Branch: feat/beehive-opentui-57f9c8fa.
+Branch: `feat/beehive-opentui-57f9c8fa`, based on
+`ec3a22f8ceb4d63d871287c8269a842184fc4ed9` through renderer checkpoint
+`d6b34118eb3e610da00878f400cd59e93630cc79`.
 
-Normal launcher and CLI are deliberately unchanged. This is only the new renderer,
-not the requested working management vertical slice. Do not install or publish it
-as the owner candidate. The source-author and held Blessed worktrees are unchanged.
-No Blessed dependency or source was copied into this worktree.
+Bare packaged `beehive` now opens actual OpenTUI 0.5.11 under Bun 1.4.2.
+The controller, existing domain services, host and credential helpers remain Node
+24.15.0. `bin/beehive` uses the package's runtime explicitly, not a global runtime.
+Arguments still route to the supported existing Node CLI; no renderer/domain fork.
 
-## Implemented
+## Usable flows
 
-- Actual pinned @opentui/core 0.5.11, standalone pnpm lockfile.
-- `src/opentui-screen.ts`: two always-visible destinations, selectable list/detail,
-  detail ScrollBox, action/help bar, focus traversal, text/multiline/hidden forms,
-  explicit typed confirmation, busy guard, small-terminal guard, resize and quit.
-- Secret entry is application-owned volatile input, never an ordinary Input or
-  Textarea and never rendered, including length. Close/cancel clears its reference.
-- Reusable honest unavailable notice and consistent signed-in/key-saved header.
-- `test/opentui-screen.bun.ts`: actual OpenTUI test renderer, synthetic data only.
-- `test/opentui-pty-fixture.ts`: actual alternate-screen fixture, no imports of
-  credentials/config/transport/provider/host factories. This is not manager routing.
+- Local Host: inspect public retained configuration and local slots, or explicitly
+  save missing owner-public/relay configuration through existing host bootstrap.
+  No owner sign-in and no implicit service/agent Start.
+- Provision a stopped local agent using an existing binding file, owner-authorized
+  genesis file and hidden matching agent key, through `provisionCredentialSlot`.
+  Existing/partial installations fail closed; no automatic identity reset.
+- Agents: saved owner credential sign-in or hidden explicit matching-key import;
+  owner verified before OS-only persistence. Sign-out retains the saved key and does
+  not Stop hosts/agents. Missing, locked, denied and mismatched keys are not reset.
+- Actual private host availability and per-host agent inventory, selectable JSON
+  detail with actual run versus selected-next and explicit stale/UNKNOWN wording.
+  This is **not an independent agent catalog**. No fabricated inventory rows.
+- Select an existing named next configuration; exact host/agent/revision confirmation.
+  Explicit Start and Stop through the existing durable management intent client.
+  Start requires a fresh assigned stopped report without actual run. Unresolved
+  operations fence further lifecycle submissions; inspect/reconcile remains available.
+- Selectable operation records include operation ID, exact target, CAS revision,
+  receipt/publication and unknown state. Reconcile does not retry blocked work.
+- Offline multiline private instruction draft creation, atomically persisted using
+  the existing draft API. Publishing/applying remains a distinct existing CLI action.
 
-## Validation of this checkpoint workstate
+## Deliberate cuts
 
-Artifacts: `/Users/loganj/.buzz/artifacts/beehive-opentui-57f9c8fa/`.
+- **Restart is unavailable in this prototype, including the controller handler**.
+  Existing backend Restart can consume a different selected binding. Rather than
+  relying on a disabled button or changing established service semantics in this
+  bounded prototype, this manager sends no Restart at all. Explicit Stop, inspect
+  accepted stopped state, then Start is available. Existing advanced CLI retains
+  its prior explicit Restart behavior; it does not promise same-runtime Restart.
+- Foreground host service launch remains `beehive host --owner-present`; Quit this
+  manager first. No daemon, process ownership transfer or auto service management.
+- Binding/provider authoring remains `beehive local-setup ~/.beehive/host` and the
+  existing provision/reconciliation CLI. The new provisioning form accepts already
+  prepared binding/genesis artifacts, not a full provider wizard.
+- Existing draft editing/resume, profile publication/application, public metadata
+  editing/publication and policy retry remain supported through `beehive drafts`
+  and `beehive tui discover <relay> ~/.beehive/owner`. New forms explicitly say
+  “Not available in this build”; these are not simulated failures or fake success.
+- No owner-key generation/reveal UI, independent relay catalog, zero-agent reusable
+  runtime catalog, identity-only registration, Move UI or remote provider login.
+- For lists/actions longer than their visible pane, use keyboard arrows/Enter.
+  Pinned OpenTUI hides its scroll offset: mouse clicks are explicitly refused rather
+  than activating an unrelated selected action. No exhaustive UX/polish claim.
 
-Official Bun 1.4.2 darwin-aarch64 downloaded from the oven-sh/bun GitHub release;
-zip verified against that release's published SHASUMS256.txt. This establishes
-checksum equality, not independent signature verification. Runtime remains app-local
-in the artifact directory; no global runtime or launcher changed.
+## Boundary / cancellation
 
-- Node 24.15.0 `node node_modules/typescript/bin/tsc --noEmit`: passes.
-- Bun 1.4.2 `bun test ./test/opentui-screen.bun.ts`: 1 pass, 0 fail. Covers real
-  rendered list selection, hidden typing/paste cancellation, multiline save,
-  60x24 -> 30x10 -> 60x24 resize, pending-input quit.
-- `pty-smoke.py`: real PTY launch/navigation/forms/resize/quit; exit 0, exact tty
-  flags restored, alternate-screen enter/exit present, synthetic secret absent.
-  Raw transcript and JSON result retained. Not an installed launcher test.
-- No full package suite run yet: functional integration is not complete. Run it
-  once on the completed functional state, not to label this renderer a candidate.
-- Initial Bun test invocation without `./` matched no tests; original log retained.
-- Important tooling incident: `pnpm run check` triggered pnpm 11 auto-install of
-  the root workspace (614 cached packages). No root tracked file changed, and no
-  global/Hermit bootstrap was requested. Avoid `pnpm run` here; direct pinned Node
-  invocation above bypassed auto-install. Do not repeat or clean unrelated files.
+Node launches only the Bun presentation; two private pipes carry application
+requests/snapshots, never owner signers in snapshots. One action is in flight, with
+monotonic request ID, captured host/agent/revision and generation fencing. Remote
+operation identity, CAS, receipt/ACK and unknown recovery stay in the existing client.
 
-## Required continuation (no owner approval gate)
+Every explicit synchronous OS credential operation runs in an owned Node helper,
+with a 10-second deadline, stripped environment/loaders, no secret argv/output, and
+SIGKILL cancellation that settles only after child close. Esc cancels pending local
+credential work; cancellation cannot undo an OS write already committed. Partial
+configuration/provisioning may retain its existing lock/recovery state; preserve it
+and use explicit reconciliation, never delete/reset automatically. Quit restores the
+presentation TTY while Node completes owned helper cleanup. Signout/Quit are not Stop.
 
-1. Complete typed manager controller and real operations. Keep manager/service and
-   credential-helper interpreter Node; use Bun for OpenTUI presentation only unless
-   a separately validated narrow boundary proves safe. Baseline helper explicitly
-   spawns `process.execPath`; merely importing existing manager under Bun silently
-   changes that interpreter and is not accepted. Held Blessed controller has useful
-   inventory/lifecycle ideas but synchronous credential calls are not suitable.
-2. Wire existing host configuration/provisioning, owner sign-in, host inventory,
-   lifecycle/configuration, offline drafts and explicit profile/public publication.
-   Missing independent catalog/runtime architecture must remain honestly unavailable,
-   while existing supported domains remain usable. Never insert fixture rows into
-   production. Generated one-time reveal lifecycle is not implemented here.
-3. Enforce mismatched Restart refusal in governing host admission, not just UI.
-   Baseline host.ts captures selected-next at restart; binding-change tests currently
-   expect the old runtime-switch behavior and need deliberate correction.
-4. Complete mouse selection for scrolled lists/actions; current click mapping only
-   selects exact rows when the entire list fits, otherwise selects the current row.
-   Check focus containment and long-label layout. Small-terminal modal rendering
-   is not exhaustively assessed. This is prototype work, not a new review gate.
-5. Add narrow Node/Bun bridge, fixture seam and launcher routing. Keep supported
-   advanced CLI accessible. Install a frozen isolated dedicated package and pinned
-   app-local runtime, then validate the actual installed launcher with explicit fake
-   credentials/transport (temporary HOME alone is unsafe on macOS).
-6. Focused boundary regressions/typecheck, one final package suite, brief PTY smoke,
-   self-review, signed-off commit with verified Logan identity, authorized new-branch
-   publication (no PR/default mutation), exact remote pin, desktop installation and
-   bounded laptop recipe. Nothing has been published or installed by this checkpoint.
+## Evidence
 
-## Reproduce local renderer evidence only
+Task artifacts: `/Users/loganj/.buzz/artifacts/beehive-opentui-57f9c8fa/`.
+
+- Node 24.15 direct TypeScript check passed (`manager-typecheck.log`).
+- Focused controller/credential boundary: 4/4 passed (`manager-boundary.log`): real
+  config and multiline draft persistence with injected synthetic credentials; owner,
+  exact selection, revision and unresolved fences; handler-level Restart refusal;
+  duplicate action prevention; late credential completion and signout fencing;
+  actual owned Node helper cancellation/exit, no inherited loader.
+- Launcher compatibility focused: 5/5 passed. First new controller test invocation
+  exposed unsupported Node parameter properties; removed, corrected tests passed.
+  Original failure is retained in `manager-focused.log`.
+- Actual Bun renderer test: 1/1 passed (`manager-renderer.log`). Previous real renderer
+  navigation/hidden input/resize/quit evidence is reused, not an exhaustive new gallery.
+- One final default-concurrent package suite: **151 passed, 0 failed, 19 skipped**,
+  170 total, natural 28.156s (`manager-full-suite.log`). Installed native opt-ins unset.
+  Historical baseline timing failures remain historical, not classified/fixed by this run.
+- Brief real-entrypoint PTY: exit 0, exact TTY restore, alternate screen enter/exit,
+  real host configuration and multiline draft saved (`worktree-manager.json`). Explicit
+  test-only module injection supplies synthetic file credentials and disconnected
+  transport. HOME alone is not the credential boundary. No production credential,
+  relay/provider/profile or real host lifecycle operation was performed.
+- Packaged shell entrypoint and desktop installed evidence are recorded in the final
+  delivery artifact/message; the shell wrapper was added after the Node package suite.
+  No repository-wide CI or production compatibility claim.
+
+## Reproduce / package
+
+Do not use `pnpm run check`: prior workspace auto-install incident expanded root
+packages. Use direct pinned Node commands; do not remove unrelated root node_modules.
 
 ```sh
-cd /Users/loganj/.buzz/REPOS/beehive-opentui-57f9c8fa/beehive
-/Users/loganj/Library/Caches/hermit/pkg/node-24.15.0/bin/node node_modules/typescript/bin/tsc --noEmit
-/Users/loganj/.buzz/artifacts/beehive-opentui-57f9c8fa/runtime/bun-darwin-aarch64/bun test ./test/opentui-screen.bun.ts
-python3 /Users/loganj/.buzz/artifacts/beehive-opentui-57f9c8fa/pty-smoke.py
+cd beehive
+/path/to/node-24.15.0 node_modules/typescript/bin/tsc --noEmit
+/path/to/bun-1.4.2 test ./test/opentui-screen.bun.ts
+/path/to/node-24.15.0 --test test/manager-controller.test.ts
+# Full suite once per final executable candidate, not rerun-to-green:
+/path/to/node-24.15.0 --test test/*.test.ts
 ```
+
+Export the pinned commit's `beehive/` directory, install package-local dependencies
+with pnpm 11.4.0 `install --ignore-workspace --ignore-scripts --frozen-lockfile`
+(and the command-local approved registry mirror where needed), then place verified
+Node 24.15.0 and Bun 1.4.2 executables at `beehive/runtime/node` and
+`beehive/runtime/bun`. Link `~/.local/bin/beehive` to the exported package's
+`bin/beehive`, not to a worktree. See the immutable delivery recipe for the exact pin.

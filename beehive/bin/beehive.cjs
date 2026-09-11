@@ -27,8 +27,10 @@ function run() {
     console.error(`beehive: Node.js 22.18.0 or newer is required; this launcher ran under Node ${process.versions.node}. Install a current Node.js (https://nodejs.org), make sure it is on PATH, and run beehive again.`);
     process.exit(1);
   }
-  const cli = join(__dirname, '..', 'src', 'cli.ts');
-  const child = spawnSync(process.execPath, [cli, ...process.argv.slice(2)], { stdio: 'inherit' });
+  const cli = join(__dirname, '..', 'src', process.argv.length === 2 ? 'manager-entry.ts' : 'cli.ts');
+  const packagedNode = join(__dirname, '..', 'runtime', 'node');
+  const node = require('node:fs').existsSync(packagedNode) ? packagedNode : process.execPath;
+  const child = spawnSync(node, [cli, ...process.argv.slice(2)], { stdio: 'inherit' });
   if (child.error) {
     console.error(`beehive: cannot start the Beehive CLI at ${cli}: ${child.error.message}`);
     process.exit(1);
