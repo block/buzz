@@ -4530,6 +4530,7 @@ fn dispatch_pending(
         }
         tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
 
+        let triggering = queue::triggering_event_context(&batch);
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
@@ -4586,6 +4587,7 @@ fn dispatch_pending(
                 channel_id: Some(channel_id),
                 scope: Some(scope.clone()),
                 turn_id,
+                triggering,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
@@ -4680,6 +4682,12 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    let task_triggering = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == agent_index)
+        .map(|meta| meta.triggering.clone())
+        .unwrap_or_default();
     let successful_steer_deliveries = pool
         .task_map()
         .values()
@@ -4714,7 +4722,7 @@ fn handle_prompt_result(
         .batch
         .as_ref()
         .map(queue::triggering_event_context)
-        .unwrap_or_default();
+        .unwrap_or(task_triggering);
     let mut attempt = result
         .batch
         .as_ref()
@@ -4759,6 +4767,7 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+                disposition = "retrying";
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4887,18 +4896,24 @@ fn handle_prompt_result(
 
     let channel_id = result.source.channel_id();
     let turn_id = result.turn_id.clone();
-    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
+    let emit_turn_error = |error_msg: &str,
+                           error_code: Option<i64>,
+                           respawn_scheduled: Option<bool>,
+                           reported_disposition: &str| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
                 "error": error_msg,
-                "disposition": disposition,
+                "disposition": reported_disposition,
                 "triggeringEventIds": triggering.event_ids,
                 "triggeringRootEventId": triggering.root_event_id,
                 "triggeringParentEventId": triggering.parent_event_id,
             });
             if let Some(attempt) = attempt {
                 payload["attempt"] = serde_json::json!(attempt);
+            }
+            if let Some(scheduled) = respawn_scheduled {
+                payload["respawnScheduled"] = serde_json::json!(scheduled);
             }
             if let Some(code) = error_code {
                 payload["code"] = serde_json::json!(code);
@@ -4945,7 +4960,7 @@ fn handle_prompt_result(
                 }
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
-            emit_turn_error(&death_message, None);
+            emit_turn_error(&death_message, None, None, disposition);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -4982,28 +4997,41 @@ fn handle_prompt_result(
                 grace = ?grace,
                 "agent_returned — respawning (cancel-drain timeout)"
             );
-            let death_message = format!(
-                "Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."
-            );
-            emit_turn_error(&death_message, None);
-
             let index = result.agent.index;
-            let slot_history = &mut crash_history[index];
-            if !spawn_respawn_task(
+            let respawn_scheduled = spawn_respawn_task(
                 result.agent,
                 config,
-                slot_history,
+                &mut crash_history[index],
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
-            ) {
-                // Circuit open — slot stays empty until maintenance refill.
-                if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
-                    tracing::error!("all agents dead — exiting");
-                    return LoopAction::Exit;
-                }
+            );
+            let replacement = if respawn_scheduled {
+                "the agent process is being replaced"
+            } else {
+                "the agent restart is delayed by the crash circuit breaker"
+            };
+            let death_message =
+                format!("Agent did not stop within {grace:?} after cancellation; {replacement}.");
+            let exiting = !respawn_scheduled
+                && pool.live_count() == 0
+                && !any_respawn_in_flight(crash_history);
+            emit_turn_error(
+                &death_message,
+                None,
+                Some(respawn_scheduled),
+                if exiting && disposition == "retrying" {
+                    "stopped"
+                } else {
+                    disposition
+                },
+            );
+            if exiting {
+                tracing::error!("all agents dead — exiting");
+                return LoopAction::Exit;
             }
         }
+
         // Errors fall into two categories:
         //
         // 1. Transport-class (Io, WriteTimeout, Timeout, Protocol): the stdio
@@ -5036,7 +5064,7 @@ fn handle_prompt_result(
                 reason,
                 "agent_returned (local project context indeterminate — pipe intact)"
             );
-            emit_turn_error(&reason, None);
+            emit_turn_error(&reason, None, None, disposition);
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
@@ -5060,7 +5088,7 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, None, disposition);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -5086,7 +5114,7 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, None, disposition);
                 pool.return_agent(result.agent);
             }
         }
@@ -5115,14 +5143,27 @@ fn recover_panicked_agent(
     };
     let i = meta.agent_index;
 
+    let triggering = meta
+        .recoverable_batch
+        .as_ref()
+        .map(queue::triggering_event_context)
+        .unwrap_or(meta.triggering);
+    let attempt = meta
+        .recoverable_batch
+        .as_ref()
+        .map(|batch| queue.retry_count(batch.scope.clone()) + 1);
+    let mut disposition = "stopped";
+    let had_batch = meta.recoverable_batch.is_some();
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                disposition = if queue.requeue(batch).is_some() {
+                    "dead_lettered"
+                } else {
+                    "retrying"
+                };
+                tracing::warn!(agent = i, disposition, "recovered panicked batch");
             } else {
                 tracing::debug!(
                     channel_id = %ch,
@@ -5156,6 +5197,44 @@ fn recover_panicked_agent(
         tracing::warn!("cleared wedged heartbeat_in_flight from panicked agent {i}");
     }
 
+    // Panics count as crashes for the circuit breaker.
+    // The panicked task already dropped the AcpClient, so we just need to
+    // check the circuit and spawn a fresh agent in the background.
+    let delay = match crash_history[i].record_crash() {
+        CrashVerdict::CircuitOpen => {
+            tracing::error!(agent = i, "circuit open after panic — not respawning");
+            None
+        }
+        CrashVerdict::HalfOpenProbe => {
+            tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
+            Some(Duration::ZERO)
+        }
+        CrashVerdict::Respawn(d) => {
+            tracing::info!(
+                agent = i,
+                delay_ms = d.as_millis(),
+                "respawn backoff after panic"
+            );
+            Some(d)
+        }
+    };
+
+    if disposition == "retrying"
+        && delay.is_none()
+        && pool.live_count() == 0
+        && !any_respawn_in_flight(crash_history)
+    {
+        // The caller exits in this state; queued memory will not survive.
+        disposition = "stopped";
+    }
+    if !had_batch
+        && delay.is_some()
+        && !meta
+            .channel_id
+            .is_some_and(|ch| removed_channels.contains(&ch))
+    {
+        disposition = "respawning";
+    }
     if let Some(ref observer) = observer {
         observer.emit(
             "agent_panic",
@@ -5164,36 +5243,22 @@ fn recover_panicked_agent(
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
+                "disposition": disposition,
+                "attempt": attempt,
+                "respawnScheduled": delay.is_some(),
+                "triggeringEventIds": triggering.event_ids,
+                "triggeringRootEventId": triggering.root_event_id,
+                "triggeringParentEventId": triggering.parent_event_id,
             }),
         );
     }
 
-    // Panics count as crashes for the circuit breaker.
-    // The panicked task already dropped the AcpClient, so we just need to
-    // check the circuit and spawn a fresh agent in the background.
-    let slot = &mut crash_history[i];
-
-    let delay = match slot.record_crash() {
-        CrashVerdict::CircuitOpen => {
-            tracing::error!(agent = i, "circuit open after panic — not respawning");
-            return;
-        }
-        CrashVerdict::HalfOpenProbe => {
-            tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
-            Duration::ZERO
-        }
-        CrashVerdict::Respawn(d) => {
-            tracing::info!(
-                agent = i,
-                delay_ms = d.as_millis(),
-                "respawn backoff after panic"
-            );
-            d
-        }
+    let Some(delay) = delay else {
+        return;
     };
 
     // Spawn respawn work off the main loop.
-    slot.respawn_in_flight = true;
+    crash_history[i].respawn_in_flight = true;
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
@@ -5288,6 +5353,7 @@ fn dispatch_heartbeat(
             channel_id: None,
             scope: None,
             turn_id,
+            triggering: Default::default(),
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
@@ -6104,6 +6170,7 @@ mod owner_control_command_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -6150,6 +6217,7 @@ mod owner_control_command_tests {
                 channel_id: Some(scope.channel_id()),
                 scope: Some(scope),
                 turn_id: "t".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -9519,6 +9587,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -9599,6 +9668,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -9721,6 +9791,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "test-turn-id".into(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -9790,6 +9861,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -9853,6 +9925,272 @@ mod error_outcome_emission_tests {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
     }
 
+    // No turn_started frame is emitted in these tests: terminal context must
+    // stand alone when an owner subscribes after a long turn has started.
+    #[tokio::test]
+    async fn panic_recovery_reports_queue_fate_and_actual_respawn_decision() {
+        for (recoverable, exhausted, removed, circuit_open, capacity, expected) in [
+            (true, false, false, false, "none", "retrying"),
+            (true, true, false, false, "none", "dead_lettered"),
+            (true, false, true, false, "none", "stopped"),
+            (true, false, false, true, "none", "stopped"),
+            (true, false, false, true, "idle", "retrying"),
+            (true, false, false, true, "respawning", "retrying"),
+            (false, false, true, false, "none", "stopped"),
+            (false, false, false, false, "none", "respawning"),
+            (false, false, false, true, "none", "stopped"),
+        ] {
+            let channel_id = Uuid::new_v4();
+            let root = "a".repeat(64);
+            let parent = "b".repeat(64);
+            let event = EventBuilder::new(Kind::Custom(9), "panic request")
+                .tags([
+                    nostr::Tag::parse(["e", root.as_str(), "", "root"]).unwrap(),
+                    nostr::Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap(),
+                ])
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let scope = scope::SessionScope::Thread {
+                channel_id,
+                root_event_id: root.clone(),
+            };
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            queue.push(QueuedEvent {
+                channel_id,
+                scope: scope.clone(),
+                event: event.clone(),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "test".into(),
+            });
+            let batch = queue.flush_next().unwrap();
+            if exhausted {
+                queue.set_retry_count_for_test(scope.clone(), queue::MAX_RETRIES);
+            }
+            let sibling = if capacity == "idle" {
+                Some(dummy_agent(1).await)
+            } else {
+                None
+            };
+            let mut pool = AgentPool::from_slots(vec![None, sibling]);
+            let task = pool.join_set.spawn(async {
+                panic!("test panic");
+            });
+            pool.task_map_mut().insert(
+                task.id(),
+                pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: Some(channel_id),
+                    scope: Some(scope.clone()),
+                    turn_id: "panic-turn".into(),
+                    triggering: queue::triggering_event_context(&batch),
+                    recoverable_batch: recoverable.then_some(batch),
+                    control_tx: None,
+                    steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
+                },
+            );
+            let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: circuit_open
+                    .then(|| std::time::Instant::now() + Duration::from_secs(60)),
+                respawn_in_flight: false,
+            }];
+            crash_history.push(SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: capacity == "respawning",
+            });
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let observer = ObserverHandle::in_process();
+            let removed_channels = if removed {
+                HashSet::from([channel_id])
+            } else {
+                HashSet::new()
+            };
+            recover_panicked_agent(
+                &mut pool,
+                &mut queue,
+                &test_config(),
+                join_error,
+                &mut false,
+                &removed_channels,
+                &mut HashMap::new(),
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                Some(observer.clone()),
+            );
+            let events = observer.snapshot();
+            let panic = events
+                .iter()
+                .find(|event| event.kind == "agent_panic")
+                .unwrap();
+            assert_eq!(panic.turn_id.as_deref(), Some("panic-turn"));
+            assert_eq!(panic.payload["disposition"], expected);
+            assert_eq!(
+                panic.payload["triggeringEventIds"],
+                serde_json::json!([event.id.to_hex()])
+            );
+            assert_eq!(panic.payload["triggeringRootEventId"], root);
+            assert_eq!(panic.payload["triggeringParentEventId"], parent);
+            assert_eq!(panic.payload["respawnScheduled"], !circuit_open);
+            assert_eq!(respawn_tasks.len(), usize::from(!circuit_open));
+            assert_eq!(
+                queue.queued_event_count(scope.clone()),
+                usize::from(recoverable && !exhausted && !removed)
+            );
+            assert!(!queue.is_scope_in_flight(&scope));
+            if recoverable && !exhausted && !removed {
+                assert_eq!(queue.drain_channel(channel_id), vec![event.id.to_hex()]);
+            }
+            if recoverable {
+                assert_eq!(
+                    panic.payload["attempt"],
+                    if exhausted { queue::MAX_RETRIES + 1 } else { 1 }
+                );
+            }
+        }
+    }
+
+    /// Called with the actual production cancellation classifier's output.
+    pub(super) async fn assert_cancel_failure_metadata(
+        outcome: PromptOutcome,
+        batch: Option<FlushBatch>,
+        original: FlushBatch,
+        removed: bool,
+        circuit_open: bool,
+        capacity: &str,
+    ) {
+        let channel_id = original.channel_id;
+        let triggering = queue::triggering_event_context(&original);
+        let preserved = batch.is_some() && !removed;
+        let agent = dummy_agent(0).await;
+        let sibling = if capacity == "idle" {
+            Some(dummy_agent(1).await)
+        } else {
+            None
+        };
+        let mut pool = AgentPool::from_slots(vec![None, sibling]);
+        let task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(original.scope.clone()),
+                turn_id: "cancel-turn".into(),
+                triggering: triggering.clone(),
+                recoverable_batch: Some(original.clone()),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: circuit_open.then(|| std::time::Instant::now() + Duration::from_secs(60)),
+            respawn_in_flight: false,
+        }];
+        crash_history.push(SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: capacity == "respawning",
+        });
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let removed_channels = if removed {
+            HashSet::from([channel_id])
+        } else {
+            HashSet::new()
+        };
+        let action = handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &test_config(),
+            PromptResult {
+                agent,
+                source: PromptSource::Channel(original.scope.clone()),
+                turn_id: "cancel-turn".into(),
+                outcome,
+                batch,
+            },
+            &mut false,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+        assert!(matches!(action, LoopAction::Exit) == (circuit_open && capacity == "none"));
+        let events = observer.snapshot();
+        let failure = events
+            .iter()
+            .find(|event| event.kind == "turn_error")
+            .unwrap();
+        assert_eq!(
+            failure.payload["disposition"],
+            if preserved && (!circuit_open || capacity != "none") {
+                "retrying"
+            } else {
+                "stopped"
+            }
+        );
+        assert_eq!(
+            failure.payload["triggeringEventIds"],
+            serde_json::json!(triggering.event_ids)
+        );
+        assert_eq!(
+            failure.payload["triggeringRootEventId"],
+            serde_json::json!(triggering.root_event_id)
+        );
+        assert_eq!(
+            failure.payload["triggeringParentEventId"],
+            serde_json::json!(triggering.parent_event_id)
+        );
+        assert_eq!(failure.turn_id.as_deref(), Some("cancel-turn"));
+        assert_eq!(failure.payload["respawnScheduled"], !circuit_open);
+        assert_eq!(respawn_tasks.len(), usize::from(!circuit_open));
+        assert_eq!(
+            failure.payload["error"]
+                .as_str()
+                .unwrap()
+                .contains("is being replaced"),
+            !circuit_open
+        );
+        // Seed the new request which causes cancelled work to merge on flush.
+        let new_event = EventBuilder::new(Kind::Custom(9), "follow-up")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        queue.push(QueuedEvent {
+            channel_id,
+            scope: original.scope,
+            event: new_event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        });
+        let next = queue.flush_next().unwrap();
+        assert_eq!(
+            next.cancelled_events.len(),
+            if preserved { original.events.len() } else { 0 }
+        );
+        if preserved {
+            assert_eq!(
+                next.cancelled_events[0].event.id,
+                original.events[0].event.id
+            );
+        }
+        assert_eq!(
+            queue.retry_count(channel_id),
+            0,
+            "cancellation never consumes a retry"
+        );
+    }
+
     #[tokio::test]
     async fn panic_event_retains_task_turn_id() {
         let mut pool = AgentPool::from_slots(vec![]);
@@ -9870,6 +10208,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope::SessionScope::Conversation { channel_id }),
                 turn_id: "panic-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -9962,6 +10301,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(scope.clone()),
                 turn_id: "panic-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: Some(batch),
                 control_tx: None,
                 steer_tx: None,
@@ -10061,6 +10401,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
+                    triggering: Default::default(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -10158,6 +10499,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
+                    triggering: Default::default(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -10266,6 +10608,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     scope: None,
                     turn_id: "test-turn-id".to_string(),
+                    triggering: Default::default(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -10344,6 +10687,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -10451,6 +10795,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -10573,6 +10918,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -10715,6 +11061,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -10849,6 +11196,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 scope: Some(session_scope.clone()),
                 turn_id: "indeterminate-project".into(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -11004,6 +11352,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -11092,6 +11441,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 scope: None,
                 turn_id: "test-turn-id".to_string(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,

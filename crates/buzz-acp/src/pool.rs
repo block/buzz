@@ -67,6 +67,9 @@ pub struct TaskMeta {
     pub scope: Option<SessionScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
+    /// Conversation correlation retained even when cancellation or Drop mode
+    /// discards the batch. Terminal events must not depend on turn_started replay.
+    pub triggering: crate::queue::TriggeringEventContext,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
@@ -7631,6 +7634,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 channel_id: Some(busy_scope.channel_id()),
                 scope: Some(busy_scope),
                 turn_id: "t".into(),
+                triggering: Default::default(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -8227,6 +8231,43 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             label, expected,
             "got outcome shape {label}, want {expected}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_failure_observer_reports_production_batch_fate() {
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        for signal in [
+            ControlSignal::Steer,
+            ControlSignal::Interrupt,
+            ControlSignal::Cancel,
+            ControlSignal::Rotate,
+        ] {
+            for (removed, circuit_open, capacity) in [
+                (false, false, "none"),
+                (true, false, "none"),
+                (false, true, "none"),
+                (false, true, "idle"),
+                (false, true, "respawning"),
+            ] {
+                let batch = one_event_batch(Uuid::new_v4());
+                let failure = classify_control_cancel_failure(
+                    &ctx,
+                    AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                    signal.clone(),
+                    Some(batch.clone()),
+                );
+                crate::error_outcome_emission_tests::assert_cancel_failure_metadata(
+                    failure.outcome,
+                    failure.retry_batch,
+                    batch,
+                    removed,
+                    circuit_open,
+                    capacity,
+                )
+                .await;
+            }
+        }
     }
 
     #[test]
