@@ -1,7 +1,7 @@
 //! Setup-mode listener for not-ready agents.
 //!
 //! When the desktop determines an agent is `NotReady` (missing provider,
-//! model, or credentials), it spawns `buzz-acp` with a setup-mode payload
+//! model, credentials, or a custom command), it spawns `buzz-acp` with a setup-mode payload
 //! instead of starting the normal agent pool. This module implements that
 //! early-branch path:
 //!
@@ -116,6 +116,10 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom harness command is not resolvable in the current PATH.
+    /// No in-app action can fix this — the user must install the binary or
+    /// update their PATH.
+    MissingBinary { command: String },
 }
 
 impl RequirementPayload {
@@ -190,6 +194,9 @@ impl RequirementPayload {
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
+            RequirementPayload::MissingBinary { command } => {
+                format!("`{command}` not found in PATH — install it or check your PATH settings")
+            }
         }
     }
 }
@@ -258,24 +265,31 @@ impl SetupPayload {
                 .requirements
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::GitBash));
-            let all_external = self
-                .requirements
-                .iter()
-                .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
-            let any_external = self
-                .requirements
-                .iter()
-                .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let all_external = self.requirements.iter().all(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
+            let any_external = self.requirements.iter().any(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
 
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
-                "Fix the config file(s) and restart the agent.".to_string()
+                "Fix the external CLI config files or command/path and restart the agent."
+                    .to_string()
             } else if any_external {
                 // Mixed: some Buzz-managed fields, some external config.
-                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
+                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files or command/path manually and restart the agent.".to_string()
             } else {
                 // All Buzz-managed — original footer unchanged.
                 "Open Edit Agent in the Buzz app to set these.".to_string()
@@ -823,6 +837,18 @@ mod tests {
     }
 
     #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Deepseeker","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"deepseeker-acp"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "deepseeker-acp"
+        ));
+    }
+
+    #[test]
     fn nudge_body_names_all_requirements() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
@@ -918,6 +944,30 @@ mod tests {
         assert!(
             !body.contains("Doctor"),
             "Git Bash nudge must not point to the removed Doctor section; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_missing_binary_copy_is_external_and_actionable() {
+        let payload = SetupPayload {
+            agent_name: "Deepseeker".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::MissingBinary {
+                command: "deepseeker-acp".to_string(),
+            }],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("deepseeker-acp` not found in PATH"),
+            "nudge must name the missing command and PATH; got: {body:?}"
+        );
+        assert!(
+            body.contains("Fix the external CLI config files or command/path"),
+            "nudge must provide external remediation; got: {body:?}"
+        );
+        assert!(
+            !body.contains("Open Edit Agent"),
+            "missing-binary nudge must not route to Edit Agent; got: {body:?}"
         );
     }
 
