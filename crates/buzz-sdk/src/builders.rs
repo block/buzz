@@ -1104,6 +1104,8 @@ pub struct GitIssueMeta {
     pub labels: Vec<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// Issue event IDs that must be resolved before this issue can proceed.
+    pub dependencies: Vec<String>,
 }
 
 /// Build a git issue event (kind:1621, NIP-34). `content` is the markdown body.
@@ -1135,8 +1137,78 @@ pub fn build_git_issue(
     for label in &meta.labels {
         tags.push(tag(&["t", label])?);
     }
+    for dependency in &meta.dependencies {
+        let dependency = check_hex_exact(dependency, 64, "issue dependency")?;
+        tags.push(tag(&["depends-on", &dependency])?);
+    }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
+}
+
+/// Build a graph-mode task transition note rooted at a NIP-34 issue.
+///
+/// The operation uses a regular kind:1 note so clients that do not understand
+/// task graphs still render a readable audit entry. Graph-aware clients reduce
+/// the `from`/`to` operation chain through the optional causal `prior` tag.
+pub fn build_git_issue_transition(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    from: &str,
+    to: &str,
+    content: &str,
+    prior: Option<&str>,
+    gate: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    if content.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "task transition content must not be empty".into(),
+        ));
+    }
+    let issue = check_hex_exact(issue_id, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    let from = check_task_transition_value(from, "from")?;
+    let to = check_task_transition_value(to, "to")?;
+    if from == to {
+        return Err(SdkError::InvalidInput(
+            "task transition from and to must differ".into(),
+        ));
+    }
+
+    let mut tags = vec![
+        tag(&["e", &issue, "", "root"])?,
+        tag(&["a", &a_value])?,
+        tag(&["t", "task-transition"])?,
+        tag(&["from", &from])?,
+        tag(&["to", &to])?,
+    ];
+    if let Some(prior) = prior {
+        let prior = check_hex_exact(prior, 64, "prior task transition")?;
+        tags.push(tag(&["prior", &prior])?);
+    }
+    if let Some(gate) = gate {
+        let gate = check_task_transition_value(gate, "gate")?;
+        tags.push(tag(&["gate", &gate])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
+fn check_task_transition_value(value: &str, field: &str) -> Result<String, SdkError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return Err(SdkError::InvalidInput(format!(
+            "task transition {field} must be between 1 and 64 characters"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(SdkError::InvalidInput(format!(
+            "task transition {field} must use lowercase letters, digits, and hyphens"
+        )));
+    }
+    Ok(value.to_string())
 }
 
 /// Build an issue assignment note (kind:1) — a labeled comment whose `p`
@@ -3690,6 +3762,7 @@ mod tests {
         let meta = GitIssueMeta {
             labels: vec!["bug".to_string(), "p1".to_string()],
             recipients: vec![],
+            dependencies: vec!["d".repeat(64)],
         };
         let ev =
             sign(build_git_issue(&repo, "Crashes on startup", "steps to repro", &meta).unwrap());
@@ -3699,6 +3772,65 @@ mod tests {
         assert!(has_tag(&ev, "subject", "Crashes on startup"));
         assert!(has_tag(&ev, "t", "bug"));
         assert!(has_tag(&ev, "t", "p1"));
+        assert!(has_tag(&ev, "depends-on", &"d".repeat(64)));
+    }
+
+    #[test]
+    fn git_issue_transition_builds_causal_operation() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let prior = "c".repeat(64);
+        let ev = sign(
+            build_git_issue_transition(
+                &repo,
+                &issue,
+                "quality-gate",
+                "implementation",
+                "Tests failed; returning to implementation.",
+                Some(&prior),
+                Some("tests"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "t", "task-transition"));
+        assert!(has_tag(&ev, "from", "quality-gate"));
+        assert!(has_tag(&ev, "to", "implementation"));
+        assert!(has_tag(&ev, "prior", &prior));
+        assert!(has_tag(&ev, "gate", "tests"));
+    }
+
+    #[test]
+    fn git_issue_transition_rejects_invalid_state_or_empty_reason() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        assert!(build_git_issue_transition(
+            &repo,
+            &issue,
+            "In Progress",
+            "quality-gate",
+            "reason",
+            None,
+            None,
+        )
+        .is_err());
+        assert!(build_git_issue_transition(
+            &repo,
+            &issue,
+            "implementation",
+            "quality-gate",
+            "  ",
+            None,
+            None,
+        )
+        .is_err());
     }
 
     #[test]
