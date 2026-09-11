@@ -88,6 +88,7 @@ jobs:
           cargo nextest archive \
             --cargo-profile ci \
             -p buzz-db \
+            -p buzz-pubsub \
             -p buzz-relay \
             -p buzz-test-client \
             --lib \
@@ -205,6 +206,13 @@ jobs:
         run: |
           scripts/postgres-test-run.sh \
             --archive-file target/ci/postgres-tests.tar.zst
+      - name: Redis subscription integration tests
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-pubsub)' \
+            --run-ignored ignored-only \
+            --test-threads 1
 
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/2)

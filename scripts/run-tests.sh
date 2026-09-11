@@ -104,6 +104,12 @@ run_unit_tests() {
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
 
+  # Mirror the complete infrastructure-free buzz-pubsub suite selected by the
+  # nextest path in `just test-unit`. Ignored real-Redis tests run in CI's
+  # required PostgreSQL/Redis lane.
+  run_test_step "buzz-pubsub unit tests" \
+    cargo test -p buzz-pubsub -- --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \
@@ -142,6 +148,18 @@ run_unit_tests() {
 
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
+
+  run_test_step "buzz-relay Redis metric contract tests" \
+    cargo test -p buzz-relay --lib metrics::contract_tests:: -- --nocapture
+
+  run_test_step "buzz-relay Redis runtime tests" \
+    cargo test -p buzz-relay --lib redis_subscription_runtime::tests:: -- --nocapture
+
+  run_test_step "buzz-relay binary tests" \
+    cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay boot lifecycle tests" \
+    cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

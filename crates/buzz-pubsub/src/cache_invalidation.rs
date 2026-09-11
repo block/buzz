@@ -11,12 +11,16 @@
 //! universal delivery-enforcement point, so dropping the stale key is
 //! sufficient: the next read re-fetches authoritative state from the DB.
 
+use std::sync::Arc;
+
 use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::health::{SubscriptionHealth, SubscriptionPath, SubscriptionTransitionReason};
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for cache-invalidation messages.
@@ -101,24 +105,56 @@ pub async fn run_cache_invalidation_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<ScopedCacheInvalidation>,
 ) {
-    let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    let health = Arc::new(SubscriptionHealth::new());
+    health.consumer_attached(SubscriptionPath::Cache);
+    run_cache_invalidation_subscriber_until_cancelled(
+        redis_url,
+        broadcast_tx,
+        CancellationToken::new(),
+        health,
+    )
+    .await;
+}
 
+/// Run cache invalidation until explicit process cancellation while reporting
+/// the shared end-to-end subscription-path health contract.
+pub async fn run_cache_invalidation_subscriber_until_cancelled(
+    redis_url: String,
+    broadcast_tx: broadcast::Sender<ScopedCacheInvalidation>,
+    cancel: CancellationToken,
+    health: Arc<SubscriptionHealth>,
+) {
+    let mut backoff_secs = BACKOFF_INITIAL_SECS;
     loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
+        health.connecting(SubscriptionPath::Cache);
+        let attempt = connect_and_subscribe(&redis_url, &broadcast_tx, &health);
+        let result = tokio::select! {
+            () = cancel.cancelled() => return,
+            result = attempt => result,
+        };
+        match result {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                health.reconnecting(
+                    SubscriptionPath::Cache,
+                    SubscriptionTransitionReason::StreamClosed,
+                );
                 tracing::warn!(
                     "Redis cache-invalidation stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
                 );
             }
-            Err(e) => {
+            Err((reason, e)) => {
+                health.reconnecting(SubscriptionPath::Cache, reason);
                 tracing::error!(
                     "Redis cache-invalidation error: {e} — reconnecting in {backoff_secs}s"
                 );
             }
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)) => {}
+        }
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
 
         tracing::info!("Attempting to reconnect to Redis cache-invalidation...");
@@ -128,11 +164,19 @@ pub async fn run_cache_invalidation_subscriber(
 async fn connect_and_subscribe(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<ScopedCacheInvalidation>,
-) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
+    health: &SubscriptionHealth,
+) -> Result<(), (SubscriptionTransitionReason, redis::RedisError)> {
+    let client = redis::Client::open(redis_url)
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
+    let mut conn = client
+        .get_async_pubsub()
+        .await
+        .map_err(|error| (SubscriptionTransitionReason::Dial, error))?;
 
-    conn.psubscribe(CACHE_INVALIDATION_PATTERN).await?;
+    conn.psubscribe(CACHE_INVALIDATION_PATTERN)
+        .await
+        .map_err(|error| (SubscriptionTransitionReason::Subscribe, error))?;
+    health.network_ready(SubscriptionPath::Cache);
 
     tracing::info!(
         "Redis cache-invalidation subscriber connected — listening on {CACHE_INVALIDATION_PATTERN}"
