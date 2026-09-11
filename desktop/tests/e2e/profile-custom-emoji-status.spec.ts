@@ -196,17 +196,32 @@ test("set status dialog uses the desktop modal with shared status choices", asyn
 test("keeps an open status draft when the saved status expires", async ({
   page,
 }) => {
+  await page.clock.install();
   await page.goto("/");
-  const nowSeconds = Math.floor(Date.now() / 1_000);
+  const nowSeconds = await page.evaluate(() => Math.floor(Date.now() / 1_000));
   await seedMockStatus(page, {
     text: "Original draft",
     emoji: "📝",
-    expiresAt: nowSeconds + 2,
+    expiresAt: nowSeconds + 5 * 60,
     createdAt: nowSeconds,
   });
   await page.getByTestId("profile-popover-set-status").click();
   const dialog = page.getByTestId("set-status-dialog");
+  await expect(dialog.getByTestId("set-status-input")).toHaveValue(
+    "Original draft",
+  );
+  await expect(page.getByTestId("sidebar-profile-user-status")).toBeVisible();
+  await expect(dialog.getByText("Quick statuses", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(dialog.getByTestId("set-status-clear")).toBeVisible();
   await dialog.getByTestId("set-status-input").fill("Unsaved draft");
+  await expect(dialog.getByLabel("Save status")).toBeEnabled();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+
+  // Expire the saved status only after the open dialog has a live, dirty
+  // baseline. Run the real expiration timer rather than racing dialog setup.
+  await page.clock.fastForward(301_000);
   await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0, {
     timeout: 5_000,
   });
