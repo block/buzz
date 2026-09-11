@@ -470,16 +470,6 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
           ),
       content,
     );
-  await input.fill(content);
-  await input.press("Escape");
-  await page.getByTestId("send-message").click();
-  await expect(
-    page.getByText("The mention @Fizz is ambiguous.", { exact: false }),
-  ).toBeVisible();
-  await expect(input).toHaveText(content);
-  await expect(banner).toHaveAttribute("data-state", "prompt");
-  expect(await sentRecipients()).toEqual([]);
-
   const agents = await invokeMockCommand<
     Array<{ pubkey: string; persona_id: string | null; status: string }>
   >(page, "list_managed_agents");
@@ -491,8 +481,46 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   // stopped. This identifies the fixture key, not a production routing rule.
   const fizz = sameNameAgents.filter((agent) => agent.status === "running");
   expect(fizz).toHaveLength(1);
-  // Make selection intent explicit; do not remove the colliding fixture or
-  // relax extraction. The resulting event must tag only our starter identity.
+  const welcomeChannel = (await getMockChannels(page)).find(
+    (channel) => channel.name === "Welcome",
+  );
+  expect(welcomeChannel).toBeDefined();
+  // Direct team setup must refresh the composer's cached roster, not just the
+  // directory. Otherwise typed Fizz could silently target only the old starter.
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        const members = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryData<
+          Array<{ pubkey: string }>
+        >(["channels", channelId, "members"]);
+        return members?.map((member) => member.pubkey) ?? [];
+      }, welcomeChannel?.id),
+    )
+    .toEqual(
+      expect.arrayContaining(sameNameAgents.map((agent) => agent.pubkey)),
+    );
+  await expect(banner).toHaveAttribute("data-state", "prompt");
+  expect(await sentRecipients()).toEqual([]);
+
+  // Baseline regression restored from the fixed root: a manually typed
+  // colliding name must fail visibly, keep the draft, and publish nothing.
+  // The production fix for that visible failure is the independent composer
+  // recovery work; until it lands, this sequence is expected to fail on the
+  // fixed root.
+  await input.fill(content);
+  await input.press("Escape");
+  await page.getByTestId("send-message").click();
+  await expect(
+    page.getByText("The mention @Fizz is ambiguous.", { exact: false }),
+  ).toBeVisible();
+  await expect(input).toHaveText(content);
+  await expect(banner).toHaveAttribute("data-state", "prompt");
+  expect(await sentRecipients()).toEqual([]);
+
+  // This freshness prefix retains both colliding starters in the roster and
+  // selects the exact current starter. Make selection intent explicit; do
+  // not remove the colliding fixture or relax extraction. The resulting event
+  // must tag only our starter identity.
   await input.fill("");
   await input.pressSequentially(content);
   await page.getByTestId(`mention-suggestion-${fizz[0].pubkey}`).click();

@@ -1,3 +1,5 @@
+import type { QueryClient } from "@tanstack/react-query";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
@@ -20,6 +22,7 @@ import type {
   ManagedAgent,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
@@ -183,6 +186,8 @@ async function ensureWelcomeTeamPersonasActive() {
 async function ensureWelcomeTeamMembership(
   channelId: string,
   agents: WelcomeTeamAgents,
+  expectedRelayUrl: string,
+  expectedSignerPubkey: string,
 ) {
   const members = await getChannelMembers(channelId).catch(() => []);
   const memberPubkeys = new Set(
@@ -199,6 +204,8 @@ async function ensureWelcomeTeamMembership(
     channelId,
     pubkeys: missingAgents.map((agent) => agent.pubkey),
     role: "bot",
+    expectedRelayUrl,
+    expectedSignerPubkey,
   });
   const unexpectedError = result.errors.find(
     ({ error }) => !error.toLowerCase().includes("already"),
@@ -321,7 +328,8 @@ export function welcomeTeammateAccessUpdate(
  */
 async function provisionWelcomeTeam(
   channelId: string,
-  relayUrl?: string | null,
+  relayUrl: string,
+  signerPubkey: string,
 ): Promise<WelcomeTeamAgents> {
   const existingAgents = await listManagedAgents();
   await ensureWelcomeTeamPersonasActive();
@@ -388,21 +396,50 @@ async function provisionWelcomeTeam(
       welcomeAgents[index] = updated.agent;
     }
   }
-  await ensureWelcomeTeamMembership(channelId, welcomeAgents);
+  await ensureWelcomeTeamMembership(
+    channelId,
+    welcomeAgents,
+    relayUrl,
+    signerPubkey,
+  );
   return welcomeAgents;
 }
 
-export function ensureWelcomeTeam(
+/** Share provisioning per relay/channel/signer; each caller refreshes its scoped roster. */
+export async function ensureWelcomeTeam(
   channelId: string,
-  relayUrl?: string | null,
+  relayUrl: string | null | undefined,
+  queryClient: QueryClient,
 ): Promise<WelcomeTeamAgents> {
-  const key = `${normalizeRelayUrl(relayUrl) ?? ""}:${channelId}`;
-  const current = welcomeTeamPromises.get(key);
-  if (current) return current;
+  // Resolve native identity for EVERY participant, before consulting the shared
+  // operation. A replacement identity must never inherit the old signer's work.
+  const expectedRelayUrl = normalizeRelayUrl(relayUrl);
+  const operation = async () => {
+    if (!expectedRelayUrl)
+      throw new Error("Welcome provisioning requires a relay.");
+    const signerPubkey = normalizePubkey((await getIdentity()).pubkey);
+    if (!signerPubkey)
+      throw new Error("Welcome provisioning requires a signer.");
+    const key = JSON.stringify([expectedRelayUrl, channelId, signerPubkey]);
+    let promise = welcomeTeamPromises.get(key);
+    if (!promise) {
+      promise = provisionWelcomeTeam(
+        channelId,
+        expectedRelayUrl,
+        signerPubkey,
+      ).finally(() => {
+        welcomeTeamPromises.delete(key);
+      });
+      welcomeTeamPromises.set(key, promise);
+    }
+    return promise;
+  };
 
-  const promise = provisionWelcomeTeam(channelId, relayUrl).finally(() =>
-    welcomeTeamPromises.delete(key),
+  // A remounted community can join this operation with a new QueryClient.
+  // Keep cache settlement per caller, not in the shared provisioning promise.
+  // Native batches commit keys independently, even when provisioning rejects;
+  // refetch authority only, never insert requested agents into the roster.
+  return operation().finally(() =>
+    invalidateChannelMembersRosters(queryClient, [channelId]),
   );
-  welcomeTeamPromises.set(key, promise);
-  return promise;
 }
