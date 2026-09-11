@@ -868,6 +868,13 @@ pub(crate) mod tests {
         rx
     }
 
+    fn archived_community_disconnect_reason() -> watch::Receiver<Option<CommunityDisconnectReason>>
+    {
+        let (tx, rx) = watch::channel(None);
+        tx.send_replace(Some(CommunityDisconnectReason::CommunityArchived));
+        rx
+    }
+
     fn text_payloads(messages: &[WsMessage]) -> Vec<String> {
         messages
             .iter()
@@ -1066,6 +1073,36 @@ pub(crate) mod tests {
                 assert_eq!(close.reason.as_str(), "community deleted");
             }
             other => panic!("expected one 1008 deletion close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_loop_sends_policy_close_when_community_is_archived() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            cancel,
+            archived_community_disconnect_reason(),
+        )
+        .await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.messages.len(), 1);
+        match &state.messages[0] {
+            WsMessage::Close(Some(close)) => {
+                assert_eq!(close.code, axum::extract::ws::close_code::POLICY);
+                assert_eq!(close.reason.as_str(), "community archived");
+            }
+            other => panic!("expected one 1008 archive close, got {other:?}"),
         }
     }
 

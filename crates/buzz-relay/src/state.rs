@@ -27,6 +27,7 @@ use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
+use chrono::{DateTime, Utc};
 use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
@@ -38,17 +39,21 @@ pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 
 /// Why a community-bound socket is being asked to stop.
 ///
-/// Only deletion is externally attributed today. Ordinary lifecycle exits keep
-/// using cancellation alone and therefore retain the existing bare-close
-/// behavior.
+/// Ordinary lifecycle exits keep using cancellation alone and therefore retain
+/// the existing bare-close behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommunityDisconnectReason {
+    CommunityArchived,
     CommunityDeleted,
 }
 
 impl CommunityDisconnectReason {
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
+            Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community archived"),
+            })),
             Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("community deleted"),
@@ -78,9 +83,8 @@ impl CommunityConnectionControl {
         self.reason_tx.subscribe()
     }
 
-    fn disconnect_community(&self) {
-        self.reason_tx
-            .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+    fn disconnect_community(&self, reason: CommunityDisconnectReason) {
+        self.reason_tx.send_replace(Some(reason));
         self.cancel.cancel();
     }
 }
@@ -148,13 +152,25 @@ impl CommunityConnectionRegistry {
         }
     }
 
-    /// Disconnects every socket type currently bound to `community_id` and
-    /// attributes the close to community deletion.
-    pub fn disconnect_community(&self, community_id: CommunityId) -> usize {
+    /// Disconnects every socket type currently bound to an archived community.
+    pub fn disconnect_archived_community(&self, community_id: CommunityId) -> usize {
+        self.disconnect_community(community_id, CommunityDisconnectReason::CommunityArchived)
+    }
+
+    /// Disconnects every socket type currently bound to a permanently deleted community.
+    pub fn disconnect_deleted_community(&self, community_id: CommunityId) -> usize {
+        self.disconnect_community(community_id, CommunityDisconnectReason::CommunityDeleted)
+    }
+
+    fn disconnect_community(
+        &self,
+        community_id: CommunityId,
+        reason: CommunityDisconnectReason,
+    ) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             if entry.value().0 == community_id {
-                entry.value().1.disconnect_community();
+                entry.value().1.disconnect_community(reason);
                 closed += 1;
             }
         }
@@ -212,21 +228,20 @@ pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run,
     cancel.cancel();
 }
 
-async fn revalidate_registered_communities<Check, CheckFuture>(
+async fn revalidate_registered_communities<Revalidate, RevalidateFuture>(
     registry: &CommunityConnectionRegistry,
-    mut check_active: Check,
+    mut revalidate: Revalidate,
 ) -> (usize, Vec<(CommunityId, buzz_db::DbError)>)
 where
-    Check: FnMut(CommunityId) -> CheckFuture,
-    CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
+    Revalidate: FnMut(CommunityId) -> RevalidateFuture,
+    RevalidateFuture: Future<Output = Result<usize, buzz_db::DbError>>,
 {
     let communities = registry.bound_communities();
     let mut closed = 0;
     let mut failures = Vec::new();
     for community_id in communities {
-        match check_active(community_id).await {
-            Ok(false) => closed += registry.disconnect_community(community_id),
-            Ok(true) => {}
+        match revalidate(community_id).await {
+            Ok(disconnected) => closed += disconnected,
             Err(error) => failures.push((community_id, error)),
         }
     }
@@ -1231,14 +1246,25 @@ impl AppState {
     pub async fn disconnect_community_clusterwide(
         &self,
         tenant: &TenantContext,
-    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        archived_at: DateTime<Utc>,
+    ) -> anyhow::Result<usize> {
         let closed = self
-            .community_connections
-            .disconnect_community(tenant.community());
+            .db
+            .with_community_archive_fence(tenant.community(), archived_at, || {
+                self.community_connections
+                    .disconnect_archived_community(tenant.community())
+            })
+            .await?
+            .unwrap_or(0);
         self.community_disconnect_publish_attempts
             .fetch_add(1, Ordering::Relaxed);
         self.pubsub
-            .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
+            .publish_conn_control(
+                tenant,
+                &ConnControl::DisconnectCommunity {
+                    archived_at: Some(archived_at),
+                },
+            )
             .await?;
         Ok(closed)
     }
@@ -1249,11 +1275,24 @@ impl AppState {
     /// semantics: a pod that missed a successful publish eventually observes the
     /// archived row directly.
     pub async fn revalidate_live_communities(&self) -> usize {
-        let (closed, failures) =
-            revalidate_registered_communities(&self.community_connections, |community_id| {
-                self.db.is_community_active_for_maintenance(community_id)
-            })
-            .await;
+        let (closed, failures) = revalidate_registered_communities(
+            &self.community_connections,
+            |community_id| async move {
+                self.db
+                    .with_inactive_community_fence(community_id, |archived_at| {
+                        if archived_at.is_some() {
+                            self.community_connections
+                                .disconnect_archived_community(community_id)
+                        } else {
+                            self.community_connections
+                                .disconnect_deleted_community(community_id)
+                        }
+                    })
+                    .await
+                    .map(|disconnected| disconnected.unwrap_or(0))
+            },
+        )
+        .await;
         for (community_id, error) in failures {
             tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
         }
@@ -1924,17 +1963,17 @@ pub(crate) mod tests {
         let _audio_a_guard = registry.register(Uuid::new_v4(), community_a, audio_a_control);
         let _ordinary_b_guard = registry.register(Uuid::new_v4(), community_b, ordinary_b_control);
 
-        assert_eq!(registry.disconnect_community(community_a), 2);
+        assert_eq!(registry.disconnect_archived_community(community_a), 2);
         assert!(ordinary_a.is_cancelled());
         assert!(audio_a.is_cancelled());
         assert!(!ordinary_b.is_cancelled());
         assert_eq!(
             *ordinary_a_reason.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted)
+            Some(CommunityDisconnectReason::CommunityArchived)
         );
         assert_eq!(
             *audio_a_reason.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted)
+            Some(CommunityDisconnectReason::CommunityArchived)
         );
         assert_eq!(*ordinary_b_reason.borrow(), None);
     }
@@ -1988,7 +2027,7 @@ pub(crate) mod tests {
             _ = registered.notified() => {}
             _ = &mut future => panic!("revalidation should be paused"),
         }
-        assert_eq!(registry.disconnect_community(community), 1);
+        assert_eq!(registry.disconnect_archived_community(community), 1);
         resume.notify_one();
         future.await;
         assert!(cancel_during.is_cancelled());
@@ -2020,17 +2059,20 @@ pub(crate) mod tests {
             CommunityConnectionControl::new(cancel_c.clone()),
         );
 
-        let (closed, failures) =
-            revalidate_registered_communities(&registry, |community| async move {
+        let registry_for_revalidation = &registry;
+        let (closed, failures) = revalidate_registered_communities(&registry, |community| {
+            let registry = registry_for_revalidation;
+            async move {
                 if community == failed {
                     Err(buzz_db::DbError::InvalidData(
                         "injected lookup failure".into(),
                     ))
                 } else {
-                    Ok(false)
+                    Ok(registry.disconnect_archived_community(community))
                 }
-            })
-            .await;
+            }
+        })
+        .await;
 
         assert_eq!(closed, 2);
         assert!(cancel_a.is_cancelled());
@@ -2042,6 +2084,46 @@ pub(crate) mod tests {
             registry.bound_communities(),
             HashSet::from([archived_a, failed, archived_c])
         );
+    }
+
+    #[tokio::test]
+    async fn periodic_revalidation_disconnects_inside_the_fenced_callback() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let cancel = CancellationToken::new();
+        let _guard = registry.register(
+            Uuid::new_v4(),
+            community,
+            CommunityConnectionControl::new(cancel.clone()),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let future = revalidate_registered_communities(&registry, |community_id| {
+            let entered = Arc::clone(&entered);
+            let resume = Arc::clone(&resume);
+            let registry = &registry;
+            async move {
+                entered.notify_one();
+                resume.notified().await;
+                Ok(registry.disconnect_archived_community(community_id))
+            }
+        });
+        tokio::pin!(future);
+        tokio::select! {
+            _ = entered.notified() => {}
+            _ = &mut future => panic!("revalidation should be paused inside the fence"),
+        }
+        assert!(
+            !cancel.is_cancelled(),
+            "the helper must not disconnect outside the fenced callback"
+        );
+
+        resume.notify_one();
+        let (closed, failures) = future.await;
+        assert_eq!(closed, 1);
+        assert!(failures.is_empty());
+        assert!(cancel.is_cancelled());
     }
 
     #[test]
@@ -2059,7 +2141,7 @@ pub(crate) mod tests {
         drop(guard);
 
         assert!(registry.bound_communities().is_empty());
-        assert_eq!(registry.disconnect_community(community), 0);
+        assert_eq!(registry.disconnect_archived_community(community), 0);
         assert!(!cancel.is_cancelled());
     }
 
