@@ -86,7 +86,7 @@ pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for e in &events {
         let emoji = e
             .get("content")
@@ -99,16 +99,40 @@ pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        groups.entry(emoji).or_default().push(pubkey);
+        let id = e
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = e.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        groups.entry(emoji).or_default().push(serde_json::json!({
+            "id": id,
+            "pubkey": pubkey,
+            "created_at": created_at,
+        }));
     }
 
     let mut reactions: Vec<serde_json::Value> = groups
         .into_iter()
-        .map(|(emoji, pubkeys)| {
+        .map(|(emoji, mut group)| {
+            group.sort_by_key(|ev| {
+                (
+                    ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0),
+                    ev.get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            });
+            let pubkeys: Vec<serde_json::Value> = group
+                .iter()
+                .map(|ev| ev.get("pubkey").cloned().unwrap_or_default())
+                .collect();
             serde_json::json!({
                 "emoji": emoji,
-                "count": pubkeys.len(),
+                "count": group.len(),
                 "pubkeys": pubkeys,
+                "events": group,
             })
         })
         .collect();
