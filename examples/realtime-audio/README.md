@@ -13,10 +13,9 @@ approval, and latency measured from the end of speech to actual playback.
 
 ## Get the model
 
-Download the [shared Frankie GGUF](https://drive.google.com/file/d/1oMUgJteaoBvgQicYvz6pWRpcSxun4KA-/view?usp=sharing)
-and save it as `models/frankie-studio-c10-q8-audio.gguf` outside the source repositories.
-Use Drive's download button; its preview is not the model file. Access to this
-externally hosted download is managed separately from this repository.
+Obtain a compatible Frankie GGUF separately and save it as
+`models/frankie-studio-c10-q8-audio.gguf` outside the source repositories.
+Model weights are not distributed through this repository.
 
 The tested September 10, 2026 package has:
 
