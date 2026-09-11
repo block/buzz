@@ -126,7 +126,16 @@ export function MessageBubbleLayout({
           )}
         </div>
         <div className="max-w-full">{extras}</div>
-        {footer && <div className="w-full self-start">{footer}</div>}
+        {footer && (
+          <div
+            className={cn(
+              "flex w-full",
+              outgoing ? "justify-end" : "justify-start",
+            )}
+          >
+            {footer}
+          </div>
+        )}
       </div>
     </>
   );

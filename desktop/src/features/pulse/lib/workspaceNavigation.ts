@@ -53,10 +53,18 @@ export function workspaceNavigationTarget(
       params = { workflowId: target.params?.workflowId };
       break;
     case "/channels/$channelId":
-      // Special navigation (auto-send, targeted history) retains its canonical route.
-      if (target.search?.autoSend || target.search?.messageId) return target;
+      // Draft auto-send still uses the canonical route that owns its lifecycle.
+      if (target.search?.autoSend) return target;
       feed = "conversation";
       params = { conversation: target.params?.channelId };
+      break;
+    case "/channels/$channelId/posts/$postId":
+      feed = "conversation";
+      params = {
+        conversation: target.params?.channelId,
+        post: target.params?.postId,
+        reply: target.search?.replyId,
+      };
       break;
     default:
       return target;

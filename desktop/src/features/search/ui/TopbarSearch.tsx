@@ -44,7 +44,7 @@ type TopbarSearchProps = {
   onCreateChannel?: () => void | Promise<void>;
   suggestionChannels?: Channel[];
   scopeFocusRequest?: number;
-  variant?: "bar" | "icon";
+  variant?: "bar" | "icon" | "dialog";
 };
 const MAX_SEARCH_SUGGESTIONS = 4;
 const SEARCH_RESULT_LIMIT = 40;
@@ -397,6 +397,7 @@ export function TopbarSearch({
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const dialogInputRef = React.useRef<HTMLInputElement>(null);
+  const returnFocusRef = React.useRef<HTMLElement | null>(null);
   const { cancelDeferredModalOpen, openAfterExit, openNextFrame } =
     useDeferredModalOpen();
   const {
@@ -515,11 +516,14 @@ export function TopbarSearch({
 
   const openSearchDialog = React.useCallback(
     (nextScopeChannelId: string | null = null) => {
+      if (!isOpen && document.activeElement instanceof HTMLElement) {
+        returnFocusRef.current = document.activeElement;
+      }
       setScopeChannelId(nextScopeChannelId);
       setSelectedMenuIndex(0);
       openNextFrame(() => setIsOpen(true));
     },
-    [openNextFrame],
+    [isOpen, openNextFrame],
   );
 
   const handleSearchOpenChange = React.useCallback(
@@ -924,44 +928,46 @@ export function TopbarSearch({
   return (
     <div className={cn("relative", className)}>
       <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
-        <button
-          aria-label="Search everything"
-          className={
-            isIconVariant
-              ? "group/search flex size-6 items-center justify-center rounded p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-              : "group/search flex h-8 w-full items-center gap-2 rounded-md bg-sidebar-border/35 px-2 text-left text-sm text-sidebar-foreground/55 transition-colors duration-150 ease-out hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
-          }
-          data-testid="open-search"
-          onClick={() => openSearchDialog(null)}
-          ref={triggerRef}
-          title="Search everything"
-          type="button"
-        >
-          <Search
+        {variant !== "dialog" && (
+          <button
+            aria-label="Search everything"
             className={
               isIconVariant
-                ? "h-4 w-4 shrink-0"
-                : "h-4 w-4 shrink-0 text-sidebar-foreground/45 transition-colors duration-150 ease-out group-hover/search:text-sidebar-foreground/65 group-focus-visible/search:text-sidebar-foreground"
+                ? "group/search flex size-6 items-center justify-center rounded p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+                : "group/search flex h-8 w-full items-center gap-2 rounded-md bg-sidebar-border/35 px-2 text-left text-sm text-sidebar-foreground/55 transition-colors duration-150 ease-out hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
             }
-          />
-          {isIconVariant ? null : (
-            <>
-              <span
-                className={cn(
-                  "min-w-0 flex-1 truncate transition-colors duration-150 ease-out",
-                  query
-                    ? "text-sidebar-foreground"
-                    : "text-sidebar-foreground/55",
-                )}
-              >
-                {query || "Search everything"}
-              </span>
-              <kbd className="shrink-0 text-2xs text-sidebar-foreground/45">
-                &#x2318;K
-              </kbd>
-            </>
-          )}
-        </button>
+            data-testid="open-search"
+            onClick={() => openSearchDialog(null)}
+            ref={triggerRef}
+            title="Search everything"
+            type="button"
+          >
+            <Search
+              className={
+                isIconVariant
+                  ? "h-4 w-4 shrink-0"
+                  : "h-4 w-4 shrink-0 text-sidebar-foreground/45 transition-colors duration-150 ease-out group-hover/search:text-sidebar-foreground/65 group-focus-visible/search:text-sidebar-foreground"
+              }
+            />
+            {isIconVariant ? null : (
+              <>
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate transition-colors duration-150 ease-out",
+                    query
+                      ? "text-sidebar-foreground"
+                      : "text-sidebar-foreground/55",
+                  )}
+                >
+                  {query || "Search everything"}
+                </span>
+                <kbd className="shrink-0 text-2xs text-sidebar-foreground/45">
+                  &#x2318;K
+                </kbd>
+              </>
+            )}
+          </button>
+        )}
         <DialogContent
           aria-busy={isSearchLoading && visibleSearchableResults.length === 0}
           className="mt-[18vh] max-w-2xl self-start gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl"
@@ -972,7 +978,7 @@ export function TopbarSearch({
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            triggerRef.current?.focus();
+            (triggerRef.current ?? returnFocusRef.current)?.focus();
           }}
           showCloseButton={false}
         >

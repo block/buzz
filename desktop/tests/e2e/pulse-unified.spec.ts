@@ -1011,10 +1011,17 @@ test("bubbles have equal corners, unwrapped media, and aligned reply indicators"
     ).toBeLessThan(1);
     const summary = row.getByTestId("message-thread-summary");
     await expect(summary).toBeVisible();
+    await summary.hover();
+    await expect(row.getByTestId("message-thread-summary-surface")).toHaveCount(
+      0,
+    );
+    await expect(summary).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     const bodyBox = await body.boundingBox();
     const summaryBox = await summary.boundingBox();
     if (!bodyBox || !summaryBox) throw new Error("Missing message bounds");
-    expect(Math.abs(bodyBox.x - summaryBox.x)).toBeLessThan(2);
+    expect(
+      Math.abs(bodyBox.x + bodyBox.width - summaryBox.x - summaryBox.width),
+    ).toBeLessThan(2);
   }
   const short = detail
     .getByTestId("message-row")
@@ -1028,7 +1035,9 @@ test("bubbles have equal corners, unwrapped media, and aligned reply indicators"
     .getByTestId("message-thread-summary")
     .boundingBox();
   if (!bodyBox || !summaryBox) throw new Error("Missing message bounds");
-  expect(Math.abs(bodyBox.x - summaryBox.x)).toBeLessThan(2);
+  expect(
+    Math.abs(bodyBox.x + bodyBox.width - summaryBox.x - summaryBox.width),
+  ).toBeLessThan(2);
   const imageOnly = detail
     .locator('[data-message-bubble="incoming"]')
     .filter({ has: page.locator("[data-block-media]") });
@@ -2257,4 +2266,137 @@ test("workspace profile panels share the main container's frame and remain resiz
   await expect(main).toHaveCSS("max-width", "960px");
   const restored = await boundsOf(main);
   expect(restored.x + restored.width / 2).toBeCloseTo(720, 0);
+});
+
+test("global search opens with the keyboard across Pulse apps and restores focus", async ({
+  page,
+}) => {
+  await seed(page);
+  const apps = page.getByTestId("pulse-app-navigation");
+  const dialog = page.getByRole("dialog", {
+    name: "Search everything",
+    exact: true,
+  });
+  for (const name of ["Messages", "Projects", "Agents", "Workflows"]) {
+    const entry = apps.getByRole("button", { name, exact: true });
+    await entry.click();
+    await entry.focus();
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(dialog).toBeVisible();
+    await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+    await expect(
+      dialog.getByText("Browse channels", { exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(entry).toBeFocused();
+  }
+  await apps.getByRole("button", { name: "Messages", exact: true }).click();
+  await page
+    .getByTestId("pulse-combined-list")
+    .locator('[data-channel-name="alice-tyler"]')
+    .click();
+  const composer = page.getByTestId("message-input");
+  await composer.fill("Keep my draft");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(dialog).toBeVisible();
+  await page.getByTestId("search-dialog-input").fill("welcome");
+  await expect(dialog).toContainText("Welcome to #general");
+  await waitForAnimations(page);
+  await dialog.screenshot({
+    path: "test-results/pulse-prototype/global-search.png",
+  });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveText("Keep my draft");
+  await expect(page.getByTestId("sidebar-pinned-header")).toHaveCount(0);
+});
+
+test("global search results stay in Pulse and open the selected conversation or message", async ({
+  page,
+}) => {
+  await seed(page);
+  const apps = page.getByTestId("pulse-app-navigation");
+  const dialog = page.getByRole("dialog", {
+    name: "Search everything",
+    exact: true,
+  });
+  const search = async (query: string) => {
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(dialog).toBeVisible();
+    await page.getByTestId("search-dialog-input").fill(query);
+  };
+  const expectContained = async () => {
+    await expect(dialog).toHaveCount(0);
+    await expect(page).toHaveURL(/#\/pulse\?/);
+    await expect(apps).toBeVisible();
+    await expect(page.getByTestId("pulse-combined-list")).toBeVisible();
+    await expect(page.getByTestId("sidebar-pinned-header")).toHaveCount(0);
+  };
+  await apps.getByRole("button", { name: "Projects", exact: true }).click();
+  await search("general");
+  await dialog
+    .locator('[data-search-section="channels"] .search-result-row')
+    .filter({ hasText: "general" })
+    .first()
+    .click();
+  await expectContained();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await search("Alice");
+  await dialog
+    .locator('[data-search-section="direct-messages"] .search-result-row')
+    .filter({ hasText: "Alice" })
+    .first()
+    .click();
+  await expectContained();
+  await expect(page.getByTestId("chat-title")).toHaveText(/Alice/i);
+
+  await search("Deep history message #0");
+  await dialog
+    .locator('[data-search-section="messages"] .search-result-row')
+    .filter({ hasText: "Deep history message #0" })
+    .first()
+    .click();
+  await expectContained();
+  await expect(
+    page.locator('[data-message-id="mock-deep-history-0"]'),
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-message-id="mock-deep-history-0"] mark').first(),
+  ).toBeVisible();
+  await search("Keep the audience visible");
+  await dialog
+    .locator('[data-search-section="messages"] .search-result-row')
+    .filter({ hasText: "Keep the audience visible" })
+    .first()
+    .click();
+  await expectContained();
+  await expect(page.getByTestId("message-thread-body")).toContainText(
+    "Keep the audience visible",
+  );
+  await expect(page.getByTestId("thread-view-mode-toggle")).toHaveCount(0);
+});
+
+test("Pulse starts without the browser media devices API", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await seed(page);
+  await page
+    .getByTestId("pulse-combined-list")
+    .locator('[data-channel-name="alice-tyler"]')
+    .click();
+  await expect(page.getByTestId("message-input")).toBeVisible();
+  await expect(
+    page.getByText("Something went wrong!", { exact: true }),
+  ).toHaveCount(0);
+  expect(errors).toEqual([]);
 });

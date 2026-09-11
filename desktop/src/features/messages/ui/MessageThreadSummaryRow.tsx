@@ -211,7 +211,10 @@ export function MessageThreadSummaryRow({
 
       <button
         aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-[1.875rem] w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
+        className={cn(
+          "group relative isolate inline-flex h-[1.875rem] w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden",
+          inline ? "focus-visible:ring-2 focus-visible:ring-ring" : "pr-3",
+        )}
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
@@ -222,15 +225,17 @@ export function MessageThreadSummaryRow({
         }}
         type="button"
       >
-        <span
-          aria-hidden="true"
-          className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
-          data-testid="message-thread-summary-surface"
-          style={{
-            left: inline ? 0 : surfaceInsetStart,
-            right: 0,
-          }}
-        />
+        {!inline && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
+            data-testid="message-thread-summary-surface"
+            style={{
+              left: surfaceInsetStart,
+              right: 0,
+            }}
+          />
+        )}
         <div className="relative z-10 flex shrink-0 items-center">
           {summary.participants.map((participant, index) => (
             <ParticipantAvatar

@@ -23,8 +23,11 @@ export function useAudioDevices(
 
   // Enumerate audio input devices on mount and when devices change.
   React.useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    // Media capture may be unavailable in a desktop webview. Chat must still mount.
+    if (!mediaDevices) return;
     function refreshDevices() {
-      navigator.mediaDevices
+      mediaDevices
         .enumerateDevices()
         .then((devices) =>
           setAudioDevices(
@@ -41,12 +44,9 @@ export function useAudioDevices(
         });
     }
     refreshDevices();
-    navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+    mediaDevices.addEventListener("devicechange", refreshDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        refreshDevices,
-      );
+      mediaDevices.removeEventListener("devicechange", refreshDevices);
     };
   }, []);
 

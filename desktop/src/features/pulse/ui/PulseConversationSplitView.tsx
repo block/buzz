@@ -120,7 +120,10 @@ export function PulseConversationSplitView({
       : (channels.find((channel) => channel.id === values[selectionKey]) ??
         (allMessages ? null : visibleRows[0]?.channel) ??
         null);
-  const selectedId = selected?.id;
+  const selectedId =
+    navigation && navigation.view !== "conversation"
+      ? undefined
+      : (values[selectionKey] ?? selected?.id);
   React.useEffect(() => {
     if (!values[selectionKey] && selectedId) {
       applyPatch({ [selectionKey]: selectedId }, { replace: true });
@@ -187,12 +190,13 @@ export function PulseConversationSplitView({
             <button
               type="button"
               aria-current={
-                !selected && (!navigation || navigation.view === "conversation")
+                !selectedId &&
+                (!navigation || navigation.view === "conversation")
                   ? "true"
                   : undefined
               }
               onClick={() => selectConversation(null)}
-              className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${!selected && (!navigation || navigation.view === "conversation") ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`}
+              className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${!selectedId && (!navigation || navigation.view === "conversation") ? "bg-muted/70 font-semibold" : "hover:bg-muted/35"}`}
             >
               <PulseChannelAvatar />
               All messages
@@ -282,7 +286,7 @@ export function PulseConversationSplitView({
           </p>
         )}
       </nav>
-      {!selected && allMessages ? (
+      {!selectedId && allMessages ? (
         <div
           ref={allMessages.scrollRef}
           className="min-h-0 min-w-0 flex-1 overflow-y-auto"
@@ -300,10 +304,13 @@ export function PulseConversationSplitView({
         <div
           className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           data-testid={`${testPrefix}-detail`}
-          data-channel-id={selected?.id}
+          data-channel-id={selectedId}
         >
-          {selected ? (
-            <PulseChannelDetail channel={selected} />
+          {selectedId ? (
+            <PulseChannelDetail
+              channel={selected ?? undefined}
+              channelId={selectedId}
+            />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
               <MessageCircle aria-hidden className="h-6 w-6" />

@@ -34,6 +34,8 @@ type PulseRouteSearch = ReturnType<typeof parseProjectDetailSearch> & {
   post?: string;
   reply?: string;
   thread?: string;
+  messageId?: string;
+  threadRootId?: string;
   agentSession?: string;
   agentSessionChannel?: string;
   channelManagement?: string;
@@ -80,6 +82,8 @@ function validatePulseSearch(
     post: stringValue("post"),
     reply: stringValue("reply"),
     thread: stringValue("thread"),
+    messageId: stringValue("messageId"),
+    threadRootId: stringValue("threadRootId"),
     agentSession: stringValue("agentSession"),
     agentSessionChannel: stringValue("agentSessionChannel"),
     channelManagement: stringValue("channelManagement"),

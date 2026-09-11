@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
 import { useTerminalContext } from "@/app/useTerminalContext";
+import { AppNavigationScope } from "@/app/AppNavigationScope";
 import { AppShellProvider } from "@/app/AppShellContext";
 import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
@@ -106,8 +107,18 @@ import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 import { AppWorkflowEditorOverlayProvider } from "@/app/AppWorkflowEditorOverlayProvider";
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
+import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
+
 const EMPTY_CHANNELS: Channel[] = [];
 export function AppShell() {
+  return (
+    <AppNavigationScope>
+      <AppShellContent />
+    </AppNavigationScope>
+  );
+}
+
+function AppShellContent() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
@@ -961,6 +972,25 @@ export function AppShell() {
                         />
                       ) : null}
                     </div>
+                  )}
+                  {isPulse && !settingsOpen && (
+                    <TopbarSearch
+                      variant="dialog"
+                      channels={channels}
+                      suggestionChannels={sidebarChannels}
+                      currentPubkey={identityQuery.data?.pubkey}
+                      focusRequest={searchFocusRequest}
+                      onOpenChannel={handleSidebarChannelSelect}
+                      onOpenResult={handleOpenSearchResult}
+                      onOpenUser={async (user) => {
+                        const dm = await openDmMutation.mutateAsync({
+                          pubkeys: [user.pubkey],
+                        });
+                        await goChannel(dm.id);
+                      }}
+                      onBrowseChannels={handleOpenBrowseChannels}
+                      onCreateAgent={() => requestOpenCreateAgent()}
+                    />
                   )}
                   <RequestedAgentCreateDialogs />
                   <AgentManagementDialogs />

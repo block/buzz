@@ -31,6 +31,8 @@ import type { RelayEvent } from "@/shared/api/types";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
+  /** Render within Pulse's conversation pane with in-place thread navigation. */
+  embedded?: boolean;
   autoSendDraftKey: string | null;
   channelId: string;
   searchHighlight: SearchHighlightNavigation | null | undefined;
@@ -112,6 +114,7 @@ async function fetchRouteTargetEvents(
 }
 
 export function ChannelRouteScreen({
+  embedded = false,
   autoSendDraftKey,
   channelId,
   searchHighlight,
@@ -295,7 +298,7 @@ export function ChannelRouteScreen({
     );
   }
 
-  if (projectHome && !isHuddleTranscript) {
+  if (projectHome && !isHuddleTranscript && !embedded) {
     return (
       <ProjectChannelHome
         allowRepositoryHealing={isProjectRelayValidated(projectHome)}
@@ -310,6 +313,7 @@ export function ChannelRouteScreen({
 
   return (
     <ChannelScreen
+      drillInThreads={embedded}
       activeChannel={activeChannel}
       autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}

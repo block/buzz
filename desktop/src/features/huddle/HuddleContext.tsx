@@ -206,15 +206,10 @@ export function HuddleProvider({
       .catch(() => {
         /* best-effort */
       });
-    navigator.mediaDevices.addEventListener(
-      "devicechange",
-      refreshOutputDevices,
-    );
+    const mediaDevices = navigator.mediaDevices;
+    mediaDevices?.addEventListener("devicechange", refreshOutputDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        refreshOutputDevices,
-      );
+      mediaDevices?.removeEventListener("devicechange", refreshOutputDevices);
     };
   }, []);
 

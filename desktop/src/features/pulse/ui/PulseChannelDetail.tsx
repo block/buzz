@@ -1,31 +1,39 @@
 import * as React from "react";
 import { useTerminalContextOverride } from "@/app/TerminalContextOverrideContext";
-import { useProfileQuery } from "@/features/profile/hooks";
+import { useLocation } from "@tanstack/react-router";
+import { selectSearchHighlightRouteState } from "@/app/routes/searchHighlightRouteState";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import type { Channel, RelayEvent } from "@/shared/api/types";
+import type { Channel } from "@/shared/api/types";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { MessageBubbleContext } from "@/features/messages/ui/MessageBubbleContext";
 import { PULSE_CONVERSATION_KEYS } from "../lib/pulsePanelState";
 
-const ChannelScreen = React.lazy(async () => {
-  const module = await import("@/features/channels/ui/ChannelScreen");
-  return { default: module.ChannelScreen };
+const ChannelRouteScreen = React.lazy(async () => {
+  const module = await import("@/app/routes/ChannelRouteScreen");
+  return { default: module.ChannelRouteScreen };
 });
-const EMPTY_EVENTS: RelayEvent[] = [];
 
-export function PulseChannelDetail({ channel }: { channel: Channel }) {
+export function PulseChannelDetail({
+  channel,
+  channelId = channel?.id,
+}: {
+  channel?: Channel;
+  channelId?: string;
+}) {
   const identity = useIdentityQuery();
-  const profile = useProfileQuery();
+  const searchHighlight = useLocation({
+    select: selectSearchHighlightRouteState,
+  });
   const detailRef = React.useRef<HTMLDivElement>(null);
-  const { values, applyPatch } = useHistorySearchState(PULSE_CONVERSATION_KEYS);
+  const { values } = useHistorySearchState(PULSE_CONVERSATION_KEYS);
   const terminalContext = React.useMemo(
     () => ({
-      channelId: channel.id,
-      channelName: channel.name,
+      channelId: channelId ?? "",
+      channelName: channel?.name ?? "Conversation",
       threadId: values.thread,
     }),
-    [channel.id, channel.name, values.thread],
+    [channelId, channel?.name, values.thread],
   );
   useTerminalContextOverride(terminalContext);
   return (
@@ -46,20 +54,19 @@ export function PulseChannelDetail({ channel }: { channel: Channel }) {
                 </p>
               }
             >
-              <ChannelScreen
-                key={channel.id}
-                activeChannel={channel}
-                currentIdentity={identity.data}
-                currentProfile={profile.data}
-                drillInThreads
-                autoSendDraftKey={null}
-                onCloseForumPost={() => applyPatch({ post: null, reply: null })}
-                onSelectForumPost={(post) => applyPatch({ post, reply: null })}
-                selectedForumPostId={values.post}
-                targetForumReplyId={values.reply}
-                targetMessageEvents={EMPTY_EVENTS}
-                targetMessageId={null}
-              />
+              {channelId && (
+                <ChannelRouteScreen
+                  key={channelId}
+                  embedded
+                  channelId={channelId}
+                  autoSendDraftKey={null}
+                  searchHighlight={searchHighlight}
+                  selectedPostId={values.post}
+                  targetReplyId={values.reply}
+                  targetMessageId={values.messageId}
+                  targetThreadRootId={values.threadRootId ?? values.thread}
+                />
+              )}
             </React.Suspense>
           </MainInsetProvider>
         </MessageBubbleContext.Provider>
