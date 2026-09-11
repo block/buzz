@@ -11,6 +11,7 @@ const dispositionCopy: Record<RecentAgentTurnFailure["disposition"], string> = {
   action_required: "Action required",
   respawning: "Restarting the agent",
   stopped: "Stopped",
+  unknown: "Recovery status unknown",
 };
 
 type AgentTurnFailureStatusProps = {
@@ -32,9 +33,13 @@ export function AgentTurnFailureStatus({
   );
   const name = agent?.name ?? "Agent";
 
+  const recoveryCopy = dispositionCopy[failure.disposition];
+  const contextCopy =
+    failure.rootEventId === null ? " · Conversation unknown" : "";
+
   return (
     <button
-      aria-label={`${name} failed. ${dispositionCopy[failure.disposition]}. View activity.`}
+      aria-label={`${name} failed. ${recoveryCopy}${contextCopy}. View activity.`}
       className="flex min-w-0 max-w-full items-center gap-2 text-left text-xs text-destructive transition-opacity hover:opacity-80"
       data-testid="agent-turn-failure-status"
       onClick={() => onOpenAgentSession(failure.agentPubkey, failure.channelId)}
@@ -54,7 +59,8 @@ export function AgentTurnFailureStatus({
         <span className="font-medium">{name} couldn&apos;t finish</span>
         <span className="text-muted-foreground">
           {" "}
-          · {dispositionCopy[failure.disposition]}
+          · {recoveryCopy}
+          {contextCopy}
           {failure.attempt ? ` · attempt ${failure.attempt}` : ""}
         </span>
       </span>

@@ -187,9 +187,9 @@ describe("recentAgentTurnFailuresStore", () => {
     );
   });
 
-  it("falls back to matching turn_started context for older turn_error payloads", () => {
+  it("keeps actual legacy source-and-ID-only context unknown and visible", () => {
     syncRecentAgentTurnFailuresFromEvents(AGENT, [
-      event(),
+      event({ payload: { source: "mention", triggeringEventIds: [TRIGGER] } }),
       event({
         seq: 2,
         kind: "turn_error",
@@ -197,9 +197,13 @@ describe("recentAgentTurnFailuresStore", () => {
       }),
     ]);
 
-    const [failure] = getRecentAgentTurnFailures("channel-1", ROOT);
+    const [failure] = getRecentAgentTurnFailures("channel-1");
     assert.equal(failure.error, "legacy failure");
-    assert.equal(failure.disposition, "stopped");
+    assert.equal(failure.rootEventId, null);
+    assert.equal(failure.parentEventId, null);
+    assert.equal(failure.disposition, "unknown");
+    assert.equal(getRecentAgentTurnFailures("channel-1", ROOT).length, 0);
+    assert.equal(getRecentAgentTurnFailures("channel-1", TRIGGER).length, 0);
   });
 });
 

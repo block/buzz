@@ -26,7 +26,8 @@ export type TurnFailureDisposition =
   | "dead_lettered"
   | "action_required"
   | "respawning"
-  | "stopped";
+  | "stopped"
+  | "unknown";
 
 export type RecentAgentTurnFailure = TurnContext & {
   agentPubkey: string;
@@ -70,14 +71,14 @@ function contextFromEvent(event: ObserverEvent): TurnContext | null {
   if (ids.length === 0 && !rootEventId && !parentEventId) return null;
   return {
     channelId: event.channelId,
-    rootEventId: rootEventId ?? ids[ids.length - 1] ?? null,
-    parentEventId: parentEventId ?? ids[ids.length - 1] ?? null,
+    rootEventId,
+    parentEventId,
     triggeringEventIds: ids,
   };
 }
 
 function failureKey(context: TurnContext): string {
-  return `${context.channelId}:${context.rootEventId ?? "unknown"}`;
+  return `${context.channelId}:${context.rootEventId ?? `unknown:${context.triggeringEventIds.join(",")}`}`;
 }
 
 function disposition(value: unknown): TurnFailureDisposition {
@@ -89,7 +90,7 @@ function disposition(value: unknown): TurnFailureDisposition {
     case "stopped":
       return value;
     default:
-      return "stopped";
+      return "unknown";
   }
 }
 
@@ -273,7 +274,7 @@ export function getRecentAgentTurnFailures(
       if (
         failure.channelId === channelId &&
         (rootEventId === null
-          ? isTopLevelFailure(failure)
+          ? failure.rootEventId === null || isTopLevelFailure(failure)
           : failure.rootEventId === rootEventId)
       ) {
         failures.push(failure);

@@ -7,7 +7,7 @@ import { AgentTurnFailureStatus } from "./AgentTurnFailureStatus.tsx";
 
 const AGENT = "a".repeat(64);
 
-function renderFailure(disposition = "retrying") {
+function renderFailure(disposition = "retrying", overrides = {}) {
   return renderToStaticMarkup(
     React.createElement(AgentTurnFailureStatus, {
       agents: [{ pubkey: AGENT, name: "Review Bee" }],
@@ -22,6 +22,7 @@ function renderFailure(disposition = "retrying") {
         disposition,
         attempt: 2,
         timestamp: "2026-09-09T17:49:09Z",
+        ...overrides,
       },
       onOpenAgentSession() {},
       profiles: {},
@@ -47,4 +48,14 @@ describe("AgentTurnFailureStatus", () => {
       /Stopped after multiple attempts/,
     );
   });
+});
+
+it("renders legacy correlation and recovery as unknown", () => {
+  const html = renderFailure("unknown", {
+    rootEventId: null,
+    parentEventId: null,
+  });
+  assert.match(html, /Conversation unknown/);
+  assert.match(html, /Recovery status unknown/);
+  assert.doesNotMatch(html, /Stopped/);
 });
