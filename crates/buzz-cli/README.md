@@ -157,7 +157,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `update` | Update a workflow |
 | | `delete` | Delete a workflow |
 | | `trigger` | Trigger a workflow |
-| | `runs` | Get workflow run history |
+| | `runs` | Get an authenticated run-history page (`runs` and `next`); paginate with `--before` and `--before-id` |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
 | `social` | `publish` | Publish a NIP-01 note |

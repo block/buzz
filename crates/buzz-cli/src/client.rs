@@ -1050,13 +1050,6 @@ impl BuzzClient {
                                     .map(str::to_string)
                             })
                             .unwrap_or(body_text);
-                        let message = if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                            format!(
-                                "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                            )
-                        } else {
-                            message
-                        };
                         return Err(CliError::Relay {
                             status,
                             body: message,
@@ -1330,15 +1323,6 @@ impl BuzzClient {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or(body);
-            if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                let message = format!(
-                    "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                );
-                return Err(CliError::Relay {
-                    status,
-                    body: message,
-                });
-            }
             return Err(CliError::Relay {
                 status,
                 body: message,
@@ -2029,14 +2013,61 @@ mod retry_policy_tests {
         let client = test_client(&url);
         let result = client.get_authed("/info").await;
         assert!(
-            matches!(result, Err(CliError::Relay { status: 403, .. })),
-            "expected Relay 403 error, got {result:?}"
+            matches!(&result, Err(CliError::Relay { status: 403, body }) if body == "not allowed"),
+            "403 must preserve the server reason without diagnosing credentials: {result:?}"
         );
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             1,
             "403 must not be retried"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_403_preserves_server_reason() {
+        let (url, attempts) = test_server(|_| {
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"RBAC access denied"}"#.into(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9042);
+        let result = client.submit_event(event).await;
+        assert!(
+            matches!(&result, Err(CliError::Relay { status: 403, body }) if body == "RBAC access denied"),
+            "{result:?}"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn forbidden_errors_with_auth_environment_preserve_server_reason() {
+        // Isolate ambient credential presence without mutating process-wide env
+        // while other tests run. Both response paths must ignore this variable
+        // when describing the server's reason for denying the request.
+        for test in [
+            "client::retry_policy_tests::query_403_is_not_retried",
+            "client::retry_policy_tests::submit_403_preserves_server_reason",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env("BUZZ_AUTH_TAG", "synthetic-presence-fixture")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("test result: ok. 1 passed; 0 failed;"),
+                "child must execute exactly one test: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 
     /// `with_retry_body` retries on `is_body()` network errors (F2: body transfer inside

@@ -57,41 +57,67 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     Ok(())
 }
 
-/// Get workflow run history — query kinds [46001, 46002, 46003].
-///
-/// NOTE: The relay does not currently emit workflow execution events (46001-46003).
-/// Run history is stored in the workflow_runs DB table, not as Nostr events.
-/// This command will return an empty array until the relay adds event emission
-/// or a dedicated REST endpoint for run history.
+/// Read one authenticated page of relay-owned workflow runs.
 pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
     limit: Option<u32>,
+    before: Option<&str>,
+    before_id: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
-    let limit = limit.unwrap_or(20).min(100);
-    let filter = serde_json::json!({
-        "kinds": [46001, 46002, 46003],
-        "#d": [workflow_id],
-        "limit": limit
-    });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let normalized: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
-        })
-        .collect();
-    let output = serde_json::to_string(&normalized).unwrap_or_default();
-    println!("{output}");
+    let path = workflow_runs_path(workflow_id, limit, before, before_id)?;
+    let response = client.get_authed(&path).await?;
+    let page = parse_workflow_runs_page(&response)?;
+    println!("{page}");
     Ok(())
+}
+
+fn workflow_runs_path(
+    workflow_id: &str,
+    limit: Option<u32>,
+    before: Option<&str>,
+    before_id: Option<&str>,
+) -> Result<String, CliError> {
+    let workflow_id = parse_uuid(workflow_id)?;
+    let limit = limit.unwrap_or(20).min(100);
+    if limit == 0 {
+        return Err(CliError::Usage("limit must be greater than zero".into()));
+    }
+    if before.is_some() != before_id.is_some() {
+        return Err(CliError::Usage(
+            "before and before-id must be supplied together".into(),
+        ));
+    }
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("limit", &limit.to_string());
+    if let (Some(before), Some(before_id)) = (before, before_id) {
+        chrono::DateTime::parse_from_rfc3339(before)
+            .map_err(|_| CliError::Usage("before must be an RFC 3339 timestamp".into()))?;
+        validate_uuid(before_id)?;
+        query
+            .append_pair("before", before)
+            .append_pair("before_id", before_id);
+    }
+    Ok(format!("/workflows/{workflow_id}/runs?{}", query.finish()))
+}
+
+fn parse_workflow_runs_page(response: &str) -> Result<serde_json::Value, CliError> {
+    let page: serde_json::Value = serde_json::from_str(response)
+        .map_err(|e| CliError::Other(format!("invalid workflow run-history response: {e}")))?;
+    if !page.get("runs").is_some_and(serde_json::Value::is_array)
+        || !page.get("next").is_some_and(|next| {
+            next.is_null()
+                || (next.get("before").is_some_and(serde_json::Value::is_string)
+                    && next
+                        .get("before_id")
+                        .is_some_and(serde_json::Value::is_string))
+        })
+    {
+        return Err(CliError::Other(
+            "invalid workflow run-history page: expected runs and next".into(),
+        ));
+    }
+    Ok(page)
 }
 
 /// Create a workflow — sign and submit a kind:30620 event.
@@ -241,8 +267,20 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         WorkflowsCmd::Trigger { workflow, inputs } => {
             cmd_trigger_workflow(client, &workflow, inputs.as_deref()).await
         }
-        WorkflowsCmd::Runs { workflow, limit } => {
-            cmd_get_workflow_runs(client, &workflow, limit).await
+        WorkflowsCmd::Runs {
+            workflow,
+            limit,
+            before,
+            before_id,
+        } => {
+            cmd_get_workflow_runs(
+                client,
+                &workflow,
+                limit,
+                before.as_deref(),
+                before_id.as_deref(),
+            )
+            .await
         }
         WorkflowsCmd::Approve {
             token,
@@ -252,5 +290,104 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const ID: &str = "cc3598aa-30bc-4c13-8616-6064e87598d2";
+
+    #[test]
+    fn run_page_preserves_rows_cursor_and_rejects_legacy_empty_array() {
+        let page = serde_json::json!({"runs": [{"id": ID, "status": "completed"}],
+            "next": {"before": "2026-09-11T12:06:00Z", "before_id": ID}});
+        assert_eq!(parse_workflow_runs_page(&page.to_string()).unwrap(), page);
+        assert!(parse_workflow_runs_page("[]").is_err());
+        assert!(parse_workflow_runs_page("not json").is_err());
+        assert!(parse_workflow_runs_page(r#"{"runs":[]}"#).is_err());
+        assert!(parse_workflow_runs_page(r#"{"runs":[],"next":null}"#).is_ok());
+    }
+
+    #[test]
+    fn workflow_run_path_canonicalizes_uuid_before_signing() {
+        let canonical = workflow_runs_path(ID, None, None, None).unwrap();
+        assert_eq!(
+            workflow_runs_path(&ID.to_uppercase(), None, None, None).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            workflow_runs_path(&ID.replace('-', ""), None, None, None).unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn run_cursor_is_paired_validated_and_encoded() {
+        assert!(workflow_runs_path(ID, Some(0), None, None).is_err());
+        assert!(workflow_runs_path(ID, None, Some("bad"), None).is_err());
+        assert!(workflow_runs_path(ID, None, Some("bad"), Some(ID)).is_err());
+        let path =
+            workflow_runs_path(ID, Some(200), Some("2026-09-11T08:06:00+00:00"), Some(ID)).unwrap();
+        assert!(path.contains("limit=100"));
+        assert!(path.contains("%2B00%3A00"));
+        assert!(path.contains("before_id="));
+    }
+
+    #[tokio::test]
+    async fn run_history_uses_authenticated_get_and_propagates_unavailable() {
+        use axum::{
+            extract::OriginalUri,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+        use base64::Engine;
+        use nostr::JsonUtil;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let expected_base = base.clone();
+        let app = Router::new().route(
+            "/workflows/{id}/runs",
+            get(move |headers: HeaderMap, uri: OriginalUri| {
+                let expected_base = expected_base.clone();
+                async move {
+                    assert_eq!(headers.get("x-auth-tag").unwrap(), "fixture-delegation");
+                    let encoded = headers
+                        .get("authorization")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .strip_prefix("Nostr ")
+                        .unwrap();
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .unwrap();
+                    let event = nostr::Event::from_json(bytes).unwrap();
+                    event.verify().unwrap();
+                    assert!(event
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice() == ["method", "GET"]));
+                    let expected_url = format!("{expected_base}{}", uri.0);
+                    assert!(event
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice() == ["u", expected_url.as_str()]));
+                    (StatusCode::NOT_FOUND, "run-history endpoint unavailable")
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = BuzzClient::new(
+            base,
+            nostr::Keys::generate(),
+            None,
+            Some("fixture-delegation".into()),
+        )
+        .unwrap();
+        let result = cmd_get_workflow_runs(&client, ID, None, None, None).await;
+        assert!(matches!(result, Err(CliError::Relay { status: 404, .. })));
+        server.abort();
     }
 }
