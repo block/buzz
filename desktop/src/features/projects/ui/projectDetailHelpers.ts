@@ -2,11 +2,14 @@ import type {
   ProjectRepoSnapshot,
   Repository as Project,
 } from "@/features/projects/hooks";
+import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const PROJECT_REPOSITORY_SEARCH_KEYS = [
   "repositoryId",
+  "tab",
+  "homeTab",
   "issueId",
   "pullRequestId",
   "commitHash",
@@ -24,8 +27,8 @@ export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
 
 export type ProjectDetailScreenProps = {
   commitHash?: string;
-  entityNavigationId?: string;
   filePath?: string;
+  homeTab?: ProjectHomeWorkspaceSheetTab;
   projectId: string;
   pullRequestId?: string;
   issueId?: string;

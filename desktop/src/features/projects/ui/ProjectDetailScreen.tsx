@@ -34,7 +34,10 @@ import {
   projectBranchOptionsFromSync,
   resolveProjectDefaultBranch,
 } from "@/features/projects/lib/projectBranches";
-import { workspaceTabForShareTab } from "@/features/projects/lib/projectShareLinks";
+import {
+  shareTabForWorkspaceTab,
+  workspaceTabForShareTab,
+} from "@/features/projects/lib/projectShareLinks";
 import {
   buildProjectDetailAgentContext,
   type ProjectDetailAgentContext,
@@ -52,7 +55,6 @@ import { isProjectRelayValidated } from "@/features/projects/projectSnapshot";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
-import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { useProjectRepoPresentation } from "@/features/projects/useProjectRepoHost";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
@@ -87,8 +89,8 @@ import {
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const {
     commitHash,
-    entityNavigationId,
     filePath,
+    homeTab,
     projectId,
     pullRequestId,
     issueId,
@@ -137,56 +139,69 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     });
   const activeTag =
     repoStateQuery.data?.tags.find((tag) => tag.name === selectedTag) ?? null;
-  const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
-    string | null
-  >(pullRequestId ?? null);
-  const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
-    issueId ?? null,
-  );
+  const selectedPullRequestId = pullRequestId ?? null;
+  const selectedIssueId = issueId ?? null;
   const [createIssueRequestKey, setCreateIssueRequestKey] = React.useState(0);
   const [createPullRequestRequestKey, setCreatePullRequestRequestKey] =
     React.useState(0);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the transient request ID deliberately reapplies an unchanged entity selection.
-  React.useEffect(() => {
-    setSelectedPullRequestId(pullRequestId ?? null);
-    setSelectedIssueId(issueId ?? null);
-  }, [entityNavigationId, issueId, pullRequestId]);
-  const [selectedCommitHash, setSelectedCommitHash] = React.useState<
-    string | null
-  >(commitHash ?? null);
-  React.useEffect(
-    () => setSelectedCommitHash(commitHash ?? null),
-    [commitHash],
-  );
-  const [tabsResetKey, setTabsResetKey] = React.useState(0);
-  const [requestedTab, setRequestedTab] = React.useState<
-    EntityLinkTab | undefined
-  >(tab);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the transient request ID deliberately reapplies an unchanged share-link tab.
-  React.useEffect(() => setRequestedTab(tab), [entityNavigationId, tab]);
-  const [activeTab, setActiveTab] = React.useState("overview");
+  const selectedCommitHash = commitHash ?? null;
+  const activeTab = pullRequestId
+    ? "prs"
+    : issueId
+      ? "issues"
+      : commitHash
+        ? "activity"
+        : tab
+          ? workspaceTabForShareTab(tab)
+          : "overview";
   const [filesContext, setFilesContext] =
     React.useState<ProjectDetailAgentContext["file"]>(null);
   const handleSelectedPullRequestIdChange = React.useCallback(
     (id: string | null) => {
-      setSelectedPullRequestId(id);
-      if (id) setSelectedCommitHash(null);
+      const nextTab = id ? "prs" : tab === "prs" || pullRequestId ? "prs" : tab;
+      applyRepositorySearch({
+        commitHash: null,
+        filePath: null,
+        issueId: null,
+        pullRequestId: id,
+        tab: nextTab,
+      });
     },
-    [],
+    [applyRepositorySearch, pullRequestId, tab],
   );
-  const handleSelectedIssueIdChange = React.useCallback((id: string | null) => {
-    setSelectedIssueId(id);
-    if (id) setSelectedCommitHash(null);
-  }, []);
+  const handleSelectedIssueIdChange = React.useCallback(
+    (id: string | null) => {
+      const nextTab = id
+        ? "issues"
+        : tab === "issues" || issueId
+          ? "issues"
+          : tab;
+      applyRepositorySearch({
+        commitHash: null,
+        filePath: null,
+        issueId: id,
+        pullRequestId: null,
+        tab: nextTab,
+      });
+    },
+    [applyRepositorySearch, issueId, tab],
+  );
   const handleSelectedCommitHashChange = React.useCallback(
     (hash: string | null) => {
-      setSelectedCommitHash(hash);
-      if (hash) {
-        setSelectedPullRequestId(null);
-        setSelectedIssueId(null);
-      }
+      const nextTab = hash
+        ? "commits"
+        : tab === "commits" || commitHash
+          ? "commits"
+          : tab;
+      applyRepositorySearch({
+        commitHash: hash,
+        filePath: null,
+        issueId: null,
+        pullRequestId: null,
+        tab: nextTab,
+      });
     },
-    [],
+    [applyRepositorySearch, commitHash, tab],
   );
   const issuesQuery = useProjectIssuesQuery(repository);
   const {
@@ -445,13 +460,18 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   });
   const projectPending = projectQuery.isPending;
   React.useEffect(() => {
-    if (!repository) {
-      if (projectPending) return;
-      setSelectedPullRequestId(null);
-      setSelectedIssueId(null);
-      setSelectedCommitHash(null);
+    if (!repository && !projectPending) {
+      applyRepositorySearch(
+        {
+          commitHash: null,
+          filePath: null,
+          issueId: null,
+          pullRequestId: null,
+        },
+        { replace: true },
+      );
     }
-  }, [projectPending, repository]);
+  }, [applyRepositorySearch, projectPending, repository]);
   React.useEffect(() => {
     if (selectedTag) {
       if (repoSource !== "remote") setRepoSource("remote");
@@ -570,10 +590,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       }
       if (createdRepository.id === repository?.id) {
         await pullRequestsQuery.refetch();
-      } else {
-        applyRepositorySearch({ repositoryId: createdRepository.id });
       }
-      setSelectedPullRequestId(pullRequestId);
+      applyRepositorySearch({
+        commitHash: null,
+        filePath: null,
+        issueId: null,
+        pullRequestId,
+        repositoryId: createdRepository.id,
+        tab: "prs",
+      });
     },
     [
       applyRepositorySearch,
@@ -588,9 +613,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       const issueId = await createIssueMutation.mutateAsync(input);
       toast.success("Task created.");
       await issuesQuery.refetch();
-      setSelectedIssueId(issueId);
+      handleSelectedIssueIdChange(issueId);
     },
-    [createIssueMutation, issuesQuery],
+    [createIssueMutation, handleSelectedIssueIdChange, issuesQuery],
   );
   const handleUpdatePullRequest = React.useCallback(async () => {
     const commit = repoSyncStatusQuery.data?.remoteHead;
@@ -685,6 +710,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     !wantsProjectRepositorySurface({
       commitHash,
       filePath,
+      homeTab,
       issueId,
       projectId,
       pullRequestId,
@@ -695,8 +721,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     return (
       <ProjectChannelHome
         allowRepositoryHealing={isProjectRelayValidated(project)}
+        commitHash={commitHash}
+        filePath={filePath}
+        homeTab={homeTab}
+        issueId={issueId}
         project={project}
         projects={projectsQuery.data ?? [project]}
+        pullRequestId={pullRequestId}
+        repositoryId={repositoryId}
       />
     );
   }
@@ -741,15 +773,24 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       commit: selectedCommit,
       issue: selectedIssue,
       pullRequest: selectedPullRequest,
-      setRequestedTab,
-      setSelectedCommitHash,
-      setSelectedIssueId,
-      setSelectedPullRequestId,
-      setTabsResetKey,
+      setRequestedTab: (nextTab) =>
+        applyRepositorySearch({ tab: nextTab ?? null }),
+      setSelectedCommitHash: handleSelectedCommitHashChange,
+      setSelectedIssueId: handleSelectedIssueIdChange,
+      setSelectedPullRequestId: handleSelectedPullRequestIdChange,
+      setTabsResetKey: () => undefined,
     });
   const goChannelHome = () => {
     if (project.projectChannelId) {
-      void goProject(project.id);
+      applyRepositorySearch({
+        commitHash: null,
+        filePath: null,
+        homeTab: null,
+        issueId: null,
+        pullRequestId: null,
+        repositoryId: null,
+        tab: null,
+      });
       return;
     }
     handleGoToProjectHome();
@@ -781,16 +822,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handleRepositoryChange = (nextRepositoryId: string) => {
     applyRepositorySearch({
       repositoryId: nextRepositoryId,
+      homeTab: null,
+      tab: null,
+      filePath: null,
       issueId: null,
       pullRequestId: null,
       commitHash: null,
     });
-    setSelectedPullRequestId(null);
-    setSelectedIssueId(null);
-    setSelectedCommitHash(null);
-    setRequestedTab(undefined);
     setRepoSource("remote");
-    setTabsResetKey((key) => key + 1);
   };
   return (
     <ProjectSelectionProvider
@@ -884,14 +923,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                     taller page when content already overflows. */}
                 <div className="flex min-h-full w-full flex-col space-y-3">
                   <WorkspaceTabs
-                    key={`${project.id}:${repository.id}:${tabsResetKey}`}
-                    initialTab={
-                      requestedTab
-                        ? workspaceTabForShareTab(requestedTab)
-                        : undefined
-                    }
+                    key={`${project.id}:${repository.id}`}
+                    selectedTab={activeTab}
                     initialFilePath={filePath}
-                    initialTabRequestKey={entityNavigationId}
                     fileContentSource={fileContentSource}
                     commitDiff={commitDiffQuery.data}
                     commitDiffError={commitDiffQuery.error}
@@ -926,6 +960,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                     localSnapshotError={localRepoSnapshotQuery.error}
                     localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                     onFilesContextChange={setFilesContext}
+                    onFilePathChange={(path) =>
+                      applyRepositorySearch({ filePath: path })
+                    }
                     onOpenMergeRecoveryTerminal={
                       handleOpenMergeRecoveryTerminal
                     }
@@ -934,7 +971,16 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                     onSelectedPullRequestIdChange={
                       handleSelectedPullRequestIdChange
                     }
-                    onSelectedTabChange={setActiveTab}
+                    onSelectedTabChange={(nextTab) =>
+                      applyRepositorySearch({
+                        commitHash: null,
+                        filePath:
+                          nextTab === "files" ? (filePath ?? null) : null,
+                        issueId: null,
+                        pullRequestId: null,
+                        tab: shareTabForWorkspaceTab(nextTab) ?? null,
+                      })
+                    }
                     onBack={goChannelHome}
                     profiles={profiles}
                     project={repository}
