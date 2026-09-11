@@ -417,6 +417,8 @@ type E2eConfig = {
     /** Delay (ms) applied to newest-page channel-window requests. */
     channelHeadDelayMs?: number;
     profileReadDelayMs?: number;
+    /** Hold `get_profile` responses until the E2E release seam is invoked. */
+    deferProfileReads?: boolean;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
     profileHasEvent?: boolean;
@@ -568,6 +570,8 @@ type E2eConfig = {
       id: string;
       href: string;
     }>;
+    /** Reject one `get_identity` call after this many successful reads. */
+    identityReadErrorAfter?: { message: string; successfulReads: number };
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -1594,6 +1598,10 @@ declare global {
     __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
     /** Number of `get_users_batch` calls currently held. */
     __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
+    /** Release every `get_profile` response held by `deferProfileReads`. */
+    __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
+    /** Number of `get_profile` responses currently held. */
+    __BUZZ_E2E_PROFILE_READS_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
@@ -1697,6 +1705,8 @@ const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 let mockIdentityLostCleared = false;
 // Same pattern for `mock.identityLocked`.
 let mockIdentityLockedCleared = false;
+let identityReadCount = 0;
+let identityReadErrorConsumed = false;
 
 // ── get_event defer/release seam ────────────────────────────────────────────
 // When `window.__BUZZ_E2E_DEFER_GET_EVENT__` is set to a target event ID,
@@ -1715,6 +1725,13 @@ let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
 let deferredThreadRepliesQueue: Array<() => void> = [];
+type DeferredProfileRead = {
+  reject: (reason: unknown) => void;
+  resolve: (value: unknown) => void;
+  run: () => Promise<unknown>;
+};
+let deferredProfileReadQueue: DeferredProfileRead[] = [];
+let profileReadsReleased = false;
 // ── get_users_batch hold seam ───────────────────────────────────────────────
 // Toggled at runtime by `__BUZZ_E2E_HOLD_USERS_BATCH__(hold)` rather than fixed
 // at boot by a mock-config flag, because a mention-identity spec needs both
@@ -6739,8 +6756,15 @@ async function handleGetChannels(
   };
 }
 
-async function handleGetProfile(config: E2eConfig | undefined) {
+async function runGetProfile(config: E2eConfig | undefined) {
   const identity = getIdentity(config);
+  const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
+  if (profileReadDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, profileReadDelayMs);
+    });
+  }
+
   const forcedHasProfileEvent = config?.mock?.profileHasEvent;
   if (forcedHasProfileEvent !== undefined) {
     return {
@@ -6749,13 +6773,6 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     };
   }
   if (!identity) {
-    const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
-    if (profileReadDelayMs > 0) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, profileReadDelayMs);
-      });
-    }
-
     const profileReadError = config?.mock?.profileReadError;
     if (profileReadError) {
       throw new Error(profileReadError);
@@ -6789,6 +6806,20 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     owner_pubkey: null,
     has_profile_event: true,
   };
+}
+
+async function handleGetProfile(config: E2eConfig | undefined) {
+  if (!config?.mock?.deferProfileReads || profileReadsReleased) {
+    return runGetProfile(config);
+  }
+
+  return new Promise<unknown>((resolve, reject) => {
+    deferredProfileReadQueue.push({
+      resolve,
+      reject,
+      run: () => runGetProfile(config),
+    });
+  });
 }
 
 async function handleUpdateProfile(
@@ -11327,6 +11358,8 @@ export function maybeInstallE2eTauriMocks() {
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   deferredThreadRepliesQueue = [];
+  deferredProfileReadQueue = [];
+  profileReadsReleased = false;
   holdUsersBatch = false;
   heldUsersBatchReleases = [];
   cancelledMediaUploadIds = new Set<string>();
@@ -11354,6 +11387,16 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
     deferredThreadRepliesQueue.length;
+  window.__BUZZ_E2E_RELEASE_PROFILE_READS__ = () => {
+    profileReadsReleased = true;
+    const queued = deferredProfileReadQueue.splice(0);
+    for (const deferred of queued) {
+      void deferred.run().then(deferred.resolve, deferred.reject);
+    }
+    return queued.length;
+  };
+  window.__BUZZ_E2E_PROFILE_READS_PENDING__ = () =>
+    deferredProfileReadQueue.length;
   window.__BUZZ_E2E_HOLD_USERS_BATCH__ = (hold: boolean) => {
     holdUsersBatch = hold;
     // Releasing on the way out of the hold, not on the way in, is what lets a
@@ -12562,6 +12605,16 @@ export function maybeInstallE2eTauriMocks() {
         }
       }
       case "get_identity": {
+        const identityReadError = activeConfig?.mock?.identityReadErrorAfter;
+        if (
+          identityReadError &&
+          !identityReadErrorConsumed &&
+          identityReadCount >= identityReadError.successfulReads
+        ) {
+          identityReadErrorConsumed = true;
+          throw new Error(identityReadError.message);
+        }
+        identityReadCount += 1;
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
         const isLocked =

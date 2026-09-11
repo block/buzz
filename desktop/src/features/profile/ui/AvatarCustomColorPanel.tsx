@@ -35,6 +35,7 @@ type AvatarCustomColorPanelProps = {
   onCommit: () => void;
   testIdPrefix: string;
   className?: string;
+  compact?: boolean;
 };
 
 /**
@@ -54,6 +55,7 @@ export function AvatarCustomColorPanel({
   onCommit,
   testIdPrefix,
   className,
+  compact = false,
 }: AvatarCustomColorPanelProps) {
   const hueDragUserSelectRef = React.useRef<string | null>(null);
 
@@ -136,7 +138,8 @@ export function AvatarCustomColorPanel({
     <motion.div
       aria-hidden={!visible}
       className={cn(
-        "absolute inset-0 z-40 flex flex-col rounded-xl bg-muted p-4",
+        "absolute z-40 flex flex-col rounded-xl bg-muted",
+        compact ? "inset-0 p-3" : "inset-0 p-4",
         visible ? "pointer-events-auto" : "pointer-events-none",
         className,
       )}
@@ -228,7 +231,10 @@ export function AvatarCustomColorPanel({
         aria-valuemax={360}
         aria-valuemin={0}
         aria-valuenow={hue}
-        className="buzz-avatar-hue-scrubber relative mt-3 h-10 w-full cursor-pointer select-none rounded-full touch-none"
+        className={cn(
+          "buzz-avatar-hue-scrubber relative w-full cursor-pointer select-none rounded-full touch-none",
+          compact ? "mt-2 h-8" : "mt-3 h-10",
+        )}
         data-testid={`${testIdPrefix}-custom-color-hue`}
         onKeyDown={(event) => {
           if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
@@ -265,7 +271,10 @@ export function AvatarCustomColorPanel({
       >
         <div
           aria-hidden="true"
-          className="absolute top-1 h-8 w-8 -translate-x-1/2 rounded-full"
+          className={cn(
+            "absolute -translate-x-1/2 rounded-full",
+            compact ? "top-0.5 h-7 w-7" : "top-1 h-8 w-8",
+          )}
           data-testid={`${testIdPrefix}-custom-color-hue-thumb`}
           style={{
             left: hueScrubberPosition((hue / 360) * 100),
@@ -276,7 +285,7 @@ export function AvatarCustomColorPanel({
       </div>
 
       <Button
-        className="mt-3 h-12 w-full rounded-xl"
+        className={cn("w-full rounded-xl", compact ? "mt-2 h-10" : "mt-3 h-12")}
         data-testid={`${testIdPrefix}-custom-color-done`}
         onClick={onCommit}
         tabIndex={visible ? 0 : -1}
