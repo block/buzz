@@ -24,7 +24,8 @@ fn valid_content(name: &str) -> Value {
         "provider": null,
         "name_pool": ["Reviewer", 7],
         "respond_to": "allowlist",
-        "parallelism": 4
+        "parallelism": 4,
+        "session_policy": "thread"
     })
 }
 
@@ -109,12 +110,24 @@ fn parser_projects_types_and_foreign_allowlists_exactly() {
     assert_eq!(projection.name_pool, vec!["Reviewer"]);
     assert_eq!(projection.respond_to.as_deref(), Some("owner-only"));
     assert_eq!(projection.parallelism, Some(4));
+    assert_eq!(projection.session_policy, AcpSessionPolicy::Thread);
 
     for bad in [0, 33] {
         let mut content = valid_content("Reviewer");
         content["parallelism"] = json!(bad);
         assert_eq!(parse_agent(&content.to_string()).unwrap().parallelism, None);
     }
+
+    let mut legacy = valid_content("Legacy");
+    legacy.as_object_mut().unwrap().remove("session_policy");
+    assert_eq!(
+        parse_agent(&legacy.to_string()).unwrap().session_policy,
+        AcpSessionPolicy::Channel
+    );
+
+    let mut malformed = valid_content("Malformed");
+    malformed["session_policy"] = json!("conversation");
+    assert!(parse_agent(&malformed.to_string()).is_none());
 }
 
 #[test]
@@ -237,6 +250,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
             name_pool: vec!["Ada".into(), "Lin".into()],
             respond_to: Some("mentions".into()),
             parallelism: Some(2),
+            session_policy: AcpSessionPolicy::Thread,
         },
     };
     let actual = serde_json::to_value(vec![publication]).unwrap();
@@ -256,6 +270,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
             "namePool": ["Ada", "Lin"],
             "respondTo": "mentions",
             "parallelism": 2,
+            "sessionPolicy": "thread",
         },
     }]);
     assert_eq!(actual, expected);

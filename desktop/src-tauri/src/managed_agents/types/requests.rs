@@ -9,6 +9,7 @@ use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
     CatalogSource, RelayMeshConfig, RespondTo,
 };
+use crate::managed_agents::AcpSessionPolicy;
 
 /// The NIP-AP behavioral group as one grouped request field.
 ///
@@ -26,6 +27,9 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    /// Absent preserves the stored value for legacy update callers.
+    #[serde(default)]
+    pub session_policy: Option<AcpSessionPolicy>,
 }
 
 /// Validate a behavior group and apply it onto a persona record.
@@ -68,6 +72,9 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
+    if let Some(session_policy) = behavior.session_policy {
+        record.session_policy = session_policy;
+    }
     Ok(())
 }
 
@@ -286,6 +293,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            session_policy: Default::default(),
             description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
@@ -332,6 +340,7 @@ mod tests {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
                 parallelism: None,
+                session_policy: None,
             }),
         )
         .unwrap();
@@ -419,6 +428,7 @@ mod tests {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
                 parallelism: Some(3),
+                session_policy: Some(AcpSessionPolicy::Thread),
             }),
         )
         .unwrap();
@@ -426,6 +436,7 @@ mod tests {
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
         assert_eq!(content.parallelism, Some(3));
+        assert_eq!(content.session_policy, AcpSessionPolicy::Thread);
     }
 
     #[test]

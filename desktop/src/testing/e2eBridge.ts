@@ -1032,6 +1032,7 @@ type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  session_policy?: "channel" | "thread";
   created_at: string;
   updated_at: string;
 };
@@ -3537,6 +3538,7 @@ function mockPersonaCatalogPublications() {
       });
     };
     const rawDescription = content.description;
+    const sessionPolicy = content.session_policy ?? "channel";
     if (
       typeof displayName !== "string" ||
       !displayName.trim() ||
@@ -3550,7 +3552,8 @@ function mockPersonaCatalogPublications() {
         typeof rawDescription !== "string") ||
       (typeof rawDescription === "string" &&
         ([...rawDescription].length > 280 ||
-          !hasValidVisibleText(rawDescription, false)))
+          !hasValidVisibleText(rawDescription, false))) ||
+      (sessionPolicy !== "channel" && sessionPolicy !== "thread")
     )
       continue;
     publications.push({
@@ -3580,6 +3583,7 @@ function mockPersonaCatalogPublications() {
               : null,
         parallelism:
           typeof content.parallelism === "number" ? content.parallelism : null,
+        sessionPolicy,
       },
     });
   }
@@ -8850,6 +8854,7 @@ type PersonaBehaviorInput = {
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
   parallelism?: number;
+  sessionPolicy?: "channel" | "thread";
 };
 
 /** Mirrors `apply_persona_behavior`: replace all four as a unit. */
@@ -8866,6 +8871,9 @@ function applyMockPersonaBehavior(
       ? [...(behavior.respondToAllowlist ?? [])]
       : [];
   persona.parallelism = behavior.parallelism ?? null;
+  if (behavior.sessionPolicy !== undefined) {
+    persona.session_policy = behavior.sessionPolicy;
+  }
 }
 
 async function handleCreatePersona(args: {
@@ -8907,6 +8915,7 @@ async function handleCreatePersona(args: {
         }
       : null,
     env_vars: { ...(args.input.envVars ?? {}) },
+    session_policy: "channel",
     created_at: now,
     updated_at: now,
   };
@@ -13986,8 +13995,6 @@ export function maybeInstallE2eTauriMocks() {
         // Post-create bootstrap reconcile: no new pairs in the mock world.
         return [];
       case "set_agent_managed_profiles":
-        return undefined;
-      case "set_thread_scoped_acp_sessions":
         return undefined;
       case "set_managed_agent_auto_restart":
         return handleSetManagedAgentAutoRestart(

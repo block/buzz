@@ -21,6 +21,7 @@ function createCatalogEvent(input: {
   shared?: boolean;
   avatarUrl?: string;
   description?: string;
+  sessionPolicy?: "channel" | "thread";
 }): RelayEvent {
   const ownerPrivateKey =
     input.ownerPrivateKey ??
@@ -49,6 +50,7 @@ function createCatalogEvent(input: {
         model: null,
         provider: null,
         name_pool: [],
+        session_policy: input.sessionPolicy ?? "channel",
       }),
     },
     hexToBytes(ownerPrivateKey),
@@ -1902,6 +1904,7 @@ test("a community member can discover and add another member's catalog agent", a
         sourcePersonaId: personaId,
         displayName: "Alice’s Reviewer",
         systemPrompt: "Review changes for the whole community.",
+        sessionPolicy: "thread",
       }),
     ],
   });
@@ -1933,6 +1936,7 @@ test("a community member can discover and add another member's catalog agent", a
       display_name: string;
       system_prompt: string;
       shared: boolean;
+      session_policy: "channel" | "thread";
       catalog_source: { owner_pubkey: string; persona_id: string } | null;
     }>
   >(page, "list_personas");
@@ -1941,6 +1945,7 @@ test("a community member can discover and add another member's catalog agent", a
   ).toMatchObject({
     system_prompt: "Review changes for the whole community.",
     shared: false,
+    session_policy: "thread",
     // Provenance is what lets the catalog recognise the copy on the next open.
     catalog_source: {
       owner_pubkey: TEST_IDENTITIES.alice.pubkey,

@@ -487,6 +487,7 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
@@ -718,6 +719,7 @@ fn summary_fixture(
     restart_diff: Vec<crate::managed_agents::spawn_snapshot::RestartDiffEntry>,
 ) -> super::ManagedAgentSummary {
     super::ManagedAgentSummary {
+        session_policy: Default::default(),
         pubkey: "aa".repeat(32),
         name: "test".into(),
         persona_id: None,
