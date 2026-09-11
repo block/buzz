@@ -21,6 +21,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/dev-service-env.sh"
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 CARGO_PROFILE="${CARGO_PROFILE:-ci}"
@@ -63,13 +66,18 @@ cd "${REPO_ROOT}"
 log "Starting docker compose services..."
 docker compose up -d postgres redis minio minio-init
 
+# Compose reads .env and applies its host-port overrides. Resolve the ports from
+# the running local stack rather than sourcing arbitrary service URLs or
+# credentials from .env into this auto-approving test launcher.
+configure_local_compose_service_env
+
 # ── Wait for services to be healthy ──────────────────────────────────────────
 
 wait_healthy() {
   local service="$1"
   local container="$2"
   log "Waiting for ${service}..."
-  for attempt in $(seq 1 60); do
+  for _attempt in $(seq 1 60); do
     status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
     if [ "${status}" = "healthy" ]; then
       ok "${service} is healthy"
@@ -89,20 +97,9 @@ wait_healthy "MinIO" "buzz-minio"
 # ── Apply database schema ────────────────────────────────────────────────────
 
 log "Applying database schema..."
-export PGHOST=localhost
-export PGPORT=5432
-export PGUSER=buzz
-export PGPASSWORD=buzz_dev
-export PGDATABASE=buzz
 
 # Use the already-running docker postgres for desired-state planning instead of
 # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
-export PGSCHEMA_PLAN_HOST=localhost
-export PGSCHEMA_PLAN_PORT=5432
-export PGSCHEMA_PLAN_DB=buzz
-export PGSCHEMA_PLAN_USER=buzz
-export PGSCHEMA_PLAN_PASSWORD=buzz_dev
-
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
@@ -168,8 +165,12 @@ if [[ "${BUZZ_REQUIRE_RELAY_MEMBERSHIP:-}" == "true" ]]; then
 fi
 
 nohup env \
-  DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
-  REDIS_URL=redis://localhost:6379 \
+  DATABASE_URL="${DATABASE_URL}" \
+  REDIS_URL="${REDIS_URL}" \
+  BUZZ_S3_ENDPOINT="${BUZZ_S3_ENDPOINT}" \
+  BUZZ_S3_ACCESS_KEY="${BUZZ_S3_ACCESS_KEY}" \
+  BUZZ_S3_SECRET_KEY="${BUZZ_S3_SECRET_KEY}" \
+  BUZZ_S3_BUCKET="${BUZZ_S3_BUCKET}" \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \
   BUZZ_RELAY_PRIVATE_KEY="${TEST_RELAY_PRIVATE_KEY}" \
@@ -183,7 +184,7 @@ echo $! > /tmp/buzz-relay.pid
 # ── Poll readiness ───────────────────────────────────────────────────────────
 
 log "Waiting for relay readiness..."
-for attempt in $(seq 1 60); do
+for _attempt in $(seq 1 60); do
   if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
     err "Relay process died"
     cat /tmp/buzz-relay.log

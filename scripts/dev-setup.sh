@@ -12,6 +12,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# `just setup` runs `bootstrap` in a separate recipe. Keep this script
+# self-contained when it validates URLs with the Hermit-provided node shim.
+export PATH="${REPO_ROOT}/bin:${PATH}"
+
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/dev-service-env.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -67,6 +74,15 @@ load_env() {
   export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
   export PGDATABASE="${PGDATABASE:-buzz}"
   export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+  export REDIS_PORT="${REDIS_PORT:-6379}"
+  export MINIO_API_PORT="${MINIO_API_PORT:-9000}"
+  export BUZZ_S3_ENDPOINT="${BUZZ_S3_ENDPOINT:-http://localhost:9000}"
+}
+
+validate_env() {
+  validate_local_service_port "DATABASE_URL" "${DATABASE_URL}" "${PGPORT}" "5432"
+  validate_local_service_port "REDIS_URL" "${REDIS_URL}" "${REDIS_PORT}" "6379"
+  validate_local_service_port "BUZZ_S3_ENDPOINT" "${BUZZ_S3_ENDPOINT}" "${MINIO_API_PORT}" "80"
 }
 
 cleanup_legacy_sprout_containers() {
@@ -76,7 +92,7 @@ cleanup_legacy_sprout_containers() {
     return
   fi
 
-  warn "Stopping/removing legacy sprout-* dev containers so buzz-* containers can bind the standard ports"
+  warn "Stopping/removing legacy sprout-* dev containers so buzz-* containers can bind the configured ports"
   echo "${legacy_containers}" | xargs docker stop >/dev/null 2>&1 || true
   echo "${legacy_containers}" | xargs docker rm >/dev/null 2>&1 || true
   success "Legacy sprout-* containers removed (volumes preserved)"
@@ -86,14 +102,11 @@ fail_if_local_redis_blocks_compose() {
   if ! command -v lsof >/dev/null 2>&1; then
     return
   fi
-  if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
-    return
-  fi
   local redis_pids
-  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
+  redis_pids=$(lsof -nP -iTCP:"${REDIS_PORT}" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
 ' ' ' || true)
   if [[ -n "${redis_pids}" ]]; then
-    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    error "Local Redis is already listening on port ${REDIS_PORT} (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
     exit 1
   fi
 }
@@ -105,6 +118,7 @@ postgres_accepting_connections() {
 }
 
 load_env
+validate_env
 cleanup_legacy_sprout_containers
 fail_if_local_redis_blocks_compose
 
@@ -187,8 +201,8 @@ echo -e "${GREEN}=======================================================${NC}"
 echo ""
 echo -e "  ${BLUE}Postgres${NC}    ${DATABASE_URL}"
 echo -e "  ${BLUE}Redis${NC}       ${REDIS_URL}"
-echo -e "  ${BLUE}Adminer${NC}     http://localhost:8082  (DB browser)"
-echo -e "  ${BLUE}Keycloak${NC}    http://localhost:8180  (admin / admin — local OAuth testing)"
+echo -e "  ${BLUE}Adminer${NC}     http://localhost:${ADMINER_PORT:-8082}  (DB browser)"
+echo -e "  ${BLUE}Keycloak${NC}    http://localhost:${KEYCLOAK_PORT:-8180}  (admin / admin — local OAuth testing)"
 echo ""
 echo -e "  ${YELLOW}Next steps:${NC}"
 echo -e "    just relay                              # start the relay (terminal 1)"
