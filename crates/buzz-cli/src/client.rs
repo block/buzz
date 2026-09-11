@@ -81,7 +81,7 @@ const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 /// - `u` tag: the full request URL
 /// - `method` tag: HTTP method (GET, POST, PUT, DELETE)
 /// - `payload` tag: SHA-256 hex of the request body (if present)
-fn sign_nip98(
+pub(crate) fn sign_nip98(
     keys: &Keys,
     method: &str,
     url: &str,

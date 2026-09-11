@@ -1,4 +1,6 @@
 pub mod agent_management;
+#[cfg(unix)]
+mod broker;
 mod client;
 mod commands;
 mod error;
@@ -105,10 +107,11 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [relay operations / broker serve]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
+On Unix, 'broker read' and 'broker reply' use only a local socket and need no key.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -210,6 +213,10 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Opt-in, single-channel local broker (no OS isolation yet)
+    #[cfg(unix)]
+    #[command(subcommand)]
+    Broker(broker::Command),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2124,6 +2131,15 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
+    // These clients talk only to the local socket. Never construct a signer
+    // or fall back to the relay when the broker is unavailable.
+    #[cfg(unix)]
+    if let Cmd::Broker(ref command) = cli.command {
+        if !matches!(command, broker::Command::Serve(_)) {
+            return broker::call(command).await;
+        }
+    }
+
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -2167,9 +2183,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
+    #[cfg(unix)]
+    if let Cmd::Broker(broker::Command::Serve(scope)) = cli.command {
+        return broker::serve(relay_url, keys, auth_tag, scope).await;
+    }
+
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        #[cfg(unix)]
+        Cmd::Broker(_) => Err(CliError::Other("broker command was not dispatched".into())),
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2321,6 +2344,8 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            #[cfg(unix)]
+            "broker",
             "canvas",
             "channels",
             "dms",
@@ -2384,6 +2409,8 @@ mod tests {
         }
 
         let cmd = Cli::command();
+        #[cfg(unix)]
+        assert_eq!(names(&cmd, "broker"), vec!["read", "reply", "serve"]);
         assert_eq!(
             names(&cmd, "agents"),
             vec![

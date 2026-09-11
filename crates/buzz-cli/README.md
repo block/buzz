@@ -20,6 +20,13 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+## Local broker prototype
+
+On Unix, `buzz broker serve` holds the key for one fixed channel;
+`buzz broker read` and `buzz broker reply` use its socket without a key.
+This is opt-in and does not isolate the broker from other same-user processes.
+See [setup and limits](src/broker/README.md).
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
