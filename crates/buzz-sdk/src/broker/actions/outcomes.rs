@@ -165,6 +165,35 @@ pub struct StorageAddress {
     pub d_tag: String,
 }
 
+/// Outcome of `storage.get`.
+///
+/// Carries the record's plaintext, decrypted host-side. `value` is absent when
+/// no record exists at the slug — a normal first-read state, not a failure, so
+/// an agent tells "empty memory" from "call failed" without reading an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageRecord {
+    /// Decrypted record body; absent when the slug holds no record.
+    #[serde(
+        default,
+        deserialize_with = "absent_or_valued",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<String>,
+}
+
+/// Outcome of `observer.emit`.
+///
+/// A batch acknowledgement, not per-frame receipts: the host re-batches and
+/// paces publication, so individual frames have no stable published id to echo.
+/// `accepted` is how many frames the host took for publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObserverReceipt {
+    /// Frames accepted for publication from this batch.
+    pub accepted: u32,
+}
+
 /// Outcome of a successful `agents.create`.
 ///
 /// Carries the new agent's **public** identity only — there is no field for
@@ -226,6 +255,24 @@ pub enum ActionOutcome {
     /// `storage.address` succeeded.
     #[serde(rename = "storage.address")]
     StorageAddress(StorageAddress),
+    /// `storage.get` succeeded.
+    #[serde(rename = "storage.get")]
+    StorageGet(StorageRecord),
+    /// `storage.put` succeeded.
+    #[serde(rename = "storage.put")]
+    StoragePut(EventPublished),
+    /// `presence.set` succeeded.
+    #[serde(rename = "presence.set")]
+    PresenceSet(EventPublished),
+    /// `typing.set` succeeded.
+    #[serde(rename = "typing.set")]
+    TypingSet(EventPublished),
+    /// `observer.emit` succeeded.
+    #[serde(rename = "observer.emit")]
+    ObserverEmit(ObserverReceipt),
+    /// `liveness.ping` succeeded.
+    #[serde(rename = "liveness.ping")]
+    LivenessPing(EventPublished),
     /// `agents.create` succeeded.
     #[serde(rename = "agents.create")]
     AgentsCreate(AgentsCreateOutcome),
@@ -248,6 +295,12 @@ impl ActionOutcome {
             Self::ReactionAdd(_) => Action::ReactionAdd,
             Self::ProfileSet(_) => Action::ProfileSet,
             Self::StorageAddress(_) => Action::StorageAddress,
+            Self::StorageGet(_) => Action::StorageGet,
+            Self::StoragePut(_) => Action::StoragePut,
+            Self::PresenceSet(_) => Action::PresenceSet,
+            Self::TypingSet(_) => Action::TypingSet,
+            Self::ObserverEmit(_) => Action::ObserverEmit,
+            Self::LivenessPing(_) => Action::LivenessPing,
             Self::AgentsCreate(_) => Action::AgentsCreate,
             Self::AgentsUpdate(_) => Action::AgentsUpdate,
             Self::AgentsDelete(_) => Action::AgentsDelete,
@@ -278,12 +331,19 @@ impl ActionOutcome {
             Self::MessagePost(published)
             | Self::MessageReply(published)
             | Self::ReactionAdd(published)
-            | Self::ProfileSet(published) => {
+            | Self::ProfileSet(published)
+            | Self::StoragePut(published)
+            | Self::PresenceSet(published)
+            | Self::TypingSet(published)
+            | Self::LivenessPing(published) => {
                 event_id(&published.event_id, "eventId")?;
             }
             Self::StorageAddress(address) => {
                 event_id(&address.d_tag, "dTag")?;
             }
+            // Neither a record body nor a batch receipt carries an identifier or
+            // cursor to check.
+            Self::StorageGet(_) | Self::ObserverEmit(_) => {}
             Self::AgentsCreate(outcome) => {
                 channel(&outcome.channel_id)?;
                 required(&outcome.display_name, "display name", MAX_NAME_CHARS)?;
