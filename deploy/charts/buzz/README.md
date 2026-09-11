@@ -220,6 +220,12 @@ database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels. Fixed-schema `buzz_process_lifecycle` logs preserve exact per-pod event
 order and process-local connection ordinals; metrics provide bucketed trends.
 
+When audit logging is enabled, the `buzz_db_connection_*` metric totals combine
+the main writer pool and the separate audit writer pool. Ordered
+`buzz_process_lifecycle` receipts and their connection ordinals cover only the
+main writer pool, so those receipts cannot be reconciled one-for-one with the
+combined metric totals.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay

@@ -2801,7 +2801,7 @@ mod postgres_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires Postgres"]
     async fn huddle_started_links_batches_valid_creator_links_and_ignores_malformed_content() {
         let pool = setup_pool().await;
@@ -2836,10 +2836,60 @@ mod postgres_tests {
             .expect("insert huddle-start candidate");
         }
 
-        let links = huddle_started_links(&pool, community, &[parent], &[session])
-            .await
-            .expect("batch huddle links");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let db = Db::from_pool(pool);
+        let links = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.huddle_started_links(community, &[parent], &[session])
+                .await
+        }
+        .expect("batch huddle links");
         assert_eq!(links, vec![(session, parent, creator)]);
+
+        let counters = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if labels.get("pool_role").map(String::as_str) != Some("writer")
+                    || labels.get("operation").map(String::as_str) != Some("subscription_history")
+                {
+                    return None;
+                }
+                let metrics_util::debugging::DebugValue::Counter(value) = value else {
+                    return None;
+                };
+                Some((
+                    (key.key().name().to_owned(), labels.get("outcome").cloned()),
+                    value,
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            counters,
+            [
+                (
+                    ("buzz_db_pool_acquire_started_total".to_owned(), None),
+                    1,
+                ),
+                (
+                    (
+                        "buzz_db_pool_acquire_attempts_total".to_owned(),
+                        Some("success".to_owned()),
+                    ),
+                    1,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            "the production huddle lookup must emit one writer/subscription_history start and success terminal"
+        );
     }
 
     #[test]
