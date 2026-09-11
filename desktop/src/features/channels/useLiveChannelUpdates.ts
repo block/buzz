@@ -14,6 +14,8 @@ import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_STARTED,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -32,6 +34,7 @@ export type UseLiveChannelUpdatesOptions = {
    */
   notifyForActiveChannel?: boolean;
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
+  onDmHuddleLifecycleEvent?: (event: RelayEvent, channel: Channel) => void;
   onLiveMention?: () => void;
   /**
    * Fired for live "new content" events in a member channel authored by
@@ -133,6 +136,17 @@ export function trackSeenEvent(
   return true;
 }
 
+export function shouldDispatchDmHuddleLifecycle(
+  kind: number,
+  createdAt: number,
+  subscriptionStartedAt: number,
+) {
+  return (
+    kind === KIND_HUDDLE_ENDED ||
+    (kind === KIND_HUDDLE_STARTED && createdAt >= subscriptionStartedAt)
+  );
+}
+
 export function useLiveChannelUpdates(
   channels: Channel[],
   activeChannelId: string | null,
@@ -194,14 +208,7 @@ export function useLiveChannelUpdates(
 
   const handleDmEvent = React.useEffectEvent(
     (event: RelayEvent, isFirstNotificationDelivery: boolean) => {
-      // Only human-visible message kinds should fire DM notifications.
-      if (!isDmNotifiableKind(event.kind) || !isFirstNotificationDelivery) {
-        return;
-      }
-
-      // Suppress backlog events that predate our subscription — these are
-      // historical replays, not live messages.
-      if (event.created_at < dmSubscriptionStartedAtRef.current) {
+      if (!isFirstNotificationDelivery) {
         return;
       }
 
@@ -216,6 +223,32 @@ export function useLiveChannelUpdates(
 
       const dmChannel = dmChannelMap.get(channelId);
       if (!dmChannel) {
+        return;
+      }
+
+      if (
+        shouldDispatchDmHuddleLifecycle(
+          event.kind,
+          event.created_at,
+          dmSubscriptionStartedAtRef.current,
+        )
+      ) {
+        options.onDmHuddleLifecycleEvent?.(event, dmChannel);
+      }
+
+      // Suppress backlog messages and Huddle starts that predate our
+      // subscription. Huddle ends are dispatched above because a reconnect
+      // replay may be the only signal available to stop an active ringtone.
+      if (event.created_at < dmSubscriptionStartedAtRef.current) {
+        return;
+      }
+
+      // Only human-visible message kinds should fire DM notifications.
+      if (
+        !isDmNotifiableKind(event.kind, {
+          muted: options.mutedChannelIds?.has(channelId) ?? false,
+        })
+      ) {
         return;
       }
 
@@ -273,8 +306,14 @@ export function useLiveChannelUpdates(
       isUnreadTriggerKind &&
       (normalizedCurrentPubkey.length === 0 ||
         event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
+    const isExternalDmHuddleLifecycleEvent =
+      isDmChannel &&
+      (event.kind === KIND_HUDDLE_STARTED ||
+        event.kind === KIND_HUDDLE_ENDED) &&
+      (normalizedCurrentPubkey.length === 0 ||
+        event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
     const isFirstNotificationDelivery =
-      !isExternalTriggerEvent ||
+      (!isExternalTriggerEvent && !isExternalDmHuddleLifecycleEvent) ||
       trackSeenEvent(
         seenNotificationEventIdsRef.current,
         event.id,

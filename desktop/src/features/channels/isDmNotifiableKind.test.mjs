@@ -28,6 +28,16 @@ test("human-visible message kinds fire DM notifications", () => {
   );
 });
 
+test("muted huddle requests do not fire DM notifications", () => {
+  assert.equal(isDmNotifiableKind(KIND_HUDDLE_STARTED, { muted: true }), false);
+  assert.equal(isDmNotifiableKind(KIND_HUDDLE_STARTED, { muted: false }), true);
+  assert.equal(
+    isDmNotifiableKind(9, { muted: true }),
+    true,
+    "the huddle feature must not change existing DM message mute behavior",
+  );
+});
+
 test("non-message kinds do NOT fire DM notifications", () => {
   assert.equal(isDmNotifiableKind(5), false, "kind:5 NIP-09 deletion");
   assert.equal(isDmNotifiableKind(7), false, "kind:7 reaction");

@@ -66,3 +66,11 @@ test("silences notifications from Huddle backing channels", () => {
   );
   assert.equal(shouldPlayNotificationSound(null, silentChannelIds), true);
 });
+
+test("huddle requests have their own enabled-by-default sound slot", async () => {
+  const sound = await import("./sound.ts");
+
+  assert.equal(sound.SOUND_SLOTS.includes("huddle_request"), true);
+  assert.equal(sound.DEFAULT_SLOT_ALERTS_ENABLED.huddle_request, true);
+  assert.equal(sound.DEFAULT_SLOT_SOUNDS.huddle_request, "unison");
+});
