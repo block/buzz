@@ -121,11 +121,28 @@ function rememberTurnContext(
   }
 }
 
-function removeFailure(agentKey: string, context: TurnContext): boolean {
+function removeCoveredFailures(
+  agentKey: string,
+  context: TurnContext,
+): boolean {
   const failures = failuresByAgent.get(agentKey);
-  if (!failures?.delete(failureKey(context))) return false;
+  if (!failures) return false;
+  const coveredIds = new Set(context.triggeringEventIds);
+  let changed = false;
+  for (const [key, failure] of failures) {
+    if (failure.channelId !== context.channelId) continue;
+    const covered =
+      failure.triggeringEventIds.length > 0
+        ? failure.triggeringEventIds.every((id) => coveredIds.has(id))
+        : failure.rootEventId !== null &&
+          failure.rootEventId === context.rootEventId;
+    if (covered) {
+      failures.delete(key);
+      changed = true;
+    }
+  }
   if (failures.size === 0) failuresByAgent.delete(agentKey);
-  return true;
+  return changed;
 }
 
 function setFailure(agentKey: string, failure: RecentAgentTurnFailure) {
@@ -161,7 +178,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent): boolean {
     const context = contextFromEvent(event);
     if (!context) return false;
     rememberTurnContext(agentKey, turnId, context);
-    return removeFailure(agentKey, context);
+    return removeCoveredFailures(agentKey, context);
   }
 
   if (event.kind !== "turn_error" && event.kind !== "agent_panic") {
@@ -169,9 +186,24 @@ function processEvent(agentPubkey: string, event: ObserverEvent): boolean {
   }
 
   const payload = asRecord(event.payload);
+  const startedContext = turnId
+    ? turnContextsByAgent.get(agentKey)?.get(turnId)
+    : null;
+  const reportedContext = contextFromEvent(event);
   const context =
-    contextFromEvent(event) ??
-    (turnId ? turnContextsByAgent.get(agentKey)?.get(turnId) : null);
+    reportedContext && startedContext
+      ? {
+          ...reportedContext,
+          triggeringEventIds:
+            reportedContext.triggeringEventIds.length > 0
+              ? reportedContext.triggeringEventIds
+              : startedContext.triggeringEventIds,
+          rootEventId:
+            reportedContext.rootEventId ?? startedContext.rootEventId,
+          parentEventId:
+            reportedContext.parentEventId ?? startedContext.parentEventId,
+        }
+      : (reportedContext ?? startedContext);
   if (!context || !turnId) return false;
   const rawError = asString(payload.error) ?? "Unknown error";
   const numericAttempt = Number(payload.attempt);

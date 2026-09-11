@@ -202,3 +202,69 @@ describe("recentAgentTurnFailuresStore", () => {
     assert.equal(failure.disposition, "stopped");
   });
 });
+
+describe("retry batch coverage through observer listener", () => {
+  beforeEach(resetRecentAgentTurnFailuresStore);
+  it("clears A when retrying [A,B] anchored at B, preserving partial and unrelated failures", () => {
+    const listener = createRecentAgentTurnFailuresObserverListener([
+      { pubkey: AGENT, status: "running" },
+    ]);
+    const failed = (seq, ids, root, overrides = {}) =>
+      event({
+        seq,
+        kind: "turn_error",
+        turnId: `failed-${seq}`,
+        payload: {
+          error: "failed",
+          disposition: "retrying",
+          triggeringEventIds: ids,
+          triggeringRootEventId: root,
+          ...overrides,
+        },
+      });
+    listener({
+      agentPubkey: AGENT,
+      events: [
+        failed(1, ["A"], "A"),
+        failed(2, ["A", "C"], "C"),
+        failed(3, ["D"], "D"),
+        { ...failed(4, ["A"], "A"), channelId: "other-channel" },
+        event({
+          seq: 5,
+          turnId: "retry-ab",
+          payload: {
+            triggeringEventIds: ["A", "B"],
+            triggeringRootEventId: "B",
+            triggeringParentEventId: "B",
+          },
+        }),
+      ],
+    });
+    assert.equal(getRecentAgentTurnFailures("channel-1", "A").length, 0);
+    assert.equal(getRecentAgentTurnFailures("channel-1", "C").length, 1);
+    assert.equal(getRecentAgentTurnFailures("channel-1", "D").length, 1);
+    assert.equal(getRecentAgentTurnFailures("other-channel", "A").length, 1);
+  });
+
+  it("preserves full started batch when an error only reports its root", () => {
+    syncRecentAgentTurnFailuresFromEvents(AGENT, [
+      event({
+        payload: { triggeringEventIds: ["A", "B"], triggeringRootEventId: "B" },
+      }),
+      event({
+        seq: 2,
+        kind: "turn_error",
+        payload: { error: "failed", triggeringRootEventId: "B" },
+      }),
+      event({
+        seq: 3,
+        turnId: "partial-retry",
+        payload: { triggeringEventIds: ["B"], triggeringRootEventId: "B" },
+      }),
+    ]);
+    assert.deepEqual(
+      getRecentAgentTurnFailures("channel-1", "B")[0].triggeringEventIds,
+      ["A", "B"],
+    );
+  });
+});
