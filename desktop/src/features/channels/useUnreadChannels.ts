@@ -966,6 +966,7 @@ export function useUnreadChannels(
     // should include in memo deps.
     getEffectiveTimestamp,
     getOwnTimestamp,
+    isReadStateReady,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,
