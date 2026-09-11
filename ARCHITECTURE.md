@@ -538,7 +538,10 @@ steps:
 
 Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Triggers use `on:` as the tag field; actions use `action:` as the tag field. Fields are flattened into the parent struct, not nested.
 
-**4 trigger types:** `message_posted`, `reaction_added`, `schedule`, `webhook`
+**6 trigger types:** `message_posted`, `slash_command`, `reaction_added`,
+`diff_posted`, `schedule`, `webhook`. A `slash_command` trigger owns an exact
+bare command such as `/new-task`; mention-prefixed commands remain ACP runtime
+commands. The argument tail is available as `{{trigger.args}}`.
 
 **7 action types:**
 
@@ -552,7 +555,9 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | `request_approval` | Suspend execution; fields: `from`, `message`, `timeout` (default 24h) |
 | `delay` | Pause execution (max 300 seconds) |
 
-**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. Single-pass resolution (not recursive). Unknown variables left as literal text.
+**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`,
+`{{trigger.command}}`, `{{trigger.args}}`, `{{steps.ID.output.FIELD}}`.
+Single-pass resolution (not recursive). Unknown variables left as literal text.
 
 **Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.
 

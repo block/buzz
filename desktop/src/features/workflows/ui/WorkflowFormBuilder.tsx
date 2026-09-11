@@ -6,6 +6,7 @@ import {
   GitPullRequest,
   MessageSquare,
   Plus,
+  SquareTerminal,
   SmilePlus,
   Trash2,
   Webhook,
@@ -35,6 +36,7 @@ import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation
 import { compactWorkflowTriggerDescription } from "./workflowTriggerDescription";
 import { workflowStepDescription } from "./workflowStepDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
+import { WorkflowSlashCommandFields } from "./WorkflowSlashCommandFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
 import {
   parseConditionExpressions,
@@ -49,6 +51,7 @@ import {
   SELECTABLE_TRIGGER_TYPES,
   TRIGGER_LABELS,
   formStateToYaml,
+  isTriggerConfigValid,
   nextStepId,
   supportsMessageTextCondition,
   withTriggerType,
@@ -100,6 +103,10 @@ function TriggerConfigFields({
           value={reactionConditionValue(trigger)}
           workflowChannelId={workflowChannelId}
         />
+      );
+    case "slash_command":
+      return (
+        <WorkflowSlashCommandFields {...{ disabled, onUpdate, trigger }} />
       );
     case "webhook":
       return (
@@ -386,10 +393,13 @@ export const WorkflowFormBuilder = React.forwardRef<
     triggerConditionDrafts.every(
       (condition) => !conditionValueError(condition.field, condition.value),
     );
+  const triggerValid = isTriggerConfigValid(formState.trigger);
 
   React.useEffect(() => {
-    onValidityChange?.(mode !== "form" || conditionDraftsValid);
-  }, [conditionDraftsValid, mode, onValidityChange]);
+    onValidityChange?.(
+      mode !== "form" || (conditionDraftsValid && triggerValid),
+    );
+  }, [conditionDraftsValid, mode, onValidityChange, triggerValid]);
   const selectedNode =
     selectedRouteNode?.type === "trigger" ||
     (selectedRouteNode?.type === "step" &&
@@ -641,6 +651,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     diff_posted: GitPullRequest,
     message_posted: MessageSquare,
     reaction_added: SmilePlus,
+    slash_command: SquareTerminal,
     schedule: CalendarClock,
     webhook: Webhook,
   }[formState.trigger.on];
