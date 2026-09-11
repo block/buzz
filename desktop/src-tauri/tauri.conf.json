@@ -45,7 +45,9 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["buzz"]
+        "schemes": [
+          "buzz"
+        ]
       }
     }
   },
@@ -54,7 +56,7 @@
     "targets": "all",
     "externalBin": [
       "binaries/buzz-acp",
-      "binaries/buzz-agent",
+      "binaries/goose",
       "binaries/buzz-backend-kubernetes",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",

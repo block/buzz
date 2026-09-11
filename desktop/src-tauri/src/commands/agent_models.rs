@@ -132,18 +132,6 @@ pub async fn get_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) = discover_databricks_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        persisted_model.clone(),
-        DatabricksAuthIntent::InteractiveModelPicker,
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
     run_agent_models_command(
         resolved_acp,
         agent_command,
@@ -304,18 +292,6 @@ pub async fn discover_agent_models(
     if let Some(models) =
         discover_anthropic_models(&state.http_client, &effective_provider, &merged_env, None)
             .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) = discover_databricks_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        None,
-        DatabricksAuthIntent::PassiveDraftDiscovery,
-    )
-    .await?
     {
         return Ok(models);
     }
@@ -686,15 +662,6 @@ async fn discover_anthropic_models(
         supports_switching: true,
     }))
 }
-
-#[path = "agent_models_databricks.rs"]
-mod databricks;
-#[cfg(test)]
-use databricks::{
-    databricks_models_response, databricks_sign_in_required_error, databricks_static_token_error,
-    is_databricks_provider, should_start_interactive_auth,
-};
-use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 #[path = "agent_models_update.rs"]
 mod update;

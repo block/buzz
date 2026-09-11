@@ -10,6 +10,17 @@ use std::path::Path;
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+const WINDOWS_SHELL_RESOLUTION_ENV: &[&str] = &[
+    "PATH",
+    "BUZZ_SHELL",
+    "GIT_BASH",
+    "SYSTEMROOT",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "LOCALAPPDATA",
+];
+
 /// A Git Bash installation the stripped MCP child can launch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct GitBashPrerequisite {
@@ -113,7 +124,7 @@ pub(crate) fn git_bash_available(overrides: &std::collections::BTreeMap<String, 
 }
 
 /// All process environment that Git Bash discovery may inspect. Its keys are
-/// deliberately sourced from `buzz_agent_pkg::WINDOWS_SHELL_RESOLUTION_ENV`,
+/// deliberately sourced from `WINDOWS_SHELL_RESOLUTION_ENV`,
 /// the exact allowlist forwarded to the otherwise-cleared MCP child.
 #[cfg(windows)]
 struct GitBashEnv {
@@ -133,7 +144,7 @@ impl GitBashEnv {
     }
 
     fn from_process_with_overrides(overrides: &std::collections::BTreeMap<String, String>) -> Self {
-        let values: std::collections::HashMap<_, _> = buzz_agent_pkg::WINDOWS_SHELL_RESOLUTION_ENV
+        let values: std::collections::HashMap<_, _> = WINDOWS_SHELL_RESOLUTION_ENV
             .iter()
             .filter_map(|key| {
                 overrides
@@ -434,8 +445,7 @@ mod tests {
     #[test]
     fn test_detector_env_keys_match_agent_shell_resolution_contract() {
         assert_eq!(
-            DETECTOR_ENV_KEYS,
-            buzz_agent_pkg::WINDOWS_SHELL_RESOLUTION_ENV,
+            DETECTOR_ENV_KEYS, WINDOWS_SHELL_RESOLUTION_ENV,
             "Doctor and the env-cleared MCP child must inspect the same resolver inputs"
         );
 

@@ -45,12 +45,11 @@ fn returns_none_for_unknown_commands() {
 }
 
 #[test]
-fn default_agent_command_resolves_bundled_buzz_agent() {
-    // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
-    assert_eq!(default_agent_command(), "buzz-agent");
+fn default_agent_command_resolves_bundled_goose() {
+    assert_eq!(default_agent_command(), "goose");
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
-        Vec::<String>::new()
+        vec!["acp".to_string()]
     );
 }
 

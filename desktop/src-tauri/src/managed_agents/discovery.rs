@@ -158,14 +158,11 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 }
 
 /// The agent command a freshly-created agent defaults to when the create
-/// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
-/// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing. (Previous default was bare `goose`, which
-/// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
+/// request supplies none. Goose is bundled with the desktop application.
 pub fn default_agent_command() -> String {
-    known_acp_runtime_exact("buzz-agent")
-        .and_then(|p| p.commands.first().copied())
-        .unwrap_or("buzz-agent")
+    known_acp_runtime_exact("goose")
+        .and_then(|runtime| runtime.commands.first().copied())
+        .unwrap_or("goose")
         .to_string()
 }
 

@@ -11,8 +11,6 @@ members = [
     "crates/buzz-search",
     "crates/buzz-audit",
     "crates/buzz-acp",
-    "crates/buzz-agent",
-    "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",
     "crates/buzz-admin",
@@ -132,7 +130,7 @@ url = "2"
 # Property-based testing (dev-only)
 proptest = "1"
 
-# MCP SDK (used by buzz-dev-mcp and buzz-agent)
+# MCP SDK (used by buzz-dev-mcp)
 rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", default-features = false }
 
