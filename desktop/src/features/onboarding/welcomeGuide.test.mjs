@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   activateWelcomeTeamPersonasSequentially,
   buildWelcomeStarterCreateInput,
+  filterWelcomeTeamAgentsMissingFromChannel,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
@@ -382,6 +383,56 @@ test("starter matching prefers running, then deployed instances", () => {
   );
 });
 
+
+test("filterWelcomeTeamAgentsMissingFromChannel skips same-named agent members", () => {
+  const localFizz = makeAgent({ name: "Fizz", pubkey: PUB_A });
+  const localHoney = makeAgent({ name: "Honey", pubkey: PUB_B });
+  const localBumble = makeAgent({ name: "Bumble", pubkey: PUB_C });
+
+  const members = [
+    {
+      pubkey: "d".repeat(64),
+      role: "bot",
+      isAgent: true,
+      joinedAt: "2026-06-11T00:00:00.000Z",
+      displayName: "Fizz",
+    },
+    {
+      pubkey: "e".repeat(64),
+      role: "bot",
+      isAgent: true,
+      joinedAt: "2026-06-11T00:00:00.000Z",
+      displayName: "honey",
+    },
+  ];
+
+  const missing = filterWelcomeTeamAgentsMissingFromChannel(
+    [localFizz, localHoney, localBumble],
+    members,
+  );
+  assert.deepEqual(
+    missing.map((agent) => agent.pubkey),
+    [PUB_C],
+  );
+});
+
+test("filterWelcomeTeamAgentsMissingFromChannel skips pubkeys already present", () => {
+  const localFizz = makeAgent({ name: "Fizz", pubkey: PUB_A });
+  const members = [
+    {
+      pubkey: PUB_A,
+      role: "bot",
+      isAgent: true,
+      joinedAt: "2026-06-11T00:00:00.000Z",
+      displayName: "Fizz",
+    },
+  ];
+  assert.deepEqual(
+    filterWelcomeTeamAgentsMissingFromChannel([localFizz], members),
+    [],
+  );
+
+
 test("owner-only-access policy accepts local Welcome teammates", () => {
   const teammate = makeAgent({
     respondTo: "owner-only",
@@ -451,4 +502,5 @@ test("owner-only-access policy accepts provider Welcome teammates", () => {
   });
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
+
 });
