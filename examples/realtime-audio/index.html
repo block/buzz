@@ -1,22 +1,174 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#080b0f"><title>Frankie — voice interface</title>
-<link rel="stylesheet" href="/style.css">
-</head>
-<body data-state="OFF" data-connected="false">
-<div class="shell">
-<header class="top"><div class="brand" style="margin:0"><span class="insignia" aria-hidden="true"></span> Frankie</div><div class="top-right mono"><span class="unit">VOICE LINK / 01</span><span><i class="status-dot" aria-hidden="true"></i><span id="connection">OFFLINE</span></span></div></header>
-<section class="hero" aria-labelledby="title"><div><div class="eyebrow mono">An open channel. A little personality.</div><h1 id="title">Frankie<span style="color:var(--accent)">.</span></h1><p>Less interface. More conversation.</p></div><div class="hero-side" aria-hidden="true"><div class="serial">F / 01</div><p>VOICE OPERATING ENVIRONMENT</p></div></section>
-<main class="deck">
-<section class="instrument" aria-label="Live voice instruments"><div class="instrument-head mono"><span>NEURAL AUDIO / LIVE</span><b id="signal">AWAITING CONNECTION</b></div><div class="scope"><canvas id="scope" aria-hidden="true"></canvas><div class="core-label"><div class="mono">FRANKIE IS</div><strong id="st">Ready.</strong><div id="state-sub" class="sub">YOUR VOICE STARTS HERE</div></div><div class="axis" aria-hidden="true">+ INPUT / OUTPUT</div><div class="axis right" aria-hidden="true">24 kHz · PCM</div></div><div class="phases" aria-hidden="true"><div id="phase-listen" class="phase"><span>01</span> LISTEN</div><div id="phase-think" class="phase"><span>02</span> THINK</div><div id="phase-speak" class="phase"><span>03</span> SPEAK</div></div><div class="telemetry"><div class="meter"><div class="meter-top"><span>YOU / MIC</span><span id="mic-label">STANDBY</span></div><canvas id="mic-meter" aria-hidden="true"></canvas></div><div class="meter"><div class="meter-top"><span>FRANKIE / VOICE</span><span id="voice-label">STANDBY</span></div><canvas id="voice-meter" aria-hidden="true"></canvas></div></div></section>
-<section class="conversation" aria-labelledby="transcript-title"><header class="conversation-head"><h2 id="transcript-title">TRANSCRIPT</h2><span id="turn-count">00 TURNS</span></header><div id="log" role="log" aria-label="Conversation transcript" aria-live="polite" aria-relevant="additions text"><div class="empty" id="empty"><div class="empty-mark" aria-hidden="true">↗</div><h3>Channel is quiet.</h3><p>Open the mic.<br>Frankie will meet you here.</p></div></div><div class="conversation-foot"><span id="latency">FIRST AUDIO —</span><span>LIVE TRANSCRIPT</span></div></section>
-</main>
-<section class="controlbar" aria-label="Connection controls"><div class="control-copy"><div class="mic-icon" aria-hidden="true"><svg aria-hidden="true" width="18" height="22" viewBox="0 0 18 22" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="6" y="1" width="6" height="12" rx="3"/><path d="M3 10v1a6 6 0 0 0 12 0v-1M9 17v4M5 21h8"/></svg></div><div><h2 id="instruction">Make yourself heard.</h2><p id="help">Start the connection and allow your microphone. Headphones recommended.</p></div></div><div class="actions"><label class="thinking-control">Thinking <select id="thinking" aria-label="Brain thinking level" title="Higher levels allow more reasoning before Frankie speaks. Change before connecting."><option value="none" selected>Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Very high</option><option value="max">Maximum</option></select></label><button id="fullscreen" type="button" aria-label="Toggle fullscreen" title="Toggle fullscreen">⛶</button><button id="go" type="button"><span id="go-label">Start talking</span><span aria-hidden="true">↗</span></button></div></section>
-<footer class="footer"><span><strong>BUILT TO LISTEN.</strong> NOT JUST TO ANSWER.</span><span>FRANKIE / EXPERIMENTAL VOICE INTERFACE</span></footer>
-<section id="permission" hidden role="dialog" aria-modal="true" aria-labelledby="permission-title"><h2 id="permission-title">Approve tool execution?</h2><pre id="tool"></pre><button id="allow" type="button">Allow once</button> <button id="deny" type="button">Deny</button></section>
-<div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
-</div>
-<script type="module" src="/client.mjs"></script>
-</body></html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="theme-color" content="#080b0f">
+    <title>Frankie — voice interface</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body data-state="OFF" data-connected="false">
+    <div class="shell">
+      <header class="top">
+        <div class="brand" style="margin:0">
+          <span class="insignia" aria-hidden="true"></span>
+          Frankie
+        </div>
+        <div class="top-right mono">
+          <span class="unit">VOICE LINK / 01</span
+          ><span
+            ><i class="status-dot" aria-hidden="true"></i
+            ><span id="connection">OFFLINE</span></span
+          >
+        </div>
+      </header>
+      <section class="hero" aria-labelledby="title">
+        <div>
+          <div class="eyebrow mono">An open channel. A little personality.</div>
+          <h1 id="title">Frankie<span style="color:var(--accent)">.</span></h1>
+          <p>Less interface. More conversation.</p>
+        </div>
+        <div class="hero-side" aria-hidden="true">
+          <div class="serial">F / 01</div>
+          <p>VOICE OPERATING ENVIRONMENT</p>
+        </div>
+      </section>
+      <main class="deck">
+        <section class="instrument" aria-label="Live voice instruments">
+          <div class="instrument-head mono">
+            <span>NEURAL AUDIO / LIVE</span
+            ><b id="signal">AWAITING CONNECTION</b>
+          </div>
+          <div class="scope">
+            <canvas id="scope" aria-hidden="true"></canvas>
+            <div class="core-label">
+              <div class="mono">FRANKIE IS</div>
+              <strong id="st">Ready.</strong>
+              <div id="state-sub" class="sub">YOUR VOICE STARTS HERE</div>
+            </div>
+            <div class="axis" aria-hidden="true">+ INPUT / OUTPUT</div>
+            <div class="axis right" aria-hidden="true">24 kHz · PCM</div>
+          </div>
+          <div class="phases" aria-hidden="true">
+            <div id="phase-listen" class="phase"><span>01</span> LISTEN</div>
+            <div id="phase-think" class="phase"><span>02</span> THINK</div>
+            <div id="phase-speak" class="phase"><span>03</span> SPEAK</div>
+          </div>
+          <div class="telemetry">
+            <div class="meter">
+              <div class="meter-top">
+                <span>YOU / MIC</span><span id="mic-label">STANDBY</span>
+              </div>
+              <canvas id="mic-meter" aria-hidden="true"></canvas>
+            </div>
+            <div class="meter">
+              <div class="meter-top">
+                <span>FRANKIE / VOICE</span
+                ><span id="voice-label">STANDBY</span>
+              </div>
+              <canvas id="voice-meter" aria-hidden="true"></canvas>
+            </div>
+          </div>
+        </section>
+        <section class="conversation" aria-labelledby="transcript-title">
+          <header class="conversation-head">
+            <h2 id="transcript-title">TRANSCRIPT</h2>
+            <span id="turn-count">00 TURNS</span>
+          </header>
+          <div
+            id="log"
+            role="log"
+            aria-label="Conversation transcript"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
+            <div class="empty" id="empty">
+              <div class="empty-mark" aria-hidden="true">↗</div>
+              <h3>Channel is quiet.</h3>
+              <p>Open the mic.<br>Frankie will meet you here.</p>
+            </div>
+          </div>
+          <div class="conversation-foot">
+            <span id="latency">FIRST AUDIO —</span><span>LIVE TRANSCRIPT</span>
+          </div>
+        </section>
+      </main>
+      <section class="controlbar" aria-label="Connection controls">
+        <div class="control-copy">
+          <div class="mic-icon" aria-hidden="true">
+            <svg
+              aria-hidden="true"
+              width="18"
+              height="22"
+              viewBox="0 0 18 22"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+            >
+              <rect x="6" y="1" width="6" height="12" rx="3" />
+              <path d="M3 10v1a6 6 0 0 0 12 0v-1M9 17v4M5 21h8" />
+            </svg>
+          </div>
+          <div>
+            <h2 id="instruction">Make yourself heard.</h2>
+            <p id="help">
+              Start the connection and allow your microphone. Headphones
+              recommended.
+            </p>
+          </div>
+        </div>
+        <div class="actions">
+          <label class="thinking-control"
+            >Thinking
+            <select
+              id="thinking"
+              aria-label="Brain thinking level"
+              title="Higher levels allow more reasoning before Frankie speaks. Change before connecting."
+            >
+              <option value="none" selected>Off</option>
+              <option value="minimal">Minimal</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Very high</option>
+              <option value="max">Maximum</option>
+            </select></label
+          ><button
+            id="fullscreen"
+            type="button"
+            aria-label="Toggle fullscreen"
+            title="Toggle fullscreen"
+          >
+            ⛶
+          </button><button id="go" type="button">
+            <span id="go-label">Start talking</span
+            ><span aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </section>
+      <footer class="footer">
+        <span><strong>BUILT TO LISTEN.</strong> NOT JUST TO ANSWER.</span
+        ><span>FRANKIE / EXPERIMENTAL VOICE INTERFACE</span>
+      </footer>
+      <section
+        id="permission"
+        hidden
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="permission-title"
+      >
+        <h2 id="permission-title">Approve tool execution?</h2>
+        <pre id="tool"></pre>
+        <button id="allow" type="button">Allow once</button>
+        <button id="deny" type="button">Deny</button>
+      </section>
+      <div
+        id="announcement"
+        class="sr-only"
+        role="status"
+        aria-live="polite"
+      ></div>
+    </div>
+    <script type="module" src="/client.mjs"></script>
+  </body>
+</html>

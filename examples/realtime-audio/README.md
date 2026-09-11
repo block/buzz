@@ -9,6 +9,8 @@ No Python inference service or hosted model API is needed.
 The page includes live transcripts, interruption, thinking controls, tool
 approval, and latency measured from the end of speech to actual playback.
 
+![Frankie voice demo](preview.png)
+
 ## Get the model
 
 Download the [shared Frankie GGUF](https://drive.google.com/file/d/1oMUgJteaoBvgQicYvz6pWRpcSxun4KA-/view?usp=sharing)

@@ -13,6 +13,8 @@ const phases = {
   OFF: ["Ready.", "YOUR VOICE STARTS HERE", ""],
 };
 function setState(state) {
+  // Audio arrives in many chunks; announce only state transitions.
+  if (document.body.dataset.state === state) return;
   const v = phases[state] || phases.OFF;
   document.body.dataset.state = state;
   st.textContent = v[0];
