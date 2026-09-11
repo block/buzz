@@ -1,18 +1,13 @@
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type {
   ProjectIssue,
   Repository as Project,
 } from "@/features/projects/hooks";
-import {
-  bwAssignmentHead,
-  bwMatchingTriageDelegation,
-} from "@/features/projects/bwProjection";
+import { bwMatchingTriageDelegation } from "@/features/projects/bwProjection";
 import {
   BwConflictError,
-  submitBwAssignment,
   submitBwImplementedTransition,
   submitBwInDevelopmentTransition,
   submitBwIssueTextUpdate,
@@ -22,8 +17,14 @@ import {
   type BwTriageAction,
   type BwTriageActionFields,
 } from "@/features/projects/bwWrite";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { invokeTauri } from "@/shared/api/tauri";
+import { BwAssignmentSection } from "./BwAssignmentSection";
+import {
+  errorMessage,
+  useInvalidateProjectIssues,
+} from "./bwIssueActionsShared";
 
 const RELATION_TYPES = [
   "blocks",
@@ -31,22 +32,6 @@ const RELATION_TYPES = [
   "duplicate-of",
   "parent-of",
 ] as const;
-
-function useInvalidateProjectIssues(project: Project) {
-  const queryClient = useQueryClient();
-  return React.useCallback(async () => {
-    await Promise.all([
-      queryClient.invalidateQueries({
-        queryKey: ["project", project.id, "issues"],
-      }),
-      queryClient.invalidateQueries({ queryKey: ["projects", "work-items"] }),
-    ]);
-  }, [project.id, queryClient]);
-}
-
-function errorMessage(error: unknown, fallback: string) {
-  return error instanceof Error ? error.message : fallback;
-}
 
 /** A BW-shaped root that has not (yet) been successfully enrolled — either
  * never attempted or a prior attempt was refused (e.g. a pre-cutover root:
@@ -426,108 +411,6 @@ function BwTriageActions({
   );
 }
 
-/** Select or release the sole delegate for a `backlog`/`ready` issue, over
- * the *existing* kind:1 assignment wire (NIP-BW.md: "no new assignment
- * grammar"). Unassign always resubmits the exact current writer as `p` —
- * Core's own causality check refuses an unassignment whose `p` does not
- * match the head it chains from, so this never lets the UI invent a
- * mismatched release. */
-function BwAssignmentSection({
-  issue,
-  project,
-}: {
-  issue: ProjectIssue;
-  project: Project;
-}) {
-  const [delegate, setDelegate] = React.useState("");
-  const [pending, setPending] = React.useState(false);
-  const invalidate = useInvalidateProjectIssues(project);
-  if (!issue.bw) return null;
-  const snapshot = issue.bw.snapshot;
-  const head = bwAssignmentHead(snapshot, issue.id);
-
-  const run = async (operation: "assignment" | "unassignment", who: string) => {
-    if (pending) return;
-    setPending(true);
-    try {
-      await submitBwAssignment({
-        delegate: who,
-        issueId: issue.id,
-        operation,
-        repo: project.repoAddress,
-        snapshot,
-      });
-      toast.success(
-        operation === "assignment" ? "Writer assigned." : "Writer unassigned.",
-      );
-      setDelegate("");
-      await invalidate();
-    } catch (error) {
-      toast.error(
-        error instanceof BwConflictError
-          ? error.message
-          : errorMessage(error, "Assignment was refused."),
-      );
-    } finally {
-      setPending(false);
-    }
-  };
-
-  if (head.conflict) {
-    return (
-      <p
-        className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
-        data-testid="bw-assignment-conflict"
-        role="alert"
-      >
-        Concurrent assignment changes are in conflict. Resolve manually.
-      </p>
-    );
-  }
-
-  return (
-    <div className="space-y-1.5" data-testid="bw-assignment-section">
-      {head.writer ? (
-        <div className="flex items-center justify-between gap-2 text-xs">
-          <span className="font-mono" data-testid="bw-assignment-writer">
-            {head.writer}
-          </span>
-          <button
-            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-            data-testid="bw-unassign"
-            disabled={pending}
-            onClick={() => void run("unassignment", head.writer as string)}
-            type="button"
-          >
-            {pending ? "Unassigning…" : "Unassign"}
-          </button>
-        </div>
-      ) : (
-        <div className="flex items-center gap-2">
-          <input
-            className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
-            data-testid="bw-assign-delegate"
-            onChange={(event) => setDelegate(event.target.value)}
-            placeholder="Delegate pubkey"
-            value={delegate}
-          />
-          <button
-            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-            data-testid="bw-assign"
-            disabled={pending || !/^[0-9a-f]{64}$/i.test(delegate.trim())}
-            onClick={() =>
-              void run("assignment", delegate.trim().toLowerCase())
-            }
-            type="button"
-          >
-            {pending ? "Assigning…" : "Assign"}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** `backlog` -> `ready`: bind a stream and the exact current assignment
  * head. Core alone decides whether the signer is Owner/coordinator and
  * whether a prior implemented needs a rework verdict or terminal set first;
@@ -879,9 +762,11 @@ function BwRelations({
  * relations. */
 export function BwIssueActions({
   issue,
+  profiles,
   project,
 }: {
   issue: ProjectIssue;
+  profiles?: UserProfileLookup;
   project: Project;
 }) {
   if (!issue.bw) return null;
@@ -910,7 +795,11 @@ export function BwIssueActions({
         <BwTriageActions issue={issue} project={project} />
       ) : null}
       {issue.bw.state === "backlog" || issue.bw.state === "ready" ? (
-        <BwAssignmentSection issue={issue} project={project} />
+        <BwAssignmentSection
+          issue={issue}
+          profiles={profiles}
+          project={project}
+        />
       ) : null}
       {issue.bw.state === "backlog" ? (
         <BwReadyAction issue={issue} project={project} />

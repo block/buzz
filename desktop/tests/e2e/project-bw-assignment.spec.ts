@@ -117,6 +117,10 @@ test("a backlog issue with no current writer offers assign; assigning submits th
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
+  // The name/agent picker is the default path; raw hex is the secondary
+  // fallback reached through this toggle (P4E follow-up: mention-style
+  // picker instead of manual hex).
+  await panel.getByTestId("bw-assign-toggle-manual").click();
   await expect(panel.getByTestId("bw-assign-delegate")).toBeVisible();
   await expect(panel.getByTestId("bw-assign")).toBeDisabled();
   await panel.getByTestId("bw-assign-delegate").fill(WRITER);
@@ -131,6 +135,46 @@ test("a backlog issue with no current writer offers assign; assigning submits th
       prior?: unknown;
     }) ?? {},
   ).toMatchObject({ delegate: WRITER, operation: "assignment", prior: null });
+});
+
+test("assigning through the name picker submits the exact pubkey it resolved, same as the raw-hex fallback", async ({
+  page,
+}) => {
+  const AGENT_NAME = "Windows Writer Agent";
+  await installMockBridge(page, {
+    bwSnapshot: {
+      activation: ACTIVATION,
+      records: { [ROOT]: rootEvent(ROOT, "Needs a writer") },
+      projection: { issues: { [ROOT]: "backlog" } },
+    },
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: AGENT_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
+  });
+  const panel = await openIssuesPanel(page);
+  await openIssue(page, panel, ROOT);
+
+  // Default path: type a name, pick the relay-agent suggestion — no hex
+  // typed anywhere.
+  await expect(panel.getByTestId("bw-assign-picker-query")).toBeVisible();
+  await panel.getByTestId("bw-assign-picker-query").fill("Windows Writer");
+  const suggestion = page.getByTestId(`mention-suggestion-${WRITER}`);
+  await expect(suggestion).toBeVisible();
+  await suggestion.click();
+  await expect(panel.getByTestId("bw-assign")).toBeEnabled();
+  await panel.getByTestId("bw-assign").click();
+
+  const call = await lastBwCall(page, "submit_project_bw_assignment");
+  expect(call?.payload).toMatchObject({
+    delegate: WRITER,
+    operation: "assignment",
+    prior: null,
+  });
 });
 
 test("a backlog issue with a current writer offers unassign, resubmitting the exact same delegate and chaining off the real head", async ({
@@ -149,7 +193,13 @@ test("a backlog issue with a current writer offers unassign, resubmitting the ex
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  await expect(panel.getByTestId("bw-assignment-writer")).toContainText(WRITER);
+  // The header now shows a display-name/avatar + truncated pubkey instead of
+  // the naked 64-hex; the full pubkey is still verifiable via the `title`
+  // attribute (truncatePubkey.ts: "never an identity proof" on its own).
+  await expect(panel.getByTestId("bw-assignment-writer")).toHaveAttribute(
+    "title",
+    WRITER,
+  );
   await panel.getByTestId("bw-unassign").click();
 
   const call = await lastBwCall(page, "submit_project_bw_assignment");
@@ -237,6 +287,7 @@ test("an assignment refused by Core surfaces the refusal instead of a silent sta
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
+  await panel.getByTestId("bw-assign-toggle-manual").click();
   await panel.getByTestId("bw-assign-delegate").fill(WRITER);
   await panel.getByTestId("bw-assign").click();
   await expect(page.getByText("bw:reject:role:unauthorized")).toBeVisible();

@@ -628,7 +628,11 @@ function IssueMetaRail({
             </p>
           ))}
           <div className="mt-3">
-            <BwIssueActions issue={issue} project={project} />
+            <BwIssueActions
+              issue={issue}
+              profiles={profiles}
+              project={project}
+            />
           </div>
         </OverviewRailSection>
       ) : null}
