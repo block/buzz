@@ -658,8 +658,12 @@ pub async fn cmd_send_message(
         media_tags.push(crate::client::build_imeta_tag(&desc));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+        } else {
+            // Generic files render as a named download link, like the Desktop.
+            let name = desc.filename.as_deref().unwrap_or("file");
+            media_content.push_str(&format!("\n[{name}]("));
         }
         media_content.push_str(&desc.url);
         media_content.push(')');
