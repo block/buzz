@@ -77,3 +77,31 @@ tests:
           path: kind
           value: HTTPRoute
         template: templates/httproute.yaml
+
+  - it: Service omits trafficDistribution by default
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - notExists:
+          path: spec.trafficDistribution
+        template: templates/service.yaml
+
+  - it: Service sets trafficDistribution when configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      service.trafficDistribution: PreferClose
+    asserts:
+      - equal:
+          path: spec.trafficDistribution
+          value: PreferClose
+        template: templates/service.yaml

@@ -221,6 +221,8 @@ pairingRelay:
     type: ClusterIP
     port: 5000
     annotations: {}
+    # Same values as service.trafficDistribution; empty → omitted
+    trafficDistribution: ""
   podAnnotations: {}
   podLabels: {}
   resources:
@@ -238,6 +240,8 @@ service:
   healthPort: 8080
   metricsPort: 9102
   annotations: {}
+  # PreferClose | PreferSameZone | PreferSameNode; empty → omitted (cluster default)
+  trafficDistribution: ""
 
 serviceAccount:
   create: true
