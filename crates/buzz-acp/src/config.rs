@@ -1363,7 +1363,11 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            // Mentions mode also accepts direct thread replies whose parent was
+            // authored by this agent. NIP-01 cannot express "#p OR reply to one
+            // of my events" in a single filter, so receive the bounded message
+            // kinds and enforce the mention/reply union in the application gate.
+            let require_mention = false;
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1388,7 +1392,6 @@ pub fn resolve_channel_filters(
         SubscribeMode::Config => {
             for ch in discovered_channels {
                 let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-                let mut require_mention = true;
                 let mut has_rule = false;
 
                 for rule in rules {
@@ -1405,9 +1408,6 @@ pub fn resolve_channel_filters(
                             }
                         }
                     }
-                    if !rule.require_mention {
-                        require_mention = false;
-                    }
                 }
 
                 if has_rule {
@@ -1415,7 +1415,10 @@ pub fn resolve_channel_filters(
                         *ch,
                         ChannelFilter {
                             kinds: merged_kinds,
-                            require_mention,
+                            // Config-mode rules may admit verified direct replies
+                            // without a p-tag. Receive configured kinds and enforce
+                            // each rule's mention predicate in the application gate.
+                            require_mention: false,
                         },
                     );
                 }
@@ -1468,7 +1471,9 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            // See resolve_channel_filters(): direct-reply routing requires the
+            // application gate to see unmentioned reply candidates.
+            require_mention: false,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1479,7 +1484,6 @@ pub fn resolve_dynamic_channel_filter(
             // evaluate ALL rules against this specific channel (including
             // channel-specific rules, not just ChannelScope::All).
             let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-            let mut require_mention = true;
             let mut has_rule = false;
 
             for rule in rules {
@@ -1496,9 +1500,6 @@ pub fn resolve_dynamic_channel_filter(
                         }
                     }
                 }
-                if !rule.require_mention {
-                    require_mention = false;
-                }
             }
 
             if !has_rule {
@@ -1509,7 +1510,9 @@ pub fn resolve_dynamic_channel_filter(
 
             Some(ChannelFilter {
                 kinds: merged_kinds,
-                require_mention,
+                // Keep dynamic subscriptions equivalent to startup: direct
+                // replies must reach the application-level rule matcher.
+                require_mention: false,
             })
         }
     }
@@ -1612,7 +1615,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
-            assert!(f.require_mention, "mentions mode requires mention");
+            assert!(
+                !f.require_mention,
+                "mentions mode must receive thread replies so the application gate can admit only replies to this agent"
+            );
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
@@ -2001,6 +2007,34 @@ mod tests {
 
         let result = resolve_channel_filters(&config, &[ch], &rules);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_config_mode_all_mention_rules_receive_direct_reply_candidates() {
+        let config = test_config(SubscribeMode::Config);
+        let ch = Uuid::new_v4();
+        let rules = vec![make_rule(
+            "mention-or-reply",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+        )];
+
+        let startup = resolve_channel_filters(&config, &[ch], &rules);
+        let startup_filter = startup.get(&ch).expect("channel should be subscribed");
+        assert_eq!(startup_filter.kinds.as_deref(), Some([9].as_slice()));
+        assert!(
+            !startup_filter.require_mention,
+            "relay subscription must deliver unmentioned direct replies"
+        );
+
+        let dynamic = resolve_dynamic_channel_filter(&config, ch, &rules)
+            .expect("dynamic channel should be subscribed");
+        assert_eq!(dynamic.kinds.as_deref(), Some([9].as_slice()));
+        assert!(
+            !dynamic.require_mention,
+            "dynamic subscription must match startup reply delivery"
+        );
     }
 
     #[test]
