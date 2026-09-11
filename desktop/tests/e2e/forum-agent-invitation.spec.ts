@@ -430,7 +430,11 @@ for (const stage of ["add", "publish"] as const) {
         await expect(
           page.getByRole("button", { name: "Remove attachment" }),
         ).toBeVisible();
-      if (replacement !== null)
+      if (replacement === "") {
+        await page.getByTestId("message-input").press("ControlOrMeta+a");
+        await page.getByTestId("message-input").press("Backspace");
+        await expect(page.getByTestId("message-input")).toBeEmpty();
+      } else if (replacement !== null)
         await page.getByTestId("message-input").fill(replacement);
       await navigate(1);
       await releaseForumGate(page);
