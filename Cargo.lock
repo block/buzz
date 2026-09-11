@@ -983,6 +983,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-ifc",
  "buzz-persona",
  "buzz-sdk",
  "buzz-ws-client",
