@@ -64,11 +64,20 @@ pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
         }
         None => hasher.update([0u8]),
     }
-    hasher.update(canonical_json(&entry.detail)?.as_bytes());
+    // Fixed-width `prev_hash` sits between the two variable-length fields
+    // (`object_id`, `canonical_json(detail)`) so no byte shift across their
+    // boundary can leave the preimage unchanged. Both were previously adjacent:
+    // `hasher.update(object_id)` then `hasher.update(canonical_json(detail))`,
+    // and any pair `(oid="x", detail=12)` / `(oid="x1", detail=2)` hashed
+    // identically — a detail edit survived `verify_chain` (#4173). Moving
+    // `prev_hash` here makes the encoding unambiguous without length-prefix
+    // framing. This is a field-order change to `compute_hash` and invalidates
+    // existing chains by design, like any other.
     match &entry.prev_hash {
         Some(h) => hasher.update(h),
         None => hasher.update(GENESIS_HASH),
     }
+    hasher.update(canonical_json(&entry.detail)?.as_bytes());
     Ok(hasher.finalize().into())
 }
 
@@ -251,6 +260,40 @@ mod tests {
         let mut e = base.clone();
         e.prev_hash = Some(vec![0xff; 32]);
         assert_ne!(h0, compute_hash(&e).unwrap());
+    }
+
+    /// Issue #4173: `object_id` and `detail` are both variable-length and
+    /// were adjacent in the preimage, so a byte shift across their boundary
+    /// could keep the concatenated tail identical while the entry differs.
+    /// Both `("x", 12)` and `("x1", 2)` hashed to the same chain tail — an
+    /// entry could be substituted for a different one and `verify_chain`
+    /// still passed. The fixed-width `prev_hash` now sits between them, so no
+    /// such shift can keep the full preimage unchanged.
+    #[test]
+    fn object_id_detail_boundary_is_unambiguous() {
+        // Bare-scalar `detail` — the case that made the boundary shift live:
+        // a JSON scalar has no framing byte of its own.
+        let mut a = sample_entry();
+        a.object_id = Some("x".into());
+        a.detail = serde_json::json!(12);
+
+        let mut b = sample_entry();
+        b.object_id = Some("x1".into());
+        b.detail = serde_json::json!(2);
+
+        assert_ne!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
+
+        // A second, string-skewed pair to exercise the same boundary with
+        // different byte lengths on each side.
+        let mut c = sample_entry();
+        c.object_id = Some("ab".into());
+        c.detail = serde_json::json!("c");
+
+        let mut d = sample_entry();
+        d.object_id = Some("a".into());
+        d.detail = serde_json::json!("bc");
+
+        assert_ne!(compute_hash(&c).unwrap(), compute_hash(&d).unwrap());
     }
 
     #[test]
