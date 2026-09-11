@@ -476,6 +476,116 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("community round trip clears mention ranking for the same viewer and channel", async ({
+    page,
+  }) => {
+    const first = "11".repeat(32);
+    const chosen = "22".repeat(32);
+    const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await installMockBridge(
+      page,
+      {
+        managedAgents: [],
+        relayAgents: [first, chosen].map((pubkey) => ({
+          pubkey,
+          name: "Scout",
+          ownerPubkey: OWNER_PUBKEY,
+          respondTo: "anyone",
+          status: "offline",
+          channelNames: ["general"],
+        })),
+        searchProfiles: [first, chosen].map((pubkey) => ({
+          pubkey,
+          displayName: "Scout",
+          isAgent: true,
+        })),
+      },
+      { skipCommunitySeed: true },
+    );
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.evaluate(
+      async ({ channelId, keys }) => {
+        await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+          channelId,
+          pubkeys: keys,
+          role: "bot",
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["channels"],
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["relay-agents"],
+        });
+      },
+      { channelId, keys: [first, chosen] },
+    );
+    const input = page.getByTestId("message-input");
+    const rows = page.locator("[data-mention-suggestion-index]");
+    const rowIds = () =>
+      rows.evaluateAll((items) =>
+        items.map((row) => row.getAttribute("data-testid")),
+      );
+    const baseline = [first, chosen].map((key) => `mention-suggestion-${key}`);
+    await input.fill("@Scout");
+    await expect.poll(rowIds).toEqual(baseline);
+    await input.press("ArrowDown");
+    await input.press("Tab");
+    await expect(input).toHaveText("@Scout ");
+    await page.keyboard.type("ranking choice");
+    await page.getByTestId("send-message").click();
+    const publication = (content: string) =>
+      page.evaluate(
+        (text) =>
+          (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? [])
+            .filter((event) => event.content === text)
+            .map((event) => ({
+              viewer: (
+                window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["identity"]) as
+                  | { data?: { pubkey: string } }
+                  | undefined
+              )?.data?.pubkey,
+              channel: event.tags.find((tag) => tag[0] === "h")?.[1],
+              recipients: event.tags
+                .filter((tag) => tag[0] === "p")
+                .map((tag) => tag[1]),
+            })),
+        content,
+      );
+    await expect
+      .poll(() => publication("@Scout ranking choice"))
+      .toEqual([
+        { viewer: OWNER_PUBKEY, channel: channelId, recipients: [chosen] },
+      ]);
+    // Positive control: this exact choice really affects the next snapshot.
+    await input.fill("@Scout");
+    await expect.poll(rowIds).toEqual([...baseline].reverse());
+    await input.press("Escape");
+    await input.fill("");
+
+    // Real rail navigation remounts the community without reloading the page.
+    for (const community of [COMMUNITY_B, COMMUNITY_A]) {
+      await page.getByTestId(`community-rail-button-${community.id}`).click();
+      await expect(
+        page.getByTestId(`community-rail-button-${community.id}`),
+      ).toHaveAttribute("aria-current", "true");
+      await page.getByTestId("channel-general").click();
+      await expect(page.getByTestId("chat-title")).toHaveText("general");
+    }
+    // The identity query used by useMentions and the publication channel bind
+    // the returned composer to the original scope;
+    // changing viewer/channel must not masquerade as clearing its history.
+    await input.fill("ranking returned");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() => publication("ranking returned"))
+      .toEqual([{ viewer: OWNER_PUBKEY, channel: channelId, recipients: [] }]);
+    await input.fill("@Scout");
+    await expect.poll(rowIds).toEqual(baseline);
+  });
+
   test("community switch cancels a send after its link preview settles", async ({
     page,
   }) => {

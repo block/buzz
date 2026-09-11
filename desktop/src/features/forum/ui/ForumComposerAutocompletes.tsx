@@ -12,7 +12,8 @@ type ForumComposerAutocompletesProps = {
   mentionSelectedIndex: number;
   mentionSuggestions: MentionSuggestion[];
   onChannelSelect: (suggestion: ChannelSuggestion) => void;
-  onMentionFetchMore?: () => void;
+  isMentionOpen: boolean;
+  isMentionLoading: boolean;
   onMentionDismiss: () => void;
   onMentionSelect: (suggestion: MentionSuggestion) => void;
   position: "above" | "below";
@@ -25,7 +26,8 @@ export function ForumComposerAutocompletes({
   mentionSelectedIndex,
   mentionSuggestions,
   onChannelSelect,
-  onMentionFetchMore,
+  isMentionOpen,
+  isMentionLoading,
   onMentionDismiss,
   onMentionSelect,
   position,
@@ -42,7 +44,8 @@ export function ForumComposerAutocompletes({
       <MentionAutocomplete
         composerOwnsFocus={composerOwnsFocus}
         onDismiss={onMentionDismiss}
-        onFetchMore={onMentionFetchMore}
+        isOpen={isMentionOpen}
+        isLoading={isMentionLoading}
         onSelect={onMentionSelect}
         position={position}
         selectedIndex={mentionSelectedIndex}

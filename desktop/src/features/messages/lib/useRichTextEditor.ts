@@ -89,6 +89,8 @@ export type AutocompleteEdit = {
 export type RichTextEditorOptions = {
   placeholder?: string;
   onUpdate?: (info: ReturnType<typeof buildPreviewUpdate>) => void;
+  /** Caret-only updates let completion owners dismiss abandoned queries. */
+  onSelectionUpdate?: (info: ReturnType<typeof buildPreviewUpdate>) => void;
   editable?: boolean;
   mentionNames?: string[];
   agentMentionNames?: string[];
@@ -151,6 +153,7 @@ export type RichTextEditorOptions = {
 export function useRichTextEditor({
   placeholder,
   onUpdate,
+  onSelectionUpdate,
   editable = true,
   mentionNames,
   agentMentionNames,
@@ -165,6 +168,8 @@ export function useRichTextEditor({
   onLinkShortcut,
 }: RichTextEditorOptions) {
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
+  const onSelectionUpdateRef = React.useRef(onSelectionUpdate);
+  onSelectionUpdateRef.current = onSelectionUpdate;
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
   const onSubmitRef = React.useRef(onSubmit);
@@ -394,7 +399,10 @@ export function useRichTextEditor({
           addKeyboardShortcuts() {
             return {
               Enter: ({ editor: ed }) => {
-                if (isAutocompleteOpen?.current) return false;
+                // The wrapper owns autocomplete Enter. Suppress splitBlock
+                // before the event bubbles there, so its current-document
+                // check sees the query the user actually chose.
+                if (isAutocompleteOpen?.current) return true;
                 if (!onSubmitRef.current) return false;
 
                 const fenceResult = handleCodeFenceEnter(ed);
@@ -586,6 +594,11 @@ export function useRichTextEditor({
           // otherwise let ArrowUp fall through to normal caret movement.
           return handler();
         },
+      },
+      onSelectionUpdate: ({ editor: ed }) => {
+        onSelectionUpdateRef.current?.(
+          buildPreviewUpdate(ed.state.doc, ed.state.selection.anchor),
+        );
       },
       onUpdate: ({ editor: ed }) => {
         // Keep the hot typing path lightweight. Markdown serialization is

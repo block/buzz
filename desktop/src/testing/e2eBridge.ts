@@ -341,6 +341,8 @@ type E2eConfig = {
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
+    /** Hold initial directory reads until explicit test release. */
+    deferAgentList?: boolean;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
     /** Sequenced add-member failures. A string fails that call; null succeeds. */
@@ -931,6 +933,7 @@ type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  team_id?: string | null;
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
   relay_url: string;
@@ -1452,6 +1455,7 @@ declare global {
       slotId: string;
     }) => unknown;
     __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
+    __BUZZ_E2E_RELEASE_AGENT_LIST__?: () => void;
     __BUZZ_E2E_QUERY_CLIENT__?: {
       invalidateQueries: (filters: {
         queryKey: readonly unknown[];
@@ -1841,6 +1845,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
+    team_id: agent.team_id ?? null,
     runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
     acp_command: agent.acp_command,
@@ -8245,7 +8250,10 @@ async function handleGetFeed(
   };
 }
 
+let mockAgentListGate: Promise<void> | null = null;
+
 async function delayAgentList(config: E2eConfig | undefined) {
+  await mockAgentListGate;
   const agentListDelayMs = config?.mock?.agentListDelayMs ?? 0;
   if (agentListDelayMs > 0) {
     await new Promise<void>((resolve) => {
@@ -9380,6 +9388,7 @@ async function handleCreateManagedAgent(
     input: {
       name: string;
       personaId?: string;
+      teamId?: string;
       relayUrl?: string;
       acpCommand?: string;
       agentCommand?: string;
@@ -9456,6 +9465,7 @@ async function handleCreateManagedAgent(
     pubkey,
     name,
     persona_id: args.input.personaId ?? null,
+    team_id: args.input.teamId ?? null,
     // Create never pins a harness id — the record inherits from the persona.
     runtime: null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
@@ -11236,6 +11246,12 @@ export function maybeInstallE2eTauriMocks() {
     : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
+  window.__BUZZ_E2E_RELEASE_AGENT_LIST__?.();
+  mockAgentListGate = config.mock?.deferAgentList
+    ? new Promise<void>((resolve) => {
+        window.__BUZZ_E2E_RELEASE_AGENT_LIST__ = resolve;
+      })
+    : null;
   resetMockManagedAgents(config);
   resetMockPersonas(config);
   resetMockTeams(config);

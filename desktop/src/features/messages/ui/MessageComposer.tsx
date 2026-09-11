@@ -55,6 +55,7 @@ import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadError } from "./ComposerUploadError";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
+import { useComposerScrollToBottom } from "./useComposerScrollToBottom";
 import { useComposerVoiceNote } from "./useComposerVoiceNote";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
@@ -152,6 +153,8 @@ function MessageComposerImpl({
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
     recentMentionPubkeys,
+    getEditorSnapshot: (): { text: string; cursor: number } =>
+      richText.getPlainTextAndCursor(),
   });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
@@ -271,13 +274,7 @@ function MessageComposerImpl({
     ((info: LinkSelectionInfo | null) => void) | null
   >(null);
   const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
-  const scrollComposerToBottom = React.useCallback(() => {
-    window.requestAnimationFrame(() => {
-      const scrollElement = composerScrollRef.current;
-      if (!scrollElement) return;
-      scrollElement.scrollTop = scrollElement.scrollHeight;
-    });
-  }, []);
+  const scrollComposerToBottom = useComposerScrollToBottom(composerScrollRef);
   const computedPlaceholder = editTarget
     ? "Edit your message"
     : (placeholder ??
@@ -302,6 +299,8 @@ function MessageComposerImpl({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    onSelectionUpdate: ({ text, cursor }) =>
+      mentions.updateMentionQuery(text, cursor),
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       trackAuthoredContent(text);
       contentRef.current = text;
@@ -439,7 +438,7 @@ function MessageComposerImpl({
     if (!replyTarget || composerDisabled) return;
     richText.focusPreserve();
   }, [composerDisabled, replyTarget, richText.focusPreserve]);
-  useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
+  useComposerAutofocus(richText.editor, effectiveDraftKey, composerDisabled);
   // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
   // applies it as a single ProseMirror transaction (no markdown round-trip).
   const applyAutocompleteEdit = React.useCallback(
@@ -514,7 +513,6 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-  // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
     (emoji: string) => {
       if (!richText.editor) return;
@@ -564,6 +562,7 @@ function MessageComposerImpl({
     onToggle: toggleAlwaysAddressAgent,
   });
   const submitMessage = React.useCallback(async () => {
+    mentions.cancelMentionAdmission();
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
@@ -683,6 +682,7 @@ function MessageComposerImpl({
     media.setUploadState,
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
+    mentions.cancelMentionAdmission,
     mentions.clearMentions,
     richText.clearContent,
     richText.setContent,
@@ -907,7 +907,11 @@ function MessageComposerImpl({
             {composerLinkPreviews}
             <output
               aria-live="polite"
-              className="sr-only"
+              className={
+                mentions.mentionAdmissionStatus
+                  ? "text-xs text-muted-foreground"
+                  : "sr-only"
+              }
               data-testid="composer-address-lock-status"
             >
               {addressLockAnnouncement}

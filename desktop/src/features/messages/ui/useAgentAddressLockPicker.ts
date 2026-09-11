@@ -1,3 +1,4 @@
+import { useMentionAdmissionEditor } from "../lib/useMentionAdmissionEditor";
 import * as React from "react";
 
 import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
@@ -87,10 +88,15 @@ export function useAgentAddressLockPicker({
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
 }) {
+  useMentionAdmissionEditor(richText.editor, mentions.cancelMentionAdmission);
   const lockedAgentPubkeys = React.useMemo(
     () => new Set(audience.pubkeys),
     [audience.pubkeys],
   );
+  // A retained callback belongs to one audience visit, including A -> B -> A.
+  const scopeOwner = React.useMemo(() => ({ audienceScope }), [audienceScope]);
+  const currentAudience = React.useRef({ scopeOwner, lockedAgentPubkeys });
+  currentAudience.current = { scopeOwner, lockedAgentPubkeys };
   const unpinnedAgentPubkeysRef = React.useRef(new Set<string>());
   const unpinnedAudienceScopeRef = React.useRef(audienceScope);
   if (unpinnedAudienceScopeRef.current !== audienceScope) {
@@ -182,7 +188,13 @@ export function useAgentAddressLockPicker({
   const removeAddressedAgent = React.useCallback(
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
-      if (!audienceScope || !normalized) return;
+      if (
+        !audienceScope ||
+        !normalized ||
+        currentAudience.current.scopeOwner !== scopeOwner
+      )
+        return;
+      mentions.cancelMentionAdmission();
       unpinnedAgentPubkeysRef.current.add(normalized);
       const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
       excludePubkey(normalized);
@@ -216,6 +228,8 @@ export function useAgentAddressLockPicker({
     },
     [
       applyAutocompleteEdit,
+      mentions.cancelMentionAdmission,
+      scopeOwner,
       audience.excludePubkey,
       audience.removePubkey,
       audienceScope,
@@ -246,87 +260,107 @@ export function useAgentAddressLockPicker({
   const toggleAlwaysAddressAgent = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
-      if (!audienceScope || !pubkey || !suggestion.isAgent) return;
+      if (
+        !audienceScope ||
+        !pubkey ||
+        !suggestion.isAgent ||
+        currentAudience.current.scopeOwner !== scopeOwner
+      )
+        return;
 
-      if (lockedAgentPubkeys.has(pubkey)) {
+      const refreshPicker = () => {
+        if (mentions.isMentionOpen) {
+          const { text, cursor } = richText.getPlainTextAndCursor();
+          if (mentions.isInlineMentionSelection()) {
+            const activeMention = detectPrefixQuery("@", text, cursor, [
+              suggestion.displayName.toLowerCase(),
+            ]);
+            const queryStart = Math.max(
+              0,
+              Math.min(
+                activeMention?.startIndex ?? mentions.mentionStartIndex,
+                text.length,
+              ),
+            );
+            applyAutocompleteEdit({
+              replaceFromOffset: queryStart,
+              replaceToOffset: Math.max(
+                queryStart,
+                Math.min(cursor, text.length),
+              ),
+              insertText: "",
+            });
+            mentions.openMentionPicker(queryStart);
+          } else {
+            mentions.openMentionPicker(cursor);
+          }
+        }
+      };
+      if (currentAudience.current.lockedAgentPubkeys.has(pubkey)) {
+        mentions.cancelMentionAdmission();
         removeAddressedAgentMentions(pubkey);
         setAnnouncement(
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
-      } else {
-        unpinnedAgentPubkeysRef.current.delete(pubkey);
-        const label =
-          mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
-            isAgent: true,
-          }) ?? suggestion.displayName;
-        const { text } = richText.getPlainTextAndCursor();
-        if (
-          !mentions
-            .getDraftMentionRefs(text)
-            .some(
-              (ref) =>
-                normalizePubkey(ref.pubkey) === pubkey &&
-                ref.displayName === label,
-            )
-        ) {
-          const insertedText = `@${label} `;
-          onImplicitPrefixInserted?.([{ pubkey, prefix: insertedText }]);
-          applyAutocompleteEdit({
-            replaceFromOffset: 0,
-            replaceToOffset: 0,
-            insertText: insertedText,
-            preserveSelection: text.length > 0,
-            reassertMentionCaret: false,
-          });
-        }
-        trackMentionAddressedAgent(pubkey);
-        if (onAddressAgentMention) {
-          onAddressAgentMention(suggestion);
-        } else {
-          audience.addPubkey(pubkey);
-          onPulseAddressLock(pubkey);
-        }
-        setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
+        refreshPicker();
+        return;
       }
-
-      if (mentions.isMentionOpen) {
-        const { text, cursor } = richText.getPlainTextAndCursor();
-        if (mentions.isInlineMentionSelection()) {
-          const activeMention = detectPrefixQuery("@", text, cursor, [
-            suggestion.displayName.toLowerCase(),
-          ]);
-          const queryStart = Math.max(
-            0,
-            Math.min(
-              activeMention?.startIndex ?? mentions.mentionStartIndex,
-              text.length,
-            ),
-          );
-          applyAutocompleteEdit({
-            replaceFromOffset: queryStart,
-            replaceToOffset: Math.max(
-              queryStart,
-              Math.min(cursor, text.length),
-            ),
-            insertText: "",
-          });
-          mentions.openMentionPicker(queryStart, "preserve");
-        } else {
-          mentions.openMentionPicker(cursor, "preserve");
-        }
-      }
+      const { cursor } = richText.getPlainTextAndCursor();
+      mentions.admitMention(
+        suggestion,
+        cursor,
+        () => currentAudience.current.scopeOwner === scopeOwner,
+        () => {
+          unpinnedAgentPubkeysRef.current.delete(pubkey);
+          const label =
+            mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
+              isAgent: true,
+            }) ?? suggestion.displayName;
+          const { text } = richText.getPlainTextAndCursor();
+          if (
+            !mentions
+              .getDraftMentionRefs(text)
+              .some(
+                (ref) =>
+                  normalizePubkey(ref.pubkey) === pubkey &&
+                  ref.displayName === label,
+              )
+          ) {
+            const insertedText = `@${label} `;
+            onImplicitPrefixInserted?.([{ pubkey, prefix: insertedText }]);
+            applyAutocompleteEdit({
+              replaceFromOffset: 0,
+              replaceToOffset: 0,
+              insertText: insertedText,
+              preserveSelection: text.length > 0,
+              reassertMentionCaret: false,
+            });
+          }
+          trackMentionAddressedAgent(pubkey);
+          if (onAddressAgentMention) {
+            onAddressAgentMention(suggestion);
+          } else {
+            audience.addPubkey(pubkey);
+            onPulseAddressLock(pubkey);
+          }
+          setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
+          refreshPicker();
+        },
+      );
     },
     [
       applyAutocompleteEdit,
       audience.addPubkey,
       audienceScope,
-      lockedAgentPubkeys,
       mentions.getDraftMentionRefs,
       mentions.isInlineMentionSelection,
       mentions.isMentionOpen,
       mentions.mentionStartIndex,
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
+      mentions.admitMention,
+      mentions.cancelMentionAdmission,
+      scopeOwner,
       onAddressAgentMention,
       onImplicitPrefixInserted,
       onPulseAddressLock,
@@ -338,39 +372,49 @@ export function useAgentAddressLockPicker({
 
   const selectMentionSuggestion = React.useCallback(
     (suggestion: MentionSuggestion) => {
-      const pubkey = normalizePubkey(suggestion.pubkey ?? "");
-      if (suggestion.isAgent && pubkey && audienceScope) {
-        const { cursor } = richText.getPlainTextAndCursor();
-        const wasUnpinned =
-          !lockedAgentPubkeys.has(pubkey) &&
-          unpinnedAgentPubkeysRef.current.has(pubkey);
-        if (mentions.isInlineMentionSelection() || wasUnpinned) {
-          applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-          trackMentionAddressedAgent(pubkey);
-          onAutoPinAgentMention?.(suggestion, {
-            reinstateExcluded: !wasUnpinned,
-          });
-          return;
-        }
-
-        applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-        if (!lockedAgentPubkeys.has(pubkey)) {
-          trackMentionAddressedAgent(pubkey);
-          if (onAddressAgentMention) {
-            onAddressAgentMention(suggestion);
-          } else {
-            audience.addPubkey(pubkey);
-            onPulseAddressLock(pubkey);
-          }
-          setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
-        } else {
-          onPulseAddressLock(pubkey);
-        }
-        return;
-      }
-
+      if (currentAudience.current.scopeOwner !== scopeOwner) return;
       const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+      const wasInlineSelection = mentions.isInlineMentionSelection();
+      mentions.selectMention(
+        suggestion,
+        cursor,
+        () => currentAudience.current.scopeOwner === scopeOwner,
+        (edit) => {
+          const pubkey = normalizePubkey(suggestion.pubkey ?? "");
+          if (suggestion.isAgent && pubkey && audienceScope) {
+            const wasUnpinned =
+              !lockedAgentPubkeys.has(pubkey) &&
+              unpinnedAgentPubkeysRef.current.has(pubkey);
+            if (wasInlineSelection || wasUnpinned) {
+              applyAutocompleteEdit(edit);
+              trackMentionAddressedAgent(pubkey);
+              onAutoPinAgentMention?.(suggestion, {
+                reinstateExcluded: !wasUnpinned,
+              });
+              return;
+            }
+
+            applyAutocompleteEdit(edit);
+            if (!lockedAgentPubkeys.has(pubkey)) {
+              trackMentionAddressedAgent(pubkey);
+              if (onAddressAgentMention) {
+                onAddressAgentMention(suggestion);
+              } else {
+                audience.addPubkey(pubkey);
+                onPulseAddressLock(pubkey);
+              }
+              setAnnouncement(
+                `Automatically mentioning ${suggestion.displayName}`,
+              );
+            } else {
+              onPulseAddressLock(pubkey);
+            }
+            return;
+          }
+
+          applyAutocompleteEdit(edit);
+        },
+      );
     },
     [
       applyAutocompleteEdit,
@@ -378,7 +422,8 @@ export function useAgentAddressLockPicker({
       audienceScope,
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
-      mentions.insertMention,
+      mentions.selectMention,
+      scopeOwner,
       onAddressAgentMention,
       onAutoPinAgentMention,
       onPulseAddressLock,
@@ -487,7 +532,7 @@ export function useAgentAddressLockPicker({
   );
 
   return {
-    announcement,
+    announcement: mentions.mentionAdmissionStatus || announcement,
     lockedAgents,
     lockedAgentPubkeys,
     removeAddressedAgent,

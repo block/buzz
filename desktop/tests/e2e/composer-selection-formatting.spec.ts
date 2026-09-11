@@ -307,7 +307,26 @@ for (const format of [
     await input.pressSequentially("before");
     await input.press("Shift+Enter");
     await applyCaretFormat(page, format.label);
-    await input.pressSequentially("inside");
+    // Toolbar focus synchronizes the new caret on a later animation frame.
+    // Locator typing would focus the DOM itself, reviving the old caret.
+    await expect(input).toBeFocused();
+    await expect
+      .poll(() =>
+        input.evaluate((element, selector) => {
+          const block = element.querySelector(`:scope > ${selector}`);
+          const selection = window.getSelection();
+          return (
+            document.activeElement === element &&
+            !!selection?.isCollapsed &&
+            !!selection.anchorNode &&
+            !!selection.focusNode &&
+            !!block?.contains(selection.anchorNode) &&
+            block.contains(selection.focusNode)
+          );
+        }, format.selector),
+      )
+      .toBe(true);
+    await page.keyboard.type("inside");
 
     await expect(input.locator(":scope > p").first()).toHaveText("before");
     await expect(input.locator(`:scope > ${format.selector}`)).toHaveText(

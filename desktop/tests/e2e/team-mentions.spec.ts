@@ -56,7 +56,7 @@ test("owned team mention unfurls into its agents", async ({ page }) => {
     clip: { x: 240, y: 380, width: 800, height: 320 },
   });
 
-  await input.press("Enter");
+  await teamRow.click();
   await expect
     .poll(() => input.evaluate((element) => element.textContent))
     .toContain("Coordinate with Launch Team(@Planner @Builder @Reviewer)");

@@ -14,6 +14,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -22,6 +23,7 @@ import {
 } from "@/shared/lib/trailingDebounce";
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
+import { refreshDirectoryAfterMembershipChange } from "./membershipDirectorySync";
 import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
@@ -319,6 +321,27 @@ export function useLiveChannelUpdates(
         ) {
           options.onThreadReplyDesktopNotification?.(channelId, event);
         }
+      }
+    }
+
+    // A membership change in any subscribed channel must refresh the mention
+    // directory. The mounted-channel refresh only covers the active channel
+    // and the global membership hook only covers viewer-addressed 44100/44101
+    // rows, so background third-party changes would otherwise stay stale
+    // until the focused directory poll. The helper coalesces bursts and
+    // dedupes by event id.
+    if (event.kind === KIND_SYSTEM_MESSAGE) {
+      try {
+        const payload = JSON.parse(event.content) as { type?: string };
+        if (
+          payload.type === "member_joined" ||
+          payload.type === "member_left" ||
+          payload.type === "member_removed"
+        ) {
+          refreshDirectoryAfterMembershipChange(queryClient, event.id);
+        }
+      } catch {
+        // Non-JSON system message — ignore.
       }
     }
 

@@ -1,3 +1,4 @@
+import type { MentionAction, MentionPresence } from "./mentionPresentation";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
@@ -19,6 +20,12 @@ export type MentionSuggestionCandidate = {
   isMember: boolean;
   role?: ChannelRole | null;
   ownerPubkey?: string | null;
+  action?: MentionAction;
+  unavailableReason?: string;
+  presence?: MentionPresence;
+  localLifecycle?: string;
+  localError?: boolean;
+  hasNameCollision?: boolean;
 };
 
 export function mapMentionCandidateToSuggestion(opts: {
@@ -44,6 +51,12 @@ export function mapMentionCandidateToSuggestion(opts: {
     : null;
 
   return {
+    action: candidate.action,
+    unavailableReason: candidate.unavailableReason,
+    presence: candidate.presence,
+    localLifecycle: candidate.localLifecycle,
+    localError: candidate.localError,
+    hasNameCollision: candidate.hasNameCollision,
     pubkey: candidate.pubkey,
     personaId: candidate.personaId ?? undefined,
     teamId: candidate.teamId,
@@ -92,7 +105,7 @@ export function pickDefaultAgentSuggestion(opts: {
     opts.activePersonaIds,
     opts.recentMentionPubkeys,
   );
-  if (!candidate) return null;
+  if (!candidate || candidate.hasNameCollision) return null;
   return mapMentionCandidateToSuggestion({
     ...opts,
     candidate,
