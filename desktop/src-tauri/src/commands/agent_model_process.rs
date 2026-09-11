@@ -38,8 +38,8 @@ pub(super) async fn run_agent_models_command(
         }
         cmd.arg("models")
             .arg("--json")
-            .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
-            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+            .env("BUZZ_ACP_AGENT_COMMAND", &agent_command);
+        crate::managed_agents::set_agent_args_env(&mut cmd, &agent_args);
         if let Some(meta) = known_acp_runtime(&agent_command) {
             for (key, value) in meta.default_env {
                 if std::env::var(key).is_err() {

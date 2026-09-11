@@ -40,6 +40,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // binaries/args as the agent process.
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
+    "BUZZ_ACP_AGENT_ARGS_JSON",
     "BUZZ_ACP_MCP_COMMAND",
     // Control-plane parallelism: the Desktop resolves the effective
     // worker-pool size (applying any per-harness cap) and writes it into
