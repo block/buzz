@@ -3,16 +3,15 @@
 image:
   tag: ""
   digest: ""
+gatewayOrigin: ""
 profiles:
   dogfood:
     appAttestAppId: ""
 httpRoute:
-  # Keep disabled when the platform already routes push.buzz.xyz to this
-  # Service. Gateway API users enable it and inject an explicit parentRef.
+  # Keep disabled when the platform already routes the configured gateway
+  # origin to this Service. Gateway API users enable it and inject a parentRef.
   enabled: false
   parentRefs: []
-  hostnames:
-    - push.buzz.xyz
 networkPolicy:
   apnsEgressCidrs:
     - 0.0.0.0/0

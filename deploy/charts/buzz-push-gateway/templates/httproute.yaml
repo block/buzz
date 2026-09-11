@@ -1,11 +1,13 @@
 {{- if .Values.httpRoute.enabled }}
+{{- $gatewayURL := urlParse (required "gatewayOrigin is required" .Values.gatewayOrigin) }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: {{ include "push.name" . }}
 spec:
   parentRefs: {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
-  hostnames: {{- toYaml .Values.httpRoute.hostnames | nindent 4 }}
+  hostnames:
+    - {{ required "gatewayOrigin must include a hostname" $gatewayURL.host | quote }}
   rules:
     - matches:
         - path: { type: PathPrefix, value: / }

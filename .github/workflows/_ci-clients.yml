@@ -111,7 +111,9 @@ jobs:
       - name: Analyze
         run: cd mobile && flutter analyze
       - name: Test
-        run: cd mobile && flutter test
+        run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test mobile without push configuration
+        run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart
       - name: Build Android debug APK
         run: just mobile-build-android
 

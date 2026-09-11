@@ -32,7 +32,7 @@ spec:
           env:
             - { name: BUZZ_PUSH_BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }
-            - { name: BUZZ_PUSH_PUBLIC_DELIVERY_URL, value: {{ .Values.publicDeliveryUrl | quote }} }
+            - { name: BUZZ_PUSH_GATEWAY_ORIGIN, value: {{ required "gatewayOrigin is required" .Values.gatewayOrigin | quote }} }
             - { name: BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS, value: {{ .Values.maxGrantLifetimeSeconds | quote }} }
             - { name: BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH, value: /run/buzz/app-attest/root.pem }
             - { name: BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID, value: {{ .Values.profiles.dogfood.appAttestAppId | quote }} }

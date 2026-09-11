@@ -18,7 +18,9 @@ migration:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 250m, memory: 128Mi}
-publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
+# Exact externally reachable HTTPS origin. The gateway derives transport routes
+# from this value; NIP-PL v1 App Attest audiences remain registered constants.
+gatewayOrigin: ""
 maxGrantLifetimeSeconds: 2592000
 profiles:
   dogfood:
@@ -41,7 +43,6 @@ httpRoute:
   # existing ingress or service mesh route should keep this disabled.
   enabled: false
   parentRefs: []
-  hostnames: [push.buzz.xyz]
 resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {cpu: "1", memory: 512Mi}

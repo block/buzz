@@ -358,7 +358,16 @@ import os.log
       openNotificationSettings(result: result)
     case "endpointGrants":
       do {
-        result(try endpointGrantStore.records().map(\.flutterArguments))
+        guard let arguments = call.arguments as? [String: Any],
+          let gatewayText = arguments["gatewayUrl"] as? String,
+          let gatewayURL = URL(string: gatewayText)
+        else { throw BuzzDevPushEnrollmentError.invalidGatewayURL }
+        let driver = try BuzzDevPushEnrollmentDriver(
+          gatewayBaseURL: gatewayURL,
+          store: endpointGrantStore,
+          appAttestKeychainAccessGroup: pushKeychainAccessGroup
+        )
+        result(try driver.endpointGrants().map(\.flutterArguments))
       } catch {
         result(
           FlutterError(

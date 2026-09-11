@@ -5,6 +5,7 @@ use crate::{
     authority::{
         AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
     },
+    config::GatewayUrls,
     grant::GrantKeyring,
     model::*,
     token::TokenKeyring,
@@ -46,7 +47,8 @@ pub struct AppState {
     /// Server-owned dogfood application identity and APNs transport. The wire
     /// profile selector is fixed and App Attest verifies the configured app ID.
     pub profile: Arc<ProfileRuntime>,
-    pub delivery_url: url::Url,
+    /// Security-sensitive endpoints and audiences derived from one gateway origin.
+    pub gateway_urls: Arc<GatewayUrls>,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -88,11 +90,15 @@ fn decode_challenge(value: &str) -> Option<[u8; 32]> {
 fn authority_error(e: AuthorityError) -> Response {
     match e {
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
+        AuthorityError::Conflict => installation_conflict(),
         AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
         AuthorityError::Unavailable => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
     }
+}
+fn installation_conflict() -> Response {
+    error(StatusCode::CONFLICT, "installation_conflict")
 }
 fn endpoint_bytes(endpoint: &str) -> Option<Vec<u8>> {
     valid_endpoint(endpoint)
@@ -151,7 +157,7 @@ async fn challenge(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct EnrollTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     key_id: &'a str,
@@ -186,7 +192,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let t = EnrollTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations",
+        audience: &s.gateway_urls.enroll_audience,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         key_id: &r.key_id,
@@ -232,7 +238,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
             )
                 .into_response();
         }
-        Ok(Some(_)) => return error(StatusCode::NOT_FOUND, "not_authorized"),
+        Ok(Some(_)) => return installation_conflict(),
         Ok(None) => {}
         Err(e) => return authority_error(e),
     }
@@ -273,23 +279,31 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         .into_response()
 }
 
+struct AssertionChallenge<'a> {
+    id: uuid::Uuid,
+    text: &'a str,
+}
+
 async fn verify_installation_assertion<T: serde::Serialize>(
     s: &AppState,
     installation_id: uuid::Uuid,
-    challenge_id: uuid::Uuid,
-    challenge_text: &str,
+    challenge: AssertionChallenge<'_>,
     assertion: &str,
     domain: &str,
     signed: &T,
+    include_revoked: bool,
 ) -> Result<(), Response> {
     let now = (s.now)();
-    let challenge = decode_challenge(challenge_text)
+    let challenge_bytes = decode_challenge(challenge.text)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let installation = s
-        .authority
-        .installation(installation_id, now)
-        .await
-        .map_err(authority_error)?;
+    let installation = if include_revoked {
+        s.authority
+            .installation_for_revocation(installation_id, now)
+            .await
+    } else {
+        s.authority.installation(installation_id, now).await
+    }
+    .map_err(authority_error)?;
     if installation.profile != AppProfile::BuzzIosDogfood {
         return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
     }
@@ -303,12 +317,12 @@ async fn verify_installation_assertion<T: serde::Serialize>(
             transcript.as_bytes(),
             &installation.app_attest_public_key,
             installation.assertion_counter,
-            challenge_text,
-            challenge_text,
+            challenge.text,
+            challenge.text,
         )
         .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
     s.authority
-        .consume_challenge(challenge_id, challenge, now)
+        .consume_challenge(challenge.id, challenge_bytes, now)
         .await
         .map_err(authority_error)?;
     s.authority
@@ -324,7 +338,7 @@ async fn verify_installation_assertion<T: serde::Serialize>(
 #[derive(serde::Serialize)]
 struct DelegateTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -352,7 +366,7 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = DelegateTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/delegations",
+        audience: &s.gateway_urls.delegate_audience,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -365,11 +379,14 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.delegate.v1",
         &t,
+        false,
     )
     .await
     {
@@ -413,7 +430,7 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RotateTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -446,7 +463,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let t = RotateTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations/endpoint",
+        audience: &s.gateway_urls.rotate_endpoint_audience,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -457,11 +474,14 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.rotate-endpoint.v1",
         &t,
+        false,
     )
     .await
     {
@@ -489,7 +509,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RevokeDelegationTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -506,7 +526,7 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = RevokeDelegationTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/delegations/revoke",
+        audience: &s.gateway_urls.revoke_delegation_audience,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -516,11 +536,14 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.revoke-delegation.v1",
         &t,
+        false,
     )
     .await
     {
@@ -538,7 +561,7 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RevokeInstallationTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -558,7 +581,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
     let t = RevokeInstallationTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations/revoke",
+        audience: &s.gateway_urls.revoke_installation_audience,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -568,11 +591,14 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.revoke-installation.v1",
         &t,
+        true,
     )
     .await
     {
@@ -613,7 +639,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     };
     let relay = match verify_auth_header(
         auth,
-        &s.delivery_url,
+        &s.gateway_urls.delivery,
         HttpMethod::POST,
         Timestamp::now(),
         Some(&body),
@@ -658,6 +684,11 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             permit
         }
         Err(AuthorityError::Rejected) => {
+            crate::metrics::record_admission(crate::metrics::Admission::Rejected);
+            crate::metrics::record_delivery_error("invalid_grant");
+            return error(StatusCode::NOT_FOUND, "invalid_grant");
+        }
+        Err(AuthorityError::Conflict) => {
             crate::metrics::record_admission(crate::metrics::Admission::Rejected);
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
@@ -875,7 +906,9 @@ mod request_limit_tests {
                 app_attest: Arc::new(app_attest),
                 transport: Arc::new(NeverTransport),
             }),
-            delivery_url: "https://push.buzz.xyz/v1/deliveries/apns".parse().unwrap(),
+            gateway_urls: Arc::new(
+                GatewayUrls::from_origin("https://push.example".parse().unwrap()).unwrap(),
+            ),
             max_grant_lifetime_seconds: 86_400,
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,
@@ -932,6 +965,15 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn live_installation_conflict_has_an_unambiguous_status() {
+        assert_eq!(
+            authority_error(AuthorityError::Conflict).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(installation_conflict().status(), StatusCode::CONFLICT);
     }
 
     #[test]

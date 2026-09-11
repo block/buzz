@@ -145,6 +145,7 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(_channel, (call) async {
       expect(call.method, 'endpointGrants');
+      expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
       return [_grantMap('opaque-grant')];
     });
 
