@@ -1261,7 +1261,15 @@ fn build_git_issue_assignee_operation(
         tags.push(tag(&["prior", &prior])?);
     }
 
-    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+    // `allow_self_tagging` because an assignee may be the signer, and that is
+    // the normal case: an agent claiming work, or a person clicking "Assign to
+    // me". `nostr` removes a `p` tag matching the author by default, which
+    // silently produced assignment events naming nobody — the operation
+    // published, the comment read "Assigned this issue to …", and the assignee
+    // list stayed empty. Here the `p` tags *are* the payload, not a mention.
+    Ok(EventBuilder::new(Kind::Custom(1), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
@@ -3709,6 +3717,55 @@ mod tests {
         };
         let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    /// The failure this guards: `nostr` removes a `p` tag naming the author
+    /// unless `allow_self_tagging` is set, so a self-assignment published an
+    /// event with no assignee in it. The comment log still read "Assigned this
+    /// issue to …" while the assignee list stayed empty — for agents claiming
+    /// their own work and for anyone clicking "Assign to me".
+    #[test]
+    fn self_assignment_keeps_the_assignee() {
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let builder = build_git_issue_assignment(
+            &repo,
+            &"d".repeat(64),
+            std::slice::from_ref(&me),
+            "Assigned this issue to me",
+        )
+        .unwrap();
+        let ev = builder.sign_with_keys(&keys).unwrap();
+        assert!(
+            has_tag(&ev, "p", &me),
+            "the assignee is the payload, not a mention: {:?}",
+            ev.tags
+        );
+    }
+
+    /// Unassigning yourself is the same shape and failed the same way.
+    #[test]
+    fn self_unassignment_keeps_the_assignee() {
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let ev = build_git_issue_unassignment(
+            &repo,
+            &"d".repeat(64),
+            std::slice::from_ref(&me),
+            "Unassigned me from this issue",
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+        assert!(has_tag(&ev, "p", &me));
     }
 
     #[test]
