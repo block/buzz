@@ -171,6 +171,7 @@ export function PersonaAdvancedFields({
             Conversation context
           </label>
           <PersonaDropdownField
+            ariaDescribedBy="persona-session-policy-description"
             disabled={disabled}
             id="persona-session-policy"
             onValueChange={(value) =>
@@ -186,7 +187,10 @@ export function PersonaAdvancedFields({
             placeholder="Entire channel"
             value={behaviorDraft.sessionPolicy}
           />
-          <p className="text-xs text-muted-foreground">
+          <p
+            className="text-xs text-muted-foreground"
+            id="persona-session-policy-description"
+          >
             {behaviorDraft.sessionPolicy === "thread"
               ? "Keeps a separate conversation for each channel thread. Direct messages remain shared."
               : "Shares one conversation across every thread in a channel."}

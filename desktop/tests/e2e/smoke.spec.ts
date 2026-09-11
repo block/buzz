@@ -247,7 +247,15 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
   await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
-  await page.locator("#persona-session-policy").click();
+  const sessionPolicy = page.locator("#persona-session-policy");
+  await expect(sessionPolicy).toHaveAttribute(
+    "aria-describedby",
+    "persona-session-policy-description",
+  );
+  await expect(
+    page.locator("#persona-session-policy-description"),
+  ).toBeVisible();
+  await sessionPolicy.click();
   await page
     .getByRole("menuitemradio", { exact: true, name: "Each thread" })
     .click();

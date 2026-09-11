@@ -3541,7 +3541,8 @@ function mockPersonaCatalogPublications() {
       });
     };
     const rawDescription = content.description;
-    const sessionPolicy = content.session_policy ?? "channel";
+    const sessionPolicy =
+      content.session_policy === "thread" ? "thread" : "channel";
     if (
       typeof displayName !== "string" ||
       !displayName.trim() ||
@@ -3555,8 +3556,7 @@ function mockPersonaCatalogPublications() {
         typeof rawDescription !== "string") ||
       (typeof rawDescription === "string" &&
         ([...rawDescription].length > 280 ||
-          !hasValidVisibleText(rawDescription, false))) ||
-      (sessionPolicy !== "channel" && sessionPolicy !== "thread")
+          !hasValidVisibleText(rawDescription, false)))
     )
       continue;
     publications.push({
