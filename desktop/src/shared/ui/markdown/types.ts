@@ -47,6 +47,18 @@ export type MarkdownRuntime = {
   onOpenEntityLink: (link: ParsedEntityLink) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
   /**
+   * Called when a GFM task-list checkbox is clicked, with the checkbox's
+   * ordinal (stamped by `rehypeTaskIndex`) and the state the user asked for.
+   * The implementation flips that marker in the message source and persists
+   * the edit — see `toggleTaskMarker.mjs`.
+   *
+   * Optional, and absent means read-only: every surface that renders
+   * untrusted or unowned content (forum posts, profile bios, project
+   * READMEs, previews) simply omits it and keeps today's disabled checkbox.
+   * Interactivity is therefore opt-in per surface, never inherited.
+   */
+  onToggleTask?: (taskIndex: number, checked: boolean) => void;
+  /**
    * The resolved relay origin (e.g. `https://buzz.block.builderlab.xyz`),
    * or `null` when not yet resolved. Used by the anchor component to
    * validate that clone-URL rewrites point to the active relay only.
@@ -100,6 +112,12 @@ export type MarkdownProps = {
   /** Inline content prepended inside the first rendered prose paragraph. */
   leadingInlineContent?: React.ReactNode;
   onRemoveLinkPreviewsForEveryone?: () => Promise<void>;
+  /**
+   * Makes GFM task-list checkboxes clickable. Supply only where the viewer
+   * may edit the underlying message (see `canManageMessageForCurrentUser`);
+   * omitting it keeps the checkboxes rendered but inert.
+   */
+  onToggleTask?: (taskIndex: number, checked: boolean) => void;
   searchQuery?: string;
   /** Display name shown in shared-agent card metadata. */
   snapshotSharedBy?: string;

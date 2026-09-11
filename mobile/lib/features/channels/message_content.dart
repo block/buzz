@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/markdown/task_list_md.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -133,6 +134,12 @@ class MessageContent extends HookConsumerWidget {
   /// gutter while keeping its first image and count aligned with the body.
   final double mediaCarouselTrailingOverflow;
 
+  /// Persists a GFM task-list checkbox tap. Supplied only where the reader may
+  /// edit the message (`canManageMessage`); leaving it null keeps the
+  /// checkboxes rendered but inert, which is what every read-only surface
+  /// (forum posts, notes, inbox previews) wants.
+  final TaskToggleCallback? onToggleTask;
+
   const MessageContent({
     super.key,
     required this.content,
@@ -150,6 +157,7 @@ class MessageContent extends HookConsumerWidget {
     this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
+    this.onToggleTask,
   });
 
   @override
@@ -285,6 +293,7 @@ class MessageContent extends HookConsumerWidget {
             _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
         textAlign: textAlign,
         maxLines: maxLines,
+        components: taskAwareComponents(onToggle: onToggleTask),
         inlineComponents: [
           _MentionMd(
             mentionNames: resolvedMentionNames,

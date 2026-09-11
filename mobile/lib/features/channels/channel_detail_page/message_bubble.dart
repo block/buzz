@@ -222,6 +222,15 @@ class _MessageBubble extends HookConsumerWidget {
                                 agentMentionPubkeys: agentMentionPubkeys,
                                 channelNames: channelNames,
                                 tags: message.tags,
+                                onToggleTask: canManageMessage
+                                    ? (taskIndex, checked) => _toggleTask(
+                                        ref: ref,
+                                        channelId: currentChannelId,
+                                        message: message,
+                                        taskIndex: taskIndex,
+                                        checked: checked,
+                                      )
+                                    : null,
                                 baseStyle: messageBodyTextStyle.copyWith(
                                   color: context.colors.onSurface,
                                 ),
@@ -363,4 +372,42 @@ IconData channelIcon(Channel channel) {
   if (channel.isPrivate) return LucideIcons.lock;
   if (channel.isForum) return LucideIcons.messageSquareText;
   return LucideIcons.hash;
+}
+
+/// Persists a task-list checkbox tap as an edit of the message that holds it.
+///
+/// Carries the original tags forward deliberately: an edit's tags *replace*
+/// the target's rather than merging into them (see `timeline_message.dart`,
+/// `edit?.tags ?? event.tags`), so publishing a bare edit here would strip the
+/// message's attachments, mentions and custom emoji. `h` and `e` are dropped
+/// because `editMessage` writes its own.
+///
+/// A null result from [toggleTaskMarker] means the ordinal no longer resolves
+/// — the message changed between the draw and the tap — and the safe response
+/// is to write nothing.
+void _toggleTask({
+  required WidgetRef ref,
+  required String channelId,
+  required TimelineMessage message,
+  required int taskIndex,
+  required bool checked,
+}) {
+  final content = toggleTaskMarker(message.content, taskIndex, checked);
+  if (content == null) return;
+  unawaited(
+    ref
+        .read(channelActionsProvider)
+        .editMessage(
+          channelId: channelId,
+          eventId: message.id,
+          content: content,
+          mediaTags: [
+            for (final tag in message.tags)
+              if (tag.isNotEmpty && tag[0] != 'h' && tag[0] != 'e') tag,
+          ],
+        )
+        .catchError((Object error) {
+          debugPrint('[TaskList] toggle failed: $error');
+        }),
+  );
 }

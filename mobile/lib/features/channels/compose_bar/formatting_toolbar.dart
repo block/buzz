@@ -2,8 +2,12 @@ part of '../compose_bar.dart';
 
 class _FormattingToolbar extends StatelessWidget {
   final void Function(String prefix, [String? suffix]) onFormat;
+  final VoidCallback onInsertTask;
 
-  const _FormattingToolbar({required this.onFormat});
+  const _FormattingToolbar({
+    required this.onFormat,
+    required this.onInsertTask,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -25,6 +29,11 @@ class _FormattingToolbar extends StatelessWidget {
           icon: LucideIcons.strikethrough,
           tooltip: 'Strikethrough',
           onTap: () => onFormat('~~'),
+        ),
+        _FormatButton(
+          icon: LucideIcons.listChecks,
+          tooltip: 'Task',
+          onTap: onInsertTask,
         ),
         _FormatButton(
           icon: LucideIcons.code,

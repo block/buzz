@@ -12,6 +12,7 @@ import { getSendToChannelSemantics } from "@/features/messages/lib/sendToChannel
 import { summarizeThreadRoot } from "@/features/messages/lib/sentFromThread";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { toggleTaskMarker } from "@/shared/lib/toggleTaskMarker.mjs";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -91,6 +92,8 @@ export function useChannelPaneHandlers({
 
   const deleteMutateRef = React.useRef(deleteMessageMutation.mutateAsync);
   deleteMutateRef.current = deleteMessageMutation.mutateAsync;
+  const editMutateRef = React.useRef(editMessageMutation.mutateAsync);
+  editMutateRef.current = editMessageMutation.mutateAsync;
 
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
@@ -211,6 +214,25 @@ export function useChannelPaneHandlers({
       onRequestEmptyEditDelete,
       setEditTargetId,
     ],
+  );
+
+  // Checking a task-list box is an edit of the message that contains it.
+  // Deliberately publishes content only: `mediaTags`/`mentionPubkeys` stay
+  // undefined so `applyEditTagOverlay` passes the original tags through,
+  // which keeps attachments intact and re-wakes nobody (a checkbox is not a
+  // mention). `toggleTaskMarker` returns null when the ordinal no longer
+  // resolves — the message changed under the click — and the safe response
+  // there is to write nothing.
+  const handleToggleTask = React.useCallback(
+    (message: TimelineMessage, taskIndex: number, checked: boolean) => {
+      const content = toggleTaskMarker(message.body, taskIndex, checked);
+      if (content === null) return;
+      // Failure is surfaced via the mutation's onError toast.
+      void editMutateRef
+        .current({ eventId: message.id, content })
+        .catch(() => {});
+    },
+    [],
   );
 
   const handleOpenThread = React.useCallback(
@@ -430,6 +452,7 @@ export function useChannelPaneHandlers({
     handleDelete,
     handleEdit,
     handleEditSave,
+    handleToggleTask,
     handleExpandThreadReplies,
     handleOpenThread,
     requireThreadEditResolution,

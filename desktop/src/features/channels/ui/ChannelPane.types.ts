@@ -103,6 +103,11 @@ export type ChannelPaneProps = {
   onCloseThread: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onToggleTask?: (
+    message: TimelineMessage,
+    taskIndex: number,
+    checked: boolean,
+  ) => void;
   onEditSave?: (
     content: string,
     mediaTags?: string[][],
