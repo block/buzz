@@ -360,6 +360,34 @@ fn align_unborn_head_branch(
     .map(|_| ())
 }
 
+/// On Windows, `Path::canonicalize()` returns an extended-length path
+/// (`\\?\C:\...`) which Git for Windows rejects as an invalid argument when
+/// passed as a CLI destination. Strip the prefix at the command boundary so
+/// external tooling receives an ordinary absolute path, while retaining the
+/// canonicalized path internally for containment/security checks. See #3707.
+#[cfg(windows)]
+pub(crate) fn path_for_external_command(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut components = path.components();
+    if let Some(Component::Prefix(prefix_component)) = components.next() {
+        if let std::path::Prefix::VerbatimDisk(letter) = prefix_component.kind() {
+            let mut stripped = std::path::PathBuf::from(format!("{}:\\", letter as char));
+            for component in components {
+                if let Component::Normal(part) = component {
+                    stripped.push(part);
+                }
+            }
+            return stripped;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn path_for_external_command(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
 pub(crate) fn clone_project_repository_blocking(
     repos_dir: Option<&str>,
     project_dtag: &str,
@@ -389,7 +417,12 @@ pub(crate) fn clone_project_repository_blocking(
             repo_dir.display()
         ));
     }
-    let repo_path = repo_dir
+    // On Windows, the canonicalized repos_root may carry a verbatim (`\\?\`)
+    // prefix, which Git for Windows rejects as an invalid argument. Convert
+    // to the ordinary absolute form only at this external CLI boundary;
+    // internal containment checks retain the canonical path (#3707).
+    let repo_dir_for_git = path_for_external_command(&repo_dir);
+    let repo_path = repo_dir_for_git
         .to_str()
         .ok_or_else(|| "repository path is not UTF-8".to_string())?;
 
@@ -894,5 +927,39 @@ mod tests {
             Timestamp::now().as_secs(),
         )
         .is_err());
+    }
+
+    /// #3707 — Windows-only regression: a verbatim-prefixed destination must
+    /// never reach the `git clone` CLI. On non-Windows hosts this still
+    /// exercises the compile truth (the helper is cfg-gated); on Windows CI
+    /// this validates the strip.
+    #[test]
+    fn clone_args_strip_verbatim_prefix_from_destination() {
+        // The input has to be the VERBATIM form -- the shape canonicalize()
+        // produces, and the only shape the Windows branch rewrites. A relative
+        // path made the assertion unreachable on Windows: it compared the
+        // untouched input against the stripped expectation and failed, while
+        // passing elsewhere because only the else branch ran (@mex-i, verified
+        // on git 2.55.0.windows.3).
+        let input = std::path::Path::new(r"\\?\C:\Users\test\.buzz\REPOS\owner--repo");
+        let result = super::path_for_external_command(input);
+        if cfg!(windows) {
+            assert_eq!(
+                result,
+                std::path::Path::new(r"C:\Users\test\.buzz\REPOS\owner--repo")
+            );
+        } else {
+            assert_eq!(result, input);
+        }
+    }
+
+    #[test]
+    fn path_for_external_command_leaves_ordinary_absolute_paths_alone() {
+        let input = std::path::Path::new(if cfg!(windows) {
+            r"C:\Users\test\.buzz\REPOS\owner--repo"
+        } else {
+            "/home/test/.buzz/REPOS/owner--repo"
+        });
+        assert_eq!(super::path_for_external_command(input), input);
     }
 }
