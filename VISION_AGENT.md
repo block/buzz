@@ -1,5 +1,7 @@
 # Vision: buzz-agent + buzz-dev-mcp
 
+For the broader collaborator model, see [Agent Collaboration](VISION_AGENT_COLLABORATION.md).
+
 ## The Problem
 
 A coding agent should be small enough to hold in your head. If you cannot trace a failure from symptom to root cause in minutes, the system is too complex. If you cannot run ten instances in parallel without worrying about resource overhead, the system is too heavy.
