@@ -337,6 +337,35 @@ pub fn build_managed_agent_summary(
     })
 }
 
+/// Pure predicate: should the "Restart required" badge fire?
+///
+/// An orphaned linked instance (its persona/definition no longer exists)
+/// can never be restarted successfully — `spawn_agent_child` refuses to
+/// spawn it before any process side effect. Surfacing "Restart required"
+/// for one would offer an action guaranteed to fail, so this always
+/// returns `false` for an orphan regardless of drift. Extracted for unit
+/// testing without `AppHandle`/global state, following the
+/// `availability_drift` pattern in `discovery.rs`.
+fn restart_eligible(persona_orphaned: bool, hash_drift: bool, availability_drift: bool) -> bool {
+    !persona_orphaned && (hash_drift || availability_drift)
+}
+
+/// Format a git-credential helper path for `credential.helper` (#3298).
+///
+/// Git runs `credential.helper` through a shell, so a helper path with
+/// spaces (e.g. `C:\Users\Jane Doe\…`) gets tokenized and never invoked.
+/// Single-quote wrap when the path contains a space. `!` prefix (shell
+/// snippet) must not be re-wrapped. Backslashes (Windows) get rewritten to
+/// forward slashes so MinGW bash doesn't treat them as escapes.
+fn git_credential_helper_value(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw.contains(' ') && !raw.starts_with('!') {
+        format!("'{raw}'")
+    } else {
+        raw
+    }
+}
+
 pub fn find_managed_agent_mut<'a>(
     records: &'a mut [ManagedAgentRecord],
     pubkey: &str,
@@ -736,7 +765,11 @@ pub fn spawn_agent_child(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
         );
-        let helper = cred_helper.to_string_lossy().replace('\\', "/");
+        // Git runs `credential.helper` through a shell, so a helper path with
+        // Git runs `credential.helper` through a shell; a spaced helper path
+        // gets tokenized and never runs. Wrap in quotes — see #3298 and
+        // `git_credential_helper_value` for edge cases.
+        let helper = git_credential_helper_value(&cred_helper);
         command.env("GIT_CONFIG_VALUE_0", helper);
         command.env(
             "GIT_CONFIG_KEY_1",
