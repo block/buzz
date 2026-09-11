@@ -898,14 +898,8 @@ async fn handle_workflow_trigger(
         ..Default::default()
     };
     if !event.content.is_empty() {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&event.content) {
-            for (k, v) in map {
-                let val_str = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                trigger_ctx.webhook_fields.insert(k, val_str);
-            }
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            trigger_ctx.webhook_fields = buzz_workflow::executor::flatten_webhook_body(&body);
         }
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
