@@ -1574,12 +1574,9 @@ test("channels tab opens the latest matching conversation without leaving the pr
   await expect(discussedAgent).not.toBeFocused();
   await expect(discussedHuman).not.toBeFocused();
   await waitForAnimations(page);
-  await channelRow.screenshot({
-    caret: "hide",
-    path: `${SHOTS}/06-project-facepile-separator.png`,
-    scale: "css",
-  });
   await expect(discussedAgent).toHaveCSS("clip-path", "none");
+  await expect(discussedAgent).toHaveCSS("isolation", "isolate");
+  await expect(discussedHuman).toHaveCSS("isolation", "isolate");
   await expect(discussedAgent).not.toHaveClass(
     /(?:^|\s)rounded-squircle(?:\s|$)/,
   );
@@ -1626,6 +1623,40 @@ test("channels tab opens the latest matching conversation without leaving the pr
   expect((agentBox?.x ?? 0) - (humanBox?.x ?? 0)).toBeLessThan(
     humanBox?.width ?? 0,
   );
+  const separatorScreenshot = await page.screenshot({ caret: "hide" });
+  const separatorPixel = await page.evaluate(
+    async ({ screenshot, x, y }) => {
+      const response = await fetch(`data:image/png;base64,${screenshot}`);
+      const image = await createImageBitmap(await response.blob());
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("2D canvas context unavailable");
+      context.drawImage(image, 0, 0);
+      const scaleX = image.width / window.innerWidth;
+      const scaleY = image.height / window.innerHeight;
+      return Array.from(
+        context.getImageData(
+          Math.round(x * scaleX),
+          Math.round(y * scaleY),
+          1,
+          1,
+        ).data,
+      );
+    },
+    {
+      screenshot: separatorScreenshot.toString("base64"),
+      x: (agentBox?.x ?? 0) - 1,
+      y: (agentBox?.y ?? 0) + (agentBox?.height ?? 0) / 2,
+    },
+  );
+  const separatorRgb = agentSeparator.backgroundColor
+    .match(/\d+(?:\.\d+)?/g)
+    ?.slice(0, 3)
+    .map(Number);
+  expect(separatorRgb).toHaveLength(3);
+  expect(separatorPixel.slice(0, 3)).toEqual(separatorRgb);
 
   await discussedAgent.focus();
   await expect(discussedAgent).toBeFocused();

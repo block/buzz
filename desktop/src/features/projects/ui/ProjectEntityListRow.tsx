@@ -36,7 +36,7 @@ export function ProjectEntityFacepile({
         const label = resolveUserLabel({ profiles, pubkey });
         const isAgent = profiles?.[pubkey]?.isAgent === true;
         const separatorClassName = cn(
-          "relative inline-flex before:pointer-events-none before:absolute before:-inset-0.5 before:bg-background before:content-['']",
+          "isolate relative inline-flex before:pointer-events-none before:absolute before:-inset-0.5 before:bg-background before:content-['']",
           isAgent ? "before:rounded-squircle" : "before:rounded-full",
         );
         const avatar = (
