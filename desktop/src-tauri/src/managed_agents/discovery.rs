@@ -585,16 +585,22 @@ fn resolve_buzz_managed_command(command: &str) -> Option<PathBuf> {
 }
 
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
-    if let Some(path) = resolve_workspace_command(command) {
-        return Some(path);
+    // If the operator wrote an explicit path (absolute or multi-component),
+    // honor ONLY that path — never let it fall through to workspace target
+    // resolution. A bare command name, by contrast, gets resolved through the
+    // user/system order below, and only drops to workspace target/debug as a
+    // last-resort dev convenience.
+    if command_looks_like_path(command) {
+        let path = PathBuf::from(command);
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+        // Path input but not executable — bail rather than fall through to
+        // bare-name workspace resolution (would silently mislead).
+        return None;
     }
 
     let basenames = command_basenames(command);
-
-    if command_looks_like_path(command) {
-        let path = PathBuf::from(command);
-        return path.exists().then_some(path);
-    }
 
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
@@ -604,6 +610,18 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         if is_executable_file(&candidate) {
             return Some(candidate);
         }
+    }
+
+    // Bare-name fallback for dev workflows: resolve to the workspace's
+    // target/{debug,release} build. This enables `buzz-acp` managed agents
+    // to work out-of-the-box during `cargo build` development without the
+    // operator needing to install to `~/.local/bin`. Workspace target is
+    // intentionally LAST so user-installed binaries always win — otherwise
+    // `cargo build` can clobber a pinned, known-good harness binary with
+    // a fresh but semantically different debug build and the agent's
+    // behavior silently regresses after `tauri dev` restart (#4233 item C).
+    if let Some(path) = resolve_workspace_command(command) {
+        return Some(path);
     }
 
     // On Windows, also scan PATH for .cmd/.bat shims (npm globals).
