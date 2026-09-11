@@ -205,6 +205,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     metrics::set_global_recorder(recorder)
         .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
+    describe_community_admission_metrics();
     describe_db_pool_metrics();
     tokio::spawn(exporter);
     Ok(())
@@ -219,24 +220,37 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         .unwrap_or_else(|error| panic!("metrics exporter must install exactly once: {error}"));
 }
 
-/// Register the frozen readiness metric descriptions with the active recorder.
+/// Register the frozen readiness and dependency-diagnostic metric descriptions.
+///
+/// The two `buzz_readiness_*` probe families describe local process lifecycle.
+/// The two dependency families keep their names for dashboard continuity but
+/// are sampled by the diagnostic `/_status` endpoint, not by the Kubernetes
+/// probe — a shared-dependency failure no longer deroutes the pod.
 pub(crate) fn describe_readiness_metrics() {
     metrics::describe_counter!(
         "buzz_readiness_checks_total",
-        "Kubernetes health-listener readiness probes by terminal bounded reason"
+        "Kubernetes health-listener readiness probes by lifecycle reason (ready, shutting_down)"
     );
     metrics::describe_counter!(
         "buzz_readiness_dependency_checks_total",
-        "Completed readiness dependency attempts by dependency and bounded outcome"
+        "Completed /_status dependency attempts by dependency and bounded outcome"
     );
     metrics::describe_histogram!(
         "buzz_readiness_check_duration_seconds",
         metrics::Unit::Seconds,
-        "Completed readiness check duration without outcome label multiplication"
+        "Completed /_status dependency check duration without outcome label multiplication"
     );
     metrics::describe_gauge!(
         "buzz_readiness_state",
-        "Latest publishable readiness state by check, where 1 is ready and 0 is not ready"
+        "Local readiness of this process, where 1 is ready and 0 is shutting down"
+    );
+}
+
+/// Register the bounded community-admission contract.
+pub(crate) fn describe_community_admission_metrics() {
+    metrics::describe_counter!(
+        "buzz_community_admission_checks_total",
+        "Durable community-active checks at socket admission by bounded outcome"
     );
 }
 

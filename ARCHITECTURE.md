@@ -625,7 +625,7 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 | GET | `/.well-known/nostr.json` | NIP-05 identity |
 | GET | `/health` | Health check |
 | GET | `/_liveness` | Liveness probe |
-| GET | `/_readiness` | Readiness probe |
+| GET | `/_readiness` | Readiness probe — local process lifecycle only |
 | POST | `/events` | Submit a signed Nostr event over HTTP (same ingest path as WebSocket `EVENT`) |
 | POST | `/query` | Query Nostr events over HTTP with NIP-01 filters |
 | POST | `/count` | Count Nostr events over HTTP with NIP-45 filters |
