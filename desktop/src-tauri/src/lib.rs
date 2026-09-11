@@ -646,6 +646,7 @@ pub fn run() {
             get_feed,
             search_messages,
             send_channel_message,
+            confirm_workdrive_owner_request,
             send_managed_agent_channel_message,
             has_managed_agent_channel_message_marker,
             get_forum_posts,
