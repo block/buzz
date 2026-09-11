@@ -77,3 +77,48 @@ test("a forked triage-action chain refuses the triage action up front", async ()
     BwConflictError,
   );
 });
+
+function withMockInvoke(handler) {
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: handler } };
+}
+
+test("a matching delegation submits delegate:true and skips the previous tag (P4F)", async () => {
+  const existingHead = record("1".repeat(64), { record: "triage-action" });
+  let captured;
+  withMockInvoke(async (_cmd, args) => {
+    captured = args;
+    return { eventId: "z".repeat(64), projection: {} };
+  });
+  await submitBwTriageAction({
+    delegate: true,
+    fields: { action: "accept" },
+    issueId,
+    repo,
+    snapshot: snapshot([existingHead]),
+  });
+  assert.equal(captured.input.delegate, true);
+  assert.equal(
+    captured.input.tags.some((tag) => tag[0] === "previous"),
+    false,
+  );
+});
+
+test("no delegation keeps delegate:false and the ordinary previous chain (P4F)", async () => {
+  const existingHead = record("1".repeat(64), { record: "triage-action" });
+  let captured;
+  withMockInvoke(async (_cmd, args) => {
+    captured = args;
+    return { eventId: "z".repeat(64), projection: {} };
+  });
+  await submitBwTriageAction({
+    fields: { action: "accept" },
+    issueId,
+    repo,
+    snapshot: snapshot([existingHead]),
+  });
+  assert.equal(captured.input.delegate, false);
+  assert.deepEqual(
+    captured.input.tags.find((tag) => tag[0] === "previous"),
+    ["previous", existingHead.id],
+  );
+});

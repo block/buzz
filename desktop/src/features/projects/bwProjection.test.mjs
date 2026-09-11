@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bwChainHead, bwFieldConflict, mergeBwIssues } from "./bwProjection.ts";
+import {
+  bwChainHead,
+  bwFieldConflict,
+  bwMatchingTriageDelegation,
+  mergeBwIssues,
+} from "./bwProjection.ts";
 import { eventToProjectIssue } from "./projectIssues.mjs";
 
 const root = {
@@ -153,4 +158,85 @@ test("bwFieldConflict flags an issue whose issue-update chain forked", () => {
   };
   assert.equal(bwFieldConflict(s, root.id), true);
   assert.equal(bwFieldConflict(s, "unrelated-issue"), false);
+});
+
+function policyRecord(id, triageDelegations) {
+  return {
+    id,
+    pubkey: "b".repeat(64),
+    created_at: 1,
+    kind: 46100,
+    tags: [["record", "role-policy"]],
+    content: JSON.stringify({ triage_delegations: triageDelegations }),
+  };
+}
+
+test("bwMatchingTriageDelegation matches the exact issue/action/signer pair before expiry", () => {
+  const s = snapshot("triage");
+  const policyId = "p".repeat(64);
+  s.activation = { policy: policyId, genesis: "g".repeat(64) };
+  s.records[policyId] = policyRecord(policyId, [
+    {
+      action: "accept",
+      delegate: "e".repeat(64),
+      expires_at: 1000,
+      issue: root.id,
+    },
+  ]);
+  assert.equal(
+    bwMatchingTriageDelegation(s, root.id, "accept", "e".repeat(64), 500),
+    true,
+  );
+});
+
+test("bwMatchingTriageDelegation is false with no matching delegation entry", () => {
+  const s = snapshot("triage");
+  const policyId = "p".repeat(64);
+  s.activation = { policy: policyId, genesis: "g".repeat(64) };
+  s.records[policyId] = policyRecord(policyId, []);
+  assert.equal(
+    bwMatchingTriageDelegation(s, root.id, "accept", "e".repeat(64), 500),
+    false,
+  );
+  // No activated policy at all behaves the same way.
+  assert.equal(
+    bwMatchingTriageDelegation(
+      snapshot("triage"),
+      root.id,
+      "accept",
+      "e".repeat(64),
+      500,
+    ),
+    false,
+  );
+});
+
+test("bwMatchingTriageDelegation rejects an expired or another signer's delegation", () => {
+  const s = snapshot("triage");
+  const policyId = "p".repeat(64);
+  s.activation = { policy: policyId, genesis: "g".repeat(64) };
+  s.records[policyId] = policyRecord(policyId, [
+    {
+      action: "accept",
+      delegate: "e".repeat(64),
+      expires_at: 100,
+      issue: root.id,
+    },
+  ]);
+  assert.equal(
+    bwMatchingTriageDelegation(s, root.id, "accept", "e".repeat(64), 500),
+    false,
+  );
+  s.records[policyId] = policyRecord(policyId, [
+    {
+      action: "accept",
+      delegate: "e".repeat(64),
+      expires_at: 1000,
+      issue: root.id,
+    },
+  ]);
+  assert.equal(
+    bwMatchingTriageDelegation(s, root.id, "accept", "f".repeat(64), 500),
+    false,
+  );
 });

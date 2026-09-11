@@ -6,7 +6,10 @@ import type {
   ProjectIssue,
   Repository as Project,
 } from "@/features/projects/hooks";
-import { bwAssignmentHead } from "@/features/projects/bwProjection";
+import {
+  bwAssignmentHead,
+  bwMatchingTriageDelegation,
+} from "@/features/projects/bwProjection";
 import {
   BwConflictError,
   submitBwAssignment,
@@ -19,6 +22,7 @@ import {
   type BwTriageAction,
   type BwTriageActionFields,
 } from "@/features/projects/bwWrite";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { invokeTauri } from "@/shared/api/tauri";
 
 const RELATION_TYPES = [
@@ -263,12 +267,20 @@ function BwTriageActions({
   const [duplicateTarget, setDuplicateTarget] = React.useState("");
   const [declineReason, setDeclineReason] = React.useState("");
   const invalidate = useInvalidateProjectIssues(project);
+  const identityQuery = useIdentityQuery();
 
   const run = async (action: BwTriageAction, fields: BwTriageActionFields) => {
     if (pending || !issue.bw) return;
     setPending(action);
     try {
+      const delegate = bwMatchingTriageDelegation(
+        issue.bw.snapshot,
+        issue.id,
+        action,
+        identityQuery.data?.pubkey,
+      );
       await submitBwTriageAction({
+        delegate,
         fields,
         issueId: issue.id,
         repo: project.repoAddress,

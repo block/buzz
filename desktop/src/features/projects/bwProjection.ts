@@ -173,6 +173,53 @@ export function bwAssignmentHead(
   };
 }
 
+type BwTriageDelegation = {
+  issue?: string;
+  action?: string;
+  delegate?: string;
+  expires_at?: number;
+};
+
+/** True when the currently activated policy (`snapshot.activation.policy`,
+ * whose own accepted body sits in `snapshot.records` like any other BW
+ * record) grants `signer` a still-valid single-task delegation for this
+ * exact `(issue, action)` pair — mirrors Core's own delegation check
+ * (`crates/buzz-core/src/bw/semantics.rs::roles`, `"triage-action"` branch)
+ * so the UI only offers `delegate: true` when Core would actually honor it.
+ * Core re-decides this independently at submit time and remains the sole
+ * authority; a false positive here only costs a doomed submit, never a
+ * granted permission. */
+export function bwMatchingTriageDelegation(
+  snapshot: BwSnapshot,
+  issueId: string,
+  action: string,
+  signer: string | null | undefined,
+  now: number = Math.floor(Date.now() / 1000),
+): boolean {
+  if (!snapshot.activation || !signer) return false;
+  const policy = snapshot.records[snapshot.activation.policy];
+  if (!policy) return false;
+  let delegations: BwTriageDelegation[];
+  try {
+    delegations =
+      (
+        JSON.parse(policy.content) as {
+          triage_delegations?: BwTriageDelegation[];
+        }
+      ).triage_delegations ?? [];
+  } catch {
+    return false;
+  }
+  return delegations.some(
+    (d) =>
+      d.issue === issueId &&
+      d.action === action &&
+      d.delegate === signer &&
+      typeof d.expires_at === "number" &&
+      now < d.expires_at,
+  );
+}
+
 /** True when any accepted issue-update for this issue is part of a visible
  * technical conflict (a fork in `snapshot.projection.conflicts`). */
 export function bwFieldConflict(
