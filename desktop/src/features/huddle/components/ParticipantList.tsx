@@ -13,6 +13,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { ROUNDED_SQUIRCLE_PATH } from "@/shared/ui/AvatarClipPaths";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
@@ -452,12 +453,31 @@ function ParticipantAvatar({
     <span
       className={cn(
         "buzz-huddle-speaking-avatar relative z-0 inline-flex shrink-0",
-        participant.isAgent ? "rounded-[30%]" : "rounded-full",
+        participant.isAgent
+          ? "buzz-huddle-speaking-avatar-agent"
+          : "rounded-full",
         sizeClass,
       )}
       data-testid="huddle-participant-avatar"
       style={speakerStyle}
     >
+      {participant.isAgent ? (
+        <svg
+          aria-hidden="true"
+          className="buzz-huddle-speaking-squircle pointer-events-none absolute inset-0 h-full w-full overflow-visible text-[hsl(142_71%_45%)]"
+          data-testid="huddle-agent-speaking-ring"
+          focusable="false"
+          viewBox="0 0 1 1"
+        >
+          <path
+            d={ROUNDED_SQUIRCLE_PATH}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      ) : null}
       <ProfileAvatar
         avatarUrl={participant.avatarUrl}
         label={participant.displayName}

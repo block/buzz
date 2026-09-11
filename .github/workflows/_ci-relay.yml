@@ -484,6 +484,19 @@ jobs:
           VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
+      - name: Git default-branch route and clone regressions
+        env:
+          # The preceding step already applied and reconciled schema/schema.sql.
+          BUZZ_TEST_SCHEMA_MODE: desired
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_TEST_REDIS_URL: redis://localhost:6379
+          BUZZ_TEST_S3_ENDPOINT: http://localhost:9000
+          BUZZ_TEST_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/api::git::settings::tests::external_infra::/)' \
+            --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
         # unit job. Its ignored database cases run in the isolated PostgreSQL

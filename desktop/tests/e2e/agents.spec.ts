@@ -342,12 +342,64 @@ test("built-in persona edits persist", async ({ page }) => {
 });
 
 test("searches agent avatar emoji with focus on open", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+  });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
-  await page.getByLabel("Add avatar").click();
+  const addAvatarButton = page.getByLabel("Add avatar");
+  await expect(addAvatarButton).toHaveCSS("border-top-width", "0px");
+  const idleShadow = await addAvatarButton.evaluate(
+    (button) => getComputedStyle(button).boxShadow,
+  );
+  const emptyOutline = page.getByTestId("agent-avatar-empty-outline");
+  const idlePlus = addAvatarButton.locator("svg.lucide-plus");
+  await expect(idlePlus).toBeVisible();
+  await expect(emptyOutline).toHaveCSS("z-index", "0");
+  await expect(idlePlus).toHaveCSS("z-index", "10");
+  const centerElement = await addAvatarButton.evaluate((button) => {
+    const bounds = button.getBoundingClientRect();
+    const center = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return center?.closest("svg.lucide-plus") !== null;
+  });
+  expect(centerElement).toBe(true);
+  await waitForAnimations(page);
+  await page.screenshot({
+    caret: "hide",
+    path: "test-results/agents/agent-avatar-idle-layering.png",
+  });
+  await addAvatarButton.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(addAvatarButton).toBeFocused();
+  await expect(addAvatarButton).toHaveCSS("clip-path", "none");
+  expect(
+    await addAvatarButton.evaluate(
+      (button) => getComputedStyle(button).boxShadow,
+    ),
+  ).not.toBe(idleShadow);
+  await waitForAnimations(page);
+  await page.screenshot({
+    caret: "hide",
+    path: "test-results/agents/agent-avatar-keyboard-focus.png",
+  });
+  await expect(emptyOutline).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
+  await expect(emptyOutline).toBeVisible();
+  await expect(emptyOutline.locator("path")).toHaveAttribute(
+    "d",
+    "M .5 0 C .93 0 1 .07 1 .5 C 1 .93 .93 1 .5 1 C .07 1 0 .93 0 .5 C 0 .07 .07 0 .5 0 Z",
+  );
+  await addAvatarButton.click();
   await page.getByRole("tab", { name: "Emoji" }).click();
 
   const picker = page.locator("em-emoji-picker");
@@ -645,7 +697,7 @@ test("team cards use the thread-style overlapping avatar stack", async ({
       return {
         maskImage: styles.maskImage,
         outlineBackground: outline.backgroundColor,
-        outlineBorderRadius: outline.borderRadius,
+        outlineClipPath: outline.clipPath,
         outlineInset: outline.inset,
       };
     }),
@@ -654,19 +706,19 @@ test("team cards use the thread-style overlapping avatar stack", async ({
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
     {
       maskImage: "none",
       outlineBackground: "rgb(255, 255, 255)",
-      outlineBorderRadius: "calc(30% + 2px)",
+      outlineClipPath: 'url("#rounded-squircle-clip")',
       outlineInset: "-2px",
     },
   ]);
@@ -693,6 +745,42 @@ test("team cards use the thread-style overlapping avatar stack", async ({
     { borderWidth: "0px", hasVisibleShadow: false },
     { borderWidth: "0px", hasVisibleShadow: false },
   ]);
+});
+
+test("empty team cards draw a squircle-shaped placeholder outline", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    teams: [
+      {
+        name: "Empty crew",
+        personaIds: [],
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const placeholder = page.locator('[data-team-empty-avatar="avatar"]').first();
+  const outline = placeholder.locator("xpath=..");
+  await expect(placeholder).toHaveCSS(
+    "clip-path",
+    'url("#rounded-squircle-clip")',
+  );
+  const styles = await outline.evaluate((element) => {
+    const frame = getComputedStyle(element);
+    const border = getComputedStyle(element, "::before");
+    return {
+      borderClipPath: border.clipPath,
+      borderWidth: frame.borderWidth,
+      frameClipPath: frame.clipPath,
+    };
+  });
+  expect(styles).toEqual({
+    borderClipPath: 'url("#rounded-squircle-clip")',
+    borderWidth: "0px",
+    frameClipPath: "none",
+  });
 });
 
 test("agent defaults stays in the header without an actions menu", async ({
@@ -2697,6 +2785,8 @@ test("start pill morphs into the running dot without remounting the avatar", asy
 
   const card = page.getByTestId(`persona-agent-row-${personaId}`);
   const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
+  const avatarMask = card.getByTestId("agent-runtime-avatar-mask");
+  await expect(avatarMask).toHaveCSS("clip-path", "none");
   const badge = startButton.locator("xpath=../..");
   const initialAvatar = await card
     .getByAltText("Motion Auditor avatar")
@@ -2731,6 +2821,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   await expect(
     page.getByTestId(`agent-runtime-active-${pubkey}`),
   ).toBeVisible();
+  await expect(avatarMask).toHaveCSS("clip-path", /polygon\(/);
   const samples = await samplesPromise;
   const finalAvatar = await card
     .getByAltText("Motion Auditor avatar")

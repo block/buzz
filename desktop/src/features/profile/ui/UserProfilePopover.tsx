@@ -50,11 +50,13 @@ type UserProfilePopoverProps = {
   pubkey: string;
   triggerElement?: "div" | "span";
   /**
-   * Extra classes for the trigger wrapper, which defaults to inline-flex.
-   * Use `min-w-0 max-w-full` when truncating flex content must shrink, or
-   * `inline` when prose content must fragment across lines.
+   * Extra classes for the focusable trigger wrapper, which defaults to
+   * inline-flex. Use `min-w-0 max-w-full` when truncating flex content must
+   * shrink, or `inline` when prose content must fragment across lines.
    */
   triggerClassName?: string;
+  /** Test id applied to the focusable profile trigger shell. */
+  triggerTestId?: string;
   /** Accessible name for interactive trigger content that is visually hidden. */
   triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
@@ -135,8 +137,9 @@ export function UserProfilePopover({
   children,
   pubkey,
   triggerElement = "div",
-  triggerClassName,
   triggerAriaLabel,
+  triggerClassName,
+  triggerTestId,
   enableProfilePanel = true,
   enableHoverPopover = true,
   role,
@@ -200,6 +203,7 @@ export function UserProfilePopover({
       <PopoverAnchor asChild>
         <TriggerElement
           aria-label={triggerAriaLabel}
+          data-testid={triggerTestId}
           role={canOpenProfilePanel ? "button" : undefined}
           tabIndex={canOpenProfilePanel ? 0 : undefined}
           onClick={handleTriggerClick}

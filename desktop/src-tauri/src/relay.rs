@@ -316,7 +316,7 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     };
 
     // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
-    // client can activate the rate-limit gate without confusing it with a
+    // client can report back-pressure without confusing it with a
     // connectivity failure (`relay unreachable:`). Also arm the Rust-side
     // admission gate here — the one place every relay HTTP error funnels
     // through — so the next relay-backed command waits out the quota window
@@ -324,10 +324,8 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let hint = extract_retry_in_hint(&body);
         // Clamp the hint to MAX_HINT_SECONDS before arming the Rust gate AND
-        // before embedding it in the returned string. Every consumer (Rust gate
-        // via `activate_rate_limit` and TS gate via `applyTauriRateLimitIfNeeded`)
-        // must see the same capped value — a single policy point prevents the TS
-        // gate from receiving an uncapped hint from an untrusted relay.
+        // before embedding it in the returned string, so the caller sees the
+        // same bounded hint the native HTTP gate actually honours.
         let capped_hint = hint.map(|s| s.min(crate::relay_admission::MAX_HINT_SECONDS));
         crate::relay_admission::activate_rate_limit(capped_hint);
         if let Some(secs) = capped_hint {
