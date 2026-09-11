@@ -590,7 +590,19 @@ for (const { incoming, savedFirst } of [
         }),
       };
     }, roots[0]);
-    await input.fill("");
+    await input.press("ControlOrMeta+a");
+    expect(
+      await input.evaluate((el) => {
+        const editor = (
+          el as HTMLElement & { editor: import("@tiptap/core").Editor }
+        ).editor;
+        return {
+          selection: editor.state.selection.toJSON(),
+          text: window.getSelection()?.toString(),
+        };
+      }),
+    ).toEqual({ selection: { type: "all" }, text: "new authored text" });
+    await input.press("Backspace");
     const deleted = await deletion.evaluate(({ completed }) => completed);
     // No assertion/poll between action completion and outgoing-key cleanup.
     await navigate(roots[1]);
