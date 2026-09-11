@@ -60,7 +60,9 @@ case "${1:-help}" in
     ;;
   restart)
     require_env
-    compose up -d --wait --force-recreate relay
+    # pairing-relay too: it shares BUZZ_IMAGE with the relay, so restarting only
+    # the relay after an image or .env change silently leaves the sidecar stale.
+    compose up -d --wait --force-recreate relay pairing-relay
     ;;
   pull)
     require_env
@@ -122,7 +124,18 @@ Commands:
 
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
+                          (also routes /pair to the device-pairing sidecar)
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+
+Device pairing:
+  The pairing-relay sidecar always runs and is published on loopback only.
+  With BUZZ_COMPOSE_TLS=true it needs no configuration: clients fall back
+  to <RELAY_URL>/pair, which the bundled Caddyfile serves. Set
+  BUZZ_PAIRING_RELAY_URL only if pairing lives on another host name.
+  Check it with:
+    curl -sS -o /dev/null -w "%{http_code}\n" https://<domain>/pair
+  400 = the sidecar is answering, 404 = no route or no sidecar.
+  See README.md § Device pairing.
 MSG
     ;;
   *)
