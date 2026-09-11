@@ -133,10 +133,10 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
     PresetHarness {
         id: "cursor",
         label: "Cursor",
-        command: "cursor-agent",
+        command: "agent",
         args: &["acp"],
         install_instructions_url: "https://cursor.com/downloads",
-        install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
+        install_hint: "Buzz talks to Cursor through the Cursor Agent CLI's ACP mode.",
         underlying_cli: None,
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,

@@ -13,6 +13,28 @@ use super::{
 use crate::managed_agents::AcpAvailabilityStatus;
 
 #[test]
+fn cursor_preset_uses_renamed_cli_and_keeps_legacy_alias() {
+    let candidates = super::command_basenames("cursor-agent");
+    let cursor = super::preset_harness_definitions()
+        .into_iter()
+        .find(|harness| harness.id == "cursor")
+        .unwrap();
+
+    assert_eq!(candidates.first().map(String::as_str), Some("cursor-agent"));
+    assert!(
+        candidates.iter().any(|candidate| {
+            candidate == "agent"
+                || candidate == "agent.exe"
+                || candidate == "agent.cmd"
+                || candidate == "agent.bat"
+        }),
+        "Cursor's current agent binary must be discoverable as a compatibility alias"
+    );
+    assert_eq!(cursor.command, "agent");
+    assert_eq!(cursor.args, vec!["acp".to_string()]);
+}
+
+#[test]
 fn resolves_known_avatar_for_bare_command() {
     let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
 

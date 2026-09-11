@@ -563,13 +563,22 @@ pub(crate) fn availability_drift(
 /// On Windows also includes `.cmd` and `.bat` variants so npm-generated shims
 /// (e.g. `codex-acp.cmd` in `%APPDATA%\npm`) are discoverable.
 fn command_basenames(command: &str) -> Vec<String> {
-    let candidates = vec![executable_basename(command)];
+    let mut candidates = vec![executable_basename(command)];
+    // Cursor renamed its native CLI from `cursor-agent` to `agent`. Keep the
+    // old command as a compatibility alias for persisted harness records and
+    // older custom configurations while preferring the current binary.
+    if command.eq_ignore_ascii_case("cursor-agent") {
+        candidates.push(executable_basename("agent"));
+    }
     #[cfg(windows)]
     {
-        let mut candidates = candidates;
         if !command.contains('.') {
             candidates.push(format!("{command}.cmd"));
             candidates.push(format!("{command}.bat"));
+            if command.eq_ignore_ascii_case("cursor-agent") {
+                candidates.push("agent.cmd".to_string());
+                candidates.push("agent.bat".to_string());
+            }
         }
         return candidates;
     }
