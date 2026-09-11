@@ -1,3 +1,5 @@
+Instruction editing: see [Private instruction profiles](PRIVATE_PROFILES.md) for offline durable drafts, owner-private relay publication/reload and selected-next versus actual-run application. Public kind0 metadata is not included.
+
 # Beehive (experimental first slice)
 
 Standalone TypeScript host + relay + terminal UI. **Not Desktop parity, not

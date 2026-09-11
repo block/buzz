@@ -46,6 +46,8 @@ test('catalog verifies owner/signature/relay/expiry; labels cannot spoof identit
 
 for (const scenario of ['external', 'configured', 'installed', 'v3-conversion']) {
 const installed = scenario === 'installed' || scenario === 'v3-conversion', converting = scenario === 'v3-conversion';
+const profiled = scenario === 'installed';
+const profileInstructions = 'PRIVATE_C66_EXACT: keep this behavior private and answer carefully.';
 test(`actual owner TUI owner-public credential slots Start/Stop via private transport (${scenario})`, { skip: installed && !process.env.BEEHIVE_REAL_BUZZ_ACP }, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'beehive-pairing-cli-catalog-tui-')));
   const owner = newKey(), a = newKey(), b = newKey(), agent = newKey();
@@ -132,6 +134,28 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       const saved = JSON.parse(readFileSync(journalPath, 'utf8'));
       assert.equal(saved.selected.harnessSetup.id, 'normal'); assert.equal(saved.actual, null);
     }
+    if (profiled) {
+      let at = output.length; child.stdin.write('profile-new\n');
+      await wait(() => output.slice(at).includes('Profile name:')); child.stdin.write('Private careful\n');
+      await wait(() => output.slice(at).includes('Nonsecret behavior instructions')); child.stdin.write(`${profileInstructions}\n`);
+      await wait(() => output.slice(at).includes('Publish immutable revision?')); child.stdin.write('no\n');
+      await wait(() => output.slice(at).includes('beehive> '));
+      const drafts = await command('drafts');
+      const id = drafts.match(/([a-f0-9-]{36}) \| saved draft/)![1];
+      assert.match(drafts, /not submitted/);
+      at = output.length; child.stdin.write(`profile-resume ${id}\n`);
+      await wait(() => output.slice(at).includes('Resume [edit/publish/cancel]')); child.stdin.write('publish\n');
+      await wait(() => output.slice(at).includes('Publish immutable revision?')); child.stdin.write('yes\n');
+      await wait(() => output.slice(at).includes('beehive> '));
+      let published = '';
+      for (let n = 0; n < 80; n++) { published = await command('profiles'); if (published.includes(profileInstructions)) break; await delay(25); }
+      assert.ok(published.includes(profileInstructions), published);
+      await command('apply 1');
+      let selected = '';
+      for (let n = 0; n < 80; n++) { selected = await command('show'); if (selected.includes('"revision": 1,\n  "body"')) break; await delay(25); }
+      assert.ok(selected.includes('"revision": 1,\n  "body"'), selected);
+      assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).actual, null);
+    }
     await command('start');
     await wait(() => output.includes('completed | accepted'));
     let shown = '';
@@ -144,6 +168,13 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       assert.equal(actual.evidence.agentPublicKey, publicKey(agent));
       assert.equal(actual.evidence.session, 'conversation-session');
       assert.equal(actual.selection.model, 'databricks-claude-haiku-4-5');
+      if (profiled) {
+        assert.equal(actual.selection.behavior.instructions, profileInstructions);
+        assert.equal(readFileSync(join(root, 'received-system-instructions'), 'utf8'), profileInstructions);
+        const nativeInputs = readFileSync(join(root, 'native-session-inputs.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        assert.ok(nativeInputs.length > 0);
+        assert.ok(nativeInputs.every(input => input.systemPrompt === profileInstructions));
+      }
       console.log('New private management transport installed signed agent reply:', conversation.replies[0]!.id);
     }
     const stopAt = output.length;
@@ -176,21 +207,21 @@ test(`actual owner TUI owner-public credential slots Start/Stop via private tran
       assert.ok(!shown.includes('FORGED'));
       assert.match(shown, /"phase": "stopped"/);
       assert.equal(readFileSync(journalPath, 'utf8'), beforeReplay);
-      assert.equal(Object.keys(journal.operations).length, converting ? 3 : 2);
+      assert.equal(Object.keys(journal.operations).length, converting || profiled ? 3 : 2);
     } finally { ownerWire.close(); }
     assert.equal(foreignMessages.length, 0, 'another admitted host cannot read owner inventory or commands');
     assert.equal(relay.httpRequests.length, 0);
     assert.ok(relay.history.every(e => e.kind === 1059 && e.tags.length === 1));
     assert.ok(!output.includes(owner)); assert.ok(!output.includes(a)); assert.ok(!output.includes(agent));
     const state = JSON.parse(readFileSync(journalPath, 'utf8'));
-    assert.equal(state.phase, 'stopped'); assert.equal(state.revision, converting ? 3 : 2);
+    assert.equal(state.phase, 'stopped'); assert.equal(state.revision, converting || profiled ? 3 : 2);
     // Simulate deliberate OS deletion while the host still has its old hydrated
     // setup in memory: the production pre-spawn re-read must refuse that cache.
     const reference = JSON.parse(manifest).agents[publicKey(agent)].key;
     credentials.remove(reference);
     const runs = JSON.stringify(state.runs);
     await command('start');
-    await wait(() => Object.keys(JSON.parse(readFileSync(journalPath, 'utf8')).operations).length === (converting ? 4 : 3));
+    await wait(() => Object.keys(JSON.parse(readFileSync(journalPath, 'utf8')).operations).length === (converting || profiled ? 4 : 3));
     const refused = JSON.parse(readFileSync(journalPath, 'utf8'));
     assert.equal(refused.phase, 'stopped'); assert.equal(refused.actual, null);
     assert.equal(JSON.stringify(refused.runs), runs);

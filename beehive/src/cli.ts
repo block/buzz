@@ -20,7 +20,8 @@ import { localSetup } from './local-setup.ts';
 import { hostSetup } from './host-setup.ts';
 import { enrollmentInput } from './enrollment-input.ts';
 import { verifyHostCatalog, type HostCatalog } from './host-catalog.ts';
-import { Profiles, profile, profileRevision, type Profile } from './profiles.ts';
+import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
+import { Profiles, type Profile } from './profiles.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { homedir } from 'node:os';
@@ -68,6 +69,7 @@ Command: beehive <command> from any directory once installed (one-time user link
   host --owner-present                     Default host and retained configured relay
   host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
   host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
+  drafts <state-directory>                Offline instruction drafts; no signer/network; same state directory as TUI
   tui discover <relay> <state-directory>   Private availability discovery; no approval file
   tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
@@ -76,7 +78,30 @@ reconcile-agent derives the interrupted binding and genesis from the retained jo
 assignment-export accepts agent public key after filename when several slots exist.
 Move is fixture-only experimental; containment acceptance remains gated. No provider login RPC. Private host/catalog uses authenticated encrypted relay transport. Relay refusals are transport errors.`;
 async function main() {
-  if (command === 'identity') {
+  if (command === 'drafts') {
+    const drafts = profileDrafts(setupPath(text(args[0])));
+    const ui = createInterface({ input: stdin, output: stdout });
+    console.log('Offline instruction drafts. Commands: drafts, profile-new, profile-resume <id>, profile-discard <id>, quit. Saved after a complete valid instructions line (Enter), not per keystroke. No publication, signer, host or model needed.');
+    try {
+      for (;;) {
+        const line = (await ui.question('drafts> ')).trim();
+        if (line === 'quit') break;
+        try {
+          if (line === 'drafts') { for (const d of drafts.list()) console.log(`${d.id} | saved draft | ${d.value.name} | ${d.value.instructions}`); continue; }
+          const previous = drafts.list().find(d => d.id === line.split(' ')[1]);
+          if (line.startsWith('profile-discard ')) {
+            if (!previous) throw Error('Unknown draft ID');
+            if (await ui.question('Discard local draft only? [yes/no]: ') === 'yes') drafts.discard(previous);
+          } else if (line === 'profile-new' || line.startsWith('profile-resume ')) {
+            if (line !== 'profile-new' && !previous) throw Error('Unknown draft ID');
+            if (previous) console.log(`Saved draft: ${previous.value.instructions}; closing before Enter preserves it.`);
+            const saved = await editProfileDraft(drafts, prompt => ui.question(prompt), previous);
+            console.log(`Saved draft ${saved.id}; publish explicitly from the connected TUI using profile-resume ${saved.id}.`);
+          } else console.log('Use drafts, profile-new, profile-resume <id>, profile-discard <id>, quit.');
+        } catch (error) { console.log(error instanceof Error ? error.message : 'Draft action failed'); }
+      }
+    } finally { ui.close(); }
+  } else if (command === 'identity') {
     throw Error('Standalone Beehive uses your existing owner identity through explicit secure input. Creating a parallel controller identity or persisting a plaintext owner key is disabled.');
   } else if (command === 'provision-agent' || command === 'reconcile-provision') {
     const directory = setupPath(text(args[0]));
@@ -387,6 +412,7 @@ async function main() {
     const inventory = new Map<string,Message>();
     const offers = new Map<string,Message>();
     const hostFresh = (host: string) => !catalog || (offers.has(host) && Date.now() - Number(offers.get(host)!.body.observedAt) <= 6000) || catalog.registrations.some(r => r.request.host === host && Date.now() < r.expires * 1000);
+    const drafts = profileDrafts(dirname(setupPath(text(args[0]))));
     const profiles = new Profiles();
     const client = managementClient(join(dirname(setupPath(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       profiles.receive(m);
@@ -406,7 +432,7 @@ async function main() {
     }, catalog ? { catalog } : undefined);
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, profile-new, profile-edit <number>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, drafts, profile-new, profile-edit <number>, profile-resume <id>, profile-discard <id>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     let profileRows: Profile[] = [];
     try {
@@ -456,18 +482,45 @@ async function main() {
           for (const p of profiles.incomplete()) console.log(`INCOMPLETE ${p.name} @ ${p.revision.slice(0, 12)}: missing/conflicting lineage; cannot apply`);
           console.log('Immutable versions; concurrent edits remain branches. Publishing never applies to agents. No destructive deletion; apply default explicitly to clear.'); continue;
         }
-        if (line === 'profile-new' || line.startsWith('profile-edit ')) {
+        if (line === 'drafts') {
+          for (const d of drafts.list()) {
+            const op = client.status().find(o => o.request.type === 'profile' && o.request.body.revision === d.value.revision);
+            console.log(`${d.id} | saved draft | ${d.value.name} | ${op ? `${op.state}: ${op.publication}` : 'not submitted'} | ${d.value.instructions}`);
+          }
+          console.log('Drafts persist after a complete valid instructions line (Enter), not each keystroke. Closing/cancelling never publishes or discards saved text.'); continue;
+        }
+        if (line === 'profile-new' || line.startsWith('profile-edit ') || line.startsWith('profile-resume ') || line.startsWith('profile-discard ')) {
           try {
-            const parent = line === 'profile-new' ? undefined : profileRows[Number(line.slice(13)) - 1];
-            if (line !== 'profile-new' && !parent) throw Error('Choose a profile version number from profiles');
-            const name = parent?.name ?? await ui.question('Profile name: ');
-            const instructions = await ui.question('Nonsecret behavior instructions (no provider/model/credentials): ');
-            const value = profile({ name, parent: parent?.revision ?? null, instructions, revision: profileRevision(name, parent?.revision ?? null, instructions) });
-            const affected = [...inventory.values()].filter(m => (m.body.selectedNext as any)?.behavior?.name === name);
+            const previous = drafts.list().find(d => d.id === line.split(' ')[1]);
+            if (line.startsWith('profile-discard ')) {
+              if (!previous) throw Error('Unknown draft ID; use drafts');
+              if (await ui.question('Discard local draft only (submitted operations/publications remain)? [yes/no]: ') === 'yes') drafts.discard(previous);
+              continue;
+            }
+            let saved = previous;
+            if (line.startsWith('profile-resume ')) {
+              if (!saved) throw Error('Unknown draft ID; use drafts');
+              console.log(`Saved draft ${saved.id}: ${saved.value.instructions}`);
+              const action = await ui.question('Resume [edit/publish/cancel]: ');
+              if (action === 'edit') saved = await editProfileDraft(drafts, prompt => ui.question(prompt), saved);
+              else if (action !== 'publish') continue;
+            } else {
+              const parent = line === 'profile-new' ? undefined : profileRows[Number(line.slice(13)) - 1];
+              if (line !== 'profile-new' && !parent) throw Error('Choose a profile version number from profiles');
+              console.log('Draft saved after complete valid instructions line (Enter), not per keystroke.');
+              saved = await editProfileDraft(drafts, prompt => ui.question(prompt), undefined, parent);
+            }
+            const value = saved!.value;
+            console.log(`Saved draft ${saved!.id}; cancellation retains it. Resume with profile-resume ${saved!.id}.`);
+            const affected = [...inventory.values()].filter(m => (m.body.selectedNext as any)?.behavior?.name === value.name);
             for (const m of affected) console.log(`Association unchanged: ${m.host} agent ${m.agent}`);
-            console.log(`Publish ${name}: ${instructions}; ${affected.length} observed associations remain unchanged. Apply separately; no restart.`);
-            if (await ui.question('Publish immutable revision? [yes/no]: ') === 'yes') client.submit(message('profile', 'profiles', 'profiles', 0, value));
-          } catch (error) { console.log(error instanceof Error ? error.message : 'Publication failed'); }
+            console.log(`Publish ${value.name}: ${value.instructions}; ${affected.length} observed associations remain unchanged. Apply separately; no restart.`);
+            if (await ui.question('Publish immutable revision? [yes/no]: ') === 'yes') {
+              const prior = client.status().find(o => o.request.type === 'profile' && o.request.body.revision === value.revision);
+              if (prior) console.log(`Already submitted: ${prior.state} | ${prior.publication}; use operations/reconcile/retry. Saved draft retained.`);
+              else client.submit(message('profile', 'profiles', 'profiles', 0, value));
+            }
+          } catch (error) { console.log(error instanceof Error ? error.message : 'Publication failed; saved draft retained'); }
           continue;
         }
         const current = inventory.get(selected);

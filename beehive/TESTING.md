@@ -1,3 +1,33 @@
+## Private instruction profiles (c66e)
+
+`private-profiles.test.ts` adds actual offline CLI completed-input draft save,
+reopen/edit/cancel/discard and stale-editor protection with an explicitly isolated
+credential adapter whose invalid backing file makes accidental credential access
+fail. The private NIP42/NIP44/NIP59 fixture exercises owner-to-self publication,
+fresh **empty** local-journal reload with no host running, parent resolution,
+wrong signer/relay and malformed revision rejection, exact authorized host Save,
+stale CAS/tampered snapshot rejection, unchanged actual A on Save B, external
+runner Restart receiving exact B, retained run history, and Stop.
+
+The directly affected `catalog-tui.test.ts` installed case now saves a draft,
+declines publication, explicitly resumes/publishes, selects the revision while
+stopped, and proves exact installed native session instructions, signed reply and
+Stop. It does not require instructions to be duplicated in each conversation turn.
+Installed attribution: Buzz 0.5.23; binary hashes and exact logs in workspace
+`WORK_LOGS/BEEHIVE_DESIGN_183FFAF0/PROFILE_PRIVATE_C66_EVIDENCE/`.
+
+Final executable strict passed; focused private+legacy profile tests **5/5**;
+Nostr codec/auth fixtures previously **5/5** in the development focused set;
+installed private TUI **1/1**. One default-concurrent whole-package run exited
+naturally in 28.473s: **141 passed, 1 failed, 19 skipped** (installed opt-ins unset).
+The unchanged admission-cancel wrong-authority control produced correct rejection,
+Start and Stop receipts/state, but took 3233ms against its unchanged 2500ms bound.
+It is the legacy transport/no-profile path; causality is not established. Full
+suite is **not green**. No rerun, serialization, timeout increase or assertion
+relaxation. Earlier new-test failures were fixture-path/model mistakes and an
+incorrect expectation that native system instructions also appear in turn text;
+all original logs are retained. No production relay/provider/credential operations.
+
 ## Current private transport validation
 
 Setup/resume is configuration-only. `host-availability.test.ts` covers fresh npub

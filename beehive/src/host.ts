@@ -115,7 +115,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}, privateSnapshots = false) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -180,7 +180,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       if (state.phase === 'transitioning' && state.actual) acp?.cancel();
     }
     if (first && state.move && m.type === 'save' && m.revision === state.revision && state.assignment.assignedHost === setup.host && !Object.hasOwn(state.operations, m.id)) {
-      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; validateSaveBinding(v, m.body); if ((v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
+      try { const v = configure(state.configurations, state.selected, m.body, state.revision + 1).selected; validateSaveBinding(v, m.body); if ((privateSnapshots || v.profile === 'default' || hash(profiles.resolve(v.profile)) === hash(v.behavior))) retracted.set(m.id, m.revision); } catch { /* Invalid Save cannot cancel. */ }
     }
     queue = queue.then(() => handle(m)).catch(() => { state.phase = 'quarantined'; save(); });
   }
@@ -448,7 +448,10 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
         } else if (m.type === 'save') {
           const candidate = configure(state.configurations, state.selected, m.body, state.revision + 1);
           const selected = candidate.selected;
-          if (selected.behavior && hash(profiles.resolve(selected.profile)) !== hash(selected.behavior)) throw Error('Profile revision conflict');
+          // configure/selection strictly validates the content address and exact snapshot.
+          // On private transport the pinned owner signed this Save; parent links
+          // organize the owner's library, not an independent execution permission.
+          if (!privateSnapshots && selected.behavior && hash(profiles.resolve(selected.profile)) !== hash(selected.behavior)) throw Error('Profile revision conflict');
           validateSaveBinding(selected, m.body);
           if (state.move) finishMove('Move cancelled before grant by save');
           state.configurations = candidate.entries; state.selected = selected; result = 'saved; running configuration unchanged';
@@ -594,7 +597,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         if (!value) throw Error('Binding removed');
         if (current.retiredBindings?.[id]) throw Error('Binding retired');
         return value;
-      }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings));
+      }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings, !!transport));
     }
     const setup = entries[0]?.setup;
     const hostKey = transport?.binding.host ?? setup!.host;

@@ -61,7 +61,7 @@ export function managementClient(root: string, url: string, secret: string, rece
       try { transport.sendEnvelope(intent.envelope); } catch { break; } // Intent remains durable.
     }
     // Query host outbox too: relay history alone may lack a lost terminal receipt.
-    const slots = new Map([...intents.values()].filter(i => !i.receipt).map(i => [JSON.stringify([i.request.host, i.request.agent]), i.request]));
+    const slots = new Map([...intents.values()].filter(i => !i.receipt && i.request.type !== 'profile').map(i => [JSON.stringify([i.request.host, i.request.agent]), i.request]));
     for (const request of slots.values()) {
       try { transport.send(message('inspect', request.host, request.agent)); } catch { break; }
     }
@@ -103,7 +103,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     submit(request: Message) {
       if (closed) throw Error('UI closed');
       if (!['profile','save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
-      if (privateHosts && !['save', 'start', 'restart', 'stop'].includes(request.type)) throw Error('Private profile distribution and Move authority are not integrated; no operation prepared');
+      if (privateHosts && !['profile', 'save', 'start', 'restart', 'stop'].includes(request.type)) throw Error('Private Move authority is not integrated; no operation prepared');
       if (request.type === 'profile') {
         profile(request.body);
         if (request.host !== 'profiles' || request.agent !== 'profiles' || request.revision !== 0) throw Error('Invalid profile publication');

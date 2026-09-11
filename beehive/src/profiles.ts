@@ -7,7 +7,7 @@ const revisionPattern = /^[a-f0-9]{64}$/;
 export function profileRevision(name: string, parent: string | null, instructions: string) {
   return digest(JSON.stringify(['beehive-profile-v1', name, parent, instructions])).toString('hex');
 }
-/** Strict public profile codec. Newlines are instructions, never executable arguments. */
+/** Strict instruction profile codec (private transport; not public kind0). Newlines are instructions, never executable arguments. */
 export function profile(value: unknown): Profile {
   const p = object(value); fields(p, ['name', 'parent', 'instructions', 'revision']);
   const name = text(p.name, 80);
