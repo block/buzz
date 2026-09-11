@@ -94,6 +94,36 @@ fn normalizes_buzz_agent_args_to_empty() {
     );
 }
 
+#[test]
+fn normalizes_grok_args_to_headless_stdio_without_leader() {
+    let expected = vec![
+        "agent".to_string(),
+        "--always-approve".to_string(),
+        "--no-leader".to_string(),
+        "stdio".to_string(),
+    ];
+    assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
+    assert_eq!(normalize_agent_args("grok", vec!["acp".into()]), expected);
+    assert_eq!(
+        normalize_agent_args("/usr/local/bin/grok", Vec::new()),
+        expected
+    );
+    assert_eq!(
+        normalize_agent_args(
+            "grok",
+            vec!["agent".into(), "--always-approve".into(), "stdio".into()]
+        ),
+        expected
+    );
+    assert_eq!(
+        normalize_agent_args(
+            "grok",
+            vec!["agent".into(), "--leader".into(), "stdio".into()]
+        ),
+        vec!["agent", "--leader", "stdio"]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn explicit_path_resolution_ignores_non_executable_files() {
