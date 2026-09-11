@@ -29,6 +29,20 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./observerEventOrder";
+import {
+  recordAppliedLifecycleFrame,
+  resetAppliedLifecycleSeq,
+  shouldApplyLifecycleFrame,
+} from "./observerLifecycleSeq";
+
+export {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./observerEventOrder";
 
 const MAX_OBSERVER_EVENTS = 3000;
 // Length the per-agent journal is evicted down to when it overflows
@@ -114,7 +128,6 @@ function liveSessionKey(agentPubkey: string, channelId: string | null): string {
   return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
 }
 
-/** Read the latest-live-session-id for a (agent, channel) pair. */
 export function getLatestLiveSessionId(
   agentPubkey: string | null | undefined,
   channelId: string | null | undefined,
@@ -407,42 +420,6 @@ export function getArchivedChannelEvents(
   );
 }
 
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
-}
-
-/**
- * Returns true if `candidate` sorts strictly after `stored` using the same
- * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
- * timestamp falls back to higher seq.  Extracted so latest-live advancement
- * cannot drift from transcript ordering.
- */
-export function isObserverEventAfter(
-  candidate: { timestamp: string; seq: number },
-  stored: { timestamp: string; seq: number },
-): boolean {
-  const candidateTime = Date.parse(candidate.timestamp);
-  const storedTime = Date.parse(stored.timestamp);
-  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
-    if (candidateTime !== storedTime) {
-      return candidateTime > storedTime;
-    }
-  }
-  return candidate.seq > stored.seq;
-}
-
 // Observer event kind for a batch envelope wrapping multiple events. The ACP
 // harness publishes one frame per second; everything that accumulated between
 // ticks arrives as `{ kind: "batch", payload: { events: [...] } }` with every
@@ -467,10 +444,13 @@ function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
 
 // Per-event processing shared by every event a live frame carries (one for a
 // plain frame, many for a batch envelope).
-function processLiveObserverEvents(
+async function processLiveObserverEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
+  activeGeneration: number,
 ) {
+  if (activeGeneration !== generation) return;
+
   // Commit the full envelope before dispatching synchronous specialized
   // callbacks. Those callbacks historically observed their triggering frame
   // in the raw/transcript stores; batching must preserve that visibility while
@@ -527,17 +507,21 @@ function processLiveObserverEvents(
       // count a terminal switch result once per distinct channel.
       dispatchControlResult(agentPubkey, parsed.payload, parsed.channelId);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
-        (error) => {
-          console.debug("Late/untracked lifecycle frame dropped:", error);
-        },
-      );
+      if (!shouldApplyLifecycleFrame(agentPubkey, parsed)) continue;
+      try {
+        await putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload);
+        if (activeGeneration !== generation) return;
+        recordAppliedLifecycleFrame(agentPubkey, parsed);
+      } catch (error) {
+        if (activeGeneration !== generation) return;
+        console.debug("Late/untracked lifecycle frame dropped:", error);
+      }
     }
   }
 
   // Preserve the harness's envelope backpressure: retained state was committed
   // before specialized callbacks, but external-store subscribers publish once.
-  if (accepted) {
+  if (accepted && activeGeneration === generation) {
     notifyListeners({ agentPubkey, events: accepted });
   }
 }
@@ -576,7 +560,11 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
+    await processLiveObserverEvents(
+      agentPubkey,
+      unwrapObserverBatch(parsed),
+      activeGeneration,
+    );
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
@@ -940,6 +928,7 @@ export function resetAgentObserverStore() {
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
+  resetAppliedLifecycleSeq();
   agentManagementListeners.clear();
   projectChannelRequestListeners.clear();
   onSessionConfigCaptured = null;
@@ -965,8 +954,8 @@ export function _testRegisterKnownAgents(
 export function _testProcessLiveObserverEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
-): void {
-  processLiveObserverEvents(agentPubkey, events);
+): Promise<void> {
+  return processLiveObserverEvents(agentPubkey, events, generation);
 }
 
 /**
