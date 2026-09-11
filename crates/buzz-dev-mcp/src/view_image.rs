@@ -27,8 +27,10 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Hard cap on bytes we will read from disk / URL / data: URL.
-pub(crate) const MAX_SOURCE_BYTES: usize = 20 * 1024 * 1024;
+/// Hard cap on bytes we will read from disk / URL / data: URL. 32 MiB clears a
+/// full-resolution phone photo (a 5712×4284 JPEG runs ~21 MiB) while the
+/// MAX_PIXELS / MAX_DECODER_ALLOC guards below still bound decode cost.
+pub(crate) const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Hard cap on the raw (pre-base64) bytes we emit. base64 expands by 4/3, so
 /// a 3 MiB raw payload becomes ~4 MiB on the wire — comfortably below
 /// Anthropic's 5 MiB-per-image limit.
@@ -38,7 +40,7 @@ pub(crate) const MAX_FINAL_RAW_BYTES: usize = 3 * 1024 * 1024;
 pub(crate) const DEFAULT_MAX_DIM: u32 = 1568;
 pub(crate) const MIN_MAX_DIM: u32 = 64;
 pub(crate) const MAX_MAX_DIM: u32 = 2048;
-/// Hard cap on decoded pixel count. A ≤20 MiB compressed source can decode
+/// Hard cap on decoded pixel count. A ≤32 MiB compressed source can decode
 /// to hundreds of megabytes; we reject anything above this budget *before*
 /// touching the decoder. 64 megapixels is generous (e.g. 8000×8000) yet
 /// keeps worst-case allocation well under a gigabyte.
@@ -46,8 +48,17 @@ pub(crate) const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 /// Defence-in-depth for the `image` decoder: bound any single allocation it
 /// performs to 256 MiB (the default is 512 MiB and skews high for a dev MCP).
 pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
-/// Connect + read timeout for URL fetches.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connect timeout for URL fetches.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request budget, including the streamed body. This bounds a peer that
+/// keeps sending tiny chunks just before the per-read stall deadline.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-read deadline for streaming body reads. reqwest's client `timeout` is a
+/// whole-request budget, while this deadline identifies a dead connection with
+/// a specific error. A relay serving a ~21 MiB photo therefore gets more total
+/// time than the old single 10 s budget, without permitting a slow-drip peer to
+/// hold the tool open indefinitely.
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Lifetime of a Blossom `t=get` read token for relay media fetches.
 /// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
 const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
@@ -322,9 +333,25 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
     let auth = relay_media_get_auth(&parsed);
-    let mut client_builder = reqwest::Client::builder()
-        .connect_timeout(FETCH_TIMEOUT)
-        .timeout(FETCH_TIMEOUT);
+    let auth_tag = auth.as_ref().and_then(|_| {
+        std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    fetch_url_with_auth(parsed, auth, auth_tag).await
+}
+
+/// Fetch a parsed URL with precomputed relay credentials. Keeping signing and
+/// origin selection in `fetch_url` lets tests exercise the bounded transport
+/// with an agent-signed header without mutating process-global environment.
+async fn fetch_url_with_auth(
+    parsed: reqwest::Url,
+    auth: Option<String>,
+    auth_tag: Option<String>,
+) -> Result<Vec<u8>, ErrorData> {
+    let url = parsed.to_string();
+    let mut client_builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    client_builder = client_builder.timeout(REQUEST_TIMEOUT);
     if auth.is_some() {
         // Do not forward Buzz auth headers to a redirect target. reqwest strips
         // Authorization cross-host, but `x-auth-tag` is not on reqwest's
@@ -338,10 +365,8 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let authed = auth.is_some();
     if let Some(header) = auth {
         req = req.header("Authorization", header);
-        if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-            if !auth_tag.trim().is_empty() {
-                req = req.header("x-auth-tag", auth_tag);
-            }
+        if let Some(auth_tag) = auth_tag {
+            req = req.header("x-auth-tag", auth_tag);
         }
     }
     let resp = req
@@ -371,9 +396,21 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let mut buf: Vec<u8> = Vec::new();
     let mut stream = resp;
     loop {
-        let chunk = stream
-            .chunk()
+        // Each streaming read gets its own deadline: a stalled connection
+        // fails with a named error instead of hanging, while a slow-but-live
+        // large download progresses. MAX_SOURCE_BYTES below still hard-stops
+        // any response larger than the cap.
+        let chunk = tokio::time::timeout(READ_STALL_TIMEOUT, stream.chunk())
             .await
+            .map_err(|_| {
+                ErrorData::internal_error(
+                    format!(
+                        "fetch stalled: no data for {}s: {url}",
+                        READ_STALL_TIMEOUT.as_secs()
+                    ),
+                    None,
+                )
+            })?
             .map_err(|e| ErrorData::internal_error(format!("fetch read failed: {e}"), None))?;
         match chunk {
             Some(bytes) => {
@@ -547,7 +584,7 @@ fn prepare(bytes: &[u8], max_dim: u32) -> Result<PreparedImage, String> {
     let longest = w.max(h);
 
     // Decompression-bomb guard: reject pathological dimensions *before* the
-    // decoder allocates pixel buffers. A 20 MiB compressed source can
+    // decoder allocates pixel buffers. A 32 MiB compressed source can
     // legitimately encode hundreds of megapixels; we cap at MAX_PIXELS.
     let pixels = u64::from(w) * u64::from(h);
     if pixels > MAX_PIXELS {
@@ -710,6 +747,65 @@ mod tests {
             .unwrap();
         fs::write(path, &bytes).unwrap();
         bytes
+    }
+
+    /// The source cap now lives in two places: this crate's `MAX_SOURCE_BYTES`
+    /// and the prose in the `view_image` tool description (crates/buzz-dev-mcp/
+    /// src/lib.rs). A future edit that moves one without the other is a silent
+    /// contract break for callers sizing uploads to the advertised limit.
+    #[test]
+    fn source_cap_is_32mb_and_documented() {
+        assert_eq!(MAX_SOURCE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(READ_STALL_TIMEOUT, Duration::from_secs(15));
+        let lib_rs = include_str!("lib.rs");
+        let expected = format!("Hard cap {} MiB source", MAX_SOURCE_BYTES / (1024 * 1024));
+        assert!(
+            lib_rs.contains(&expected),
+            "tool description must advertise the current cap ({expected})"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_signed_fetch_accepts_a_source_between_20_and_32_mib() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const BODY_LEN: usize = 21 * 1024 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let keys = nostr::Keys::generate();
+        let auth = sign_media_get_auth(&keys, &address.to_string()).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("authorization: Nostr "), "{request}");
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {BODY_LEN}\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let chunk = vec![0_u8; 64 * 1024];
+            let mut remaining = BODY_LEN;
+            while remaining > 0 {
+                let count = remaining.min(chunk.len());
+                socket.write_all(&chunk[..count]).await.unwrap();
+                remaining -= count;
+            }
+        });
+
+        let parsed = reqwest::Url::parse(&format!("http://{address}/media/photo.jpg")).unwrap();
+        let bytes = fetch_url_with_auth(parsed, Some(auth), None).await.unwrap();
+        assert_eq!(bytes.len(), BODY_LEN);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -936,8 +1032,8 @@ mod tests {
 
     #[test]
     fn data_url_rejects_oversized_payload() {
-        // 30 MiB of base64 = ~22.5 MiB raw — over MAX_SOURCE_BYTES.
-        let huge = "A".repeat(30 * 1024 * 1024);
+        // 50 MiB of base64 = ~37.5 MiB raw — over MAX_SOURCE_BYTES (32 MiB).
+        let huge = "A".repeat(50 * 1024 * 1024);
         let url = format!("data:image/png;base64,{huge}");
         let err = decode_data_url(&url).unwrap_err();
         assert!(err.contains("limit") && err.contains("raw bytes"), "{err}");
