@@ -1,13 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  completeLegacyThreadScopedAcpSessionsMigration,
-  getLegacyThreadScopedAcpSessionsOverride,
-  getOverrides,
-  OVERRIDES_KEY,
-  setOverride,
-} from "./store.ts";
+import { getOverrides, OVERRIDES_KEY, setOverride } from "./store.ts";
 
 function installStorage(value) {
   const values = new Map([[OVERRIDES_KEY, JSON.stringify(value)]]);
@@ -56,30 +50,4 @@ test("getOverrides drops non-boolean values", () => {
   installStorage({ workflows: "yes", projects: false });
 
   assert.deepEqual(getOverrides(), { projects: false });
-});
-
-test("legacy thread-session override remains readable after manifest removal", () => {
-  const { writes } = installStorage({
-    workflows: true,
-    threadScopedAcpSessions: true,
-  });
-
-  assert.equal(getLegacyThreadScopedAcpSessionsOverride(), true);
-  assert.deepEqual(getOverrides(), { workflows: true });
-  assert.deepEqual(writes, []);
-});
-
-test("completing the legacy migration removes only its matching override", () => {
-  const { values } = installStorage({
-    workflows: true,
-    removedFeature: false,
-    threadScopedAcpSessions: true,
-  });
-
-  assert.equal(completeLegacyThreadScopedAcpSessionsMigration(false), false);
-  assert.equal(completeLegacyThreadScopedAcpSessionsMigration(true), true);
-  assert.equal(
-    values.get(OVERRIDES_KEY),
-    JSON.stringify({ workflows: true, removedFeature: false }),
-  );
 });

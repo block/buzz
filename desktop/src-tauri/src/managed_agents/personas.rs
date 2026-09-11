@@ -259,18 +259,6 @@ fn migrate_retired_personas(stored: &mut [AgentDefinition], now: &str) -> bool {
     changed
 }
 
-fn migrate_legacy_thread_scoped_personas(personas: &mut [AgentDefinition], now: &str) -> usize {
-    let mut changed = 0;
-    for persona in personas {
-        if persona.session_policy == super::AcpSessionPolicy::Channel {
-            persona.session_policy = super::AcpSessionPolicy::Thread;
-            persona.updated_at = now.to_string();
-            changed += 1;
-        }
-    }
-    changed
-}
-
 pub fn ensure_persona_is_active(
     personas: &[AgentDefinition],
     persona_id: &str,
@@ -350,10 +338,11 @@ pub fn validate_persona_activation_change(
     Ok(())
 }
 
-fn load_merged_personas<R: tauri::Runtime>(
+pub fn load_personas<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    now: &str,
-) -> Result<(Vec<AgentDefinition>, bool), String> {
+) -> Result<Vec<AgentDefinition>, String> {
+    let now = now_iso();
+
     // Post-fold: definitions live in the unified agent store, presented in
     // the legacy shape. Pre-fold stores are converted by
     // `fold_personas_into_agent_store` in boot migrations before any caller
@@ -363,35 +352,12 @@ fn load_merged_personas<R: tauri::Runtime>(
         .filter_map(|record| record.to_definition_view())
         .collect();
 
-    Ok(merge_personas(records, now))
-}
-
-pub fn load_personas<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<AgentDefinition>, String> {
-    let now = now_iso();
-    let (records, changed) = load_merged_personas(app, &now)?;
-
+    let (records, changed) = merge_personas(records, &now);
     if changed {
         save_personas(app, &records)?;
     }
 
     Ok(records)
-}
-
-/// Convert the removed global thread-session experiment into per-definition
-/// policy exactly once. The caller keeps the frontend override as a durable
-/// retry marker until this write and the enclosing workspace apply succeed.
-pub fn migrate_legacy_thread_scoped_persona_policy<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<usize, String> {
-    let now = now_iso();
-    let (mut records, merge_changed) = load_merged_personas(app, &now)?;
-    let migrated = migrate_legacy_thread_scoped_personas(&mut records, &now);
-    if merge_changed || migrated > 0 {
-        save_personas(app, &records)?;
-    }
-    Ok(migrated)
 }
 
 /// Read the raw persona records at `path` — no built-in merge, no write-back.

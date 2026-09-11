@@ -11,11 +11,7 @@ import {
 import { applyCommunity } from "@/shared/api/tauriWorkspace";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
-import {
-  completeLegacyThreadScopedAcpSessionsMigration,
-  getLegacyThreadScopedAcpSessionsOverride,
-  getOverrides,
-} from "@/shared/features";
+import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { resetLinkPreviewMetadataCache } from "@/shared/lib/useResolvedLinkPreviews";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
@@ -312,7 +308,6 @@ export function useCommunityInit(
       // and re-applied it on every reload, which silently overwrote any
       // imported key. `loadCommunities()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
-      const legacyThreadSessions = getLegacyThreadScopedAcpSessionsOverride();
       try {
         await applyCommunity(
           activeCommunity.relayUrl,
@@ -320,7 +315,6 @@ export function useCommunityInit(
           activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
-          legacyThreadSessions === true,
         );
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
@@ -345,15 +339,6 @@ export function useCommunityInit(
           });
         }
         return;
-      }
-
-      if (
-        legacyThreadSessions !== undefined &&
-        !completeLegacyThreadScopedAcpSessionsMigration(legacyThreadSessions)
-      ) {
-        console.warn(
-          "Could not clear the legacy ACP session override; migration will retry on next launch.",
-        );
       }
 
       if (!cancelled) {

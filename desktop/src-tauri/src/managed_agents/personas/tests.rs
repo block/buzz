@@ -1,11 +1,10 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_legacy_thread_scoped_personas, migrate_retired_personas,
-    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
-    RETIRED_PERSONAS,
+    merge_personas, migrate_retired_personas, validate_persona_activation_change,
+    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
-use crate::managed_agents::{AcpSessionPolicy, AgentDefinition};
+use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
@@ -92,32 +91,6 @@ fn merge_personas_preserves_builtin_edits() {
     assert_eq!(fizz.name_pool, edited_builtin.name_pool);
     assert_eq!(fizz.env_vars, edited_builtin.env_vars);
     assert_eq!(fizz.is_active, edited_builtin.is_active);
-}
-
-#[test]
-fn legacy_thread_override_migrates_every_existing_definition_once() {
-    let mut personas = vec![
-        custom_persona("custom:channel", "Channel"),
-        AgentDefinition {
-            session_policy: AcpSessionPolicy::Thread,
-            ..custom_persona("custom:thread", "Thread")
-        },
-    ];
-    let original_thread_updated_at = personas[1].updated_at.clone();
-
-    assert_eq!(
-        migrate_legacy_thread_scoped_personas(&mut personas, "2026-09-11T00:00:00Z"),
-        1
-    );
-    assert!(personas
-        .iter()
-        .all(|persona| persona.session_policy == AcpSessionPolicy::Thread));
-    assert_eq!(personas[0].updated_at, "2026-09-11T00:00:00Z");
-    assert_eq!(personas[1].updated_at, original_thread_updated_at);
-    assert_eq!(
-        migrate_legacy_thread_scoped_personas(&mut personas, "later"),
-        0
-    );
 }
 
 #[test]
