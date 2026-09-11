@@ -15,6 +15,8 @@ test('actual OpenTUI selection, hidden entry, multiline save, resize and quit', 
     ui.mockInput.pressArrow('down');
     await ui.renderOnce();
     assert.equal(selected, 'b');
+    assert.ok(!ui.captureCharFrame().includes('Second detail'));
+    ui.mockInput.pressEnter(); await ui.renderOnce();
     assert.match(ui.captureCharFrame(), /Second detail/);
     const secret = 'synthetic-secret-not-a-real-key';
     const entered = view.input('Fixture secret', '', true);
@@ -39,5 +41,52 @@ test('actual OpenTUI selection, hidden entry, multiline save, resize and quit', 
     ui.mockInput.pressKey('q', { ctrl: true });
     await view.done;
     assert.equal(await quitting, undefined);
+  } finally { view.close(); }
+});
+
+test('drawer guards, persistent keys, pending Esc priority, list navigation and validated input', async () => {
+  const ui = await createTestRenderer({ width: 100, height: 30, exitOnCtrlC: false });
+  const view = new OpenTuiScreen(ui.renderer);
+  try {
+    let calls = 0, cancelled = 0, selected = '';
+    view.onSelect = id => { selected = id; };
+    view.onCancel = () => { cancelled++; };
+    view.show(Array.from({length: 25}, (_, i) => ({id: String(i), label: `Agent ${i}`, detail: `Summary ${i}`, evidence: `PUBLIC ${i}`})), [
+      {label: 'Start', disabled: 'Requires fresh stopped report.', run: () => { calls++; }},
+      ...Array.from({length: 10}, (_, i) => ({label: `Action ${i}`, run: () => { calls++; }})),
+    ]);
+    ui.mockInput.pressKey('HOME'); await ui.renderOnce();
+    await ui.mockMouse.scroll(4, 5, 'down'); await ui.renderOnce();
+    assert.equal(selected, '1');
+    ui.mockInput.pressKey('END'); await ui.renderOnce();
+    assert.equal(selected, '24');
+    await ui.mockMouse.click(4, 5); await ui.renderOnce();
+    assert.equal(selected, '24', 'scrolled click cannot select wrong row');
+    ui.mockInput.pressEnter(); assert.equal(calls, 0);
+    ui.mockInput.pressKey('F2'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(), /\(unavailable\) Start/);
+    assert.match(ui.captureCharFrame(), /Requires fresh stopped report/);
+    ui.mockInput.pressEnter(); assert.equal(calls, 0);
+    ui.mockInput.pressKey('END'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(), /Action 9/);
+    ui.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 50));
+    view.setPending(true); view.notice('Working: synthetic pending request');
+    ui.mockInput.pressKey('F2'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(), /Esc cancels waiting/);
+    assert.match(ui.captureCharFrame(), /F1 Keys F2 Actions F3 Inspect/);
+    ui.mockInput.pressEnter(); assert.equal(calls, 0);
+    ui.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(cancelled, 1);
+    await ui.renderOnce(); assert.match(ui.captureCharFrame(), /\[Actions\]/);
+    view.setPending(false); ui.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 50));
+    ui.mockInput.pressKey('F3'); await ui.renderOnce(); assert.match(ui.captureCharFrame(), /PUBLIC 24/);
+    ui.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 50));
+    const input = view.input('Required public field', '', false, false, value => value ? '' : 'Required; enter a value.');
+    ui.mockInput.pressEnter(); await ui.renderOnce(); assert.match(ui.captureCharFrame(), /Required; enter a value/);
+    await ui.mockInput.typeText('retained public input');
+    ui.resize(60,24); await ui.renderOnce(); assert.match(ui.captureCharFrame(), /retained public input/);
+    ui.mockInput.pressEnter(); assert.equal(await input, 'retained public input');
+    view.notice('FAILED: a long outcome\n' + 'Details\n'.repeat(40));
+    ui.mockInput.pressKey('F4'); await ui.renderOnce(); assert.match(ui.captureCharFrame(), /FAILED: a long outcome/);
+    assert.match(ui.captureCharFrame(), /F1 Keys F2 Actions F3 Inspect/);
   } finally { view.close(); }
 });

@@ -39,6 +39,9 @@ test('manager config save is real/keyless owner routing; retained configuration 
     await f.controller.request({ id: 1, action: 'configure', values: { owner, relay: 'wss://example.invalid' } });
     assert.ok(existsSync(join(f.home,'.beehive','host','host-identity.json')));
     assert.match(f.snapshot.status,/saved/);
+    assert.match(f.snapshot.local[0]!.detail, /Service: not checked/);
+    assert.ok(!f.snapshot.local[0]!.detail.includes('{'));
+    assert.match(f.snapshot.local[0]!.evidence!, /nonce/);
     assert.equal(f.backend.read(credentialReference('owner',owner)),null);
     await f.controller.request({ id: 2, action: 'configure', values: { owner, relay: 'wss://other.invalid' } });
     assert.match(f.snapshot.status,/already exists/);
@@ -58,6 +61,10 @@ test('manager gates owner, exact selection/revision/freshness, unresolved operat
     await request('signin',{ values: { owner, relay: 'wss://example.invalid', secret } }); assert.equal(f.snapshot.owner,owner);
     const m = message('inventory','host-a','agent-a',3,{ observedAt: Date.now(), phase: 'stopped', actualRun: null, assignedHost: 'host-a', configurations: { default: {} }, selectedNext: {} });
     f.receive(m);
+    assert.match(f.snapshot.agents[0]!.detail, /Actual run \(reported\)/);
+    assert.match(f.snapshot.agents[0]!.detail, /Selected for next Start/);
+    assert.ok(!f.snapshot.agents[0]!.detail.includes('{'));
+    assert.equal(f.snapshot.agents[0]!.disabled!.start, '');
     const target = JSON.stringify(['host-a','agent-a']);
     await request('start',{ target, revision: 2 }); assert.match(f.snapshot.status,/Selection changed/);
     await request('start',{ target, revision: 3 }); assert.equal(f.submitted.length,1); assert.equal(f.submitted[0]!.type,'start');

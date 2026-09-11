@@ -117,3 +117,19 @@ with pnpm 11.4.0 `install --ignore-workspace --ignore-scripts --frozen-lockfile`
 Node 24.15.0 and Bun 1.4.2 executables at `beehive/runtime/node` and
 `beehive/runtime/bun`. Link `~/.local/bin/beehive` to the exported package's
 `bin/beehive`, not to a worktree. See the immutable delivery recipe for the exact pin.
+
+## Local visual-polish candidate (not installed)
+
+The subsequent presentation candidate replaces default JSON walls with Node-built
+public summaries and F3 technical evidence; uses ≥88×24 split / narrow Enter-to-detail;
+puts contextual guarded commands in F2; retains permanent keys with F4 scrollable
+outcomes; and uses compact validated inputs plus a named configuration chooser.
+The installed `6390e594` exports are deliberately unchanged pending independent
+implementation-vs-design review.
+
+Evidence and the corrected external design are under
+`/Users/loganj/.buzz/artifacts/beehive-opentui-polish-6390e594/implementation/`.
+Read `IMPLEMENTATION.md` there for the eight-point self-review, scoped deviations,
+actual PTY comparisons versus offscreen fixtures, exact runtime commands and limits.
+This candidate does not claim exhaustive design conformance, real relay inventory,
+light-terminal visual proof, or safe scrolled-action mouse activation.

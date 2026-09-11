@@ -12,7 +12,15 @@ import { message, type Message } from './protocol.ts';
 import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
 
 export type ManagerRequest = { id: number; action: string; values?: Record<string, string>; target?: string; revision?: number };
-export type ManagerSnapshot = { local: { id: string; label: string; detail: string }[]; agents: { id: string; label: string; detail: string; revision: number; configurations: string[] }[]; owner?: string; status: string };
+export type ManagerItem = { id: string; label: string; detail: string; evidence?: string; disabled?: Record<string, string> };
+export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string };
+const short = (s: string) => s.length > 22 ? `${s.slice(0,8)}…${s.slice(-6)}` : s;
+const describe = (v: unknown): string => {
+  if (v === undefined || v === null) return 'Not reported';
+  if (typeof v !== 'object') return typeof v === 'string' && /^[0-9a-f]{32,}$/i.test(v) ? short(v) : String(v);
+  if (!Object.keys(v).length) return 'Not reported';
+  return Object.entries(v).map(([k, value]) => `${k}: ${describe(value)}`).join('\n');
+};
 
 /** One bounded Node helper per explicit credential operation. Completion waits for exit.
  * Cancellation cannot undo OS persistence; callers must inspect before retrying. */
@@ -66,15 +74,61 @@ export class ManagerController {
     try {
       if (existsSync(join(this.hostDirectory, 'host-identity.json'))) {
         const identity = readHostIdentityPublic(this.hostDirectory);
-        local.push({ id: 'host', label: identity.pairing.label, detail: `THIS COMPUTER — configuration, not service liveness\n${JSON.stringify(identity.pairing, null, 2)}\nStart foreground service separately: beehive host --owner-present\nLocal provisioning: beehive local-setup ${this.hostDirectory}\nProvision from a binding file: beehive provision-agent (existing CLI).\nService launch and binding authoring forms: Not available in this build. Existing binding/genesis provisioning is available below.` });
+        local.push({ id: 'host', label: identity.pairing.label, evidence: JSON.stringify(identity.pairing, null, 2), detail: `${identity.pairing.label}
+Configuration: saved
+Relay: ${identity.pairing.relay}
+Owner: ${short(identity.pairing.owner)}
+Service: not checked by this view
+
+Registration is not Start authority.
+
+Next steps
+F2: provision from prepared binding/genesis files.
+Quit manager before foreground CLI use:
+beehive host --owner-present
+Service launch and binding authoring forms are unavailable.` });
         if (existsSync(join(this.hostDirectory, 'setup.json'))) for (const slot of installationPublicSlots(this.hostDirectory)) local.push({ id: slot.agent, label: slot.agent, detail: `Local public slot (not current run status)\nAgent ${slot.agent}\nBindings: ${Object.keys(slot.bindings).join(', ')}` });
       } else local.push({ id: 'missing', label: 'Configure this computer', detail: 'No local host configuration. Save owner PUBLIC npub and relay; host identity is created in OS credentials. No owner sign-in, agent or service Start.' });
     } catch (error) { local.push({ id: 'error', label: 'Retained configuration needs attention', detail: String(error) + '\nPreserved; no automatic reset.' }); }
-    const agents: ManagerSnapshot['agents'] = [...this.inventory].map(([id, m]) => ({ id, label: `${m.agent.slice(0, 12)} · ${m.host.slice(0, 12)} · ${this.fresh(m) ? m.body.phase : 'UNKNOWN/stale'}`, revision: m.revision, configurations: Object.keys((m.body.configurations ?? {}) as object), detail: `HOST OBSERVATION — not an independent agent catalog\n${this.fresh(m) ? 'Recent report' : 'UNKNOWN / historical, not stopped'}\nActual run and selected-next are separate.\n${JSON.stringify(m, null, 2)}` }));
-    for (const [id, m] of this.offers) agents.push({ id: `host:${id}`, label: `Host ${id.slice(0, 12)}`, revision: m.revision, configurations: [], detail: `Infrastructure availability is not agent authorization or global liveness.\n${JSON.stringify(m, null, 2)}` });
-    for (const operation of this.client?.status() ?? []) agents.push({ id: `operation:${operation.request.id}`, label: `${operation.request.type} · ${operation.state} · ${operation.request.id.slice(0,8)}`, revision: operation.request.revision, configurations: [], detail: `OPERATION RECORD — not current host state\n${JSON.stringify(operation, null, 2)}\nUnknown is not stopped. Reconcile queries receipts without resubmitting. Policy retry remains available in existing CLI.` });
-    return { local, agents, owner: this.owner, status: this.status };
+    const agents: ManagerSnapshot['agents'] = [...this.inventory].map(([id, m]) => {
+      const fresh = this.fresh(m);
+      const blocked = !fresh ? 'Host stale or unreachable. Refresh before acting.' : this.client?.status().some(o => o.request.host === m.host && o.request.agent === m.agent && !['completed','failed'].includes(o.state)) ? 'Unresolved operation: inspect receipts before acting.' : '';
+      return { id, label: `Agent ${short(m.agent)} · ${fresh ? m.body.phase : 'UNKNOWN'}`, revision: m.revision, configurations: Object.keys((m.body.configurations ?? {}) as object),
+        disabled: { 'select-config': blocked, stop: blocked, start: blocked || (m.body.phase !== 'stopped' || m.body.actualRun || m.body.assignedHost !== m.host ? 'Requires fresh assigned stopped report without an actual run.' : '') },
+        evidence: JSON.stringify(m, null, 2), detail: `Agent ${short(m.agent)}
+Host ${short(m.host)}
+${fresh ? 'Recent host report' : 'UNKNOWN — stale or unreachable; last reported below'}
+Reported phase: ${m.body.phase}
+Start authority: ${m.body.assignedHost === m.host ? 'Assigned to this host' : 'Not assigned to this host'}
+
+Actual run (reported)
+${m.body.actualRun ? describe(m.body.actualRun) : 'No actual run in this report'}
+
+Selected for next Start
+${describe(m.body.selectedNext)}
+Choosing next does not change the actual run.` };
+    });
+    for (const [id, m] of this.offers) agents.push({ id: `host:${id}`, label: `Host ${short(id)}`, revision: m.revision, configurations: [], evidence: JSON.stringify(m, null, 2), detail: `Host availability report
+Host ${short(id)}
+${this.fresh(m) ? 'Recent host report' : 'UNKNOWN — stale or unreachable'}
+${describe(m.body)}
+Availability is not agent Start authority.` });
+    for (const operation of this.client?.status() ?? []) agents.push({ id: `operation:${operation.request.id}`, label: `${operation.request.type} · ${operation.state} · ${operation.request.id.slice(0,8)}`, revision: operation.request.revision, configurations: [], evidence: JSON.stringify(operation, null, 2), detail: `Operation: ${operation.request.type}
+State: ${operation.state}
+Host: ${short(operation.request.host)}
+Agent: ${short(operation.request.agent)}
+Captured revision: ${operation.request.revision}
+Publication: ${describe(operation.publication)}
+Receipt/result: ${describe(operation.result)}
+
+Publication is not acceptance.
+Outcome unknown? Check receipts; do not submit again.
+A Stop receipt is not a fresh stopped inventory report.` });
+    let routing: ReturnType<typeof readControllerConfig>;
+    try { routing = readControllerConfig(this.ownerDirectory); } catch { /* Invalid retained routing is refused by sign-in; never reset here. */ }
+    return { local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
   }
+
   private fresh(m: Message) { return Boolean(this.client?.connected && Date.now() - Number(m.body.observedAt) <= 6000); }
   refresh() { if (!this.closed) this.changed(this.snapshot()); }
   cancel() { this.generation++; this.active?.abort(); }
@@ -91,7 +145,7 @@ export class ManagerController {
         const owner = ownerPublicInput(v.owner ?? '');
         if (!/^(wss|ws):\/\//.test(v.relay ?? '')) throw Error('Management relay URL required');
         await this.credential({ action: 'configure', directory: this.hostDirectory, label: hostname().slice(0,128), owner, relay: v.relay }, abort.signal);
-        check(); this.status = 'Host configuration saved. Not serving; no agents started.';
+        check(); this.status = 'Configuration saved. This action did not start a service or agent.';
       } else if (request.action === 'provision') {
         await this.credential({ action: 'provision', directory: this.hostDirectory, binding: v.binding, genesis: v.genesis, secret: v.secret }, abort.signal);
         check(); this.status = 'Local agent provisioned stopped using existing binding/genesis APIs. No Start or relay publication.';
