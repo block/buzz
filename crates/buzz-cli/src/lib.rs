@@ -374,13 +374,16 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n\n\
+Content with embedded NUL (0x00) is rejected for Rust-visible bodies (stdin / resolved --content).\n\
+Windows argv can still truncate at NUL before buzz starts — that case is undetectable here.\n\
+Workaround: PowerShell literal here-string @'...'@, or pipe UTF-8 via --content - (avoid `0 escapes)."
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
         #[arg(long)]
         channel: String,
-        /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
+        /// Message text — supports @mentions and markdown. Use '-' to read from stdin (preferred when the shell may inject NUL).
         #[arg(long)]
         content: String,
         /// Nostr event kind (default: channel default)
