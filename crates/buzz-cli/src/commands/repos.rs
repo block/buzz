@@ -1,5 +1,7 @@
 use buzz_core::{
-    git_perms::{parse_protection_tag, parse_protection_tags, RefPattern},
+    git_perms::{
+        parse_protection_tag, parse_protection_tags, RefPattern, REPO_EXPECTED_REVISION_TAG,
+    },
     kind::KIND_GIT_REPO_ANNOUNCEMENT,
 };
 use nostr::{Event, EventBuilder, Tag, Timestamp};
@@ -95,6 +97,7 @@ enum RepoChange {
 fn build_updated_repo_announcement(
     existing: &Event,
     change: RepoChange,
+    now: Timestamp,
 ) -> Result<EventBuilder, CliError> {
     let repo_id = repo_id_from_event(existing)?;
     // What to strip beyond `auth` (always stripped), and what to append.
@@ -121,7 +124,7 @@ fn build_updated_repo_announcement(
         .tags
         .iter()
         .filter(|tag| {
-            if has_tag_name(tag, "auth") {
+            if has_tag_name(tag, "auth") || has_tag_name(tag, REPO_EXPECTED_REVISION_TAG) {
                 return false;
             }
             if removed_channel && has_tag_name(tag, "buzz-channel") {
@@ -134,6 +137,10 @@ fn build_updated_repo_announcement(
     if let Some(tag) = replacement {
         tags.push(tag);
     }
+    let observed_revision = existing.id.to_hex();
+    tags.push(
+        Tag::parse([REPO_EXPECTED_REVISION_TAG, observed_revision.as_str()]).map_err(tag_error)?,
+    );
 
     let raw_tags: Vec<Vec<String>> = tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
     parse_protection_tags(&raw_tags).map_err(|error| {
@@ -142,13 +149,15 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // Use wall clock for ordinary stale heads while still advancing a future
+    // observed head. The signed expected-revision tag prevents a delayed writer
+    // from using the newer timestamp to erase an intervening metadata update.
+    let after_head = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = after_head.max(now.as_secs());
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -193,9 +202,25 @@ fn validate_write_response(raw: &str) -> Result<String, CliError> {
     )
 }
 
+fn map_repo_submit_error(error: CliError) -> CliError {
+    match error {
+        CliError::Relay { status: 400, body } if body.starts_with("conflict: repository") => {
+            let message = body
+                .strip_prefix("conflict: ")
+                .unwrap_or(body.as_str())
+                .to_string();
+            CliError::Conflict(message)
+        }
+        error => error,
+    }
+}
+
 async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
     let event = client.sign_event(builder)?;
-    let raw = client.submit_event(event).await?;
+    let raw = client
+        .submit_event(event)
+        .await
+        .map_err(map_repo_submit_error)?;
     println!("{}", validate_write_response(&raw)?);
     Ok(())
 }
@@ -369,8 +394,11 @@ async fn cmd_protect_set(
         require_patch,
     )?;
     let event = current_repo(client, repo_id).await?;
-    let builder =
-        build_updated_repo_announcement(&event, RepoChange::SetProtection(Box::new(tag)))?;
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoChange::SetProtection(Box::new(tag)),
+        Timestamp::now(),
+    )?;
     submit_repo_update(client, builder).await
 }
 
@@ -394,6 +422,7 @@ async fn cmd_protect_remove(
     let builder = build_updated_repo_announcement(
         &event,
         RepoChange::RemoveProtection(ref_pattern.to_string()),
+        Timestamp::now(),
     )?;
     submit_repo_update(client, builder).await
 }
@@ -410,8 +439,11 @@ async fn cmd_protect_remove(
 /// latency.
 async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
-    let builder =
-        build_updated_repo_announcement(&event, RepoChange::BindChannel(channel.to_string()))?;
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoChange::BindChannel(channel.to_string()),
+        Timestamp::now(),
+    )?;
     submit_repo_update(client, builder).await
 }
 
@@ -472,11 +504,12 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
+    use buzz_core::git_perms::REPO_EXPECTED_REVISION_TAG;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
         build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        map_repo_submit_error, protection_rules_json, validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -500,6 +533,7 @@ mod tests {
                 tag(&["buzz-channel", "channel-id"]),
                 tag(&["future-metadata", "preserve-me"]),
                 tag(&["auth", &"a".repeat(64), "kind=30617", &"b".repeat(128)]),
+                tag(&[REPO_EXPECTED_REVISION_TAG, &"c".repeat(64)]),
                 tag(&["buzz-protect", "refs/heads/main", "push:member"]),
                 tag(&["buzz-protect", "refs/tags/*", "no-delete"]),
             ],
@@ -512,6 +546,7 @@ mod tests {
         let updated = build_updated_repo_announcement(
             &existing,
             RepoChange::SetProtection(Box::new(replacement)),
+            Timestamp::from(100_u64),
         )
         .expect("build update")
         .sign_with_keys(&Keys::generate())
@@ -523,6 +558,15 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.as_slice().first().map(String::as_str) == Some("auth")));
+        let revision_tags: Vec<_> = updated
+            .tags
+            .iter()
+            .filter(|tag| {
+                tag.as_slice().first().map(String::as_str) == Some(REPO_EXPECTED_REVISION_TAG)
+            })
+            .collect();
+        assert_eq!(revision_tags.len(), 1);
+        assert_eq!(revision_tags[0].as_slice()[1], existing.id.to_hex());
         assert!(updated
             .tags
             .iter()
@@ -560,6 +604,43 @@ mod tests {
     }
 
     #[test]
+    fn repository_update_uses_wall_clock_for_stale_heads_and_advances_future_heads() {
+        let stale = signed_repo(vec![tag(&["d", "stale"])], "", 100);
+        let stale_update = build_updated_repo_announcement(
+            &stale,
+            RepoChange::BindChannel(uuid::Uuid::new_v4().to_string()),
+            Timestamp::from(10_000_u64),
+        )
+        .expect("build stale-head update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign stale-head update");
+        assert_eq!(stale_update.created_at.as_secs(), 10_000);
+
+        let future = signed_repo(vec![tag(&["d", "future"])], "", 20_000);
+        let future_update = build_updated_repo_announcement(
+            &future,
+            RepoChange::BindChannel(uuid::Uuid::new_v4().to_string()),
+            Timestamp::from(10_000_u64),
+        )
+        .expect("build future-head update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign future-head update");
+        assert_eq!(future_update.created_at.as_secs(), 20_001);
+    }
+
+    #[test]
+    fn repository_update_rejects_timestamp_overflow() {
+        let existing = signed_repo(vec![tag(&["d", "demo"])], "", u64::MAX);
+        let error = build_updated_repo_announcement(
+            &existing,
+            RepoChange::BindChannel(uuid::Uuid::new_v4().to_string()),
+            Timestamp::from(0_u64),
+        )
+        .expect_err("maximum timestamp cannot be advanced");
+        assert!(error.to_string().contains("timestamp cannot be advanced"));
+    }
+
+    #[test]
     fn protection_remove_preserves_other_patterns() {
         let existing = signed_repo(
             vec![
@@ -574,6 +655,7 @@ mod tests {
         let updated = build_updated_repo_announcement(
             &existing,
             RepoChange::RemoveProtection("refs/heads/main".into()),
+            Timestamp::from(10_u64),
         )
         .expect("build removal")
         .sign_with_keys(&Keys::generate())
@@ -611,6 +693,7 @@ mod tests {
         let error = build_updated_repo_announcement(
             &existing,
             RepoChange::SetProtection(Box::new(replacement)),
+            Timestamp::from(10_u64),
         )
         .expect_err("malformed existing rule must fail closed");
 
@@ -637,6 +720,7 @@ mod tests {
         let error = build_updated_repo_announcement(
             &existing,
             RepoChange::SetProtection(Box::new(replacement)),
+            Timestamp::from(10_u64),
         )
         .expect_err("the 51st rule must be rejected");
 
@@ -705,11 +789,14 @@ mod tests {
             100,
         );
 
-        let updated =
-            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
-                .expect("build bind update")
-                .sign_with_keys(&Keys::generate())
-                .expect("sign bind update");
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::BindChannel(channel.clone()),
+            Timestamp::from(100_u64),
+        )
+        .expect("build bind update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
         assert_eq!(updated.created_at.as_secs(), 101);
@@ -745,11 +832,14 @@ mod tests {
         let channel = uuid::Uuid::new_v4().to_string();
         let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
 
-        let updated =
-            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
-                .expect("build bind update")
-                .sign_with_keys(&Keys::generate())
-                .expect("sign bind update");
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::BindChannel(channel.clone()),
+            Timestamp::from(10_u64),
+        )
+        .expect("build bind update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign bind update");
 
         assert!(updated
             .tags
@@ -761,9 +851,12 @@ mod tests {
     fn bind_channel_rejects_malformed_uuid() {
         let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
 
-        let error =
-            build_updated_repo_announcement(&existing, RepoChange::BindChannel("nope".into()))
-                .expect_err("malformed channel id must not build an update");
+        let error = build_updated_repo_announcement(
+            &existing,
+            RepoChange::BindChannel("nope".into()),
+            Timestamp::from(10_u64),
+        )
+        .expect_err("malformed channel id must not build an update");
 
         assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
@@ -834,6 +927,27 @@ mod tests {
         .expect_err("dominated writes must not report success");
 
         assert!(matches!(error, crate::error::CliError::Conflict(_)));
+    }
+
+    #[test]
+    fn repository_relay_conflict_maps_to_exit_five_error() {
+        let error = map_repo_submit_error(crate::error::CliError::Relay {
+            status: 400,
+            body: "conflict: repository changed since it was loaded".into(),
+        });
+        assert!(matches!(error, crate::error::CliError::Conflict(_)));
+    }
+
+    #[test]
+    fn non_conflict_relay_error_keeps_its_status() {
+        let error = map_repo_submit_error(crate::error::CliError::Relay {
+            status: 400,
+            body: "invalid: bad repository expected revision".into(),
+        });
+        assert!(matches!(
+            error,
+            crate::error::CliError::Relay { status: 400, .. }
+        ));
     }
 
     #[test]

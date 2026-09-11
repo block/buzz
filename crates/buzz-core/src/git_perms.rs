@@ -39,6 +39,13 @@ pub const GIT_NO_CHANNEL_BINDING_TOKEN: &str = "no_channel_binding";
 pub const GIT_NO_CHANNEL_BINDING_BODY: &str =
     "no_channel_binding: repository has no channel binding";
 
+/// Buzz extension tag carrying the exact kind:30617 head an update observed.
+///
+/// Repo metadata writers replace this tag on every read-modify-write. The relay
+/// uses it as an optimistic concurrency precondition while vanilla NIP-34
+/// announcements without the tag retain standard latest-wins behavior.
+pub const REPO_EXPECTED_REVISION_TAG: &str = "buzz-expected-revision";
+
 /// Maximum number of `buzz-protect` tags per repo.
 pub const MAX_PROTECTION_RULES: usize = 50;
 /// Maximum character length of a ref pattern.
