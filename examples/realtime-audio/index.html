@@ -118,7 +118,7 @@
           </div>
         </div>
         <div class="actions">
-          <label class="thinking-control"
+          <label class="setting-control"
             >Thinking
             <select
               id="thinking"
@@ -133,7 +133,22 @@
               <option value="xhigh">Very high</option>
               <option value="max">Maximum</option>
             </select></label
-          ><button
+          >
+          <label class="setting-control approval-control">
+            Tool approval
+            <select
+              id="tool-approval"
+              aria-describedby="approval-note"
+              autocomplete="off"
+            >
+              <option value="ask" selected>Ask each time</option>
+              <option value="auto">Automatically approve</option>
+            </select>
+            <span id="approval-note" hidden
+              >All shell commands, including file changes.</span
+            >
+          </label>
+          <button
             id="fullscreen"
             type="button"
             aria-label="Toggle fullscreen"

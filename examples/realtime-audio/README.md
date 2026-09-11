@@ -86,10 +86,17 @@ URL printed by the launcher in Chrome, click **Start talking**, and allow the
 microphone. Model loading and warm-up happen before this URL appears. Stop with
 Ctrl-C. The launcher supports macOS and Linux.
 
-Try “What is two plus two?” and then “Run uptime.” A tool request displays its
-arguments: choose **Allow once** or **Deny**. The demo advertises one short shell
+Try “What is two plus two?” and then “Run uptime.” By default, a tool request
+displays its arguments: choose **Allow once** or **Deny**. The demo advertises one short shell
 tool through a thin adapter to the existing `buzz-dev-mcp`; approval and execution
 stay in Buzz. Nothing is executed by recognizing speech alone.
+
+The **Tool approval** menu defaults to **Ask each time**. Choose **Automatically
+approve** to approve every subsequent shell call, including commands that modify
+files. You can switch back while connected; any approval dialog already open
+still needs a decision. The choice stays in this page across reconnects and resets
+to **Ask each time** on reload. Automatically approved calls are noted in the
+transcript.
 
 By default tools run in an empty temporary directory. Add `--cwd /path/to/project`
 to choose their working directory. The launcher uses neutral instructions and
@@ -169,3 +176,8 @@ peers, including stale playback, cancellation, thinking acknowledgment, output
 limits, and reconnect isolation. Native model inference is a separate end-to-end
 check requiring the GGUF and the fork binary; unit fixtures are not inference
 benchmarks. The example tests also run in `just ci` and GitHub CI.
+
+With the repository’s Playwright development dependencies and Chromium installed,
+run `node examples/realtime-audio/client.browser.mjs` to check the browser approval
+menu against a controlled ACP subprocess. This covers manual and automatic
+approval, switching modes, keyboard controls, reload defaults, and narrow screens.

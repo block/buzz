@@ -12,10 +12,26 @@ let voice,
   measured = false,
   outputItem;
 window.realtimeEvidence = [];
+const approval = $("tool-approval");
+// Approval is a visible choice for this page, never a saved default.
+approval.value = "ask";
+approval.onchange = () => {
+  $("approval-note").hidden = approval.value !== "auto";
+  approval
+    .closest("label")
+    .classList.toggle("automatic", approval.value === "auto");
+};
 function permission(tool, decide) {
+  if (tool && approval.value === "auto") {
+    $("permission").hidden = true;
+    ui.note(`Automatically approved ${tool.title || "tool call"}.`);
+    decide("allow_once").catch(error);
+    return;
+  }
   $("permission").hidden = !tool;
   if (!tool) {
     savedFocus?.focus();
+    savedFocus = null;
     return;
   }
   savedFocus = document.activeElement;
