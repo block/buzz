@@ -137,11 +137,27 @@ impl RealtimeSender {
     /// Append at most one second of 24 kHz mono signed little-endian PCM16.
     /// The caller must configure the matching audio/pcm session format first.
     pub async fn append_audio(&mut self, pcm: &[u8]) -> Result<(), AgentError> {
+        self.append_duplex_audio(pcm, None).await
+    }
+
+    /// Optional system PCM must come from the same capture/render clock.
+    /// Callers may send it only after the provider advertises frankie.duplex_audio.
+    pub(crate) async fn append_duplex_audio(
+        &mut self,
+        pcm: &[u8],
+        playback: Option<&[u8]>,
+    ) -> Result<(), AgentError> {
         if pcm.is_empty() || pcm.len() > MAX_AUDIO_BYTES || !pcm.len().is_multiple_of(2) {
             return Err(error("invalid PCM16 chunk length"));
         }
-        self.send(json!({"type":"input_audio_buffer.append", "audio":STANDARD.encode(pcm)}))
-            .await
+        let mut event = json!({"type":"input_audio_buffer.append", "audio":STANDARD.encode(pcm)});
+        if let Some(played) = playback {
+            if played.len() != pcm.len() {
+                return Err(error("duplex PCM lengths differ"));
+            }
+            event["playback_audio"] = Value::String(STANDARD.encode(played));
+        }
+        self.send(event).await
     }
 
     /// Commit buffered input without implicitly requesting a response.
@@ -230,7 +246,22 @@ impl RealtimeReceiver {
                 .next()
                 .await
                 .ok_or_else(|| error("websocket closed"))?
-                .map_err(|_| error("websocket read failed"))?;
+                .map_err(|cause| {
+                    // Classify transport failures without logging frame contents or credentials.
+                    let detail = match cause {
+                        tokio_tungstenite::tungstenite::Error::Protocol(problem) => {
+                            problem.to_string()
+                        }
+                        tokio_tungstenite::tungstenite::Error::Io(problem) => {
+                            format!("I/O {:?}", problem.kind())
+                        }
+                        tokio_tungstenite::tungstenite::Error::Capacity(_) => {
+                            "frame capacity exceeded".into()
+                        }
+                        _ => "transport error".into(),
+                    };
+                    error(&format!("websocket read failed: {detail}"))
+                })?;
             match message {
                 Message::Text(text) => {
                     let event: Value =

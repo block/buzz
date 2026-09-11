@@ -350,7 +350,7 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: realtime-audio-test check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
@@ -1167,3 +1167,7 @@ benchmark-check:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# Exercise the dependency-free local Realtime demo.
+realtime-audio-test:
+    node --test examples/realtime-audio/*.test.mjs

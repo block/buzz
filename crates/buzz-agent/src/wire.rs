@@ -52,7 +52,7 @@ pub struct InitializeParams {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: u32,
     #[serde(default, rename = "clientCapabilities")]
-    pub _client_capabilities: Value,
+    pub client_capabilities: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +70,8 @@ pub struct SessionNewParams {
 pub struct SessionPromptParams {
     pub session_id: String,
     pub prompt: Vec<ContentBlock>,
+    #[serde(default, rename = "_meta")]
+    pub meta: Value,
 }
 
 #[derive(Debug, Deserialize)]

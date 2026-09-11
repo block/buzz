@@ -1,6 +1,8 @@
 //! Manual-turn ACP driver for a persistent, server-owned Realtime conversation.
 //! Transport loss is terminal: never replay possibly committed tool effects.
 
+mod media;
+
 use std::{collections::HashSet, time::Duration};
 
 use crate::realtime_audio::{decode_wav, encode_wav, MAX_PCM};
@@ -47,6 +49,9 @@ struct Live {
     expires: Instant,
     ids: HashSet<String>,
     active_response: Option<String>,
+    duplex_audio: bool,
+    backchannels: bool,
+    output_audio_limit: u64,
 }
 
 impl Drop for Live {
@@ -155,15 +160,12 @@ impl RealtimeSession {
         }
     }
 
-    async fn run_inner(
+    async fn connect(
         &mut self,
         ctx: &mut RunCtx<'_>,
-        inputs: Vec<Input>,
         audio_output: bool,
-    ) -> Result<StopReason, AgentError> {
-        if *ctx.cancel.borrow() {
-            return Err(AgentError::Cancelled);
-        }
+        media: bool,
+    ) -> Result<(), AgentError> {
         if self.live.is_none() {
             let endpoint = endpoint(&ctx.cfg.base_url, ctx.effective_model)?;
             let connection = tokio::select! {
@@ -200,6 +202,9 @@ impl RealtimeSession {
                 expires,
                 ids: HashSet::new(),
                 active_response: None,
+                duplex_audio: false,
+                backchannels: false,
+                output_audio_limit: MAX_PCM as u64 / 2,
             });
             let live = self.live.as_mut().ok_or_else(|| error("missing session"))?;
             let mut tools = ctx.mcp.tools();
@@ -215,29 +220,67 @@ impl RealtimeSession {
                     })
                 })
                 .collect();
-            live.sender
-                .update_session(json!({
-                    "type":"realtime", "model":ctx.effective_model,
-                    "instructions":ctx.system_prompt, "tools":tools,
-                    "output_modalities":[if audio_output { "audio" } else { "text" }],
-                    "audio":{
-                        "input":{"turn_detection":null,"format":{"type":"audio/pcm","rate":24000}},
-                        "output":{"format":{"type":"audio/pcm","rate":24000}},
-                    },
-                }))
-                .await?;
+            let mut session = json!({
+                "type":"realtime", "model":ctx.effective_model,
+                "instructions":ctx.system_prompt, "tools":tools,
+                "output_modalities":[if audio_output { "audio" } else { "text" }],
+                "audio":{
+                    "input":{"turn_detection":if media { json!({"type":"server_vad","create_response":false,"interrupt_response":false}) } else { Value::Null },"format":{"type":"audio/pcm","rate":24000}},
+                    "output":{"format":{"type":"audio/pcm","rate":24000}},
+                },
+            });
+            if let Some(effort) = ctx.cfg.thinking_effort {
+                session["reasoning"] = json!({"effort": effort.openai_effort_str()});
+            }
+            live.sender.update_session(session).await?;
             let deadline = Instant::now() + ctx.cfg.llm_timeout;
             let updated = live.next(ctx, deadline).await?;
+            live.duplex_audio = updated["session"]["frankie"]["duplex_audio"] == true;
+            live.backchannels = updated["session"]["frankie"]["backchannels"] == true;
+            if let Some(limit) = updated["session"]["frankie"].get("max_output_audio_samples") {
+                let limit = limit
+                    .as_u64()
+                    .filter(|n| (1..=24000 * 3600).contains(n))
+                    .ok_or_else(|| error("invalid provider live audio budget"))?;
+                live.output_audio_limit = limit;
+            }
             if updated["type"] != "session.updated"
+                || ctx.cfg.thinking_effort.is_some_and(|effort| {
+                    updated["session"]["reasoning"]["effort"] != effort.openai_effort_str()
+                })
                 || updated["session"]["output_modalities"]
                     != json!([if audio_output { "audio" } else { "text" }])
-                || updated["session"]["audio"]["input"]
-                    .get("turn_detection")
-                    .is_some_and(|value| !value.is_null())
+                || if media {
+                    let detection = &updated["session"]["audio"]["input"]["turn_detection"];
+                    detection["type"] != "server_vad"
+                        || detection["create_response"] != false
+                        || detection["interrupt_response"] != false
+                } else {
+                    updated["session"]["audio"]["input"]
+                        .get("turn_detection")
+                        .is_some_and(|value| !value.is_null())
+                }
             {
-                return Err(error("provider did not acknowledge manual session"));
+                return Err(error(if media {
+                    "provider did not acknowledge live media session"
+                } else {
+                    "provider did not acknowledge manual session"
+                }));
             }
         }
+        Ok(())
+    }
+
+    async fn run_inner(
+        &mut self,
+        ctx: &mut RunCtx<'_>,
+        inputs: Vec<Input>,
+        audio_output: bool,
+    ) -> Result<StopReason, AgentError> {
+        if *ctx.cancel.borrow() {
+            return Err(AgentError::Cancelled);
+        }
+        self.connect(ctx, audio_output, false).await?;
         let live = self.live.as_mut().ok_or_else(|| error("missing session"))?;
         if Instant::now() >= live.expires || live.reader.is_finished() {
             return Err(error("session disconnected or expired"));
@@ -498,14 +541,24 @@ impl Live {
                 if event["type"] == "error" {
                     // This manual driver cannot reconcile rejected mutations yet.
                     // Keep that policy here, not in the reusable transport.
-                    let message = event["error"]["message"].as_str().unwrap_or("unspecified provider error");
-                    let bounded: String = message.chars().filter(|c| !c.is_control()).take(512).collect();
-                    return Err(error(&format!("provider rejected request: {bounded}")));
+                    return Err(provider_error("provider rejected request", &event["error"]));
                 }
                 Ok(event)
             }
         }
     }
+}
+
+fn provider_error(context: &str, detail: &Value) -> AgentError {
+    let message = detail["message"]
+        .as_str()
+        .unwrap_or("unspecified provider error");
+    let bounded: String = message
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(512)
+        .collect();
+    error(&format!("{context}: {bounded}"))
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, AgentError> {

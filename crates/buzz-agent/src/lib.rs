@@ -12,6 +12,7 @@ pub mod model_capabilities;
 mod permission;
 pub mod realtime;
 mod realtime_audio;
+mod realtime_media;
 mod realtime_session;
 pub mod types;
 mod wire;
@@ -38,7 +39,7 @@ pub const WINDOWS_SHELL_RESOLUTION_ENV: &[&str] = &[
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -68,6 +69,7 @@ struct App {
     /// [`PROTOCOL_VERSION`] before `initialize`; no prompt (and thus no
     /// permission ask) can run before then.
     negotiated_version: AtomicU32,
+    realtime_audio: AtomicBool,
     /// Owns the entire `session/request_permission` correlation lifecycle:
     /// process-wide admission, id allocation, response delivery, and abort-safe
     /// cleanup. See [`permission::PermissionBroker`].
@@ -82,6 +84,7 @@ struct App {
 
 struct Session {
     realtime: realtime_session::RealtimeSession,
+    media: Option<realtime_media::Ingress>,
     id: String,
     mcp: Arc<McpRegistry>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
@@ -221,6 +224,7 @@ async fn async_main() {
         llm,
         sessions: Mutex::new(HashMap::new()),
         negotiated_version: AtomicU32::new(PROTOCOL_VERSION),
+        realtime_audio: AtomicBool::new(false),
         permissions,
         models_cache: tokio::sync::OnceCell::new(),
     });
@@ -308,6 +312,10 @@ async fn handle_request(
     params: Value,
     wire_tx: &WireSender,
 ) {
+    if let Some(operation) = method.strip_prefix(realtime_media::PREFIX) {
+        realtime_media::dispatch(app, operation, id, params, wire_tx).await;
+        return;
+    }
     match method.as_str() {
         "initialize" => initialize(app, id, params, wire_tx).await,
         "session/new" => {
@@ -362,6 +370,9 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
     // RFD. Revisit when that RFD merges; otherwise a genuine upstream-v2 agent
     // would silently lose `[Base]`.
     let negotiated_version = p.protocol_version.min(PROTOCOL_VERSION);
+    let live_audio = app.cfg.openai_api == config::OpenAiApi::Realtime
+        && realtime_media::enabled(&p.client_capabilities["_meta"]);
+    app.realtime_audio.store(live_audio, Ordering::Relaxed);
     // Store the negotiated version for the connection lifetime: the
     // `session/request_permission` wire shape derives from this value, never
     // from a later mutable session field, so a strict client always receives
@@ -376,6 +387,7 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
                 "protocolVersion": negotiated_version,
                 "agentCapabilities": {
                     "loadSession": false,
+                    "_meta": {"buzz": {"realtimeAudio": if live_audio { 1 } else { 0 }}},
                     "promptCapabilities": { "image": app.cfg.openai_api == config::OpenAiApi::Realtime, "audio": app.cfg.openai_api == config::OpenAiApi::Realtime, "embeddedContext": false },
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
@@ -561,6 +573,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     sessions.insert(
         session_id.clone(),
         Session {
+            media: None,
             id: session_id.clone(),
             mcp,
             skills,
@@ -772,6 +785,16 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         Ok(p) => p,
         Err(m) => return reject(&wire_tx, id, INVALID_PARAMS, &m).await,
     };
+    let live_audio = realtime_media::enabled(&p.meta);
+    if live_audio && !app.realtime_audio.load(Ordering::Relaxed) {
+        return reject(
+            &wire_tx,
+            id,
+            INVALID_PARAMS,
+            "realtime audio extension not negotiated",
+        )
+        .await;
+    }
     let (
         sid,
         mcp,
@@ -798,6 +821,15 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
             )
             .await
         }
+    };
+    let media = if live_audio {
+        let (ingress, receiver) = realtime_media::channel(run_id.clone());
+        if let Some(session) = app.sessions.lock().await.get_mut(&sid) {
+            session.media = Some(ingress);
+        }
+        Some(receiver)
+    } else {
+        None
     };
     // Advertise the active run id so steer-capable clients can target this turn
     // via `expectedRunId`. Mirrors goose's `send_active_run_update`.
@@ -864,7 +896,11 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         };
         match realtime.as_mut() {
             Some(state) => {
-                let result = state.run(&mut ctx, p.prompt).await;
+                let result = if let Some(media) = media {
+                    state.run_media(&mut ctx, p.prompt, media).await
+                } else {
+                    state.run(&mut ctx, p.prompt).await
+                };
                 if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
                     if let Some(state) = realtime.take() {
                         s.realtime = state;
@@ -879,6 +915,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     };
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
         s.busy = false;
+        s.media = None;
         // Clear run state so a late steer can't queue into a finished turn.
         s.active_run_id = None;
         s.steer_tx = None;
