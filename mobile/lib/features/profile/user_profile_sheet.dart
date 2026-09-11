@@ -83,14 +83,23 @@ class UserProfileSheet extends HookConsumerWidget {
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
-    final displayName = profile?.displayName;
+    // Canonical npub for the copy action; null when [pubkey] is not a valid
+    // identity, in which case the copy tile is disabled — an invalid key is
+    // never placed on the clipboard.
+    final npub = fullNpub(pubkey);
+
+    // Routed through the shared label so a blank cached name (empty or
+    // whitespace-only, relay-valid) falls back to the compact npub instead
+    // of an empty heading.
+    final displayName = profile?.label;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
     Future<void> copyPublicKey() async {
-      await Clipboard.setData(ClipboardData(text: pubkey));
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
       copied.value = true;
       _showProfileCopyToast(context);
@@ -239,6 +248,7 @@ class UserProfileSheet extends HookConsumerWidget {
                                 ? LucideIcons.check
                                 : LucideIcons.key,
                             label: copied.value ? 'Copied' : 'Copy public key',
+                            isEnabled: npub != null,
                             onTap: copyPublicKey,
                           ),
                         ),

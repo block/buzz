@@ -35,6 +35,17 @@ function fallbackColorClass(displayName: string) {
 type UserAvatarProps = {
   avatarUrl: string | null;
   displayName: string;
+  /**
+   * Label used to derive fallback initials; defaults to `displayName`.
+   *
+   * Callers whose `displayName` is a generated role-prefixed key fallback
+   * ("Agent npub1abcd…wxyz") pass the unprefixed compact key here:
+   * word-initials would collapse every unnamed identity onto "AN"/"PN",
+   * while the compact key keeps distinct key-tail initials. Authored
+   * display names keep their name initials. The fallback color keeps
+   * hashing `displayName`, which still contains the key.
+   */
+  initialsLabel?: string;
   size?: UserAvatarSize;
   accent?: boolean;
   shape?: "circle" | "squircle";
@@ -47,6 +58,7 @@ type UserAvatarProps = {
 export function UserAvatar({
   avatarUrl,
   displayName,
+  initialsLabel,
   size = "md",
   accent = false,
   shape,
@@ -55,7 +67,7 @@ export function UserAvatar({
   imageDraggable,
   testId,
 }: UserAvatarProps) {
-  const initials = getInitials(displayName);
+  const initials = getInitials(initialsLabel ?? displayName);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);

@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Page } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
+import { nsecEncode, npubEncode } from "nostr-tools/nip19";
 
 import {
   installMockBridge,
@@ -1482,7 +1482,12 @@ test("first-community owner can replace a mismatched account identity", async ({
         email: "old-owner@example.com",
         expiresAt: "2099-01-01T00:00:00Z",
       },
-      builderlabIdentity: { pubkey_hex: "f".repeat(64) },
+      builderlabIdentity: {
+        pubkey_hex: "f".repeat(64),
+        // Contradiction: the server npub spells this device's key, not the
+        // bound pubkey_hex the mismatch gate and recovery actions use.
+        npub: npubEncode(BLANK_TYLER_IDENTITY.pubkey),
+      },
     },
     {
       relayWsUrl: "ws://localhost:3000",
@@ -1498,6 +1503,19 @@ test("first-community owner can replace a mismatched account identity", async ({
       name: "This account uses a different Buzz identity",
     }),
   ).toBeVisible();
+  // The account row must show the authoritative bound key's npub, never the
+  // contradictory hosted npub (which here spells the device key) or raw hex.
+  const identityRows = page.getByText(/^Account: npub1/);
+  await expect(identityRows).toContainText(
+    `Account: ${npubEncode("f".repeat(64))}`,
+  );
+  await expect(identityRows).toContainText(
+    `This device: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`,
+  );
+  await expect(identityRows).not.toContainText(
+    `Account: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`,
+  );
+  await expect(page.getByText("f".repeat(64))).toHaveCount(0);
   await page
     .getByRole("button", { name: "Use this device's identity" })
     .click();
@@ -1512,6 +1530,190 @@ test("first-community owner can replace a mismatched account identity", async ({
         "bind_builderlab_nostr_identity",
       ]),
     );
+});
+
+test("first-community owner recovers from an npub-only account identity", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "old-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: {
+        // Identity object present, but no authoritative pubkey_hex — only
+        // the independent server npub, spelled for a different key.
+        npub: npubEncode("f".repeat(64)),
+      },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  // Presence of the identity object must not read as a linked, ready
+  // account: the mismatch recovery modal drives the flow instead.
+  await expect(
+    page.getByRole("heading", {
+      name: "This account uses a different Buzz identity",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(`Account: ${npubEncode("f".repeat(64))}`),
+  ).toHaveCount(0);
+  await expect(page.getByText("Account: Unavailable")).toBeVisible();
+  await expect(
+    page.getByText(`This device: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`),
+  ).toBeVisible();
+  // No create/connect surface is exposed behind the recovery modal.
+  await expect(page.getByTestId("hosted-community-create-surface")).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }),
+  ).toHaveCount(0);
+
+  // Recovery rebinds the device key and restores readiness.
+  await page
+    .getByRole("button", { name: "Use this device's identity" })
+    .click();
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .toEqual(
+      expect.arrayContaining([
+        "delete_builderlab_nostr_identity",
+        "bind_builderlab_nostr_identity",
+      ]),
+    );
+  await expect(
+    page.getByRole("heading", { name: "Choose a community" }),
+  ).toBeVisible();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }),
+  ).toBeVisible();
+});
+
+test("first-community owner never rebinds over a same-key spelling in the hex field", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "old-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: {
+        // A checksum-valid npub stored in the authoritative hex field,
+        // spelling this very device's key. It is not a hex key: recovery
+        // owns the flow, the spelling never renders as the account's key,
+        // and no delete/rebind of the identity the device already holds
+        // is demanded for it.
+        pubkey_hex: npubEncode(BLANK_TYLER_IDENTITY.pubkey),
+      },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(
+    page.getByRole("heading", {
+      name: "This account uses a different Buzz identity",
+    }),
+  ).toBeVisible();
+  await expect(page.getByText("Account: Unavailable")).toBeVisible();
+  await expect(
+    page.getByText(`Account: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(`This device: ${npubEncode(BLANK_TYLER_IDENTITY.pubkey)}`),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("first-community owner with a padded same-key hex is ready, not mismatched", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: {
+        // The device's own key, padded and uppercased: the same key after
+        // normalization, so the account is ready — never a mismatch
+        // demanding a delete/rebind of the identity it already holds.
+        pubkey_hex: `  ${BLANK_TYLER_IDENTITY.pubkey.toUpperCase()}  `,
+      },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(
+    page.getByRole("heading", {
+      name: "This account uses a different Buzz identity",
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("textbox", { name: "Community name" }),
+  ).toBeVisible();
 });
 
 test("first-community explains when the local identity belongs to another account", async ({
