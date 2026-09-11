@@ -83,9 +83,10 @@ Native contract reference is immutable Buzz `051c3a270be9c73da9ab06700bcab7d5552
 Desktop `relay.rs` `build_profile_event`, `sync_managed_agent_profile`,
 `query_relay_at_with_keys`, `query_agent_profile`; `commands/agents_profile.rs`;
 SDK `nip_oa.rs`; relay `api/bridge.rs`. At this pin Desktop's managed-agent
-builder/query actually use name/picture, not about. Beehive adds the requested
-explicit about field through the supported kind0 JSON contract, not through
-behavior text.
+builder/query/reconcile include the separately authored public `about`, alongside
+name/picture. These contracts were verified with `git show` at the immutable pin;
+the reference checkout's live HEAD differs and must not be used as that pin.
+Beehive likewise never derives about from private behavior text.
 
 `test/public-metadata.test.ts` drives the real offline CLI, private management
 consumer and signature-enforcing loopback HTTP consumer with synthetic keys and
