@@ -271,4 +271,24 @@ describe("retry batch coverage through observer listener", () => {
       ["A", "B"],
     );
   });
+
+  it("accepts panic context without a preceding start and preserves reported recovery", () => {
+    syncRecentAgentTurnFailuresFromEvents(AGENT, [
+      event({
+        kind: "agent_panic",
+        payload: {
+          error: "panic",
+          triggeringEventIds: [TRIGGER],
+          triggeringRootEventId: ROOT,
+          disposition: "retrying",
+          respawnScheduled: false,
+          attempt: 2,
+        },
+      }),
+    ]);
+    const [failure] = getRecentAgentTurnFailures("channel-1", ROOT);
+    assert.equal(failure.disposition, "retrying");
+    assert.equal(failure.respawnScheduled, false);
+    assert.equal(failure.attempt, 2);
+  });
 });

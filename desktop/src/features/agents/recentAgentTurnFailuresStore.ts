@@ -35,6 +35,7 @@ export type RecentAgentTurnFailure = TurnContext & {
   error: string;
   disposition: TurnFailureDisposition;
   attempt: number | null;
+  respawnScheduled?: boolean;
   timestamp: string;
 };
 
@@ -214,6 +215,10 @@ function processEvent(agentPubkey: string, event: ObserverEvent): boolean {
     turnId,
     error: friendlyTurnErrorCopy(rawError, payload.code),
     disposition: disposition(payload.disposition),
+    respawnScheduled:
+      typeof payload.respawnScheduled === "boolean"
+        ? payload.respawnScheduled
+        : undefined,
     attempt:
       Number.isInteger(numericAttempt) && numericAttempt > 0
         ? numericAttempt

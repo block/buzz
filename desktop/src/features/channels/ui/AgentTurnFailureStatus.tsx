@@ -33,7 +33,10 @@ export function AgentTurnFailureStatus({
   );
   const name = agent?.name ?? "Agent";
 
-  const recoveryCopy = dispositionCopy[failure.disposition];
+  const recoveryCopy =
+    failure.disposition === "retrying" && failure.respawnScheduled === false
+      ? "Queued for retry"
+      : dispositionCopy[failure.disposition];
   const contextCopy =
     failure.rootEventId === null ? " · Conversation unknown" : "";
 

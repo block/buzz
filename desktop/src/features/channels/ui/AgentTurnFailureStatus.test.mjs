@@ -59,3 +59,13 @@ it("renders legacy correlation and recovery as unknown", () => {
   assert.match(html, /Recovery status unknown/);
   assert.doesNotMatch(html, /Stopped/);
 });
+
+it("distinguishes queued work from a promised runtime restart", () => {
+  const html = renderFailure("retrying", { respawnScheduled: false });
+  assert.match(html, /Queued for retry/);
+  assert.doesNotMatch(html, /Restarting|restart needed|Retrying automatically/);
+  assert.match(
+    renderFailure("respawning", { respawnScheduled: true }),
+    /Restarting the agent/,
+  );
+});
