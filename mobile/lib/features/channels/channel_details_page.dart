@@ -253,7 +253,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         Navigator.canPop(context) &&
         Theme.of(context).platform == TargetPlatform.iOS;
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
+      useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         centerTitle: true,
         leading: usesNativeIosGlassBackButton
@@ -655,11 +655,18 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isSelf = member.pubkey.toLowerCase() == currentPubkey?.toLowerCase();
+    final hasName = displayName?.trim().isNotEmpty == true;
     final label = isSelf
         ? 'You'
-        : displayName?.trim().isNotEmpty == true
+        : hasName
         ? displayName!.trim()
         : member.labelFor(currentPubkey);
+    // Self/named initials come from the visible label; unnamed members stay
+    // keyed to the hex public key so the compact-npub label doesn't render
+    // `N` for everyone.
+    final initial = isSelf || hasName
+        ? label[0].toUpperCase()
+        : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final roleLabel = _channelMemberRoleLabel(member.role);
     final titleStyle = context.textTheme.bodyLarge;
     final roleStyle = context.textTheme.bodySmall?.copyWith(
@@ -671,7 +678,8 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
         imageUrl: avatarUrl,
         radius: 20,
         backgroundColor: context.colors.primaryContainer,
-        fallback: Text(label.isEmpty ? '?' : label[0].toUpperCase()),
+        fallback: Text(initial),
+        isAgent: member.isBot,
       ),
       title: Text.rich(
         TextSpan(

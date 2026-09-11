@@ -121,12 +121,16 @@ class _IdentityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final privHex = nostr.Nip19.decode(payload: nsec).data;
-    final pubkey = privHex.isNotEmpty ? nostr.Keys(privHex).public : 'unknown';
+    final npub = privHex.isNotEmpty
+        ? fullNpub(nostr.Keys(privHex).public)
+        : null;
 
+    // The full npub is the canonical copy/share form (never raw hex); an
+    // invalid identity is surfaced as unavailable and never copied.
     return Semantics(
       button: true,
       label: 'Copy identity public key',
-      value: pubkey,
+      value: npub ?? 'Identity unavailable',
       child: AppListRow(
         icon: LucideIcons.key,
         title: 'Identity (pubkey)',
@@ -135,9 +139,11 @@ class _IdentityRow extends StatelessWidget {
           size: 18,
           color: context.colors.onSurfaceVariant,
         ),
-        onTap: () async {
-          await copyToClipboard(context, pubkey, message: 'Pubkey copied');
-        },
+        onTap: npub == null
+            ? null
+            : () async {
+                await copyToClipboard(context, npub, message: 'Pubkey copied');
+              },
       ),
     );
   }
@@ -158,12 +164,21 @@ void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () {
+          onPressed: () async {
             Navigator.of(ctx).pop(); // close dialog
+            try {
+              await ref.read(authProvider.notifier).signOut();
+            } catch (error) {
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Could not remove community: $error')),
+              );
+              return;
+            }
+            if (!context.mounted) return;
             // Pop all pushed routes back to root so MaterialApp.home rebuilds
             // to PairingPage when auth state changes.
             Navigator.of(context).popUntil((route) => route.isFirst);
-            ref.read(authProvider.notifier).signOut();
           },
           style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
           child: const Text('Remove'),

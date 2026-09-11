@@ -98,7 +98,7 @@ export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=${PG_PORT}
 export PGSCHEMA_PLAN_DB=buzz PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
 export PGHOST=localhost PGPORT=${PG_PORT} PGUSER=buzz PGDATABASE=buzz
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
-psql_h < scripts/attach-schema-partitions.sql
+psql_h < scripts/reconcile-schema-after-pgschema.sql
 ok "Schema applied"
 
 # ── Deployment community + channels + members ────────────────────────────────

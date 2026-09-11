@@ -15,11 +15,16 @@ enum IosGlassNavigationIcon {
   camera,
   photoLibrary,
   palette,
+  droplet,
   emoji,
   person,
   frame,
   rotateCamera,
   shutter,
+  colorSwatch,
+  sun,
+  moon,
+  systemAppearance,
 }
 
 /// Leading width used by iOS channel-style headers.
@@ -48,6 +53,7 @@ class IosGlassNavigationButton extends HookWidget {
     this.fillWidth = false,
     this.buttonCenterX,
     this.foregroundColor,
+    this.swatchColor,
     this.isBusy = false,
     this.isSelected = false,
     this.nativeViewSuppressed,
@@ -85,6 +91,9 @@ class IosGlassNavigationButton extends HookWidget {
   /// Optional foreground tint for the native control and Flutter fallback.
   final Color? foregroundColor;
 
+  /// Optional inset color swatch used by [IosGlassNavigationIcon.colorSwatch].
+  final Color? swatchColor;
+
   /// Whether the native control presents its busy state.
   final bool isBusy;
 
@@ -102,6 +111,7 @@ class IosGlassNavigationButton extends HookWidget {
     final brightness = context.theme.brightness.name;
     final effectiveForeground = foregroundColor ?? context.colors.primary;
     final foregroundValue = effectiveForeground.toARGB32();
+    final swatchColorValue = swatchColor?.toARGB32();
     final enabled = onPressed != null;
 
     useEffect(() {
@@ -126,6 +136,7 @@ class IosGlassNavigationButton extends HookWidget {
               'enabled': enabled,
               'busy': isBusy,
               'selected': isSelected,
+              'swatchColor': ?swatchColorValue,
             }),
           );
         }
@@ -138,6 +149,7 @@ class IosGlassNavigationButton extends HookWidget {
         enabled,
         isBusy,
         isSelected,
+        swatchColorValue,
       ],
     );
 
@@ -193,6 +205,16 @@ class IosGlassNavigationButton extends HookWidget {
                               ),
                             ),
                           )
+                        : icon == IosGlassNavigationIcon.colorSwatch
+                        ? Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: swatchColor,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          )
                         : label != null
                         ? Text(
                             label!,
@@ -214,6 +236,8 @@ class IosGlassNavigationButton extends HookWidget {
                                 Icons.photo_library_rounded,
                               IosGlassNavigationIcon.palette =>
                                 Icons.palette_rounded,
+                              IosGlassNavigationIcon.droplet =>
+                                Icons.water_drop_rounded,
                               IosGlassNavigationIcon.emoji =>
                                 Icons.emoji_emotions_rounded,
                               IosGlassNavigationIcon.person =>
@@ -223,11 +247,21 @@ class IosGlassNavigationButton extends HookWidget {
                               IosGlassNavigationIcon.rotateCamera =>
                                 Icons.cameraswitch_rounded,
                               IosGlassNavigationIcon.shutter => Icons.circle,
+                              IosGlassNavigationIcon.colorSwatch =>
+                                Icons.circle,
+                              IosGlassNavigationIcon.sun =>
+                                Icons.light_mode_rounded,
+                              IosGlassNavigationIcon.moon =>
+                                Icons.dark_mode_rounded,
+                              IosGlassNavigationIcon.systemAppearance =>
+                                Icons.brightness_auto_rounded,
                             },
                             size: icon == IosGlassNavigationIcon.shutter
                                 ? controlSize * 0.72
                                 : 22,
-                            color: effectiveForeground,
+                            color: icon == IosGlassNavigationIcon.colorSwatch
+                                ? swatchColor
+                                : effectiveForeground,
                           ),
                   ),
                 ),
@@ -250,6 +284,7 @@ class IosGlassNavigationButton extends HookWidget {
         'buttonCenterX': buttonCenterX ?? width / 2,
         'hitTargetWidth': width,
         'hitTargetHeight': height,
+        'swatchColor': ?swatchColorValue,
       };
       if (label != null) creationParams['label'] = label!;
       return UiKitView(

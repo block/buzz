@@ -1,8 +1,7 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
@@ -10,11 +9,14 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod auth_status_cache;
+mod bounded_command;
 mod login_shell;
 mod presets;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
+mod catalog;
+pub(crate) use catalog::KNOWN_ACP_RUNTIMES;
 pub use login_shell::{find_nvm_default_bin, login_shell_path};
 pub(crate) use login_shell::{find_via_login_shell, refresh_login_shell_path};
 #[cfg(test)]
@@ -26,7 +28,10 @@ pub(crate) use presets::{
     preset_harness_ids,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
+pub(crate) use runtime_metadata::EffortNormalization;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
+#[cfg(test)]
+pub(crate) use runtime_metadata::GOOSE_EFFORT_NORMALIZATION;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -82,144 +87,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
         paths
     })
 }
-
-const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
-    KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        // Goose's stable release currently publishes only the Unix installer;
-        // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &[windows_install_command!("goose", "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "$env:CONFIGURE='false'; ")],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
-        adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[("GOOSE_MODE", "auto")],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        max_rounds_env_var: None,
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-    KnownAcpRuntime {
-        id: "claude",
-        label: "Claude Code",
-        commands: &["claude-agent-acp", "claude-code-acp"],
-        aliases: &["claude-code", "claudecode"],
-        avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("claude"),
-        cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &[windows_install_command!("claude", "https://claude.ai/install.ps1")],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
-        cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Buzz talks to Claude Code through the Claude Code CLI.",
-        adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
-        skill_dir: Some(".claude/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: true,
-        default_env: &[],
-        config_file_path: Some("~/.claude/settings.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        max_rounds_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "codex",
-        label: "Codex",
-        commands: &["codex-acp"],
-        aliases: &[],
-        avatar_url: CODEX_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: false,
-        underlying_cli: Some("codex"),
-        cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &[windows_install_command!("codex", "https://chatgpt.com/codex/install.ps1")],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
-        cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
-        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
-        skill_dir: Some(".codex/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.codex/config.toml"),
-        config_file_format: Some("toml"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        max_rounds_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "buzz-agent",
-        label: "Buzz Agent",
-        commands: &["buzz-agent"],
-        aliases: &[],
-        avatar_url: BUZZ_AGENT_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: true,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://github.com/block/buzz",
-        adapter_install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        model_env_var: Some("BUZZ_AGENT_MODEL"),
-        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: None,
-        config_file_format: None,
-        supports_acp_native_config: false,
-        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
-        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
-        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
-        max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-];
 
 /// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
@@ -375,7 +242,11 @@ pub fn effective_agent_command(
 }
 
 mod overrides;
-pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
+pub use overrides::remove_record_effort_aliases;
+pub use overrides::{
+    apply_agent_command_update, apply_env_vars_then_effort_transition,
+    create_time_agent_command_override,
+};
 
 /// Prefix of the typed dangling-harness error produced by
 /// `try_record_agent_command` / `resolve_effective_harness_descriptor`.
@@ -592,6 +463,16 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 pub fn resolve_command_cached(command: &str) -> Option<PathBuf> {
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
+    }
+    // Bundled sidecars (e.g. `buzz-agent`) ship next to the app executable, so
+    // `resolve_workspace_command` finds them with a filesystem stat and no
+    // login-shell spawn — the same class of work the managed-shim check above
+    // already performs. Without this the cheap path could never see the sidecar
+    // until a forced discovery warmed the resolve cache, so `buzz-agent` (which
+    // cannot legitimately be missing) reported "not installed" at every cold
+    // launch across the create/edit and agent-defaults surfaces.
+    if let Some(workspace) = resolve_workspace_command(command) {
+        return Some(workspace);
     }
     resolve_cache()
         .lock()
@@ -822,10 +703,9 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 
 /// Run a CLI auth probe with a 10-second process-level timeout.
 ///
-/// Spawns the probe CLI as a child process. Stdout and stderr are drained on
-/// background threads to prevent pipe-buffer deadlock. On timeout the child is
-/// killed and `Unknown` is returned; no orphaned threads or processes are left
-/// behind. Returns `Unknown` on timeout.
+/// On timeout or spawn failure the child is killed and `Unknown` is returned;
+/// no orphaned threads or processes are left behind (see
+/// [`bounded_command::output_with_timeout`]).
 fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
@@ -836,81 +716,17 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::util::configure_no_window(&mut command);
+    // Window suppression is owned by `output_with_timeout`'s spawn
+    // (`BOUNDED_CREATION_FLAGS` carries `CREATE_NO_WINDOW`); a
+    // `configure_no_window` call here would be clobbered by that later
+    // `creation_flags` set, so it is deliberately omitted.
 
-    let mut child = match command.spawn() {
-        Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
+    let Some(output) = bounded_command::output_with_timeout(command, Duration::from_secs(10))
+    else {
+        return AuthStatus::Unknown;
     };
 
-    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    // Save PID for kill-on-timeout before moving child into the wait thread.
-    let child_pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wait_thread = std::thread::spawn(move || {
-        let _ = tx.send(child.wait());
-    });
-
-    // 10-second timeout for auth probes.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let exit_status = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(child_pid as i32, libc::SIGTERM);
-            }
-            #[cfg(not(unix))]
-            let _ = child_pid;
-            drop(rx);
-            let _ = wait_thread.join();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return AuthStatus::Unknown;
-        }
-        match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(_)) => {
-                let _ = wait_thread.join();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
-            }
-        }
-    };
-
-    let _ = wait_thread.join();
-    let _ = stdout_thread.join();
-    let stderr_bytes = stderr_thread.join().unwrap_or_default();
-
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+    match cli_probe::classify_probe_output(&output.stderr, output.status.success()) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
@@ -967,12 +783,14 @@ pub(crate) fn classify_runtime(
 /// The oldest `codex-acp` version supported by Buzz managed agents.
 ///
 /// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
-/// that does not reliably give `buzz` CLI subprocesses outbound relay access.
+/// that cannot use newer models. Adapter 1.6.2 bundles Codex 0.148.x, which rejects
+/// GPT-6 Astra even when the separately installed Codex CLI has been updated.
+/// Published adapter 1.10.0 depends on `@openai/codex ^0.153.3`.
 ///
 /// Bump policy: raise this only when a newer adapter fixes a defect that breaks managed
 /// agents, and only to a version already published on npm — every user below the floor is
 /// offered a reinstall on their next discovery pass.
-pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 1, 7);
+pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 10, 0);
 
 /// Probe the full version of a `codex-acp` binary by running `--version`.
 ///
@@ -1223,6 +1041,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            effort_canonical_values: runtime
+                .effort_normalization
+                .map(|norm| norm.canonical.iter().map(|s| s.to_string()).collect()),
             max_tokens_env_var: runtime.max_tokens_env_var.map(str::to_string),
             context_limit_env_var: runtime.context_limit_env_var.map(str::to_string),
             max_rounds_env_var: runtime.max_rounds_env_var.map(str::to_string),
@@ -1311,7 +1132,6 @@ pub fn discover_acp_runtimes_from(
     // Track all ids seen so far (builtins) to prevent preset/custom collisions.
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
-
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
@@ -1363,6 +1183,7 @@ pub fn discover_acp_runtimes_from(
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,
+                effort_canonical_values: None,
                 max_tokens_env_var: None,
                 context_limit_env_var: None,
                 max_rounds_env_var: None,

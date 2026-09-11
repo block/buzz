@@ -938,6 +938,67 @@ test("inline video hover reveals a timeline without a second play control", asyn
     .toBe(true);
 });
 
+test("expanded video controls fade with the video hover boundary", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${VIDEO_URL}`,
+        "m video/mp4",
+        `x ${VIDEO_SHA}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename launch-demo.mp4",
+      ],
+    ],
+  });
+
+  await page.getByRole("button", { name: "Open video review" }).last().click();
+
+  const dialog = page.getByTestId("video-review-dialog");
+  const mediaSurface = dialog.locator(".video-review-media-surface");
+  const controls = dialog.locator(".video-review-controls");
+  await expect(mediaSurface).toBeVisible();
+
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  const restingControlsBox = await controls.boundingBox();
+  expect(restingControlsBox).not.toBeNull();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await mediaSurface.hover();
+  await expect(controls).toHaveCSS("opacity", "1");
+  const hoveredControlsBox = await controls.boundingBox();
+  expect(hoveredControlsBox).not.toBeNull();
+  expect(
+    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+  ).toBeLessThan(0.5);
+  await expect(controls).toHaveCSS("transition-property", "opacity");
+  await expect(controls).toHaveCSS("transition-duration", "0.15s");
+
+  const playButton = controls.getByRole("button", { name: /review video$/ });
+  await playButton.click();
+  await expect(playButton).toBeFocused();
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await page.keyboard.press("Tab");
+  await expect(controls).toHaveCSS("opacity", "1");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(controls).toHaveCSS("transition-property", "none");
+});
+
 test("video replies in threads open the review comments view", async ({
   page,
 }) => {
@@ -1517,4 +1578,92 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(
     offRelayMenu.getByRole("button", { name: "Download video" }),
   ).toHaveCount(0);
+});
+
+test("playback speed persists across videos and reloads", async ({ page }) => {
+  await installVideoReviewHarness(page);
+
+  const openGeneralWithVideo = async (
+    url: string,
+    sha: string,
+    filename: string,
+  ) => {
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+    const emitted = (await emitMockMessage(
+      page,
+      "general",
+      `![video](${url})`,
+      {
+        extraTags: [
+          [
+            "imeta",
+            `url ${url}`,
+            "m video/mp4",
+            `x ${sha}`,
+            "size 987654",
+            "dim 160x80",
+            "duration 12.5",
+            `image ${POSTER_DATA_URL}`,
+            `filename ${filename}`,
+          ],
+        ],
+      },
+    )) as { id: string };
+    const player = page
+      .locator(`[data-message-id="${emitted.id}"]`)
+      .getByTestId("video-player");
+    await expect(player).toBeVisible();
+    await player.getByRole("button", { name: "Play video" }).click();
+    return player;
+  };
+
+  await page.goto("/");
+  const firstPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const firstSpeedButton = firstPlayer.getByTestId("video-inline-speed");
+  await expect(firstSpeedButton).toHaveText("1x");
+  await firstSpeedButton.click();
+  await page
+    .getByTestId("video-inline-speed-menu")
+    .getByRole("button", { name: "2x", exact: true })
+    .click();
+  await expect(firstSpeedButton).toHaveText("2x");
+
+  // A different video in the same session starts at the chosen speed.
+  const secondPlayer = await openGeneralWithVideo(
+    MENU_RELAY_VIDEO_URL,
+    MENU_RELAY_VIDEO_SHA,
+    "second-demo.mp4",
+  );
+  const secondVideo = secondPlayer.locator("video");
+  await expect(secondPlayer.getByTestId("video-inline-speed")).toHaveText("2x");
+  await expect
+    .poll(() =>
+      secondVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(2);
+
+  // And the preference survives an app restart.
+  await page.reload();
+  const reloadedPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const reloadedVideo = reloadedPlayer.locator("video");
+  await expect(reloadedPlayer.getByTestId("video-inline-speed")).toHaveText(
+    "2x",
+  );
+  await expect
+    .poll(() =>
+      reloadedVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(2);
 });

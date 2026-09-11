@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{HeaderMap, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware,
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -24,6 +24,7 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
+use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -67,7 +68,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Health endpoints
         .route("/health", get(health_handler))
         .route("/_liveness", get(liveness_handler))
-        .route("/_readiness", get(readiness_handler))
+        .route("/_readiness", get(public_readiness_handler))
         // Nostr HTTP bridge (NIP-98 auth)
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
@@ -173,14 +174,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 let admin_host = api::admin::is_admin_host(&state, req.headers());
                 if admin_host {
                     if let (Some(index), Some(files)) = (admin_index, admin_files) {
-                        if path.starts_with("/assets/") {
-                            return files.oneshot(req).await.map(IntoResponse::into_response);
+                        if is_admin_static_path(path) {
+                            return files
+                                .oneshot(req)
+                                .await
+                                .map(|response| with_admin_csp(response.into_response()));
                         }
                         if is_admin_spa_path(path) {
-                            return Ok(read_spa_index(&index).await);
+                            return Ok(with_admin_csp(read_spa_index(&index).await));
                         }
                     }
-                    return Ok(StatusCode::NOT_FOUND.into_response());
+                    return Ok(with_admin_csp(StatusCode::NOT_FOUND.into_response()));
                 }
 
                 if let (Some(index), Some(files)) = (web_index, web_files) {
@@ -224,6 +228,14 @@ fn is_admin_spa_path(path: &str) -> bool {
         || path.starts_with("/feedback/")
 }
 
+/// Files served from the admin bundle directory verbatim. `/assets/*` is the
+/// hashed Vite output; `/favicon.svg` is the one root-level file the bundle
+/// emits and the document links. Everything else on the admin host is a 404 —
+/// the directory is not browsable.
+fn is_admin_static_path(path: &str) -> bool {
+    path.starts_with("/assets/") || path == "/favicon.svg"
+}
+
 fn is_invite_landing_path(path: &str) -> bool {
     path.strip_prefix("/invite/")
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
@@ -244,13 +256,46 @@ async fn read_spa_index(index: &std::path::Path) -> axum::response::Response {
     }
 }
 
+/// The admin dashboard holds the operator token in `sessionStorage`, so its
+/// documents and assets are locked to same-origin code with no framing. `blob:`
+/// images are required: attachments are fetched with the token and rendered
+/// from object URLs. Applied only to the admin host — the public bundle keeps
+/// its own headers.
+#[rustfmt::skip]
+const ADMIN_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+fn with_admin_csp(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(ADMIN_CSP),
+    );
+    response
+}
+
+/// Serve the admin bundle's `index.html` for a browser request to `/`. Any
+/// non-HTML request to the admin authority is a 404: the relay protocol is not
+/// exposed there.
+async fn admin_spa_document(state: &AppState, accept: &str) -> axum::response::Response {
+    let index = state
+        .config
+        .admin
+        .as_ref()
+        .and_then(|config| config.web_dir.as_ref())
+        .filter(|_| accept.contains("text/html"))
+        .map(|dir| dir.join("index.html"));
+    match index {
+        Some(index) => read_spa_index(&index).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Build the health-only router for K8s probes (port 8080 in CAKE).
 ///
 /// No metrics middleware, no auth, no CORS, no body limit.
 pub fn build_health_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/_liveness", get(liveness_handler))
-        .route("/_readiness", get(readiness_handler))
+        .route("/_readiness", get(kubernetes_readiness_handler))
         .route("/_status", get(status_handler))
         .route("/_mesh", get(mesh_status_handler))
         .with_state(state)
@@ -282,19 +327,7 @@ async fn nip11_or_ws_handler(
     // Short-circuit the exact admin authority here and never let it serve the
     // public web bundle, NIP-11 document, or WebSocket endpoint.
     if api::admin::is_admin_host(&state, &headers) {
-        if !accept.contains("text/html") {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        let Some(index) = state
-            .config
-            .admin
-            .as_ref()
-            .and_then(|config| config.web_dir.as_ref())
-            .map(|dir| dir.join("index.html"))
-        else {
-            return StatusCode::NOT_FOUND.into_response();
-        };
-        return read_spa_index(&index).await;
+        return with_admin_csp(admin_spa_document(&state, accept).await);
     }
 
     if accept.contains("application/nostr+json") {
@@ -374,11 +407,36 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
-async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use std::time::Duration;
+/// Compatibility endpoint on the public listener. It evaluates dependencies
+/// and preserves the existing response contract but never records rollout
+/// telemetry.
+async fn public_readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.readiness.public_evaluation_allowed() {
+        return readiness_response(ReadinessEvaluation::shutting_down(), false);
+    }
 
-    if state.shutting_down.load(Ordering::Relaxed) {
+    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
+    let evaluation = state.readiness.finish_public_evaluation(evaluation);
+    readiness_response(evaluation, false)
+}
+
+/// Kubernetes health-listener endpoint. All rollout metrics flow through the
+/// process-owned coordinator so shutdown and probe generations are ordered.
+async fn kubernetes_readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let readiness::ProbeStart::Evaluate(ticket) = state.readiness.begin_probe() else {
+        return readiness_response(ReadinessEvaluation::shutting_down(), true);
+    };
+
+    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
+    let evaluation = state.readiness.finish_probe(ticket, evaluation);
+    readiness_response(evaluation, true)
+}
+
+fn readiness_response(
+    evaluation: ReadinessEvaluation,
+    include_reason: bool,
+) -> axum::response::Response {
+    if evaluation.reason == ReadinessReason::ShuttingDown {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "shutting_down"})),
@@ -386,33 +444,23 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .into_response();
     }
 
-    let check = async {
-        let (pg_ok, redis_ok, deletion_catalog_ok) = tokio::join!(
-            state.db.ping(),
-            async { state.redis_pool.get().await.is_ok() },
-            async { state.db.validate_deletion_serving_catalog().await.is_ok() },
-        );
-        (pg_ok, redis_ok, deletion_catalog_ok)
-    };
+    let pg_ok = evaluation.postgres_ready();
+    let redis_ok = evaluation.redis_ready();
+    let deletion_catalog_ok = evaluation.deletion_catalog_ready();
 
-    let (pg_ok, redis_ok, deletion_catalog_ok) =
-        tokio::time::timeout(Duration::from_secs(2), check)
-            .await
-            .unwrap_or((false, false, false));
-
-    if pg_ok && redis_ok && deletion_catalog_ok {
+    if evaluation.is_ready() {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "not_ready",
-                "postgres": pg_ok,
-                "redis": redis_ok,
-                "deletion_catalog": deletion_catalog_ok
-            })),
-        )
-            .into_response()
+        let mut payload = json!({
+            "status": "not_ready",
+            "postgres": pg_ok,
+            "redis": redis_ok,
+            "deletion_catalog": deletion_catalog_ok
+        });
+        if include_reason {
+            payload["reason"] = json!(evaluation.reason.label());
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, Json(payload)).into_response()
     }
 }
 
@@ -474,18 +522,115 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
     use axum::{routing::get, Router};
     use futures_util::SinkExt;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Notify};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
     use tower::ServiceBuilder;
     use tracing::Instrument as _;
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    struct ScriptedReadinessEvaluator {
+        evaluations: Mutex<VecDeque<ReadinessEvaluation>>,
+    }
+
+    impl ScriptedReadinessEvaluator {
+        fn new(evaluations: impl IntoIterator<Item = ReadinessEvaluation>) -> Self {
+            Self {
+                evaluations: Mutex::new(evaluations.into_iter().collect()),
+            }
+        }
+
+        fn push(&self, evaluation: ReadinessEvaluation) {
+            self.evaluations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_back(evaluation);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl readiness::ReadinessEvaluator for ScriptedReadinessEvaluator {
+        async fn evaluate(
+            &self,
+            _db: &buzz_db::Db,
+            _redis_pool: &deadpool_redis::Pool,
+        ) -> ReadinessEvaluation {
+            self.evaluations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front()
+                .expect("scripted readiness evaluation")
+        }
+    }
+
+    struct BarrierReadinessEvaluator {
+        calls: AtomicUsize,
+        first_started: Notify,
+        release_first: Notify,
+        first: ReadinessEvaluation,
+        second: ReadinessEvaluation,
+    }
+
+    impl BarrierReadinessEvaluator {
+        fn new(first: ReadinessEvaluation, second: ReadinessEvaluation) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                first_started: Notify::new(),
+                release_first: Notify::new(),
+                first,
+                second,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl readiness::ReadinessEvaluator for BarrierReadinessEvaluator {
+        async fn evaluate(
+            &self,
+            _db: &buzz_db::Db,
+            _redis_pool: &deadpool_redis::Pool,
+        ) -> ReadinessEvaluation {
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                self.first_started.notify_waiters();
+                self.release_first.notified().await;
+                self.first
+            } else {
+                self.second
+            }
+        }
+    }
+
+    fn readiness_evaluation(
+        postgres: readiness::PostgresOutcome,
+        redis: readiness::RedisOutcome,
+        deletion_catalog: readiness::DeletionCatalogOutcome,
+    ) -> ReadinessEvaluation {
+        ReadinessEvaluation::from_results(
+            readiness::TimedOutcome::new(postgres, Duration::from_millis(35)),
+            readiness::TimedOutcome::new(redis, Duration::from_millis(20)),
+            readiness::TimedOutcome::new(deletion_catalog, Duration::from_millis(15)),
+            Duration::from_millis(35),
+        )
+    }
+
+    fn ready_evaluation() -> ReadinessEvaluation {
+        readiness_evaluation(
+            readiness::PostgresOutcome::Success,
+            readiness::RedisOutcome::Success,
+            readiness::DeletionCatalogOutcome::Success,
+        )
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
@@ -515,6 +660,593 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    /// Relay state serving both bundles: the admin SPA on `admin.example` and
+    /// the public SPA on any other host.
+    async fn spa_state(admin_dir: &std::path::Path, web_dir: &std::path::Path) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.web_dir = Some(web_dir.to_path_buf());
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: Some(admin_dir.to_path_buf()),
+        });
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    async fn readiness_state(evaluator: Arc<dyn readiness::ReadinessEvaluator>) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (mut state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        state.set_readiness_evaluator(evaluator);
+        Arc::new(state)
+    }
+
+    async fn readiness_request(router: Router) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::get("/_readiness")
+                    .body(Body::empty())
+                    .expect("readiness request"),
+            )
+            .await
+            .expect("readiness response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("readiness response body");
+        let payload = serde_json::from_slice(&body).expect("readiness JSON");
+        (status, payload)
+    }
+
+    fn readiness_metric_lines(rendered: &str) -> Vec<&str> {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("buzz_readiness"))
+            .collect()
+    }
+
+    fn sorted_readiness_metric_lines(rendered: &str) -> Vec<String> {
+        let mut lines = readiness_metric_lines(rendered)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        lines.sort();
+        lines
+    }
+
+    fn metric_value(rendered: &str, exact_prefix: &str) -> f64 {
+        rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(exact_prefix)
+                    .and_then(|value| value.strip_prefix(' '))
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or_else(|| panic!("missing metric line: {exact_prefix}"))
+    }
+
+    #[test]
+    fn production_readiness_routes_export_the_frozen_health_only_contract() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let evaluator = Arc::new(ScriptedReadinessEvaluator::new(std::iter::repeat_n(
+            ready_evaluation(),
+            4,
+        )));
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            crate::metrics::describe_readiness_metrics();
+            runtime.block_on(async {
+                let state = readiness_state(evaluator.clone()).await;
+                let public = build_router(state.clone());
+                let health = build_health_router(state.clone());
+
+                for _ in 0..3 {
+                    assert_eq!(
+                        readiness_request(public.clone()).await,
+                        (StatusCode::OK, json!({"status": "ready"}))
+                    );
+                }
+                assert!(
+                    readiness_metric_lines(&handle.render()).is_empty(),
+                    "public compatibility requests must emit no readiness series"
+                );
+
+                assert_eq!(
+                    readiness_request(health.clone()).await,
+                    (StatusCode::OK, json!({"status": "ready"}))
+                );
+                let first_scrape = handle.render();
+
+                assert!(first_scrape.contains("# TYPE buzz_readiness_checks_total counter"));
+                assert!(first_scrape
+                    .contains("# TYPE buzz_readiness_dependency_checks_total counter"));
+                assert!(first_scrape
+                    .contains("# TYPE buzz_readiness_check_duration_seconds histogram"));
+                assert!(first_scrape.contains("# TYPE buzz_readiness_state gauge"));
+                assert_eq!(
+                    metric_value(
+                        &first_scrape,
+                        "buzz_readiness_checks_total{reason=\"ready\"}"
+                    ),
+                    1.0
+                );
+                assert_eq!(
+                    metric_value(
+                        &first_scrape,
+                        "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
+                    ),
+                    1.0
+                );
+                assert_eq!(
+                    metric_value(
+                        &first_scrape,
+                        "buzz_readiness_state{check=\"overall\"}"
+                    ),
+                    1.0
+                );
+                for bucket in ["2", "2.5", "+Inf"] {
+                    assert!(first_scrape.contains(&format!(
+                        "buzz_readiness_check_duration_seconds_bucket{{check=\"overall\",le=\"{bucket}\"}}"
+                    )));
+                }
+                assert!(!first_scrape.contains("result="));
+                assert!(!first_scrape
+                    .lines()
+                    .filter(|line| line.starts_with("buzz_readiness_check_duration_seconds"))
+                    .any(|line| line.contains("outcome=")));
+
+                let before_public_failure = sorted_readiness_metric_lines(&first_scrape);
+                evaluator.push(readiness_evaluation(
+                    readiness::PostgresOutcome::Success,
+                    readiness::RedisOutcome::PoolTimeout,
+                    readiness::DeletionCatalogOutcome::Success,
+                ));
+                assert_eq!(
+                    readiness_request(public.clone()).await,
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({
+                            "status": "not_ready",
+                            "postgres": true,
+                            "redis": false,
+                            "deletion_catalog": true
+                        })
+                    )
+                );
+                assert_eq!(
+                    sorted_readiness_metric_lines(&handle.render()),
+                    before_public_failure
+                );
+
+                let contract_evaluations = [
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::PoolTimeout,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::PoolError,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::QueryTimeout,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::QueryError,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::Success,
+                        readiness::RedisOutcome::PoolTimeout,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::Success,
+                        readiness::RedisOutcome::PoolError,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::Success,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::OperationTimeout,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::Success,
+                        readiness::RedisOutcome::Success,
+                        readiness::DeletionCatalogOutcome::OperationError,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::PoolTimeout,
+                        readiness::RedisOutcome::PoolTimeout,
+                        readiness::DeletionCatalogOutcome::OperationTimeout,
+                    ),
+                    readiness_evaluation(
+                        readiness::PostgresOutcome::PoolError,
+                        readiness::RedisOutcome::PoolError,
+                        readiness::DeletionCatalogOutcome::Success,
+                    ),
+                ];
+                for evaluation in contract_evaluations {
+                    evaluator.push(evaluation);
+                    let (status, payload) = readiness_request(health.clone()).await;
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                    assert_eq!(payload["reason"], json!(evaluation.reason.label()));
+                }
+
+                let before_shutdown = handle.render();
+                let histogram_counts_before = ["overall", "postgres", "redis", "deletion_catalog"]
+                    .map(|check| {
+                        metric_value(
+                            &before_shutdown,
+                            &format!(
+                                "buzz_readiness_check_duration_seconds_count{{check=\"{check}\"}}"
+                            ),
+                        )
+                    });
+                state.begin_shutdown();
+                assert_eq!(
+                    readiness_request(public).await,
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"status": "shutting_down"})
+                    )
+                );
+                let after_public_shutdown = handle.render();
+                assert!(after_public_shutdown
+                    .lines()
+                    .all(|line| !line.contains("reason=\"shutting_down\"")));
+
+                assert_eq!(
+                    readiness_request(health).await,
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"status": "shutting_down"})
+                    )
+                );
+                let final_scrape = handle.render();
+                let histogram_counts_after = ["overall", "postgres", "redis", "deletion_catalog"]
+                    .map(|check| {
+                        metric_value(
+                            &final_scrape,
+                            &format!(
+                                "buzz_readiness_check_duration_seconds_count{{check=\"{check}\"}}"
+                            ),
+                        )
+                    });
+                assert_eq!(histogram_counts_after, histogram_counts_before);
+                assert_eq!(
+                    metric_value(
+                        &final_scrape,
+                        "buzz_readiness_checks_total{reason=\"shutting_down\"}"
+                    ),
+                    1.0
+                );
+                assert_eq!(
+                    metric_value(
+                        &final_scrape,
+                        "buzz_readiness_state{check=\"overall\"}"
+                    ),
+                    0.0
+                );
+                assert!(!final_scrape.contains("sensitive-sql-or-url"));
+
+                let exported_reasons = final_scrape
+                    .lines()
+                    .filter(|line| line.starts_with("buzz_readiness_checks_total{"))
+                    .count();
+                assert_eq!(exported_reasons, readiness::READINESS_REASON_LABELS.len());
+                assert_eq!(
+                    readiness_metric_lines(&final_scrape).len(),
+                    readiness::READINESS_RAW_SERIES_PER_POD,
+                    "readiness series contract must stay at or below its 99-series cap"
+                );
+            });
+        });
+    }
+
+    fn run_out_of_order_route_case(
+        first: ReadinessEvaluation,
+        second: ReadinessEvaluation,
+    ) -> (serde_json::Value, serde_json::Value, String) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let evaluator = Arc::new(BarrierReadinessEvaluator::new(first, second));
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let state = readiness_state(evaluator.clone()).await;
+                let health = build_health_router(state);
+                let first_started = evaluator.first_started.notified();
+                let slow_first = tokio::spawn(readiness_request(health.clone()));
+                first_started.await;
+
+                let (_, second_payload) = readiness_request(health).await;
+                evaluator.release_first.notify_one();
+                let (_, first_payload) = slow_first.await.expect("slow first probe task");
+                (first_payload, second_payload, handle.render())
+            })
+        })
+    }
+
+    #[test]
+    fn real_health_route_generation_fence_covers_both_completion_orders() {
+        let failure = readiness_evaluation(
+            readiness::PostgresOutcome::Success,
+            readiness::RedisOutcome::PoolTimeout,
+            readiness::DeletionCatalogOutcome::Success,
+        );
+
+        let (older_failure, newer_success, success_scrape) =
+            run_out_of_order_route_case(failure, ready_evaluation());
+        assert_eq!(older_failure["reason"], json!("redis_pool_timeout"));
+        assert_eq!(newer_success, json!({"status": "ready"}));
+        assert_eq!(
+            metric_value(&success_scrape, "buzz_readiness_state{check=\"overall\"}"),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&success_scrape, "buzz_readiness_state{check=\"redis\"}"),
+            1.0
+        );
+
+        let (older_success, newer_failure, failure_scrape) =
+            run_out_of_order_route_case(ready_evaluation(), failure);
+        assert_eq!(older_success, json!({"status": "ready"}));
+        assert_eq!(newer_failure["reason"], json!("redis_pool_timeout"));
+        assert_eq!(
+            metric_value(&failure_scrape, "buzz_readiness_state{check=\"overall\"}"),
+            0.0
+        );
+        assert_eq!(
+            metric_value(&failure_scrape, "buzz_readiness_state{check=\"redis\"}"),
+            0.0
+        );
+        for scrape in [&success_scrape, &failure_scrape] {
+            assert_eq!(
+                metric_value(scrape, "buzz_readiness_checks_total{reason=\"ready\"}"),
+                1.0
+            );
+            assert_eq!(
+                metric_value(
+                    scrape,
+                    "buzz_readiness_checks_total{reason=\"redis_pool_timeout\"}"
+                ),
+                1.0
+            );
+        }
+    }
+
+    #[test]
+    fn real_health_route_shutdown_fence_dominates_an_in_flight_success() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let evaluator = Arc::new(BarrierReadinessEvaluator::new(
+            ready_evaluation(),
+            ready_evaluation(),
+        ));
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let state = readiness_state(evaluator.clone()).await;
+                let health = build_health_router(state.clone());
+                let first_started = evaluator.first_started.notified();
+                let in_flight = tokio::spawn(readiness_request(health));
+                first_started.await;
+
+                state.begin_shutdown();
+                evaluator.release_first.notify_one();
+                assert_eq!(
+                    in_flight.await.expect("in-flight readiness task"),
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"status": "shutting_down"})
+                    )
+                );
+
+                let scrape = handle.render();
+                assert_eq!(
+                    metric_value(&scrape, "buzz_readiness_state{check=\"overall\"}"),
+                    0.0
+                );
+                assert!(scrape
+                    .lines()
+                    .all(|line| !line.starts_with("buzz_readiness_state{check=\"postgres\"}")));
+                assert_eq!(
+                    metric_value(
+                        &scrape,
+                        "buzz_readiness_checks_total{reason=\"shutting_down\"}"
+                    ),
+                    1.0
+                );
+                assert_eq!(
+                    metric_value(
+                        &scrape,
+                        "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
+                    ),
+                    1.0
+                );
+            });
+        });
+    }
+
+    /// A minimal built SPA: an index document, one hashed asset, and the
+    /// root-level favicon Vite copies out of `public/`.
+    fn write_bundle(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("assets")).expect("assets dir");
+        std::fs::write(dir.join("index.html"), "<!doctype html>").expect("index.html");
+        std::fs::write(dir.join("assets/app.js"), "export {};").expect("bundle asset");
+        std::fs::write(dir.join("favicon.svg"), "<svg/>").expect("favicon");
+    }
+
+    async fn spa_response(
+        state: Arc<AppState>,
+        host: &str,
+        path: &str,
+    ) -> axum::response::Response {
+        build_router(state)
+            .oneshot(
+                Request::get(path)
+                    .header(axum::http::header::HOST, host)
+                    .header(axum::http::header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn admin_spa_documents_and_assets_carry_the_admin_csp() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        for path in [
+            "/",
+            "/reports",
+            "/feedback/abc",
+            "/assets/app.js",
+            "/favicon.svg",
+        ] {
+            let response = spa_response(state.clone(), "admin.example", path).await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .and_then(|value| value.to_str().ok()),
+                Some(ADMIN_CSP),
+                "{path} must carry the admin CSP"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_admin_host_serves_the_favicon_the_document_links() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        let response = spa_response(state.clone(), "admin.example", "/favicon.svg").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The bundle directory is not browsable: only the assets Vite emits at
+        // the root are reachable, never arbitrary files beside them.
+        for path in ["/index.html", "/nope.svg"] {
+            let response = spa_response(state.clone(), "admin.example", path).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_admin_csp_never_allows_inline_or_eval() {
+        assert!(
+            !ADMIN_CSP.contains("unsafe-inline") && !ADMIN_CSP.contains("unsafe-eval"),
+            "the dashboard performs signed admin requests — inline script or style must stay blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_spa_is_untouched_by_the_admin_csp() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        for path in ["/invite/payload.mac", "/assets/app.js"] {
+            let response = spa_response(state.clone(), "public.example", path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none(),
+                "{path} on the public host must keep its own headers"
+            );
+        }
     }
 
     #[test]

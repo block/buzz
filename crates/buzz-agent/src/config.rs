@@ -429,6 +429,96 @@ pub enum Provider {
     OpenRouter,
 }
 
+/// Optional visibility filter for the Databricks model catalog.
+///
+/// Each comma-separated pattern is trimmed and matched against the complete,
+/// case-sensitive model id. Only `*` (zero or more characters) and `?` (one
+/// character) have wildcard semantics; all other characters are literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabricksModelFilter {
+    patterns: Vec<String>,
+}
+
+impl DatabricksModelFilter {
+    /// Parse `DATABRICKS_MODEL_FILTER`-style input.
+    ///
+    /// Unset or whitespace-only input disables filtering. A nonblank value must
+    /// contain at least one nonblank comma-separated pattern.
+    pub fn parse(raw: Option<&str>) -> Result<Option<Self>, String> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let patterns: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if patterns.is_empty() {
+            return Err(
+                "config: DATABRICKS_MODEL_FILTER must contain at least one nonblank pattern".into(),
+            );
+        }
+
+        Ok(Some(Self { patterns }))
+    }
+
+    /// Return whether the complete model id matches at least one pattern.
+    pub fn matches(&self, model_id: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| glob_matches(pattern, model_id))
+    }
+}
+
+/// Match one full-string `*`/`?` pattern without treating any other character
+/// as syntax. The inputs are converted to Unicode scalar values so `?` means
+/// one character rather than one UTF-8 byte.
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
+    let mut pattern_index = 0;
+    let mut value_index = 0;
+    let mut star_index = None;
+    let mut star_value_index = 0;
+
+    while value_index < value.len() {
+        match pattern.get(pattern_index) {
+            Some('?') => {
+                pattern_index += 1;
+                value_index += 1;
+            }
+            Some('*') => {
+                star_index = Some(pattern_index);
+                star_value_index = value_index;
+                pattern_index += 1;
+            }
+            Some(character) if *character == value[value_index] => {
+                pattern_index += 1;
+                value_index += 1;
+            }
+            _ if star_index.is_some() => {
+                if let Some(star_index) = star_index {
+                    pattern_index = star_index + 1;
+                }
+                star_value_index += 1;
+                value_index = star_value_index;
+            }
+            _ => return false,
+        }
+    }
+
+    while matches!(pattern.get(pattern_index), Some('*')) {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
 /// (`auto|chat|responses`); ignored when `provider = Anthropic`. `Auto`
 /// picks Responses for `*.openai.com`, Chat Completions otherwise, and
@@ -509,6 +599,9 @@ pub struct Config {
     /// Default (env unset/empty) is `None` — hooks are off unless the
     /// operator explicitly opts in.
     pub hook_servers: HookServers,
+    /// The effective `DATABRICKS_MODEL_FILTER` value. This is parsed by the
+    /// caller and passed explicitly so discovery never consults process env.
+    pub databricks_model_filter: Option<DatabricksModelFilter>,
     pub api_key: String,
     pub model: String,
     pub base_url: String,
@@ -616,7 +709,7 @@ impl Config {
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
-            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
+            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 1_260)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
                 30,
@@ -643,6 +736,9 @@ impl Config {
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
+            databricks_model_filter: DatabricksModelFilter::parse(
+                env("DATABRICKS_MODEL_FILTER").as_deref(),
+            )?,
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
             thinking_summary: parse_thinking_summary(
@@ -660,7 +756,12 @@ impl Config {
     /// and the catalog HTTP helpers are meaningful; all others are set to
     /// inert defaults. Never call `from_env` for discovery — it requires
     /// `DATABRICKS_MODEL` and other fields that are irrelevant here.
-    pub fn for_discovery(provider: Provider, api_key: String, base_url: String) -> Self {
+    pub fn for_discovery(
+        provider: Provider,
+        api_key: String,
+        base_url: String,
+        databricks_model_filter: Option<DatabricksModelFilter>,
+    ) -> Self {
         Self {
             provider,
             api_key,
@@ -691,6 +792,7 @@ impl Config {
             stop_max_rejections: 0,
             require_reply: false,
             hook_servers: HookServers::None,
+            databricks_model_filter,
             hints_enabled: false,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
@@ -1023,6 +1125,61 @@ fn parse_hook_servers(raw: Option<&str>) -> HookServers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn databricks_model_filter_unset_and_blank_disable_filtering() {
+        for raw in [None, Some(""), Some("   ")] {
+            assert_eq!(DatabricksModelFilter::parse(raw).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn databricks_model_filter_rejects_nonblank_input_without_patterns() {
+        let error = DatabricksModelFilter::parse(Some(" ,  , ")).unwrap_err();
+        assert!(error.contains("DATABRICKS_MODEL_FILTER"), "{error}");
+    }
+
+    #[test]
+    fn databricks_model_filter_matches_exact_full_string_case_sensitively() {
+        let filter = DatabricksModelFilter::parse(Some("data_tools.goose.kimi-k3")).unwrap();
+        assert!(filter.as_ref().unwrap().matches("data_tools.goose.kimi-k3"));
+        assert!(!filter
+            .as_ref()
+            .unwrap()
+            .matches("prefix.data_tools.goose.kimi-k3"));
+        assert!(!filter.as_ref().unwrap().matches("data_tools.goose.Kimi-k3"));
+    }
+
+    #[test]
+    fn databricks_model_filter_matches_star_and_question_mark() {
+        let filter =
+            DatabricksModelFilter::parse(Some("databricks-*,data_tools.goose.????-k3")).unwrap();
+        let filter = filter.as_ref().unwrap();
+        assert!(filter.matches("databricks-gpt-5"));
+        assert!(filter.matches("data_tools.goose.kimi-k3"));
+        assert!(!filter.matches("data_tools.goose.kimi-k33"));
+        assert!(!filter.matches("other-model"));
+    }
+
+    #[test]
+    fn databricks_model_filter_trims_multiple_patterns_and_preserves_no_match() {
+        let filter = DatabricksModelFilter::parse(Some("  first  , second-model ,  third-* "))
+            .unwrap()
+            .unwrap();
+        assert!(filter.matches("first"));
+        assert!(filter.matches("second-model"));
+        assert!(filter.matches("third-model"));
+        assert!(!filter.matches("fourth-model"));
+    }
+
+    #[test]
+    fn databricks_model_filter_question_mark_matches_one_unicode_character() {
+        let filter = DatabricksModelFilter::parse(Some("goose-? "))
+            .unwrap()
+            .unwrap();
+        assert!(filter.matches("goose-é"));
+        assert!(!filter.matches("goose-eé"));
+    }
 
     #[test]
     fn hook_servers_unset_is_none() {
@@ -1834,7 +1991,8 @@ mod tests {
         provider: Provider,
         thinking_effort: Option<ThinkingEffort>,
     ) -> Config {
-        let mut cfg = Config::for_discovery(provider, "key".into(), "https://example.com".into());
+        let mut cfg =
+            Config::for_discovery(provider, "key".into(), "https://example.com".into(), None);
         cfg.model = "some-model".into();
         cfg.thinking_effort = thinking_effort;
         // for_discovery sets max_output_tokens=1 and max_context_tokens=200_001 which satisfies
@@ -2303,5 +2461,25 @@ mod tests {
     fn pricing_authority_unknown_host_returns_none() {
         assert_eq!(pricing_authority("https://api.databricks.com/v1"), None);
         assert_eq!(pricing_authority("https://custom.llm.corp/v1"), None);
+    }
+
+    #[test]
+    fn default_tool_timeout_is_1260_seconds() {
+        // Lock the production default so accidental regressions are caught.
+        // This value must remain >= buzz-dev-mcp's MAX_TIMEOUT_MS (1_200s) to
+        // give every shell(timeout_ms=1_200_000) call time to complete before
+        // buzz-agent kills the MCP server. See PR #7185 for the full budget chain.
+        //
+        // 1_260s is the literal default passed to parse_env in Config::from_env().
+        // Update here if and only if you update that literal; the test name makes
+        // "grep for old value" reliable.
+        const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1_260;
+        const {
+            // Shell cap (1_200_000 ms = 1_200s) must fit inside the agent timeout.
+            assert!(
+                1_200u64 <= DEFAULT_TOOL_TIMEOUT_SECS,
+                "agent tool timeout must be >= dev-mcp shell cap (1200s)"
+            );
+        }
     }
 }

@@ -416,3 +416,74 @@ test("test_concurrent_refreshes_after_seeded_snapshot_share_one_authoritative_fe
     unsubscribe();
   }
 });
+
+test("test_subscription_refresh_preserves_cold_history_error", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const channelId = "cold-failure";
+  const queryKey = channelMessagesKey(channelId);
+  const observer = new QueryObserver(client, {
+    queryKey,
+    queryFn: async () => {
+      throw new Error("history unavailable");
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  try {
+    await observer.refetch();
+    assert.equal(observer.getCurrentResult().status, "error");
+    assert.equal(observer.getCurrentResult().data, undefined);
+
+    await assert.rejects(
+      refreshChannelWindowMessages(client, channelId),
+      /history unavailable/,
+    );
+    assert.equal(observer.getCurrentResult().status, "error");
+    assert.equal(observer.getCurrentResult().data, undefined);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("test_refresh_failure_retains_cached_rows_and_success_clears_error", async () => {
+  const harness = createHarness();
+  let shouldFail = true;
+  const refreshed = event("refreshed", 110);
+  const observer = new QueryObserver(harness.client, {
+    queryKey: harness.messagesKey,
+    queryFn: async ({ signal }) => {
+      if (shouldFail) {
+        throw new Error("history unavailable");
+      }
+      const previousMessages =
+        harness.client.getQueryData(harness.messagesKey) ?? [];
+      return reconcileFetchedChannelWindow(
+        harness.client,
+        harness.channelId,
+        wirePage([refreshed, event("initial", 100)]),
+        previousMessages,
+        signal,
+      );
+    },
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  try {
+    await assert.rejects(
+      refreshChannelWindowMessages(harness.client, harness.channelId),
+      /history unavailable/,
+    );
+    assert.equal(observer.getCurrentResult().status, "error");
+    assert.deepEqual(contents(harness), ["initial"]);
+
+    shouldFail = false;
+    await refreshChannelWindowMessages(harness.client, harness.channelId);
+    assert.equal(observer.getCurrentResult().status, "success");
+    assert.deepEqual(contents(harness), ["initial", "refreshed"]);
+  } finally {
+    unsubscribe();
+  }
+});

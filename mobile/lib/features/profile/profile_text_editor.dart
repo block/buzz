@@ -95,13 +95,17 @@ Future<void> _showProfileTextEditor({
   bool multiline = false,
 }) async {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
+    final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
     try {
       await IosProfileTextEditor.presentUntilSaved(
         title: title,
         initialValue: initialValue,
         placeholder: hintText,
         multiline: multiline,
-        brightness: Theme.of(context).brightness,
+        brightness: sheetTheme.brightness,
+        pageBackgroundColor: sheetTheme.colorScheme.surface,
+        containerBackgroundColor:
+            sheetTheme.colorScheme.surfaceContainerHighest,
         onSave: onSave,
         shouldRetryOnError: (error) =>
             error is! ProfileCommunityChangedException,

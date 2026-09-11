@@ -8,6 +8,7 @@ globalThis.localStorage = {
 };
 
 const preference = await import("./autoPinMentionedAgentsPreference.ts");
+const persistentAudience = await import("./persistentAgentAudience.ts");
 
 test("defaults missing and invalid values to one-time agent mentions", () => {
   assert.equal(preference.parseKeepMentionedAgentsPinned(null), false);
@@ -29,5 +30,18 @@ test("persists changes to the post-mention pinning preference", () => {
   assert.equal(
     values.get(preference.KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY),
     "false",
+  );
+});
+
+test("turning off automatic mentions clears active conversation audiences", () => {
+  const scope = `${"1".repeat(64)}:channel-a:channel`;
+  persistentAudience.setPersistentAgentAudience(scope, ["a".repeat(64)]);
+  preference.setKeepMentionedAgentsPinned(true);
+
+  preference.setKeepMentionedAgentsPinned(false);
+
+  assert.deepEqual(
+    persistentAudience.getPersistentAgentAudienceSnapshot().audiences,
+    {},
   );
 });

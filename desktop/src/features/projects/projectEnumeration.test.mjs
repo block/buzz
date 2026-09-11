@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   enumerateProjectEvents,
+  buildProjectHomeFromFetcher,
   buildProjectsFromFetcher,
 } from "./projectEnumeration.ts";
 
@@ -31,6 +32,64 @@ function fetcherFor(events) {
       )
       .slice(0, limit);
 }
+
+test("buildProjectHomeFromFetcher scopes startup lookup to the active channel", async () => {
+  const owner = "a".repeat(64);
+  const channelId = "11111111-1111-4111-8111-111111111111";
+  const repositoryAddress = `30617:${owner}:relay`;
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Relay"],
+      ["buzz-channel", channelId],
+      ["a", repositoryAddress],
+    ],
+  };
+  const repositoryEvent = {
+    id: "r".repeat(64),
+    kind: 30617,
+    pubkey: owner,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Relay"],
+      ["buzz-channel", channelId],
+    ],
+  };
+  const calls = [];
+  const fetchExhaustively = async (kinds, extraFilter) => {
+    calls.push({ kinds, extraFilter });
+    if (kinds.includes(30621)) return [projectEvent];
+    if (kinds.includes(30617)) return [repositoryEvent];
+    return [];
+  };
+
+  const project = await buildProjectHomeFromFetcher(
+    fetchExhaustively,
+    channelId,
+    { viewerPubkey: owner },
+  );
+
+  assert.equal(project?.projectChannelId, channelId);
+  assert.deepEqual(calls[0], {
+    kinds: [30621],
+    extraFilter: { "#buzz-channel": [channelId] },
+  });
+  assert.deepEqual(calls[1], {
+    kinds: [30617],
+    extraFilter: { "#buzz-channel": [channelId] },
+  });
+  assert.deepEqual(calls[2], {
+    kinds: [5],
+    extraFilter: { "#a": [`30621:${owner}:relay`, repositoryAddress] },
+  });
+});
 
 test("enumerateProjectEvents drains a tied boundary second before advancing", async () => {
   const events = [

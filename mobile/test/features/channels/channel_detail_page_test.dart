@@ -476,7 +476,118 @@ void main() {
     _testPrefs = await SharedPreferences.getInstance();
   });
 
+  for (final thread in [false, true]) {
+    for (final reverse in [false, true]) {
+      testWidgets('signed qualified caller thread=$thread reverse=$reverse', (
+        tester,
+      ) async {
+        final first = 'a' * 64, second = 'b' * 64, sibling = 'c' * 64;
+        Future<void> tapProfile(String label, String key) async {
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                .pubkey,
+            key,
+          );
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        for (final firstName in ['Scout', 'Renamed Scout', first, null]) {
+          for (final secondName in [null, 'Scout', 'Renamed Scout', second]) {
+            for (final bystander in [null, 'Bob', 'Scout']) {
+              final names = {
+                first: ?firstName,
+                second: ?secondName,
+                sibling: 'Alice',
+                'd' * 64: ?bystander,
+              };
+              final keys = [
+                first,
+                second.toUpperCase(),
+                sibling,
+                if (bystander != null) 'd' * 64,
+              ];
+              final event = _textMsg(
+                id: 'qualified',
+                pubkey: 'author',
+                content: '@Scout @Scout ($second) @Alice @Other (${'e' * 64})',
+                extraTags: [
+                  for (final key in reverse ? keys.reversed : keys) ['p', key],
+                ],
+              );
+              await tester.pumpWidget(
+                _buildTestable(
+                  messages: [event],
+                  users: {
+                    for (final e in names.entries)
+                      e.key: UserProfile(pubkey: e.key, displayName: e.value),
+                  },
+                  threadReplies: const {'qualified': []},
+                  initialThreadRootId: thread ? 'qualified' : null,
+                ),
+              );
+              await tester.pumpAndSettle();
+              await tapProfile('Scout (bbbbbbbb…bbbb)', second);
+              expect(find.text('Scout'), findsNothing);
+              expect(find.text('Bob'), findsNothing);
+              if (firstName != null) expect(find.text(firstName), findsNothing);
+              expect(find.text('Other (eeeeeeee…eeee)'), findsNothing);
+              await tapProfile('Alice', sibling);
+              expect(tester.takeException(), isNull);
+              await tester.pumpWidget(const SizedBox.shrink());
+              await tester.pumpAndSettle();
+            }
+          }
+        }
+      });
+    }
+  }
+
   group('ChannelDetailPage', () {
+    testWidgets(
+      'bot-role author avatars stay squircles in channel and thread',
+      (tester) async {
+        final message = _textMsg(
+          id: 'bot-message',
+          pubkey: 'bot',
+          content: 'Bot message',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [message],
+            users: const {
+              'bot': UserProfile(pubkey: 'bot', displayName: 'Bot'),
+            },
+            loadChannelBotPubkeys: () async => const {'bot'},
+            threadReplies: const {'bot-message': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        AvatarImage avatarIn(Finder row) => tester.widget<AvatarImage>(
+          find.descendant(of: row, matching: find.byType(AvatarImage)),
+        );
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('message-row-bot-message')));
+        await tester.pumpAndSettle();
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('thread-message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {
@@ -511,6 +622,17 @@ void main() {
       expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
       expect(avatar.badge, isNotNull);
       expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(16),
+      );
+      expect(
         find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
         findsOneWidget,
       );
@@ -524,8 +646,140 @@ void main() {
       expect(name.style?.fontWeight, FontWeight.w500);
       expect(presence.style?.fontSize, 14);
       expect(presence.style?.fontWeight, FontWeight.w400);
+      // Named counterpart: the avatar initial comes from the authored name.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('keys unnamed DM header avatars to the hex participant key', (
+      tester,
+    ) async {
+      // A valid unnamed counterpart: the compact-npub label would render `N`
+      // for every unnamed DM, so the header avatar stays keyed to the hex
+      // public key instead.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: [shortPubkey(a11ce), 'Self'],
+        participantPubkeys: const [a11ce, 'self'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(a11ce),
+      );
+      // The named counterpart in the test above keeps its authored initial
+      // ('A' from 'Alice'); this unnamed one gets the hex-key-derived 'A',
+      // not the `N` its npub label starts with.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
+    });
+
+    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
+      tester,
+    ) async {
+      // Member order does not guarantee the counterpart is listed first:
+      // the current user (self, from the fake profile) comes FIRST, so an
+      // avatar keyed to the first participant would render the current
+      // user's initial while the header label names the counterpart.
+      const b0b =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: ['Self', shortPubkey(b0b)],
+        participantPubkeys: const ['self', b0b],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      // Label and avatar agree on the counterpart's key: the compact npub
+      // names the unnamed counterpart, and the avatar initial is keyed to
+      // that same hex key — never the current user's `S`.
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(b0b),
+      );
+      expect(_dmHeaderAvatarInitial(tester), 'B');
+    });
+
+    testWidgets('uses a fallback squircle for bot-role DM participants', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message with a bot',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadChannelBotPubkeys: () async => const {'bot'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
+      expect(
+        tester
+            .widget<AvatarImageContent>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(AvatarImageContent),
+              ),
+            )
+            .imageUrl,
+        isNull,
+      );
+      expect(
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
+        findsOneWidget,
+      );
     });
 
     testWidgets('hides the Huddle action in a one-to-one agent DM', (
@@ -560,6 +814,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
@@ -2172,16 +2438,36 @@ void main() {
     testWidgets('previews five members before an icon-free See all row', (
       tester,
     ) async {
+      // Valid fixture keys whose npub encodings were verified against the
+      // NIP-19 codec independently of the code under test.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const carol =
+          'c010100000000000000000000000000000000000000000000000000000000000';
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          users: {
+            carol: const UserProfile(pubkey: carol, displayName: 'Carol'),
+          },
           members: [
             ChannelMember(
               pubkey: 'self',
               role: 'owner',
               joinedAt: DateTime(2025),
             ),
-            for (var index = 0; index < 5; index++)
+            ChannelMember(
+              pubkey: a11ce,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: carol,
+              role: 'member',
+              joinedAt: DateTime(2025),
+              displayName: 'Carol',
+            ),
+            for (var index = 0; index < 3; index++)
               ChannelMember(
                 pubkey: 'member-$index',
                 role: 'member',
@@ -2240,6 +2526,31 @@ void main() {
         closeTo(tester.getTopLeft(firstMemberTitle).dx, 0.1),
       );
       expect(tester.getSize(seeAllRow).height, 40 + (Grid.xxs * 2));
+
+      // Identity display in the preview rows: unnamed members keep distinct
+      // hex-keyed avatar initials (the compact-npub label would render `N`
+      // for everyone), while self and named rows keep their label initials.
+      final unnamedRow = find.byKey(ValueKey('channel-details-member-$a11ce'));
+      expect(
+        find.descendant(
+          of: unnamedRow,
+          matching: find.textContaining(shortPubkey(a11ce)),
+        ),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, a11ce), 'A');
+      final namedRow = find.byKey(ValueKey('channel-details-member-$carol'));
+      expect(
+        find.descendant(of: namedRow, matching: find.textContaining('Carol')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, carol), 'C');
+      final selfRow = find.byKey(const ValueKey('channel-details-member-self'));
+      expect(
+        find.descendant(of: selfRow, matching: find.textContaining('You')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
       await tester.ensureVisible(seeAllRow);
       await tester.pumpAndSettle();
@@ -4129,6 +4440,16 @@ void main() {
         );
 
         await tester.tap(find.text('Message #general'));
+        for (var frame = 0; frame < 15; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'Composer expansion must not expose Latest while tail-follow '
+                'layout catches up.',
+          );
+        }
         await tester.pumpAndSettle();
 
         expect(
@@ -4144,7 +4465,24 @@ void main() {
           findsNothing,
         );
 
-        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+          tester.view.viewInsets = FakeViewPadding(bottom: inset);
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'IME inset frames must not expose Latest while the followed '
+                'tail is being realigned.',
+          );
+        }
+        await tester.pump(androidImeMetricsSettleDelay);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+          reason:
+              'Latest must stay hidden when settled IME padding is applied.',
+        );
         await tester.pumpAndSettle();
 
         expect(latestMessage, findsOneWidget);
@@ -5141,11 +5479,12 @@ void main() {
       expect(find.text('Alice'), findsNWidgets(2));
     });
 
-    testWidgets('shows pubkey fallback when no profile', (tester) async {
+    testWidgets('shows compact npub fallback when no profile', (tester) async {
       final messages = [
         _textMsg(
           id: 'msg1',
-          pubkey: 'abcdef1234567890',
+          pubkey:
+              'abcdef0000000000000000000000000000000000000000000000000000000000',
           content: 'Hi',
           createdAt: 1000,
         ),
@@ -5155,8 +5494,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Hi'), findsOneWidget);
-      // Should show first 8 chars of pubkey + ellipsis
-      expect(find.text('abcdef12…'), findsOneWidget);
+      // Should show the compact npub form of the author's public key
+      expect(find.text('npub140x…etzk'), findsOneWidget);
     });
   });
 
@@ -8217,21 +8556,60 @@ void main() {
     testWidgets('opens a profile sheet from a membership system avatar', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        _buildTestable(
+      const alicePubkey =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const bobPubkey =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      // Not a valid hex public key — the sheet must surface a neutral label
+      // and refuse to copy it rather than leaking the raw string.
+      const invalidPubkey = 'bob-not-a-real-pubkey';
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      // Both scenarios share this sheet workflow — a keyed remount so the
+      // second [ProviderScope] (and its user-cache override) is fresh.
+      Widget sheetHost(
+        String scenario,
+        String target, {
+        Map<String, UserProfile> users = const {},
+      }) => KeyedSubtree(
+        key: ValueKey('sheet-$scenario'),
+        child: _buildTestable(
           messages: [
             _systemMsg(
-              id: 'sys-membership-avatar',
+              id: 'sys-membership-avatar-$scenario',
               payload: {
                 'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'bob',
+                'actor': alicePubkey,
+                'target': target,
               },
             ),
           ],
+          users: users,
+        ),
+      );
+
+      // A valid identity: the sheet copies the full canonical npub.
+      await tester.pumpWidget(
+        sheetHost(
+          'valid',
+          bobPubkey,
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+            bobPubkey: const UserProfile(pubkey: bobPubkey, displayName: 'Bob'),
           },
         ),
       );
@@ -8241,15 +8619,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
-      expect(find.text('alice'), findsNothing);
+      // The full hex key is never rendered in the sheet.
+      expect(find.text(alicePubkey), findsNothing);
+      expect(find.text(bobPubkey), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(SystemChannels.platform, null),
-      );
       await tester.ensureVisible(find.text('Copy public key'));
       await tester.pumpAndSettle();
       final copyAction = find
@@ -8262,6 +8636,68 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsOneWidget);
+      // The clipboard receives the full canonical npub — never the raw hex.
+      expect(clipboardTexts, [
+        'npub1kzcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0euyv8',
+      ]);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
+
+      // An invalid identity through the same workflow: neutral label,
+      // disabled copy, and no second clipboard write.
+      await tester.pumpWidget(
+        sheetHost(
+          'invalid',
+          invalidPubkey,
+          users: {
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      // Malformed identity → neutral label, never truncated raw input.
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Unknown identity'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(invalidPubkey), findsNothing);
+      // The copy tile is disabled and exposes no tap handler.
+      final disabledCopyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      expect(tester.widget<GestureDetector>(disabledCopyAction).onTap, isNull);
+      final copySemantics = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(Semantics),
+          )
+          .first;
+      expect(
+        tester.widget<Semantics>(copySemantics).properties.enabled,
+        isFalse,
+      );
+
+      await tester.tap(disabledCopyAction, warnIfMissed: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsNothing);
+      // The valid scenario's npub is still the only clipboard write.
+      expect(clipboardTexts, hasLength(1));
 
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
@@ -8269,6 +8705,79 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets(
+      'profile sheet heading falls back to the compact npub for blank cached names',
+      (tester) async {
+        const alicePubkey =
+            'a11ce00000000000000000000000000000000000000000000000000000000000';
+        const bobPubkey =
+            'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+        // The membership row opens the sheet for the joined member (bob).
+        // His cached display name is relay-valid but blank (empty and
+        // whitespace-only), so the heading must resolve through the shared
+        // nonblank-name label contract — the compact npub of the b0b key,
+        // never a blank heading. Keyed remounts keep each ProviderScope
+        // (and its user-cache override) fresh between scenarios.
+        for (final blankName in const ['', '   ']) {
+          await tester.pumpWidget(
+            KeyedSubtree(
+              key: ValueKey('blank-name-sheet-${blankName.length}'),
+              child: _buildTestable(
+                messages: [
+                  _systemMsg(
+                    id: 'sys-membership-blank-${blankName.length}',
+                    payload: {
+                      'type': 'member_joined',
+                      'actor': alicePubkey,
+                      'target': bobPubkey,
+                    },
+                  ),
+                ],
+                users: {
+                  alicePubkey: const UserProfile(
+                    pubkey: alicePubkey,
+                    displayName: 'Alice',
+                  ),
+                  bobPubkey: UserProfile(
+                    pubkey: bobPubkey,
+                    displayName: blankName,
+                  ),
+                },
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.byType(CircleAvatar));
+          await tester.pumpAndSettle();
+
+          expect(find.byType(UserProfileSheet), findsOneWidget);
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text(blankName),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text('npub1kzc…uyv8'),
+            ),
+            findsOneWidget,
+          );
+          // The full hex key is never rendered either.
+          expect(find.text(bobPubkey), findsNothing);
+
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('opens a profile sheet from a huddle system avatar', (
       tester,
@@ -10823,6 +11332,96 @@ void main() {
       );
     });
 
+    testWidgets(
+      'iOS thread keeps Latest hidden through composer and keyboard frames',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'A short thread',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 6; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: i.isEven ? 'alice' : 'bob',
+                content: i.isEven ? 'hello' : 'testing',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('thread-jump-to-latest')),
+            findsNothing,
+          );
+
+          await tester.tap(find.text('Reply in thread…').hitTestable());
+          for (var frame = 0; frame < 15; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'Composer expansion must not expose Latest while followed '
+                  'tail geometry catches up.',
+            );
+          }
+
+          for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+            tester.view.viewInsets = FakeViewPadding(bottom: inset);
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'IME inset frames must not expose Latest while the composer '
+                  'is following the thread tail.',
+            );
+          }
+          await tester.pumpAndSettle();
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     for (final replyCount in [0, 1]) {
       testWidgets(
         'cached writable $replyCount-reply thread defers dock correction until measured',
@@ -11365,75 +11964,94 @@ void main() {
     testWidgets('short initial thread hydration remains top-anchored', (
       tester,
     ) async {
-      final rootEvent = _textMsg(
-        id: 'thread-root',
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: 1000,
-      );
-      final replies = [
-        _textMsg(
-          id: 'reply-1',
-          pubkey: 'bob',
-          content: 'First reply',
-          createdAt: 1100,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-        _textMsg(
-          id: 'reply-2',
-          pubkey: 'bob',
-          content: 'Second reply',
-          createdAt: 1101,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-      ];
-      final completer = Completer<List<NostrEvent>>();
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          pendingThreadReplies: {'thread-root': completer.future},
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final threadHead = formatTimeline([rootEvent]).single;
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: [threadHead],
-            channelId: _channelId,
-            currentPubkey: 'self',
-            isMember: true,
-            isArchived: false,
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          _textMsg(
+            id: 'reply-1',
+            pubkey: 'bob',
+            content: 'First reply',
+            createdAt: 1100,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
+          _textMsg(
+            id: 'reply-2',
+            pubkey: 'bob',
+            content: 'Second reply',
+            createdAt: 1101,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
 
-      final headFinder = find.byKey(
-        const ValueKey('thread-message-group-thread-root'),
-      );
-      final initialHeadY = tester.getTopLeft(headFinder).dy;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      completer.complete(replies);
-      await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(headFinder, findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('thread-message-group-reply-2')),
-        findsOneWidget,
-      );
-      expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        final headFinder = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final initialHeadY = tester.getTopLeft(headFinder).dy;
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsNothing);
+
+        completer.complete(replies);
+        await tester.pump();
+        for (var frame = 0; frame < 8; frame++) {
+          expect(
+            find.byKey(latestButton),
+            findsNothing,
+            reason:
+                'Ordinary thread entry must not expose Latest on frame $frame.',
+          );
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+
+        expect(headFinder, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-2')),
+          findsOneWidget,
+        );
+        expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        expect(find.byKey(latestButton), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets(
@@ -12155,7 +12773,9 @@ void main() {
         final composer = find.byKey(const ValueKey('composer-surface'));
         // Clear the gesture arena's touch slop so this represents a deliberate
         // tail-detaching drag rather than a long-press hold with small motion.
-        await tester.drag(list, const Offset(0, 48));
+        // The compact composer now rests lower, so use enough drag distance to
+        // keep the final reply beneath its top edge for this covered-tail case.
+        await tester.drag(list, const Offset(0, 56));
         await tester.pumpAndSettle();
         expect(
           tester.getBottomLeft(latest).dy,
@@ -12807,6 +13427,81 @@ void main() {
       );
     }
 
+    testWidgets(
+      'thread shows Latest after composer tail correction exhausts and focus leaves',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([rootEvent]).single,
+              allMessages: formatTimeline([rootEvent, replies[5]]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+              jumpThreadTailForTesting: () => true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pump();
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+          reason: 'The lazy tail must remain unlaid after bounded correction.',
+        );
+
+        focusNode.unfocus();
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(find.byKey(latestButton), findsOneWidget);
+      },
+    );
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {
@@ -12983,19 +13678,35 @@ void main() {
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
 
-    test(
-      'thread tail accepts exact scroll extent while item positions lag',
-      () {
+    test('thread tail ignores oscillating item positions at exact extent', () {
+      for (final tailItemIsVisible in [true, false, false, true, false]) {
         expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 0),
+          threadTailIsAtEffectiveEnd(
+            tailIsLaidOut: true,
+            tailIsVisible: tailItemIsVisible,
+            extentAfter: 0,
+          ),
           isTrue,
         );
-        expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
-          isFalse,
-        );
-      },
-    );
+      }
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: true,
+          tailIsVisible: false,
+          extentAfter: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: false,
+          tailIsVisible: false,
+          extentAfter: 0,
+        ),
+        isFalse,
+        reason: 'A not-yet-laid-out lazy tail cannot trust stale extent.',
+      );
+    });
 
     testWidgets('thread Latest settles across expanding lazy scroll extents', (
       tester,
@@ -13152,6 +13863,21 @@ void main() {
         expect(
           find.byKey(const ValueKey('thread-jump-to-latest')),
           findsNothing,
+        );
+
+        final landingScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        landingScrollable.position.jumpTo(
+          landingScrollable.position.maxScrollExtent - 24,
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+          reason:
+              'A stale landing measurement must not expose Latest before the '
+              'user explicitly browses history.',
         );
 
         await tester.drag(list, const Offset(0, 500));
@@ -13317,6 +14043,8 @@ void main() {
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
         positionedList.itemScrollController!.jumpTo(index: 5);
+        await tester.pumpAndSettle();
+        await tester.drag(list, const Offset(0, 20));
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-159')),
@@ -14529,4 +15257,26 @@ class _TestNavigatorObserver extends NavigatorObserver {
     pushCount += 1;
     super.didPush(route, previousRoute);
   }
+}
+
+/// Avatar fallback initial in the DM header — asserts at the production
+/// seam (the masked `dm-header-avatar` badge), not the label helper.
+String _dmHeaderAvatarInitial(WidgetTester tester) {
+  final avatar = find.byKey(const ValueKey('dm-header-avatar'));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
+}
+
+/// Avatar fallback initial in the channel-details member preview row keyed
+/// to [pubkey] — asserts at the production seam (the rendered
+/// `_ChannelMemberPreviewRow`), not the label helper.
+String _previewRowAvatarInitial(WidgetTester tester, String pubkey) {
+  final row = find.byKey(ValueKey('channel-details-member-$pubkey'));
+  final avatar = find.descendant(of: row, matching: find.byType(AvatarImage));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
 }

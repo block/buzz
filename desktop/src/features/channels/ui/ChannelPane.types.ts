@@ -13,6 +13,7 @@ import type {
 } from "@/features/profile/ui/UserProfilePanel";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import type { Channel } from "@/shared/api/types";
+import type { IdleAuxiliaryHeaderControls } from "./IdleAuxiliaryPanel";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
@@ -39,6 +40,16 @@ export type ChannelPaneProps = {
   editTarget?: MessageComposerEditTarget | null;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
+  /**
+   * Idle-state body for the right auxiliary pane (project extras, etc.).
+   * Uses the same slot as thread, profile, agent-session, and management panels.
+   * By default it yields to those surfaces; callers may opt into thread override.
+   */
+  idleAuxiliaryPanel?: React.ReactNode;
+  idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
+  /** Show the idle auxiliary surface ahead of an already-open thread. */
+  idleAuxiliaryOverridesThread?: boolean;
+  idleAuxiliaryTitle?: string;
   hasOlderMessages?: boolean;
   /** True when the loaded window provably starts at the channel's beginning. */
   historyExhausted?: boolean;
@@ -48,7 +59,10 @@ export type ChannelPaneProps = {
   isJoining?: boolean;
   isSinglePanelView?: boolean;
   isSending: boolean;
+  /** Terminal channel-history failure. Cached messages remain visible when present. */
+  isTimelineError?: boolean;
   isTimelineLoading: boolean;
+  onRetryTimeline?: () => void;
   /** Newly-created message that should receive the one-shot conversation arrival motion. */
   entranceMessageId?: string | null;
   onEntranceMessageComplete?: (messageId: string) => void;
@@ -80,8 +94,10 @@ export type ChannelPaneProps = {
   onCloseAgentSession: () => void;
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
+  onCloseIdleAuxiliaryPanel?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: (options?: { beforeSend?: () => void }) => void;
+  onAddFiles?: () => void;
   onBrowseChannels?: () => void;
   onCreateChannel?: () => void;
   onCloseThread: () => void;

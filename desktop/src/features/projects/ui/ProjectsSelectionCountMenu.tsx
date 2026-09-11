@@ -1,4 +1,15 @@
-import { Bot, GitPullRequest, Link2, X } from "lucide-react";
+import {
+  Bot,
+  CircleDot,
+  FolderGit2,
+  Folders,
+  GitCommitHorizontal,
+  GitPullRequest,
+  Hash,
+  Link2,
+  ListChecks,
+  X,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -19,6 +30,16 @@ function selectionActionIcon(id: ProjectSelectionAction["id"]) {
   return Link2;
 }
 
+function selectionKindIcon(kind: ProjectSelectionItem["kind"] | undefined) {
+  if (kind === "channel") return Hash;
+  if (kind === "commit") return GitCommitHorizontal;
+  if (kind === "project") return Folders;
+  if (kind === "repository") return FolderGit2;
+  if (kind === "review") return GitPullRequest;
+  if (kind === "task") return CircleDot;
+  return ListChecks;
+}
+
 /** Inline actions for the current Projects selection. */
 export function ProjectsSelectionCountMenu({
   onChatWithAgent,
@@ -33,6 +54,8 @@ export function ProjectsSelectionCountMenu({
 }) {
   const selection = useProjectSelection();
   const openChannelWithDraft = useProjectDiscussInChannel(selectionItems);
+  const selectionKind = selectionItems[0]?.kind;
+  const SelectionIcon = selectionKindIcon(selectionKind);
 
   const discussInChannel = React.useCallback(
     (channelId: string) => {
@@ -67,13 +90,26 @@ export function ProjectsSelectionCountMenu({
 
   return (
     <div className="w-full" data-testid="projects-selection-actions">
-      <h2
-        className="flex h-7 min-w-0 items-center truncate text-sm font-normal text-muted-foreground/70"
-        data-testid="projects-overview-context-title"
+      <div
+        className="inline-flex max-w-full items-center gap-2 rounded-full border border-border/60 bg-muted/35 px-2.5 py-1.5"
+        data-testid="projects-selection-summary"
       >
-        {presentation.title}
-      </h2>
-      <div className="space-y-0.5 pt-2">
+        <SelectionIcon
+          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+          data-testid={
+            selectionKind
+              ? `projects-selection-kind-${selectionKind}`
+              : undefined
+          }
+        />
+        <h2
+          className="truncate text-sm font-medium text-foreground"
+          data-testid="projects-overview-context-title"
+        >
+          {presentation.title}
+        </h2>
+      </div>
+      <div className="space-y-2.5 pt-3">
         {presentation.actions
           .filter(
             (action) =>

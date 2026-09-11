@@ -55,17 +55,28 @@ pub(crate) async fn enforce_http_admission(
     }
 }
 
+/// Values retained from an already-verified bridge authentication event.
+#[derive(Debug)]
+pub(crate) struct VerifiedBridgeAuth {
+    pub(crate) pubkey: nostr::PublicKey,
+    pub(crate) event_id_bytes: [u8; 32],
+    pub(crate) signed_created_at: Option<u64>,
+}
+
+type BridgeAuthResult = Result<VerifiedBridgeAuth, (StatusCode, Json<Value>)>;
+
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
-/// Returns the authenticated public key and an event ID for replay detection.
-/// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
+/// Returns the authenticated public key, an event ID for replay detection, and
+/// the verified signed auth timestamp. For X-Pubkey dev mode, the event ID is
+/// a zero hash and the timestamp is absent.
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> BridgeAuthResult {
     verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
 }
 
@@ -76,7 +87,7 @@ pub(crate) fn verify_bridge_auth_with_options(
     body: Option<&[u8]>,
     require_auth_token: bool,
     require_payload: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> BridgeAuthResult {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
         .get("authorization")
@@ -111,7 +122,11 @@ pub(crate) fn verify_bridge_auth_with_options(
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
 
-        return Ok((pubkey, event_id_bytes));
+        return Ok(VerifiedBridgeAuth {
+            pubkey,
+            event_id_bytes,
+            signed_created_at: Some(event.created_at.as_secs()),
+        });
     }
 
     // Dev-mode fallback: X-Pubkey header (only when require_auth_token is false)
@@ -120,7 +135,11 @@ pub(crate) fn verify_bridge_auth_with_options(
             let pubkey = nostr::PublicKey::from_hex(hex_val)
                 .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid X-Pubkey hex"))?;
             // Zero event ID — no replay detection needed for dev mode
-            return Ok((pubkey, [0u8; 32]));
+            return Ok(VerifiedBridgeAuth {
+                pubkey,
+                event_id_bytes: [0u8; 32],
+                signed_created_at: None,
+            });
         }
     }
 
@@ -272,6 +291,14 @@ fn extract_before_id(raw: &Value) -> BeforeId {
         Some(id) => BeforeId::Valid(id),
         None => BeforeId::Malformed,
     }
+}
+
+fn extract_buzz_channel(raw: &Value) -> Option<&str> {
+    raw.get("#buzz-channel")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
 }
 
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
@@ -715,7 +742,11 @@ pub async fn submit_event(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -728,8 +759,16 @@ pub async fn submit_event(
     // runs inside the helper.  The thin wrapper here owns the single terminal
     // attribution line so it fires for every outcome, including admission/
     // replay/membership failures that previously returned before any log fired.
-    let outcome =
-        submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
 
     match &outcome {
         SubmitOutcome::Ok { accepted, kind, .. } => {
@@ -838,6 +877,7 @@ async fn submit_event_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -880,18 +920,23 @@ async fn submit_event_authed(
     };
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     let nip_oa_owner = match super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await
     {
         Ok(owner) => owner.or_else(|| {
             if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
+                super::relay_members::extract_nip_oa_owner(
+                    &pubkey_bytes,
+                    auth_tag,
+                    signed_auth_created_at,
+                )
             } else {
                 None
             }
@@ -986,7 +1031,11 @@ pub async fn query_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -999,8 +1048,16 @@ pub async fn query_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        query_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = query_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
     match &result {
         Ok(Json(Value::Array(events))) => {
             tracing::info!(
@@ -1036,17 +1093,19 @@ async fn query_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await?;
 
@@ -1117,8 +1176,10 @@ async fn query_events_authed(
         .await;
     }
 
-    if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
-        return Ok(Json(Value::Array(presence_events)));
+    if let Some(presence_result) =
+        synthesize_presence(&state.pubsub, &state.relay_keypair, tenant, &filters).await
+    {
+        return presence_result.map(|events| Json(Value::Array(events)));
     }
 
     let mut events: Vec<Value> = Vec::new();
@@ -1365,6 +1426,9 @@ async fn query_events_authed(
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
+        if let Some(channel) = extract_buzz_channel(raw) {
+            query.custom_tag = Some(("buzz-channel".into(), channel.into()));
+        }
         // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
         // newer private events does not starve older shared ones off the page.
         if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
@@ -1510,7 +1574,11 @@ pub async fn count_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1523,8 +1591,16 @@ pub async fn count_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        count_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = count_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    )
+    .await;
     match &result {
         Ok(Json(value)) => {
             let count = value.get("count").and_then(Value::as_u64);
@@ -1558,17 +1634,19 @@ async fn count_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    signed_auth_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_auth_created_at,
     )
     .await?;
 
@@ -2165,12 +2243,19 @@ pub async fn workflow_webhook(
 /// presence from Redis instead of querying the DB (ephemeral events are never
 /// stored, and kind:40902 snapshots are relay-generated on demand).
 ///
-/// Returns `Some(events)` if handled, `None` to fall through to normal query.
+/// Returns `None` when the filters are not a presence query (fall through to
+/// the normal query path). Returns `Some(Ok(events))` when a presence snapshot
+/// was produced — an empty vec is an authoritative "all offline" answer.
+/// Returns `Some(Err(_))` when the backing Redis lookup failed: callers must
+/// propagate that as an error response rather than a fake-empty success, so a
+/// consumer cannot mistake a backend outage for an authoritative snapshot.
+#[allow(clippy::type_complexity)]
 async fn synthesize_presence(
-    state: &AppState,
+    pubsub: &buzz_pubsub::PubSubManager,
+    relay_keypair: &nostr::Keys,
     tenant: &buzz_core::tenant::TenantContext,
     filters: &[nostr::Filter],
-) -> Option<Vec<Value>> {
+) -> Option<Result<Vec<Value>, (StatusCode, Json<Value>)>> {
     use buzz_core::kind::{KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE};
 
     // Only intercept if every filter targets kind:20001 or 40902 with authors.
@@ -2190,22 +2275,23 @@ async fn synthesize_presence(
     }
 
     if all_pubkeys.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Dedup pubkeys.
     all_pubkeys.sort_by_key(|pk| pk.to_hex());
     all_pubkeys.dedup();
 
-    // Look up Redis.
-    let presence_map = state
-        .pubsub
-        .get_presence_bulk(tenant, &all_pubkeys)
-        .await
-        .unwrap_or_default();
+    // Look up Redis. A lookup failure must surface as an error, not a
+    // fake-empty success — otherwise a Redis outage is indistinguishable from
+    // an authoritative all-offline snapshot to the consumer.
+    let presence_map = match pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
+        Ok(map) => map,
+        Err(e) => return Some(Err(internal_error(&format!("presence lookup: {e}")))),
+    };
 
     if presence_map.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Synthesize kind:20001 events signed by the relay.
@@ -2217,20 +2303,30 @@ async fn synthesize_presence(
     let mut events = Vec::with_capacity(presence_map.len());
     for (pubkey_hex, status) in &presence_map {
         // Build a synthetic event: relay-signed, content = status, p-tag = subject.
-        let tags = vec![nostr::Tag::parse(["p", pubkey_hex]).ok()?];
-        let event =
-            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-                .tags(tags)
-                .custom_created_at(nostr::Timestamp::from(now))
-                .sign_with_keys(&state.relay_keypair)
-                .ok()?;
+        // A build/sign failure here is an internal fault, not a "not a presence
+        // query" signal, so surface it as an error rather than falling through.
+        let tags = match nostr::Tag::parse(["p", pubkey_hex]) {
+            Ok(tag) => vec![tag],
+            Err(e) => return Some(Err(internal_error(&format!("presence tag: {e}")))),
+        };
+        let event = match nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(now))
+        .sign_with_keys(relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => return Some(Err(internal_error(&format!("presence sign: {e}")))),
+        };
 
         if let Ok(v) = serde_json::to_value(&event) {
             events.push(v);
         }
     }
 
-    Some(events)
+    Some(Ok(events))
 }
 
 // ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────
@@ -2278,8 +2374,11 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -2431,7 +2530,7 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
@@ -2486,6 +2585,48 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    /// Production-wiring seam for the Redis-outage boundary. Drives the real
+    /// `synthesize_presence` with a `PubSubManager` whose pool points at a
+    /// closed port, so the `get_presence_bulk` lookup fails. A presence-snapshot
+    /// filter must yield `Some(Err(500))` — never `Some(Ok([]))`, which would
+    /// let a consumer mistake a backend outage for an authoritative all-offline
+    /// snapshot. Restoring `unwrap_or_default()` inside `synthesize_presence`
+    /// turns this red (it would return `Some(Ok([]))`), which is what protects
+    /// the error-mapping seam Thufir found otherwise mutation-unprotected.
+    #[tokio::test]
+    async fn synthesize_presence_surfaces_redis_failure_as_error_response() {
+        use buzz_core::kind::KIND_PRESENCE_SNAPSHOT;
+
+        // Pool at a closed port: get_presence_bulk's connection attempt fails.
+        let dead_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool builds lazily");
+        let pubsub = buzz_pubsub::PubSubManager::new("redis://127.0.0.1:1", dead_pool)
+            .await
+            .expect("PubSubManager::new performs no IO");
+        let relay_keypair = Keys::generate();
+        let tenant = fresh_tenant("relay.example");
+
+        // A presence-snapshot query for a concrete author reaches the Redis
+        // lookup (an empty author set would short-circuit to an empty snapshot).
+        let filters = vec![nostr::Filter::new()
+            .kind(Kind::Custom(KIND_PRESENCE_SNAPSHOT as u16))
+            .author(Keys::generate().public_key())];
+
+        let result = synthesize_presence(&pubsub, &relay_keypair, &tenant, &filters).await;
+
+        match result {
+            Some(Err((status, _))) => assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a Redis lookup failure must surface as HTTP 500"
+            ),
+            other => panic!(
+                "a Redis outage must yield Some(Err(500)), not a fake-empty success: {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -2624,8 +2765,6 @@ mod tests {
     /// replay of the same event id in the same community is rejected. The same
     /// id in a different community still succeeds, proving the key is scoped by
     /// server-resolved tenant rather than global process memory.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
         let pool = redis_pool();
         let pod_a = buzz_pubsub::RedisNip98ReplayGuard::new(pool.clone());
@@ -2653,8 +2792,6 @@ mod tests {
     /// rejection. A single guard instance, called twice with the same
     /// `TenantContext` and the same event id, MUST reject the second call.
     /// Bites if `try_mark`'s admit/reject mapping is reversed or no-op'd.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
         let pool = redis_pool();
         let pod = buzz_pubsub::RedisNip98ReplayGuard::new(pool);
@@ -2669,6 +2806,20 @@ mod tests {
             .await
             .expect_err("same-pod replay of the same id+community must reject");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    mod external_infra_redis_tests {
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
+            super::nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
+            super::nip98_replay_guard_rejects_same_pod_same_community_replay().await;
+        }
     }
 
     /// Attack 3 fail-closed guard: a stateless worker that loses Redis MUST
@@ -2848,13 +2999,20 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example");
         let expected_url = nip98_expected_url(config_relay_url, &tenant_a, "/events");
 
-        let (pubkey, _event_id_bytes) =
-            verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
-                .expect("matching-host NIP-98 event must verify");
+        let VerifiedBridgeAuth {
+            pubkey,
+            signed_created_at,
+            ..
+        } = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
+            .expect("matching-host NIP-98 event must verify");
         assert_eq!(
             pubkey,
             keys.public_key(),
             "returned pubkey must be the signer's"
+        );
+        assert!(
+            signed_created_at.is_some(),
+            "verified NIP-98 auth must retain its signed timestamp"
         );
     }
 
@@ -2897,7 +3055,7 @@ mod tests {
             Some("limit=20&status=open"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-bearing moderation read must verify against the same query");
         assert_eq!(pubkey, keys.public_key());
@@ -2954,7 +3112,7 @@ mod tests {
             Some("limit=20"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("audit query-bearing read must verify");
         assert_eq!(pubkey, keys.public_key());
@@ -2979,7 +3137,7 @@ mod tests {
         );
         assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
 
-        let (pubkey, _event_id_bytes) =
+        let VerifiedBridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-less restricted read must verify against the bare path");
         assert_eq!(pubkey, keys.public_key());
@@ -3245,6 +3403,22 @@ mod tests {
         assert!(
             search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
             "channel-scoped hit must be accepted when caller has access to that channel"
+        );
+    }
+
+    #[test]
+    fn extract_buzz_channel_requires_one_string_value() {
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a"]})),
+            Some("channel-a")
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a", "channel-b"]})),
+            None
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": [42]})),
+            None
         );
     }
 
@@ -3655,8 +3829,6 @@ mod tests {
         }
     }
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     /// Build an AppState suitable for handler-level bridge tests.
     ///
     /// - `require_auth_token = false` → X-Pubkey dev-mode fallback active.
@@ -3669,7 +3841,7 @@ mod tests {
     /// Returns `None` when local Postgres is not reachable.
     async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -3677,7 +3849,9 @@ mod tests {
         config.require_auth_token = false;
         config.require_relay_membership = false;
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

@@ -9,6 +9,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
@@ -31,7 +32,7 @@ class CommunityInvitePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final roleAsync = ref.watch(currentCommunityRoleProvider);
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
+      useUtilitySurfaceTheme: true,
       appBar: const FrostedAppBar(
         centerTitle: true,
         title: Text('Invite to community'),

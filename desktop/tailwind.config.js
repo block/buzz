@@ -12,6 +12,7 @@ export default {
         "2xs": "calc(var(--buzz-type-rem) * 0.6875)", // 11px at 16px type rem
         "3xs": "calc(var(--buzz-type-rem) * 0.5)", // 8px at 16px type rem
         badge: "calc(var(--buzz-type-rem) * 0.625)", // 10px at 16px type rem
+        "status-indicator": "0.9375rem", // 15px at the default root size
         // Shared channel, DM, thread, and composer type. Variables keep app-wide
         // font size and keyboard zoom consistent without branching components.
         message: [
@@ -65,6 +66,7 @@ export default {
       },
       spacing: {
         4.5: "1.125rem",
+        "status-indicator": "0.9375rem", // 15px at the default root size
         "conversation-body": "var(--conversation-body-gap)",
         "conversation-list": "var(--conversation-list-item-gap)",
         "conversation-paragraph": "var(--conversation-paragraph-gap)",
@@ -109,10 +111,6 @@ export default {
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
-        },
-        notification: {
-          DEFAULT: "hsl(var(--notification))",
-          foreground: "hsl(var(--notification-foreground))",
         },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

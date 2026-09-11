@@ -4,6 +4,7 @@ import {
   ExternalLink,
   Globe,
   Loader2,
+  MessageCircle,
 } from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
@@ -26,6 +27,7 @@ import {
 } from "./ProjectRepositorySource";
 import { GitHubMark } from "./GitHubMark";
 import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -260,16 +262,37 @@ export function ReadmePanel({
   }
 
   if (!file || !fileContent.content) {
+    const loadError = Boolean(fileContent.error);
+    const emptyRepository = gitDataState === "empty";
     return (
-      <section className="overflow-hidden">
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {header}
-        <div className="px-8 py-6 text-sm text-muted-foreground">
-          {fileContent.error
-            ? "Could not load this README. Try again after refreshing the repository."
-            : gitDataState === "empty"
-              ? "No files have been pushed to this repository yet."
-              : "Add a README to this repository to describe setup, usage, and project context."}
-        </div>
+        <ProjectPanelState
+          action={
+            sourceControls?.onAskForAccess ? (
+              <Button onClick={sourceControls.onAskForAccess} size="sm">
+                <MessageCircle className="h-4 w-4" />
+                Chat with an agent
+              </Button>
+            ) : undefined
+          }
+          description={
+            loadError
+              ? "Refresh the repository or ask an agent to investigate."
+              : emptyRepository
+                ? "Ask an agent to create the initial codebase or connect an existing repository."
+                : "Add a README to describe setup, usage, and project context."
+          }
+          error={loadError}
+          panel={false}
+          title={
+            loadError
+              ? "Could not load the README"
+              : emptyRepository
+                ? "No files have been pushed yet"
+                : "No README yet"
+          }
+        />
       </section>
     );
   }

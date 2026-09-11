@@ -44,8 +44,17 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.config/nextest.toml'
+              - 'scripts/postgres-test-*.sh'
+              - 'scripts/reconcile-schema-after-pgschema.sql'
+              - 'bin/pgschema'
+              - 'bin/.pgschema-*.pkg'
+              - 'scripts/check-postgres-test-discovery.py'
+              - 'scripts/test-postgres-test-discovery.sh'
+              - 'scripts/test-postgres-test-wrapper.sh'
               - 'deny.toml'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-*.yml'
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
@@ -73,6 +82,12 @@ jobs:
               - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-*.yml'
+      - name: Validate PostgreSQL test discovery
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
+        run: |
+          scripts/test-postgres-test-discovery.sh
+          scripts/test-postgres-test-wrapper.sh
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract
@@ -87,866 +102,20 @@ jobs:
         run: |
           scripts/test-mobile-release-contract.sh
           scripts/test-mobile-release-candidate-publisher.sh
+      - name: Desktop instance environment contract
+        run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Codex security review contract
+        run: just security-review-check
       - name: Rust cache contract
         run: |
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
+      - name: CI required-context isolation contract
+        run: scripts/test-ci-required-context-isolation.sh
       - name: File size policy
         run: just file-size-check
-
-  rust-lint:
-    name: Rust Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Format check
-        run: just fmt-check
-      - name: Desktop Tauri format check
-        run: just desktop-tauri-fmt-check
-      - name: Clippy
-        run: just clippy
-
-  unit-tests:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          key: sherpa-cache-v1
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
-        with:
-          tool: cargo-nextest@0.9.136
-      - name: Unit tests
-        run: just test-unit
-
-  desktop-core:
-    name: Desktop Core
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 2
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          workspaces: desktop/src-tauri
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Install Tauri dependencies (Linux)
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30
-          sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o DPkg::Lock::Timeout=120 \
-            build-essential \
-            curl \
-            file \
-            libasound2-dev \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install desktop dependencies
-        run: just desktop-install-ci
-      - name: Desktop lint and format
-        run: just desktop-check
-      - name: Desktop unit tests
-        run: just desktop-test
-      - name: Desktop build
-        run: just desktop-build
-      - name: Desktop Tauri clippy
-        run: just desktop-tauri-clippy
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri check
-        run: just desktop-tauri-check
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri tests
-        run: just desktop-tauri-test
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri compiled-flag verification
-        run: just desktop-tauri-test-compiled-flags
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Upload desktop e2e artifacts
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: desktop-e2e-artifacts
-          path: |
-            desktop/playwright-report
-            desktop/test-results
-          if-no-files-found: ignore
-      - name: Save pnpm store cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-
-  desktop-smoke-e2e:
-    name: Desktop Smoke E2E (${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install desktop dependencies
-        run: just desktop-install-ci
-      - name: Get Playwright version
-        id: pw-version
-        run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
-      - name: Restore Playwright browser cache
-        id: playwright-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: cd desktop && pnpm exec playwright install chromium
-      - name: Install Playwright system dependencies
-        run: cd desktop && pnpm exec playwright install-deps chromium
-      - name: Save Playwright browser cache
-        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Desktop E2E build
-        run: pnpm -C desktop build:e2e
-      - name: Desktop smoke e2e
-        run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/4
-      - name: Summarize flaky tests
-        if: ${{ !cancelled() }}
-        run: node scripts/summarize-flaky-tests.mjs playwright-report.json "Desktop Smoke E2E (${{ matrix.shard }})"
-        working-directory: desktop
-      - name: Upload desktop smoke e2e artifacts
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: desktop-smoke-e2e-artifacts-${{ matrix.shard }}
-          path: |
-            desktop/playwright-report
-            desktop/playwright-report.json
-            desktop/test-results
-          if-no-files-found: ignore
-          retention-days: 7
-
-  desktop:
-    name: Desktop
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [changes, desktop-core, desktop-smoke-e2e]
-    if: always() && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
-    permissions:
-      contents: read
-    steps:
-      - name: Check desktop jobs
-        run: |
-          if [ "${{ needs.desktop-core.result }}" != "success" ]; then
-            echo "Desktop Core finished with: ${{ needs.desktop-core.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.desktop-smoke-e2e.result }}" != "success" ]; then
-            echo "Desktop Smoke E2E shards finished with: ${{ needs.desktop-smoke-e2e.result }}"
-            exit 1
-          fi
-          echo "Desktop jobs passed"
-
-  desktop-e2e-relay:
-    name: Desktop E2E Relay
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.number == 5224)) && 'READ_WRITE' || 'READ_ONLY' }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      # Reuse the relay binaries and backend test archive when none of their
-      # inputs changed (desktop-only PRs hit this every time). The key covers
-      # everything they embed, including migrations via sqlx migrate!.
-      - name: Restore relay artifacts cache
-        id: relay-artifacts-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            target/ci/buzz-relay
-            target/ci/git-credential-nostr
-            target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          save-if: ${{ github.event_name != 'pull_request' }}
-      # Cache rustc outputs for unchanged workspace crates. Trusted pushes write;
-      # the bounded PR 5224 trial writes only to its isolated merge-ref scope.
-      - name: Set up sccache
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11 # zizmor: ignore[cache-poisoning] Bounded trial: only PR 5224 writes to its isolated merge-ref scope; trusted pushes retain production writes.
-        with:
-          version: v0.16.0
-      - name: Install cargo-nextest
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
-        with:
-          tool: cargo-nextest@0.9.136
-      - name: Build relay artifacts
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-        env:
-          RUSTC_WRAPPER: sccache
-        run: |
-          cargo build --profile ci -p buzz-relay -p git-credential-nostr
-          cargo nextest archive \
-            --cargo-profile ci \
-            -p buzz-db \
-            -p buzz-relay \
-            -p buzz-test-client \
-            --lib \
-            --test e2e_event_reminder \
-            --archive-file target/ci/backend-integration-tests.tar.zst
-      - name: Save relay artifacts cache
-        # PR-scoped exact-source entries cannot warm main or other PRs and churn
-        # the shared cache pool. sccache provides read-only PR reuse instead.
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            target/ci/buzz-relay
-            target/ci/git-credential-nostr
-            target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
-      - name: Upload relay artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: desktop-e2e-relay
-          path: |
-            target/ci/buzz-relay
-            target/ci/git-credential-nostr
-            target/ci/backend-integration-tests.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
-  desktop-e2e-integration-shard:
-    name: Desktop E2E Integration (${{ matrix.shard }}/2)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes, desktop-e2e-relay]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Start integration services
-        run: |
-          for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
-            sleep $((attempt * 5))
-          done
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install desktop dependencies
-        run: just desktop-install-ci
-      - name: Get Playwright version
-        id: pw-version
-        run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
-      - name: Restore Playwright browser cache
-        id: playwright-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: cd desktop && pnpm exec playwright install chromium
-      - name: Install Playwright system dependencies
-        run: cd desktop && pnpm exec playwright install-deps chromium
-      - name: Save Playwright browser cache
-        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Desktop E2E build
-        run: pnpm -C desktop build:e2e
-      - name: Wait for integration services
-        run: |
-          wait_healthy() {
-            local service="$1"
-            local container="$2"
-            for attempt in $(seq 1 60); do
-              status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
-              if [ "${status}" = "healthy" ]; then
-                echo "${service} is healthy"
-                return 0
-              fi
-              sleep 2
-            done
-            docker logs "${container}" || true
-            return 1
-          }
-          wait_healthy "Postgres" "buzz-postgres"
-          wait_healthy "Redis" "buzz-redis"
-          wait_healthy "MinIO" "buzz-minio"
-      - name: Download relay binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: desktop-e2e-relay
-          path: target/ci
-      - name: Apply schema and seed deployment community
-        # MT: the relay resolves each request's tenant from the communities host
-        # map and fails closed on an unmapped host. The channel reconciler binds
-        # the deployment community ONCE at boot (outside its retry loop) and
-        # exits permanently on an unmapped host, so the 'localhost:3000'
-        # community MUST exist before the relay starts — the retry loop only
-        # handles late-seeded channels, not a late-seeded community. The relay
-        # migrates at boot via BUZZ_AUTO_MIGRATE, but that's too late for the
-        # pre-boot seed, so apply the schema here first (then drop AUTO_MIGRATE
-        # below). lower(host) is the unique index → ON CONFLICT target. psql
-        # isn't on PATH in hermit → exec into the buzz-postgres container.
-        env:
-          PGHOST: localhost
-          PGPORT: "5432"
-          PGUSER: buzz
-          PGPASSWORD: buzz_dev
-          PGDATABASE: buzz
-          # Use the already-running docker postgres for desired-state planning instead of
-          # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
-          PGSCHEMA_PLAN_HOST: localhost
-          PGSCHEMA_PLAN_PORT: "5432"
-          PGSCHEMA_PLAN_DB: buzz
-          PGSCHEMA_PLAN_USER: buzz
-          PGSCHEMA_PLAN_PASSWORD: buzz_dev
-        run: |
-          ./bin/pgschema apply --file schema/schema.sql --auto-approve
-          docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
-            psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
-          docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
-            psql -U buzz -d buzz -qtA -c "
-          INSERT INTO communities (id, host)
-          VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
-          ON CONFLICT (lower(host)) DO NOTHING
-          ;"
-      - name: Start relay
-        run: |
-          chmod +x ./target/ci/buzz-relay
-          nohup env \
-            DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
-            REDIS_URL=redis://localhost:6379 \
-            RELAY_URL=ws://localhost:3000 \
-            BUZZ_BIND_ADDR=0.0.0.0:3000 \
-            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
-            BUZZ_REQUIRE_AUTH_TOKEN=false \
-            BUZZ_RECONCILE_CHANNELS=true \
-            BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000 \
-            BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN=100000 \
-            BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC=10000 \
-            BUZZ_GIT_PROBE_WRITERS=8 \
-            SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
-            ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
-          echo $! > /tmp/buzz-relay.pid
-          for attempt in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
-              cat /tmp/buzz-relay.log
-              exit 1
-            fi
-            status_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/_readiness || true)
-            if [ "${status_code}" = "200" ]; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/buzz-relay.log
-          exit 1
-      - name: Seed desktop e2e data
-        run: bash scripts/setup-desktop-test-data.sh
-      - name: Desktop relay-backed e2e
-        run: cd desktop && pnpm exec playwright test --project=integration --shard=${{ matrix.shard }}/2
-      - name: Summarize flaky tests
-        if: ${{ !cancelled() }}
-        run: node scripts/summarize-flaky-tests.mjs playwright-report.json "Desktop E2E Integration (${{ matrix.shard }}/2)"
-        working-directory: desktop
-      - name: Upload desktop integration artifacts
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: desktop-e2e-integration-artifacts-${{ matrix.shard }}
-          path: |
-            desktop/playwright-report
-            desktop/playwright-report.json
-            desktop/test-results
-            /tmp/buzz-relay.log
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Save pnpm store cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-
-  desktop-e2e-integration:
-    name: Desktop E2E Integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [changes, desktop-e2e-integration-shard]
-    if: always() && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
-    permissions:
-      contents: read
-    steps:
-      - name: Check integration shards
-        run: |
-          if [ "${{ needs.desktop-e2e-integration-shard.result }}" != "success" ]; then
-            echo "Desktop E2E Integration shards finished with: ${{ needs.desktop-e2e-integration-shard.result }}"
-            exit 1
-          fi
-          echo "Desktop E2E Integration shards passed"
-
-  backend-integration:
-    name: Backend Integration (relay e2e)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes, desktop-e2e-relay]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
-        with:
-          tool: cargo-nextest@0.9.136
-      - name: Start integration services
-        run: |
-          for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "docker compose up failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
-            sleep $((attempt * 5))
-          done
-      - name: Wait for integration services
-        run: |
-          wait_healthy() {
-            local service="$1"
-            local container="$2"
-            for attempt in $(seq 1 60); do
-              status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
-              if [ "${status}" = "healthy" ]; then
-                echo "${service} is healthy"
-                return 0
-              fi
-              sleep 2
-            done
-            docker logs "${container}" || true
-            return 1
-          }
-          wait_healthy "Postgres" "buzz-postgres"
-          wait_healthy "Redis" "buzz-redis"
-          wait_healthy "MinIO" "buzz-minio"
-      - name: Download relay artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: desktop-e2e-relay
-          path: target/ci
-      - name: Apply schema and seed deployment community
-        # MT: the relay resolves each request's tenant from the communities host
-        # map and fails closed on an unmapped host. The reminder scheduler binds
-        # the deployment community ONCE at boot and exits permanently on an
-        # unmapped host (no retry, unlike the channel reconciler), so the
-        # 'localhost:3000' community MUST exist before the relay starts — seeding
-        # after boot leaves the scheduler dead. The relay migrates at boot via
-        # BUZZ_AUTO_MIGRATE, but that's too late for the pre-boot seed, so apply
-        # the schema here first (then drop AUTO_MIGRATE below). lower(host) is the
-        # unique index → ON CONFLICT target. psql isn't on PATH in hermit → exec
-        # into the buzz-postgres container.
-        env:
-          PGHOST: localhost
-          PGPORT: "5432"
-          PGUSER: buzz
-          PGPASSWORD: buzz_dev
-          PGDATABASE: buzz
-          # Use the already-running docker postgres for desired-state planning instead of
-          # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
-          PGSCHEMA_PLAN_HOST: localhost
-          PGSCHEMA_PLAN_PORT: "5432"
-          PGSCHEMA_PLAN_DB: buzz
-          PGSCHEMA_PLAN_USER: buzz
-          PGSCHEMA_PLAN_PASSWORD: buzz_dev
-        run: |
-          ./bin/pgschema apply --file schema/schema.sql --auto-approve
-          docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
-            psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
-          docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
-            psql -U buzz -d buzz -qtA -c "
-          INSERT INTO communities (id, host)
-          VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
-          ON CONFLICT (lower(host)) DO NOTHING
-          ;"
-      - name: Replaceable persistence PostgreSQL tests
-        # Transaction, concurrency, and mention-index coverage for the
-        # replaceable-event store seam. These tests require real Postgres and
-        # are ignored by the infrastructure-free unit-test job.
-        run: |
-          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E "${filter}" \
-            --run-ignored ignored-only
-        env:
-          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-      - name: Database pressure observability PostgreSQL tests
-        # Explicit pool acquisition and advisory-lock metrics require real
-        # Postgres and are ignored by the infrastructure-free unit-test job.
-        run: |
-          filter='package(buzz-db) and test(/observability::tests::(pool_acquire_records_success_timeout_and_error_with_wait_time|advisory_lock_records_success_contention_timeout_and_error)/)'
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E "${filter}" \
-            --run-ignored ignored-only
-        env:
-          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-      - name: Start relay
-        run: |
-          chmod +x ./target/ci/buzz-relay
-          nohup env \
-            DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
-            REDIS_URL=redis://localhost:6379 \
-            RELAY_URL=ws://localhost:3000 \
-            BUZZ_BIND_ADDR=0.0.0.0:3000 \
-            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
-            BUZZ_REQUIRE_AUTH_TOKEN=false \
-            BUZZ_RECONCILE_CHANNELS=true \
-            BUZZ_GIT_PROBE_WRITERS=8 \
-            SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
-            ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
-          echo $! > /tmp/buzz-relay.pid
-          for attempt in $(seq 1 60); do
-            if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
-              cat /tmp/buzz-relay.log
-              exit 1
-            fi
-            status_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/_readiness || true)
-            if [ "${status_code}" = "200" ]; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/buzz-relay.log
-          exit 1
-      - name: Invite security tests
-        run: |
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E '(package(buzz-db) and test(/relay_invite::tests/)) or (package(buzz-relay) and test(/api::invites::tests/))' \
-            --run-ignored ignored-only
-        env:
-          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-      - name: Workspace profile (kind:9033) gate tests
-        # Call-site integration for the 9033 authorization gate: open relay
-        # rosterless/steward transitions and the closed-relay admin/owner rule,
-        # against real Postgres. #[ignore]d in the default suite, selected
-        # explicitly here — see handlers::relay_admin::tests.
-        run: |
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'package(buzz-relay) and test(/handlers::relay_admin::tests/)' \
-            --run-ignored ignored-only
-        env:
-          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-      - name: NIP-ER reminder e2e
-        # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
-        # validation, author-only read filtering, and scheduler delivery against
-        # a live relay. The schema-drift / migration-version guarantee is owned
-        # by the buzz-db migration.rs unit tests, not this suite.
-        run: |
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'binary(e2e_event_reminder)' \
-            --run-ignored ignored-only
-        env:
-          RELAY_URL: ws://localhost:3000
-      - name: NIP-MP coordinate deletion guard
-        # Verifies the never-delete-newer invariant of soft_delete_by_coordinate:
-        # a stale tombstone (created_at earlier than the live head) spares that
-        # head, and an equal-timestamp tombstone deletes it.
-        run: |
-          cargo nextest run \
-            --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'package(buzz-db) and test(coordinate_delete_spares_head_newer_than_the_deletion)' \
-            --run-ignored ignored-only
-        env:
-          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
-      - name: Upload relay log
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: backend-integration-relay-log
-          path: /tmp/buzz-relay.log
-          if-no-files-found: ignore
-
-  relay-e2e:
-    name: Relay E2E
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes, desktop-e2e-relay]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      # Reuse the relay + git-credential-nostr built by Desktop E2E Relay
-      # instead of compiling them a second time.
-      - name: Download relay binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: desktop-e2e-relay
-          path: target/ci
-      - name: Start relay
-        run: |
-          chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
-          ./scripts/start-relay-for-tests.sh --no-build
-      - name: Relay E2E tests
-        run: |
-          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_project -- --ignored --nocapture
-          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
-          cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
-        env:
-          RELAY_URL: ws://localhost:3000
-          GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
-      - name: Media read-auth e2e
-        # Reads require kind:24242 `t=get` auth, so these binaries are the only
-        # coverage that a real relay rejects bare reads and honours host- and
-        # hash-scoped tokens. They were #[ignore]d and selected by no CI job, so
-        # the lane never ran; select it here, where MinIO and the seeded
-        # 'localhost:3000' community already exist.
-        # --no-fail-fast: without it cargo stops after the first failing binary,
-        # so one broken case hides every later binary's result.
-        run: |
-          cargo test -p buzz-test-client --no-fail-fast --test e2e_media --test e2e_media_extended --test e2e_media_video -- --ignored --nocapture
-        env:
-          RELAY_URL: ws://localhost:3000
-          RELAY_HTTP_URL: http://localhost:3000
-      - name: Upload relay logs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: relay-e2e-artifacts
-          path: /tmp/buzz-relay.log
-          if-no-files-found: ignore
-
-  web:
-    name: Web
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.web == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 2
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Web lint and format
-        run: just web-check
-      - name: Web build
-        run: just web-build
-      - name: Save pnpm store cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-
-  mobile:
-    name: Mobile
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 2
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Compute Hermit cache key
-        id: hermit-bin-hash
-        run: |
-          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-      - name: Restore Hermit package cache
-        id: hermit-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.cache/hermit/pkg
-          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
-          restore-keys: ${{ runner.os }}-hermit-cache-
-      - name: Prime Flutter SDK
-        run: flutter --version
-      - name: Save Hermit package cache
-        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        continue-on-error: true
-        with:
-          path: ~/.cache/hermit/pkg
-          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
-      - name: Restore pub cache
-        id: pub-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
-          restore-keys: pub-${{ runner.os }}-
-      - name: Install dependencies
-        run: cd mobile && flutter pub get
-      - name: Save pub cache
-        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        continue-on-error: true
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
-      - name: Format check
-        run: cd mobile && dart format --output=none --set-exit-if-changed .
-      - name: Analyze
-        run: cd mobile && flutter analyze
-      - name: Test
-        run: cd mobile && flutter test
-      - name: Build Android debug APK
-        run: just mobile-build-android
-
-  security:
-    name: Security
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Dependency policy
-        run: cargo-deny check
 
   dead-token-guard:
     name: Dead Token Reference Guard
@@ -969,203 +138,272 @@ jobs:
           fi
           echo "No dead token references found."
 
-  server-cross-compile:
-    name: Server Cross-Compile
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  rust:
+    name: Rust
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    uses: ./.github/workflows/_ci-rust.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+      lane: required
+
+  rust-cross-compile-domain:
+    name: Rust Cross-Compile
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+    uses: ./.github/workflows/_ci-rust.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+      lane: cross-compile
+
+  desktop-domain:
+    name: Desktop Domain
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-desktop.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+
+  relay-artifacts-domain:
+    name: Relay Artifact Producer
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-relay.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+      lane: artifacts
+
+  postgres-domain:
+    name: PostgreSQL Domain
+    needs: [changes, relay-artifacts-domain]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-relay.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+      lane: postgres
+
+  desktop-macos-domain:
+    name: Desktop macOS Domain
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-desktop-macos.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+
+  relay-domain:
+    name: Relay and PostgreSQL
+    needs: [changes, relay-artifacts-domain]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-relay.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+      lane: required
+
+  clients:
+    name: Clients
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.web == 'true' || needs.changes.outputs.mobile == 'true'
+    uses: ./.github/workflows/_ci-clients.yml
+    with:
+      web: ${{ needs.changes.outputs.web == 'true' }}
+      mobile: ${{ needs.changes.outputs.mobile == 'true' }}
+      lane: required
+
+  mobile-swift-domain:
+    name: Mobile Swift Domain
+    needs: [changes]
+    if: needs.changes.outputs.mobile == 'true'
+    uses: ./.github/workflows/_ci-clients.yml
+    with:
+      web: ${{ needs.changes.outputs.web == 'true' }}
+      mobile: ${{ needs.changes.outputs.mobile == 'true' }}
+      lane: mobile-swift
+
+  security-domain:
+    name: Security Domain
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-security.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+
+  rust-lint:
+    name: Rust Lint
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    needs: [changes, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          key: cross-${{ matrix.target }}
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Install cross
-        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
-        with:
-          tool: cross@0.2.5
-      - name: Build server binaries
+      - name: Check Rust Lint result
         env:
-          TARGET: ${{ matrix.target }}
-          # PRs: compile + build-script gate only (no codegen/link). Main: full link gate.
-          CARGO_CMD: ${{ github.event_name == 'pull_request' && 'check' || 'build' }}
-        run: |
-          cross "$CARGO_CMD" --release --target "$TARGET" \
-            -p buzz-relay \
-            -p buzz-acp \
-            -p buzz-agent \
-            -p buzz-dev-mcp \
-            -p git-credential-nostr \
-            -p git-sign-nostr
+          RESULT: ${{ needs.rust.outputs.rust_lint_result }}
+        run: test "$RESULT" = success
+
+  unit-tests:
+    name: Unit Tests
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    needs: [changes, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Unit Tests result
+        env:
+          RESULT: ${{ needs.rust.outputs.unit_tests_result }}
+        run: test "$RESULT" = success
 
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
-    runs-on: windows-latest
-    # Windows runners are slow and this compiles the workspace + Tauri crate
-    # cold across four steps; budget generously.
-    timeout-minutes: 45
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
-    permissions:
-      contents: read
-    env:
-      TARGET: x86_64-pc-windows-msvc
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')
+    needs: [changes, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
-      # runner — hermit, used by the Linux jobs, does not provide MSVC. The
-      # toolchain (1.95.0 + clippy via profile = default) comes from the
-      # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
-      # honors on demand; the host triple already is x86_64-pc-windows-msvc.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          key: windows-msvc
-          save-if: ${{ github.event_name != 'pull_request' }}
-      # Tauri validates externalBin at compile time, so the Tauri-crate steps
-      # below fail without these stubs. Mirrors scripts/bundle-sidecars.sh's
-      # Windows naming (binaries/<bin>-<triple>.exe); empty files suffice for a
-      # type-check since nothing executes them.
-      - name: Create sidecar placeholders
-        shell: bash
-        run: |
-          mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
-          done
-      - name: Clippy (workspace)
-        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
-      - name: Check (workspace)
-        run: cargo check --workspace --all-targets --target $env:TARGET
-      - name: Test (buzz-dev-mcp)
-        # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
-        # only gate if this crate is tested ON Windows.
-        # Serial: windows_resolver_tests mutate process-global env
-        # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
-        run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
-      # Smoke-test the new host-prereq contract: Git for Windows (which provides
-      # bash) is available on the runner, a shell command round-trips, and bash
-      # does NOT resolve from System32 (so WSL's launcher is never picked up).
-      # windows-latest runners have Git for Windows pre-installed; the unit tests
-      # above exercise the MCP resolver itself. This step verifies the host env.
-      - name: Smoke-test host Git Bash prereq (host env check)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Git for Windows ships bash.exe under its bin/ directory; confirm it
-          # resolves from the standard location the runtime resolver probes first.
-          bash_path=$(command -v bash 2>/dev/null || true)
-          [[ -n "$bash_path" ]] || { echo "ERROR: bash not found on PATH — host Git for Windows missing" >&2; exit 1; }
-          echo "Resolved bash: $bash_path"
-          [[ "$bash_path" != *System32* ]] || { echo "ERROR: resolved bash is WSL's System32 launcher" >&2; exit 1; }
-
-          # Run a basic pipeline through the resolved bash (same invocation the
-          # agent uses: bash -c '...').
-          out=$(bash -c 'echo hello | tr a-z A-Z')
-          [[ "$out" == "HELLO" ]] || { echo "bash pipeline failed: got '$out'" >&2; exit 1; }
-
-          # Confirm git itself works — agents run git commands frequently.
-          git --version
-          repo=$(mktemp -d)
-          cd "$repo"
-          git init -q
-          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
-          git log -1 --format=%s | grep -qx smoke
-          echo "Host bash resolved and functional; git commit round-trip passed"
-      - name: Check (Tauri crate)
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --target $env:TARGET
+      - name: Check Windows Rust result
         env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Test (Tauri crate)
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+          RESULT: ${{ needs.rust.outputs.windows_rust_result }}
+        run: test "$RESULT" = success
+
+  desktop:
+    name: Desktop
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    needs: [changes, desktop-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Desktop result
         env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          RESULT: ${{ needs.desktop-domain.outputs.desktop_result }}
+        run: test "$RESULT" = success
 
   desktop-build-macos:
     name: Desktop Build (macOS)
-    runs-on: macos-latest
-    timeout-minutes: 45
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    permissions:
-      contents: read
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    needs: [changes, desktop-macos-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-        with:
-          workspaces: desktop/src-tauri
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Install desktop dependencies
-        run: just desktop-install-ci
-      - name: Create sidecar placeholders
-        run: |
-          TARGET=$(rustc -vV | sed -n 's|host: ||p')
-          mkdir -p desktop/src-tauri/binaries
-          touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-          touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-          touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
-          touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-          touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-          touch "desktop/src-tauri/binaries/buzz-$TARGET"
-      # Mesh rev is derived from Cargo.lock so a dependency bump needs no
-      # lockstep edit here; the cache key tracks it automatically.
-      - name: Resolve mesh-llm rev
-        id: mesh_rev
-        run: |
-          set -euo pipefail
-          REV=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].rsplit("#", 1)[1])')
-          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
-          echo "rev=$REV" >> "$GITHUB_OUTPUT"
-          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
-      - name: Restore mesh llama build cache
-        id: llama_cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ github.workspace }}/.cache/mesh-llama
-          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
-      - name: Build mesh llama native libraries
-        if: steps.llama_cache.outputs.cache-hit != 'true'
+      - name: Check Desktop Build (macOS) result
         env:
-          MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
-        run: |
-          set -euo pipefail
-          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
-          SHORT="$MESH_REV_SHORT"
-          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
-          if [[ -z "$MESH_ROOT" ]]; then
-            echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
-            exit 1
-          fi
-          export LLAMA_STAGE_BACKEND=metal
-          export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
-          export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
-          "$MESH_ROOT/scripts/prepare-llama.sh" pinned
-          "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
-      - name: Save mesh llama build cache
-        if: steps.llama_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ github.workspace }}/.cache/mesh-llama
-          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
-      - name: Build Tauri app
-        run: cd desktop && pnpm tauri build
+          RESULT: ${{ needs.desktop-macos-domain.outputs.desktop_macos_result }}
+        run: test "$RESULT" = success
+
+  desktop-e2e-relay:
+    name: Desktop E2E Relay
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    needs: [changes, relay-artifacts-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Desktop E2E Relay result
         env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
-          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
-          LLAMA_STAGE_BACKEND: metal
-          LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
-          SKIPPY_LLAMA_AUTO_BUILD: "0"
+          RESULT: ${{ needs.relay-artifacts-domain.outputs.desktop_e2e_relay_result }}
+        run: test "$RESULT" = success
+
+  desktop-e2e-integration:
+    name: Desktop E2E Integration
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    needs: [changes, relay-artifacts-domain, relay-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Desktop E2E Integration result
+        env:
+          RESULT: ${{ needs.relay-domain.outputs.desktop_e2e_integration_result }}
+        run: test "$RESULT" = success
+
+  backend-integration:
+    name: Backend Integration (relay e2e)
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    needs: [changes, relay-artifacts-domain, relay-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Backend Integration result
+        env:
+          RESULT: ${{ needs.relay-domain.outputs.backend_integration_result }}
+        run: test "$RESULT" = success
+
+  postgres-tests:
+    name: PostgreSQL Tests
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    needs: [changes, relay-artifacts-domain, postgres-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check PostgreSQL Tests result
+        env:
+          RESULT: ${{ needs.postgres-domain.outputs.postgres_tests_result }}
+        run: test "$RESULT" = success
+
+  relay-e2e:
+    name: Relay E2E
+    if: always() && needs.changes.result == 'success' && needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    needs: [changes, relay-artifacts-domain, relay-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Relay E2E result
+        env:
+          RESULT: ${{ needs.relay-domain.outputs.relay_e2e_result }}
+        run: test "$RESULT" = success
+
+  web:
+    name: Web
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.web == 'true')
+    needs: [changes, clients]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Web result
+        env:
+          RESULT: ${{ needs.clients.outputs.web_result }}
+        run: test "$RESULT" = success
+
+  mobile:
+    name: Mobile
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.mobile == 'true')
+    needs: [changes, clients]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Mobile result
+        env:
+          RESULT: ${{ needs.clients.outputs.mobile_result }}
+        run: test "$RESULT" = success
+
+  security:
+    name: Security
+    if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')
+    needs: [changes, security-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check Security result
+        env:
+          RESULT: ${{ needs.security-domain.outputs.security_result }}
+        run: test "$RESULT" = success

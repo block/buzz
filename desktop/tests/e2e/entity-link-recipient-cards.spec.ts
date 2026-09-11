@@ -160,8 +160,8 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "hsl(var(--secondary))";
-    probe.style.color = "hsl(var(--secondary-foreground))";
+    probe.style.backgroundColor = "hsl(var(--popover))";
+    probe.style.color = "hsl(var(--popover-foreground))";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {
@@ -579,10 +579,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
     name: "Project breadcrumb",
   });
   await breadcrumb.getByRole("button").nth(1).click();
-  await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
 
   await emitEntityLink(repoLink);
   await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");

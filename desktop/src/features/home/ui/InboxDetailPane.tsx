@@ -42,6 +42,7 @@ import {
   hasRenderedVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
@@ -125,6 +126,10 @@ type InboxDetailPaneProps = {
     messageId: string,
     threadRootId?: string | null,
   ) => void;
+  /** True while the selected hidden DM is being reopened on the relay. */
+  reopenPending?: boolean;
+  /** True when the last reopen of the selected hidden DM failed. */
+  reopenErrored?: boolean;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -189,6 +194,8 @@ function InboxMessageDetailPane({
   onRequestEmptyEditDelete,
   onManageChannel,
   onOpenContext,
+  reopenPending = false,
+  reopenErrored = false,
   onSendReply,
   onToggleReaction,
 }: InboxDetailPaneProps) {
@@ -489,6 +496,10 @@ function InboxMessageDetailPane({
       : null;
   const isThreadContext =
     !isDirectMessage && hasInboxThreadContext(item, messages);
+  const threadRootTags = isThreadContext
+    ? (displayMessages.find((message) => message.id === item.conversationId)
+        ?.tags ?? [])
+    : [];
   const contextLabel = isThreadContext
     ? isDirectMessage
       ? `Thread with ${item.senderLabel}`
@@ -556,7 +567,7 @@ function InboxMessageDetailPane({
                   {canOpenChannel && contextChannelId ? (
                     <h2 className="min-w-0">
                       <button
-                        className="block min-w-0 text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        className="block min-w-0 max-w-full text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                         data-testid="home-inbox-context-title"
                         onClick={() =>
                           onOpenContext(
@@ -589,6 +600,47 @@ function InboxMessageDetailPane({
               <TooltipProvider>
                 <div className="flex shrink-0 items-center gap-1">
                   <UpdateIndicator />
+                  {reopenPending || reopenErrored ? (
+                    <div
+                      aria-live="polite"
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium",
+                        reopenErrored
+                          ? "bg-destructive/10 text-destructive"
+                          : "bg-muted/60 text-muted-foreground",
+                      )}
+                      data-testid="home-inbox-reopen-status"
+                      role="status"
+                    >
+                      {reopenPending ? (
+                        <>
+                          <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                          <span>Reopening…</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>Couldn’t reopen</span>
+                          {contextChannelId ? (
+                            <button
+                              className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                              data-testid="home-inbox-reopen-retry"
+                              onClick={() =>
+                                onOpenContext(
+                                  contextChannelId,
+                                  sourceEventId,
+                                  contextThreadRootId,
+                                )
+                              }
+                              type="button"
+                            >
+                              Retry
+                            </button>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  ) : null}
                   {canOpenChannel && contextChannelId ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -643,6 +695,11 @@ function InboxMessageDetailPane({
           aria-busy={isThreadContextLoading}
           className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
           data-testid="home-inbox-detail-scroll"
+          // Selection copy across a rendered mention chip: restores the sigil
+          // and the identity sidecar the browser's default copy would drop.
+          // Covers only the messages — the composer is a sibling overlay, so
+          // its own copy handler is untouched.
+          onCopy={handleTimelineMentionCopy}
           onScroll={onScroll}
           ref={scrollContainerRef}
         >
@@ -717,6 +774,7 @@ function InboxMessageDetailPane({
                   onEdit={canEditMessage ? handleSelectEditTarget : undefined}
                   onSelectReplyTarget={handleSelectReplyTarget}
                   onToggleReaction={onToggleReaction}
+                  profiles={profiles}
                   showUnreadBoundary={hasUnreadBoundary}
                   videoReviewCommentRootId={videoReviewPresentation.commentRootIdsByMessageId.get(
                     message.id,
@@ -757,7 +815,14 @@ function InboxMessageDetailPane({
           />
           <div className="pointer-events-auto">
             <MessageComposer
-              audienceContext={isDirectMessage ? null : { type: "thread" }}
+              audienceContext={
+                isDirectMessage
+                  ? null
+                  : {
+                      type: "thread",
+                      rootTags: threadRootTags,
+                    }
+              }
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}

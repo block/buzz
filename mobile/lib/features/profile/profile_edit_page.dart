@@ -111,13 +111,17 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
         try {
           await IosProfileTextEditor.presentUntilSaved(
             title: title,
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
-            brightness: Theme.of(context).brightness,
+            brightness: sheetTheme.brightness,
+            pageBackgroundColor: sheetTheme.colorScheme.surface,
+            containerBackgroundColor:
+                sheetTheme.colorScheme.surfaceContainerHighest,
             onSave: onSave,
             shouldRetryOnError: (error) =>
                 error is! ProfileCommunityChangedException,
@@ -279,7 +283,7 @@ class ProfileEditPage extends HookConsumerWidget {
         }
       },
       child: FrostedScaffold(
-        backgroundColor: context.colors.surface,
+        useUtilitySurfaceTheme: true,
         resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
         appBar: FrostedAppBar(
           centerTitle: true,

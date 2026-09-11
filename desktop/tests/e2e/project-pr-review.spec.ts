@@ -6,6 +6,7 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const SHOTS = "test-results/project-pr-review";
 const RECOVERY_SHOTS = "test-results/project-pr-conflict-recovery";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
+const REVIEWER_HUMAN_PUBKEY = "b".repeat(64);
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 
 async function expectSinglePrimaryTextColumn(row: Locator) {
@@ -61,6 +62,7 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
 async function addProjectToSidebar(
@@ -72,6 +74,8 @@ async function addProjectToSidebar(
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
+  await expect(browser).toBeHidden();
+  await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
 }
 
 function pullRequestRowByAuthor(
@@ -1031,15 +1035,15 @@ test("project pull requests report aggregate root query failures", async ({
   await page.getByTestId("open-projects-view").click();
   await page.getByRole("button", { name: "Reviews", exact: true }).click();
 
-  await expect(page.getByText("Could not load reviews.")).toBeVisible();
+  await expect(page.getByText("Could not load reviews")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByText("No reviews yet.")).toHaveCount(0);
+  await expect(page.getByText("No reviews yet")).toHaveCount(0);
 
   await page.evaluate(() => {
     window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
   });
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Could not load reviews.")).toHaveCount(0);
+  await expect(page.getByText("Could not load reviews")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: /^View / }).first(),
   ).toBeVisible();
@@ -1150,7 +1154,7 @@ test("sidebar distinguishes the Projects overview from an open project", async (
   await projectsOverview.click();
   await expect(projectsOverview).toHaveAttribute("data-active", "true");
   await expect(sidebarProject).toHaveAttribute("data-active", "false");
-  await expect(sidebarProject.locator("svg").first()).toHaveCSS(
+  await expect(sidebarProject.getByTestId("project-channel-icon")).toHaveCSS(
     "opacity",
     "0.8",
   );
@@ -1160,9 +1164,8 @@ test("sidebar distinguishes the Projects overview from an open project", async (
   );
 
   await sidebarProject.click();
-  await expect(projectsOverview).toHaveAttribute("data-active", "true");
-  await expect(sidebarProject).toHaveAttribute("data-active", "false");
-  await expect(sidebarProject).toHaveAttribute("aria-expanded", "false");
+  await expect(projectsOverview).toHaveAttribute("data-active", "false");
+  await expect(sidebarProject).toHaveAttribute("data-active", "true");
 });
 
 test("collapsed sidebar leaves a balanced Projects surface gutter", async ({
@@ -1323,6 +1326,9 @@ test("overview tasks and reviews are grouped and selectable by project", async (
     const rows = firstGroup.locator(
       `[data-testid^="${section.rowTestIdPrefix}"]`,
     );
+    await expect(rows).toHaveCount(
+      Number(await firstGroup.getAttribute("data-project-group-size")),
+    );
     const rowCount = await rows.count();
     expect(rowCount).toBeGreaterThan(0);
 
@@ -1476,7 +1482,29 @@ test("channels tab opens the latest matching conversation without leaving the pr
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+    window.localStorage.setItem("buzz:text-scale", "1.5");
+  });
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        avatarUrl:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" fill="%23F4B942"/%3E%3C/svg%3E',
+        displayName: "reviewer human",
+        isAgent: false,
+        pubkey: REVIEWER_HUMAN_PUBKEY,
+      },
+      {
+        avatarUrl:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" fill="%237657FF"/%3E%3C/svg%3E',
+        displayName: "reviewer agent",
+        isAgent: true,
+        pubkey: REVIEWER_AGENT_PUBKEY,
+      },
+    ],
+  });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
   await waitForMockLiveSubscription(page, "general");
@@ -1484,26 +1512,27 @@ test("channels tab opens the latest matching conversation without leaving the pr
   const olderContent = "Older matching conversation for channels tab";
   const latestContent = "Latest matching conversation for channels tab";
   await page.evaluate(
-    ({ author, latestContent, olderContent, repoToken }) => {
+    ({ latestAuthor, latestContent, olderAuthor, olderContent, repoToken }) => {
       const now = Math.floor(Date.now() / 1_000);
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `${olderContent} ${repoToken}`,
         createdAt: now - 1,
         kind: 9,
-        pubkey: author,
+        pubkey: olderAuthor,
       });
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `${latestContent} ${repoToken}`,
         createdAt: now,
         kind: 9,
-        pubkey: author,
+        pubkey: latestAuthor,
       });
     },
     {
-      author: TEST_IDENTITIES.alice.pubkey,
+      latestAuthor: REVIEWER_HUMAN_PUBKEY,
       latestContent,
+      olderAuthor: REVIEWER_AGENT_PUBKEY,
       olderContent,
       repoToken: `${DEFAULT_MOCK_PUBKEY} buzz`,
     },
@@ -1518,9 +1547,121 @@ test("channels tab opens the latest matching conversation without leaving the pr
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
   await page.getByRole("tab", { name: "Channels", exact: true }).click();
   const channelRow = page.getByTestId("project-channel-row").first();
   await expect(channelRow).toBeVisible({ timeout: 10_000 });
+
+  const discussedAgent = channelRow.getByRole("button", {
+    name: "View reviewer agent's profile",
+  });
+  const discussedHuman = channelRow.getByRole("button", {
+    name: "View reviewer human's profile",
+  });
+  await expect(discussedAgent).toBeVisible();
+  await expect(discussedHuman).toBeVisible();
+  await expect(
+    channelRow.getByRole("button", { name: /^View .*'s profile$/ }),
+  ).toHaveCount(2);
+  expect(
+    await channelRow
+      .getByRole("button", { name: /^View .*'s profile$/ })
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("aria-label")),
+      ),
+  ).toEqual(["View reviewer human's profile", "View reviewer agent's profile"]);
+  await page.locator("body").click({ position: { x: 0, y: 0 } });
+  await expect(discussedAgent).not.toBeFocused();
+  await expect(discussedHuman).not.toBeFocused();
+  await waitForAnimations(page);
+  await expect(discussedAgent).toHaveCSS("clip-path", "none");
+  await expect(discussedAgent).toHaveCSS("isolation", "isolate");
+  await expect(discussedHuman).toHaveCSS("isolation", "isolate");
+  await expect(discussedAgent).not.toHaveClass(
+    /(?:^|\s)rounded-squircle(?:\s|$)/,
+  );
+  await expect(discussedAgent).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(discussedAgent).toHaveCSS("box-shadow", "none");
+  await expect(discussedAgent).toHaveCSS("overflow", "visible");
+  const agentSeparator = await discussedAgent.evaluate((element) => {
+    const style = getComputedStyle(element, "::before");
+    return {
+      backgroundColor: style.backgroundColor,
+      clipPath: style.clipPath,
+      content: style.content,
+      insetBottom: style.bottom,
+      insetLeft: style.left,
+      insetRight: style.right,
+      insetTop: style.top,
+      opacity: style.opacity,
+      position: style.position,
+    };
+  });
+  expect(agentSeparator).toMatchObject({
+    clipPath: /url\(["']?#rounded-squircle-clip["']?\)/,
+    content: /(?:""|none)/,
+    opacity: "1",
+    position: "absolute",
+  });
+  expect(agentSeparator.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(Number.parseFloat(agentSeparator.insetTop)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetRight)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetBottom)).toBeLessThan(0);
+  expect(Number.parseFloat(agentSeparator.insetLeft)).toBeLessThan(0);
+  await expect(
+    discussedAgent.locator("[data-avatar-shape='squircle']"),
+  ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
+  const [agentBox, humanBox] = await Promise.all([
+    discussedAgent.boundingBox(),
+    discussedHuman.boundingBox(),
+  ]);
+  expect(agentBox).not.toBeNull();
+  expect(humanBox).not.toBeNull();
+  expect((agentBox?.x ?? 0) - (humanBox?.x ?? 0)).toBeLessThan(
+    humanBox?.width ?? 0,
+  );
+  const separatorScreenshot = await page.screenshot({ caret: "hide" });
+  const separatorPixel = await page.evaluate(
+    async ({ screenshot, x, y }) => {
+      const response = await fetch(`data:image/png;base64,${screenshot}`);
+      const image = await createImageBitmap(await response.blob());
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("2D canvas context unavailable");
+      context.drawImage(image, 0, 0);
+      const scaleX = image.width / window.innerWidth;
+      const scaleY = image.height / window.innerHeight;
+      return Array.from(
+        context.getImageData(
+          Math.round(x * scaleX),
+          Math.round(y * scaleY),
+          1,
+          1,
+        ).data,
+      );
+    },
+    {
+      screenshot: separatorScreenshot.toString("base64"),
+      x: (agentBox?.x ?? 0) - 1,
+      y: (agentBox?.y ?? 0) + (agentBox?.height ?? 0) / 2,
+    },
+  );
+  const separatorRgb = agentSeparator.backgroundColor
+    .match(/\d+(?:\.\d+)?/g)
+    ?.slice(0, 3)
+    .map(Number);
+  expect(separatorRgb).toHaveLength(3);
+  expect(separatorPixel.slice(0, 3)).toEqual(separatorRgb);
+
+  await discussedAgent.focus();
+  await expect(discussedAgent).toBeFocused();
+  await expect(discussedAgent).toHaveCSS("clip-path", "none");
+
   await channelRow.click();
 
   const panel = page.getByTestId("project-conversation-panel");
@@ -1658,7 +1799,15 @@ test("project overview presents collapsible context beside grouped activity", as
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        displayName: "tyler",
+        isAgent: true,
+        pubkey: DEFAULT_MOCK_PUBKEY,
+      },
+    ],
+  });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
@@ -1693,14 +1842,17 @@ test("project overview presents collapsible context beside grouped activity", as
     "Projects Activity",
   );
   await expect(page.getByTestId("projects-activity-search")).toBeVisible();
-  await expect(page.getByTestId("projects-activity-intro")).toContainText(
-    "Keeping up with the community has never been easier—or mattered more.",
+  await expect(page.getByTestId("projects-activity-summary")).toContainText(
+    /^(This week:|Currently tracking)/,
   );
+  await expect(
+    page.getByTestId("projects-activity-summary").locator("strong").first(),
+  ).toBeVisible();
   await expect(
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
-    "Projects",
+    "Activity",
   );
   expect(
     Math.round(
@@ -1710,12 +1862,7 @@ test("project overview presents collapsible context beside grouped activity", as
   ).toBe(280);
   await expect(
     page.getByTestId("projects-overview-create-project"),
-  ).toContainText("Create project");
-  await expect(
-    page
-      .getByTestId("projects-overview-context-panel")
-      .getByTestId("projects-create-menu"),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByTestId("projects-overview-stats-pod")).toBeVisible();
   await expect(
     page
@@ -1727,6 +1874,23 @@ test("project overview presents collapsible context beside grouped activity", as
       .getByTestId("projects-overview-stats-pod")
       .getByTestId("projects-overview-people"),
   ).toHaveCount(0);
+  await page.getByTestId("projects-section-projects").click();
+  await page.getByRole("button", { name: "Grid layout" }).click();
+  const projectPeopleButton = page.locator(
+    'button[aria-label="View tyler\'s profile"]',
+  );
+  await expect(projectPeopleButton).toBeVisible();
+  await projectPeopleButton.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(projectPeopleButton).toBeFocused();
+  await expect(projectPeopleButton).toHaveCSS("clip-path", "none");
+  await expect(projectPeopleButton).not.toHaveCSS("box-shadow", "none");
+  await expect(projectPeopleButton.locator(":scope > span")).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
+  await page.getByTestId("projects-section-all").click();
   await expect(
     page
       .getByTestId("projects-overview-context-panel")
@@ -1740,7 +1904,7 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(
     page
       .getByTestId("projects-overview-context-panel")
-      .getByRole("heading", { name: "Activity" }),
+      .getByRole("heading", { level: 3, name: "Activity" }),
   ).toHaveCount(0);
   await expect(
     page
@@ -1785,17 +1949,12 @@ test("project overview presents collapsible context beside grouped activity", as
   const stats = page.getByTestId("projects-overview-stat");
   await expect(stats).toHaveCount(5);
   await expect(stats.nth(2)).toContainText("Channels");
-  const createBox = await page
-    .getByTestId("projects-overview-create-project")
-    .boundingBox();
   const lastStatBox = await stats.last().boundingBox();
   const peopleBox = await page
     .getByTestId("projects-overview-people")
     .boundingBox();
-  expect(createBox).toBeTruthy();
   expect(lastStatBox).toBeTruthy();
   expect(peopleBox).toBeTruthy();
-  expect(peopleBox?.y ?? 0).toBeGreaterThan(createBox?.y ?? 0);
   expect(peopleBox?.y ?? 0).toBeGreaterThan(
     (lastStatBox?.y ?? 0) + (lastStatBox?.height ?? 0) - 1,
   );
@@ -1821,9 +1980,13 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "Channels",
   );
+  await expect(page.getByTestId("projects-overview-add-channel")).toBeVisible();
+  await page.getByTestId("projects-overview-add-channel").click();
+  await expect(page.getByTestId("create-project-channel-dialog")).toBeVisible();
   await expect(
-    page.getByTestId("projects-overview-create-project"),
-  ).toHaveCount(0);
+    page.getByTestId("create-project-channel-project"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.getByTestId("projects-overview-people")).toHaveCount(0);
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
   await expect(stats).toHaveCount(3);
@@ -1834,7 +1997,7 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   const channelRows = page.getByTestId("project-channel-row");
   expect(await channelRows.count()).toBeGreaterThan(0);
-  await expect(channelRows.first()).toContainText("#general");
+  await expect(channelRows.first()).toContainText("#buzz");
   const channelsList = page.getByTestId("projects-channels-list");
   await expect(channelsList).toContainText("buzz");
   await expect(channelsList).toContainText("relay-tools");
@@ -1851,6 +2014,19 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(page.getByTestId("project-channel-repository")).toHaveCount(
     channelCount,
   );
+  await expect(
+    page.getByTestId("project-channel-repository").first(),
+  ).toHaveCSS("text-align", "left");
+  const affiliationXs = (
+    await page
+      .getByTestId("project-channel-repository")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getBoundingClientRect().x),
+      )
+  ).filter((x) => Number.isFinite(x));
+  expect(
+    Math.max(...affiliationXs) - Math.min(...affiliationXs),
+  ).toBeLessThanOrEqual(2);
   await page.getByTestId("projects-section-projects").click();
   await expect(page.getByTestId("projects-page-header")).toContainText(
     "Projects",
@@ -1871,8 +2047,14 @@ test("project overview presents collapsible context beside grouped activity", as
     "Repositories",
   );
   await expect(
-    page.getByTestId("projects-overview-create-project"),
-  ).toHaveCount(0);
+    page.getByTestId("projects-overview-add-repository"),
+  ).toBeVisible();
+  await page.getByTestId("projects-overview-add-repository").click();
+  await expect(page.getByTestId("add-project-repository-dialog")).toBeVisible();
+  await expect(
+    page.getByTestId("add-project-repository-project"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(stats.nth(1)).toContainText("Active tasks");
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
   await page.getByTestId("projects-section-issues").click();
@@ -1881,7 +2063,7 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   await expect(
     page.getByTestId("projects-overview-create-issue"),
-  ).toContainText("Create task");
+  ).toHaveAttribute("aria-label", "Create task");
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
   await page.getByTestId("projects-section-prs").click();
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
@@ -1889,7 +2071,7 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   await expect(
     page.getByTestId("projects-overview-create-pull-request"),
-  ).toContainText("Create review");
+  ).toHaveAttribute("aria-label", "Create review");
   await expect(page.getByTestId("projects-overview-people")).toBeVisible();
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
   await page.getByTestId("projects-section-all").click();
@@ -1897,10 +2079,11 @@ test("project overview presents collapsible context beside grouped activity", as
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
-    "Projects",
+    "Activity",
   );
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
 
+  await page.getByTestId("projects-section-projects").click();
   await page.getByTestId("projects-overview-create-project").click();
   await expect(page.getByTestId("create-project-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
@@ -1918,13 +2101,8 @@ test("project overview presents collapsible context beside grouped activity", as
     "data-project-context-detached",
     "true",
   );
-  await expect(stats).toHaveCount(5);
-  await expect(activityCards.first()).toBeVisible();
-  await expect(
-    page
-      .getByTestId("projects-workspace-chrome")
-      .getByTestId("projects-create-menu"),
-  ).toHaveCount(0);
+  await expect(stats).toHaveCount(3);
+  await expect(activityCards).toHaveCount(0);
 });
 
 test("project overview chrome toggles a detached resizable agent chat", async ({
@@ -2072,7 +2250,7 @@ test("project overview chrome toggles a detached resizable agent chat", async ({
   ).toBeVisible();
 });
 
-test("project overview info control animates the context rail", async ({
+test("project overview drawer control animates the context rail", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -2083,6 +2261,10 @@ test("project overview info control animates the context rail", async ({
   const toggle = page.getByTestId("projects-overview-context-toggle");
   const rail = page.getByTestId("projects-overview-context-rail");
   const railPanel = page.getByTestId("projects-overview-context-rail-panel");
+  const drawerIndicator = page
+    .getByTestId("projects-overview-context-icon")
+    .locator("rect")
+    .nth(1);
   const contentSurface = page.locator("[data-buzz-content-surface]");
   await expect(page.getByTestId("projects-overview-layout")).toHaveAttribute(
     "data-project-context-detached",
@@ -2102,6 +2284,7 @@ test("project overview info control animates the context rail", async ({
   await expect(
     page.getByTestId("projects-overview-context-icon"),
   ).toBeVisible();
+  await expect(drawerIndicator).toHaveAttribute("width", "5px");
   await expect(rail).toHaveCSS("width", "288px");
   await expect(page.getByTestId("projects-overview-layout")).toHaveCSS(
     "padding-right",
@@ -2115,17 +2298,48 @@ test("project overview info control animates the context rail", async ({
   await toggle.click();
   await expect(rail).toHaveCSS("width", "0px");
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(drawerIndicator).toHaveAttribute("width", "2px");
   await expect(railPanel).toHaveCSS("transform", "none");
   expect(await surfaceStyle()).toEqual(expandedSurfaceStyle);
-  await expect(
-    page
-      .getByTestId("projects-workspace-chrome")
-      .getByTestId("projects-create-menu"),
-  ).toHaveCount(0);
-
   await toggle.click();
   await expect(rail).toHaveCSS("width", "288px");
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
+});
+
+test("Projects search replaces and restores the section tabs", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+
+  await expect(
+    page.getByTestId("projects-page-tabs").getByRole("combobox"),
+  ).toHaveCount(0);
+  await page.getByTestId("projects-activity-search").click();
+  const search = page.getByTestId("projects-section-search-input");
+  await expect(search).toBeFocused();
+  await expect(page.getByTestId("projects-section-projects")).toHaveCount(0);
+  await expect(
+    page.getByTestId("projects-page-tabs").getByRole("combobox"),
+  ).toHaveValue("updated");
+
+  await search.fill("buzz");
+  await expect(
+    page.locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    ),
+  ).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("projects-section-search")).toHaveCount(0);
+  await expect(page.getByTestId("projects-section-projects")).toBeVisible();
+
+  await page.getByTestId("projects-activity-search").click();
+  await page.getByTestId("projects-section-search-close").click();
+  await expect(page.getByTestId("projects-section-search")).toHaveCount(0);
 });
 
 test("selecting overview list rows switches the context pod to the cluster", async ({
@@ -2155,6 +2369,9 @@ test("selecting overview list rows switches the context pod to the cluster", asy
   );
   await page.keyboard.press("Space");
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "1 task",
+  );
+  await expect(page.getByTestId("projects-selection-summary")).toContainText(
     "1 task",
   );
   await expect(page.getByTestId("projects-selection-items")).toHaveCount(0);
@@ -2213,6 +2430,36 @@ test("selecting overview list rows switches the context pod to the cluster", asy
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "Tasks",
   );
+  await expect(page.getByTestId("projects-overview-context-rail")).toHaveCSS(
+    "width",
+    "288px",
+  );
+});
+
+test("selection restores a previously collapsed Projects context drawer", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Tasks", exact: true }).click();
+  await page.getByRole("button", { name: "List layout" }).click();
+
+  const toggle = page.getByTestId("projects-overview-context-toggle");
+  const rail = page.getByTestId("projects-overview-context-rail");
+  await toggle.click();
+  await expect(rail).toHaveCSS("width", "0px");
+
+  const row = page.locator('[data-testid^="projects-issue-row-"]').first();
+  await row.hover();
+  await row.getByTestId("projects-row-select").click();
+  await expect(rail).toHaveCSS("width", "288px");
+  await expect(page.getByTestId("projects-selection-clear")).toBeVisible();
+
+  await page.getByTestId("projects-selection-clear").click();
+  await expect(rail).toHaveCSS("width", "0px");
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
 });
 
 test("repository changes discard captured selection context before agent sends", async ({
@@ -2222,7 +2469,7 @@ test("repository changes discard captured selection context before agent sends",
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-buzz").click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
   await page.getByRole("tab", { name: "Tasks", exact: true }).click();
 
   const selectedRow = page.getByTestId("project-issue-row").first();
@@ -2241,8 +2488,10 @@ test("repository changes discard captured selection context before agent sends",
     agentPanel.getByText(selectedTitle, { exact: true }),
   ).toBeVisible();
 
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-workspace-back").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
   await expect(page).toHaveURL(/repositoryId=.*relay-tools/);
+  await page.getByTestId("project-right-panel-chat-tab").click();
   await expect(agentPanel).toBeVisible();
   await expect(
     agentPanel.getByTestId("projects-agent-selection-toggle"),
@@ -2251,7 +2500,7 @@ test("repository changes discard captured selection context before agent sends",
   const prompt = "Explain the current repository.";
   const composer = agentPanel.getByTestId("message-composer");
   await composer.locator('[contenteditable="true"]').fill(prompt);
-  await composer.getByRole("button", { name: "Send message" }).click();
+  await composer.locator('[contenteditable="true"]').press("Enter");
   await expect
     .poll(() =>
       page.evaluate((prefix) => {
@@ -2394,7 +2643,7 @@ test("overview lists position identifying and generic icons consistently", async
   }
 });
 
-test("repository info control animates the context rail from the far right", async ({
+test("repository drawer control animates the context rail from the far right", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -2404,7 +2653,7 @@ test("repository info control animates the context rail from the far right", asy
   const chat = page.getByTestId("project-right-panel-chat-tab");
   const terminal = page.getByTestId("project-terminal-toggle");
   const info = page.getByTestId("project-right-panel-repository-tab");
-  const infoIcon = page.getByTestId("project-right-panel-repository-icon");
+  const contextIcon = page.getByTestId("project-right-panel-repository-icon");
   const rail = page.getByTestId("project-context-rail");
   const repositoryPanel = page.getByTestId("project-repository-actions-panel");
   const layout = page.getByTestId("project-panel-layout");
@@ -2436,7 +2685,8 @@ test("repository info control animates the context rail from the far right", asy
   expect(terminalBounds?.x).toBeLessThan(chatBounds?.x ?? 0);
   expect(chatBounds?.x).toBeLessThan(infoBounds?.x ?? 0);
   await expect(info).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  await expect(infoIcon).toHaveCSS("opacity", "1");
+  await expect(contextIcon).toBeVisible();
+  await expect(info).toHaveAttribute("aria-pressed", "true");
   await expect(rail).toHaveCSS("width", "288px");
   await expect(layout).toHaveCSS("padding-right", "8px");
   await expect(rail).toHaveCSS("transition-duration", "0.2s");
@@ -2444,7 +2694,7 @@ test("repository info control animates the context rail from the far right", asy
 
   await info.click();
   await expect(rail).toHaveCSS("width", "0px");
-  await expect(infoIcon).toHaveCSS("opacity", "0.6");
+  await expect(info).toHaveAttribute("aria-pressed", "false");
   await expect(layout).toHaveAttribute("data-project-context-detached", "true");
   expect(
     await contentSurface.evaluate((element) => {
@@ -2460,7 +2710,7 @@ test("repository info control animates the context rail from the far right", asy
 
   await info.click();
   await expect(rail).toHaveCSS("width", "288px");
-  await expect(infoIcon).toHaveCSS("opacity", "1");
+  await expect(info).toHaveAttribute("aria-pressed", "true");
   await expect(repositoryPanel).toBeVisible();
 });
 
@@ -2478,6 +2728,7 @@ test("selecting repository workspace rows switches the context pod to the cluste
     )
     .first()
     .click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 
   await page.getByRole("tab", { name: "Commits" }).click();
   const commitRows = page.getByTestId("project-activity-feed-item");
@@ -3070,7 +3321,9 @@ test("external repositories stay on local source after a branch round trip", asy
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
+  await page.getByRole("button", { name: "github.com" }).click();
+  await page.getByRole("menuitemradio", { name: /^Local/ }).click();
 
   await expect(
     page.getByRole("heading", { name: "Local branch README" }),
@@ -3164,7 +3417,9 @@ test("repository files beyond the eager preview limit load on demand", async ({
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
+  await page.getByRole("button", { name: "github.com" }).click();
+  await page.getByRole("menuitemradio", { name: /^Local/ }).click();
 
   await expect(
     page.getByRole("heading", { name: "Deferred README" }),

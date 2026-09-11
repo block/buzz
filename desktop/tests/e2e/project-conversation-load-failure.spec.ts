@@ -148,6 +148,7 @@ test.describe("project conversation load failure", () => {
       .first();
     await expect(projectEntry).toBeVisible({ timeout: 10_000 });
     await projectEntry.click();
+    await page.getByTestId("project-home-context-repo-buzz").click();
     await page.getByRole("tab", { name: "Channels", exact: true }).click();
     const channelRow = page
       .getByTestId("project-channel-row")

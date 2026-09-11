@@ -109,7 +109,7 @@ async fn persist_command_event(
 
     let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
     let mut tx = db
-        .begin_transaction()
+        .begin_event_write_transaction()
         .await
         .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
     buzz_deletion::store(db)
@@ -381,6 +381,7 @@ async fn handle_dm_open(
                 "actor": self_hex,
                 "participants": participant_hexes,
             }),
+            chrono::Utc::now(),
         )
         .await
         {
@@ -462,7 +463,7 @@ async fn handle_dm_add_member(
     // 3. Validate channel is type "dm"
     let existing_channel = state
         .db
-        .get_channel(tenant.community(), channel_id)
+        .get_channel_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|_| IngestError::Rejected("invalid: DM not found".into()))?;
     if existing_channel.channel_type != "dm" {
@@ -472,7 +473,7 @@ async fn handle_dm_add_member(
     // 4. Get existing members, merge with new
     let existing_members = state
         .db
-        .get_members(tenant.community(), channel_id)
+        .get_members_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|e| IngestError::Internal(format!("error: get members: {e}")))?;
 
@@ -592,7 +593,7 @@ async fn handle_dm_hide(
     // 3. Validate channel is type "dm"
     let channel = state
         .db
-        .get_channel(tenant.community(), channel_id)
+        .get_channel_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|_| IngestError::Rejected("invalid: DM not found".into()))?;
     if channel.channel_type != "dm" {
@@ -762,7 +763,7 @@ async fn handle_workflow_def(
     let community_id = tenant.community();
     state
         .db
-        .get_channel(community_id, channel_id)
+        .get_channel_for_event_write(community_id, channel_id)
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
@@ -1366,21 +1367,23 @@ async fn resume_workflow_after_approval(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow persistence test database");
         let db = buzz_db::Db::from_pool(pool);
-        db.migrate()
-            .await
-            .expect("migrate workflow persistence test database");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate()
+                .await
+                .expect("migrate workflow persistence test database");
+        }
         let host = format!("workflow-cas-{}.example", Uuid::new_v4().simple());
         let community = db
             .ensure_configured_community(&host)
@@ -1508,7 +1511,9 @@ mod tests {
         ));
 
         let create_revision = create.id.to_hex();
-        let mut updates = (0..64).map(|index| {
+        // Event IDs are hashes, so keep sampling instead of imposing a finite
+        // cutoff that makes this same-second ordering check probabilistic.
+        let mut updates = (0_u64..).map(|index| {
             workflow_event(
                 &keys,
                 workflow_id,
@@ -1520,7 +1525,7 @@ mod tests {
         let update = updates
             .find(|candidate| candidate.id.as_bytes() < create.id.as_bytes())
             .expect("find same-second update that wins NIP-33 ordering");
-        let dominated_update = (64..256)
+        let dominated_update = (64_u64..)
             .map(|index| {
                 workflow_event(
                     &keys,
@@ -1590,7 +1595,10 @@ mod tests {
             "legacy-malformed",
         );
 
-        let mut tx = db.begin_transaction().await.expect("begin legacy seed");
+        let mut tx = db
+            .begin_event_write_transaction()
+            .await
+            .expect("begin legacy seed");
         let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(
             &mut tx,
             tenant.community(),

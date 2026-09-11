@@ -42,11 +42,9 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import {
-  PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
-} from "./projectPanelStyles";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProjectRepositoryLatestCommitRow } from "./ProjectRepositoryLatestCommitRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -57,6 +55,10 @@ import {
   type RepositoryFileContentSource,
   useRepositoryFileContent,
 } from "./useRepositoryFileContent";
+import {
+  type RepositoryFilesContext,
+  useRepositoryFilesNavigation,
+} from "./useRepositoryFilesNavigation";
 
 function normalizeAuthorLookupValue(value: string | null | undefined) {
   return value?.trim().toLowerCase() ?? "";
@@ -612,6 +614,7 @@ function FileContentPanel({
 export function RepositoryFilesPanel({
   files,
   fileContentSource,
+  initialPath,
   snapshot,
   isLoading,
   error,
@@ -624,36 +627,31 @@ export function RepositoryFilesPanel({
 }: {
   files: ProjectRepoFile[];
   fileContentSource?: RepositoryFileContentSource;
+  initialPath?: string;
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
   profiles?: UserProfileLookup;
   fallbackAuthorPubkey?: string;
-  onContextChange?: (context: {
-    kind: "file" | "folder";
-    path: string;
-  }) => void;
+  onContextChange?: (context: RepositoryFilesContext) => void;
   onOpenCommit?: (commitHash: string) => void;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
   unavailableMessage?: string;
 }) {
-  const [currentPath, setCurrentPath] = React.useState("");
-  const [selectedFile, setSelectedFile] =
-    React.useState<ProjectRepoFile | null>(null);
-  const [visibleEntryCount, setVisibleEntryCount] = React.useState(
-    REPOSITORY_ENTRY_PAGE_SIZE,
-  );
-  const openPath = React.useCallback((path: string) => {
-    setCurrentPath(path);
-    setVisibleEntryCount(REPOSITORY_ENTRY_PAGE_SIZE);
-  }, []);
-  React.useEffect(() => {
-    onContextChange?.({
-      kind: selectedFile ? "file" : "folder",
-      path: selectedFile?.path ?? currentPath,
-    });
-  }, [currentPath, onContextChange, selectedFile]);
+  const {
+    currentPath,
+    openPath,
+    selectedFile,
+    setSelectedFile,
+    setVisibleEntryCount,
+    visibleEntryCount,
+  } = useRepositoryFilesNavigation({
+    files,
+    initialPath,
+    onContextChange,
+    pageSize: REPOSITORY_ENTRY_PAGE_SIZE,
+  });
   const entries = React.useMemo(
     () => repositoryEntries(files, currentPath),
     [currentPath, files],
@@ -696,18 +694,6 @@ export function RepositoryFilesPanel({
   );
   const pathSegments = currentPath ? currentPath.split("/") : [];
 
-  const filesKey = React.useMemo(
-    () => files.map((file) => file.path).join("\0"),
-    [files],
-  );
-
-  React.useEffect(() => {
-    if (!filesKey) return;
-    setCurrentPath("");
-    setSelectedFile(null);
-    setVisibleEntryCount(REPOSITORY_ENTRY_PAGE_SIZE);
-  }, [filesKey]);
-
   // Loading/error/empty states keep the header controls visible — the
   // remote/local toggle must stay reachable when one source fails to load.
   if (isLoading) {
@@ -748,15 +734,20 @@ export function RepositoryFilesPanel({
         ? "No files have been pushed yet."
         : null;
   if (stateMessage) {
+    const state = (
+      <ProjectPanelState
+        description={
+          error || unavailableMessage
+            ? "Refresh the repository or check its access settings."
+            : "Files pushed to this repository will appear here."
+        }
+        error={Boolean(error || unavailableMessage)}
+        panel={!sourceControls}
+        title={stateMessage}
+      />
+    );
     if (!sourceControls) {
-      return (
-        <div
-          className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-          data-project-detail-panel
-        >
-          {stateMessage}
-        </div>
-      );
+      return state;
     }
     return (
       <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
@@ -780,7 +771,7 @@ export function RepositoryFilesPanel({
             <RepoSyncActionButton controls={sourceControls} />
           </div>
         </div>
-        <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
+        {state}
       </div>
     );
   }
@@ -790,10 +781,7 @@ export function RepositoryFilesPanel({
       <FileContentPanel
         file={selectedFile}
         fileContentSource={fileContentSource}
-        onOpenPath={(path) => {
-          setSelectedFile(null);
-          openPath(path);
-        }}
+        onOpenPath={openPath}
       />
     );
   }
@@ -874,6 +862,9 @@ export function RepositoryFilesPanel({
                         accent={latestCommitProfile?.isAgent === true}
                         avatarUrl={latestCommitProfile?.avatarUrl ?? null}
                         displayName={latestCommitAuthorLabel}
+                        shape={
+                          latestCommitProfile?.isAgent ? "squircle" : "circle"
+                        }
                         size="sm"
                       />
                       <p className="min-w-0 flex-1 truncate text-foreground">

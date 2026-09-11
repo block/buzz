@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import '../../shared/theme/theme.dart';
+
 /// Opens the native iOS form used to edit a single profile text field.
 class IosProfileTextEditor {
   IosProfileTextEditor._();
@@ -14,6 +16,8 @@ class IosProfileTextEditor {
     required String placeholder,
     required bool multiline,
     required Brightness brightness,
+    required Color pageBackgroundColor,
+    required Color containerBackgroundColor,
     bool allowUnchangedSubmission = false,
   }) => _channel.invokeMethod<String>('present', {
     'title': title,
@@ -21,6 +25,9 @@ class IosProfileTextEditor {
     'placeholder': placeholder,
     'multiline': multiline,
     'brightness': brightness.name,
+    'pageBackgroundArgb': pageBackgroundColor.toARGB32(),
+    'containerBackgroundArgb': containerBackgroundColor.toARGB32(),
+    'containerCornerRadius': Radii.container,
     'allowUnchangedSubmission': allowUnchangedSubmission,
   });
 
@@ -32,6 +39,8 @@ class IosProfileTextEditor {
     required String placeholder,
     required bool multiline,
     required Brightness brightness,
+    required Color pageBackgroundColor,
+    required Color containerBackgroundColor,
     required Future<void> Function(String value) onSave,
     required void Function() onSaveError,
     bool Function(Object error)? shouldRetryOnError,
@@ -47,6 +56,8 @@ class IosProfileTextEditor {
         placeholder: placeholder,
         multiline: multiline,
         brightness: brightness,
+        pageBackgroundColor: pageBackgroundColor,
+        containerBackgroundColor: containerBackgroundColor,
         allowUnchangedSubmission: isRetry,
       );
       if (value == null) return;

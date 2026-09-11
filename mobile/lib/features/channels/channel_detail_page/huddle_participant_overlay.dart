@@ -170,6 +170,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
       fallbackLabel: fallbackLabel,
       isSelf: isSelf,
     );
+    final isAgent = profile?.isAgent == true || fallbackLabel != null;
 
     return Semantics(
       label: active ? '$label, speaking' : label,
@@ -193,7 +194,12 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                     : const Duration(milliseconds: 180),
                 padding: EdgeInsets.all(active ? Grid.xxs : Grid.half),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
+                  shape: isAgent ? BoxShape.rectangle : BoxShape.circle,
+                  borderRadius: isAgent
+                      ? BorderRadius.circular(
+                          (_huddleParticipantSpotlightRadius + Grid.half) * 0.6,
+                        )
+                      : null,
                   color: context.colors.primary.withValues(
                     alpha: active ? 0.18 : 0.08,
                   ),
@@ -207,6 +213,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                     size: 56,
                     color: context.colors.onPrimaryContainer,
                   ),
+                  isAgent: isAgent,
                 ),
               ),
               const SizedBox(height: Grid.twelve),
@@ -348,6 +355,9 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                                       size: 22,
                                       color: context.colors.onPrimaryContainer,
                                     ),
+                                    isAgent:
+                                        profile?.isAgent == true ||
+                                        fallbackLabels[pubkey] != null,
                                   ),
                                   const SizedBox(width: Grid.twelve),
                                   Expanded(

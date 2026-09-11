@@ -74,7 +74,43 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         !widget.dispatchMessageLinks) {
       return;
     }
+    if (link is MessageDeepLink) {
+      unawaited(_dispatchNotificationLink(link));
+      return;
+    }
 
+    _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchNotificationLink(MessageDeepLink link) async {
+    final preparation = await ref
+        .read(pendingDeepLinkProvider.notifier)
+        .prepareCommunity(link);
+    if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+    switch (preparation) {
+      case DeepLinkCommunityPreparation.ready:
+        _dispatchNavigableLink(link);
+      case DeepLinkCommunityPreparation.switched:
+        // The community-scoped app subtree remounts and consumes the parked
+        // target after its channels load.
+        return;
+      case DeepLinkCommunityPreparation.unavailable:
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Notification community is no longer available'),
+          ),
+        );
+      case DeepLinkCommunityPreparation.failed:
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Could not open the notification community'),
+          ),
+        );
+    }
+  }
+
+  void _dispatchNavigableLink(BuzzDeepLink link) {
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,

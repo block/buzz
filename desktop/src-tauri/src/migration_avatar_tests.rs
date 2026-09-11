@@ -25,6 +25,8 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         },
     ];
     let definition = crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "builtin:fizz".to_string(),
         display_name: "Fizz".to_string(),
         avatar_url: Some(old_fizz.to_string()),
@@ -39,6 +41,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -157,6 +160,40 @@ fn current_builtin_agent_avatars_do_not_match_legacy_hashes() {
             legacy.data_url_sha256
         );
     }
+}
+
+#[test]
+fn legacy_avatar_match_checks_every_known_generation_for_a_persona() {
+    use sha2::{Digest as _, Sha256};
+
+    let prior_avatar = "data:image/png;base64,prior-fizz";
+    let prior_hash = hex::encode(Sha256::digest(prior_avatar.as_bytes()));
+    let legacy_avatars = [
+        LegacyBuiltInAvatar {
+            persona_id: "builtin:fizz",
+            data_url_sha256: "older-fizz-hash",
+            sanitized_media_sha256: "older-upload-hash",
+            persona_content_hash: "older-persona-version",
+        },
+        LegacyBuiltInAvatar {
+            persona_id: "builtin:fizz",
+            data_url_sha256: prior_hash.as_str(),
+            sanitized_media_sha256: "prior-upload-hash",
+            persona_content_hash: "prior-persona-version",
+        },
+    ];
+    let record = serde_json::json!({
+        "slug": "builtin:fizz",
+        "avatar_url": prior_avatar,
+    });
+
+    let matched = legacy_avatar_match(&record, &legacy_avatars).unwrap();
+
+    assert_eq!(
+        matched.metadata.persona_content_hash,
+        "prior-persona-version"
+    );
+    assert!(!matched.was_uploaded);
 }
 
 #[test]

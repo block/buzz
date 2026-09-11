@@ -13,7 +13,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import type { RelayMemberRole, UserSearchResult } from "@/shared/api/types";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -50,7 +50,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -441,6 +441,7 @@ function SearchResult({
         className="h-8 w-8 text-xs shadow-none"
         iconClassName="h-4 w-4"
         label={name}
+        shape={user.isAgent ? "squircle" : "circle"}
       />
       <span className="min-w-0 flex-1 truncate text-sm font-medium">
         {name}

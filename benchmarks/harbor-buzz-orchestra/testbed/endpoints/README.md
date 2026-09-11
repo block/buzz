@@ -9,6 +9,13 @@ endpoint string remains the join key.
 Every key in these files must be a manifest endpoint name; the loader treats
 all entries as endpoint configs (no comment keys).
 
+## openai-live-wire-debug.json
+
+Diagnostic variant of `openai-live.json` for local runs. It enables
+`acp::wire=debug`, so retained agent stdout logs include full ACP messages,
+including tool-call arguments and results. These logs may contain prompt or
+command content; keep them local. The verifier and reward do not read them.
+
 ## m1-local.json
 
 M1 wiring proof: both placeholder endpoints resolve to one local llama-server

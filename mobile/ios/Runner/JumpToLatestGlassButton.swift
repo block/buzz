@@ -175,6 +175,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
+  private let swatchView = UIView()
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
   private var contentIcon = "back"
@@ -247,6 +248,20 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       activityIndicator.widthAnchor.constraint(equalToConstant: 24),
       activityIndicator.heightAnchor.constraint(equalToConstant: 24),
     ])
+
+    swatchView.translatesAutoresizingMaskIntoConstraints = false
+    swatchView.isUserInteractionEnabled = false
+    swatchView.isHidden = true
+    swatchView.layer.cornerCurve = .continuous
+    button.addSubview(swatchView)
+    let swatchSize = max(0, controlSize - 8)
+    NSLayoutConstraint.activate([
+      swatchView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+      swatchView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+      swatchView.widthAnchor.constraint(equalToConstant: swatchSize),
+      swatchView.heightAnchor.constraint(equalToConstant: swatchSize),
+    ])
+    swatchView.layer.cornerRadius = swatchSize / 2
 
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
@@ -342,6 +357,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let enabled = arguments?["enabled"] as? Bool ?? true
     let busy = arguments?["busy"] as? Bool ?? false
     let selected = arguments?["selected"] as? Bool ?? false
+    let swatchColorValue = (arguments?["swatchColor"] as? NSNumber)?.uint32Value
 
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
@@ -360,6 +376,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.tintColor = foregroundColor
       button.configuration?.baseForegroundColor = foregroundColor
       activityIndicator.color = foregroundColor
+    }
+    if let swatchColorValue {
+      swatchView.backgroundColor = Self.color(from: swatchColorValue)
     }
     if #unavailable(iOS 26.0) {
       button.configuration?.baseBackgroundColor = Self.fallbackBackgroundColor(
@@ -384,11 +403,16 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "camera": buttonIconName = "camera"
     case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
     case "palette": buttonIconName = "paintpalette"
+    case "droplet": buttonIconName = "drop.fill"
     case "emoji": buttonIconName = "face.smiling"
     case "person": buttonIconName = "person"
     case "frame": buttonIconName = "rectangle.stack"
     case "rotateCamera": buttonIconName = "arrow.triangle.2.circlepath.camera"
     case "shutter": buttonIconName = "circle.fill"
+    case "sun": buttonIconName = "sun.max"
+    case "moon": buttonIconName = "moon"
+    case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
+    case "colorSwatch": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"
     }
     if buttonLabel != nil {
@@ -457,10 +481,13 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     if isBusy {
       button.configuration?.title = nil
       button.configuration?.image = nil
+      swatchView.isHidden = true
       activityIndicator.startAnimating()
     } else {
-      button.configuration?.title = buttonLabel
-      button.configuration?.image = buttonLabel == nil ? buttonImage : nil
+      let displaysSwatch = contentIcon == "colorSwatch"
+      button.configuration?.title = displaysSwatch ? nil : buttonLabel
+      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : buttonImage
+      swatchView.isHidden = !displaysSwatch
       activityIndicator.stopAnimating()
     }
   }

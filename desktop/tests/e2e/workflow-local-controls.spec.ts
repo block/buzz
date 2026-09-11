@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
@@ -63,7 +64,9 @@ async function addMessageStep(
 ) {
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await dialog
+    .locator('textarea[id^="wf-step-"][id$="-text"]')
+    .fill("Workflow notification");
 }
 
 async function createEnabled(
@@ -152,7 +155,7 @@ test("inserts template variables with keyboard control and restores the caret", 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
 
-  const textarea = dialog.getByLabel("Message text");
+  const textarea = dialog.locator('textarea[id^="wf-step-"][id$="-text"]');
   const listbox = page.getByRole("listbox");
   await textarea.fill("Hello {{trig");
   await expect(listbox).toBeVisible();
@@ -286,6 +289,7 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
+  await waitForAnimations(page);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
   const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
@@ -640,11 +644,11 @@ test("round-trips manual author and reaction message IDs through save and reopen
   });
   await authorSearch.fill(author);
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toBeVisible();
   await authorSearch.press("Enter");
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
   await dialog.getByRole("tab", { name: "YAML" }).click();
@@ -663,7 +667,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   });
   await correctedAuthorSearch.fill(author);
   await expect(
-    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    dialog.getByRole("option", { name: truncateNpub(author) }),
   ).toBeVisible();
   await correctedAuthorSearch.press("Enter");
   await dialog
@@ -697,7 +701,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await openTriggerInspector(reopened);
   await reopened.getByText("Author", { exact: true }).locator("..").click();
   await expect(
-    reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+    reopened.getByRole("option", { name: truncateNpub(author) }),
   ).toHaveAttribute("aria-selected", "true");
   await reopened.getByText("Message", { exact: true }).locator("..").click();
   await expect(
@@ -738,7 +742,7 @@ test("toggles selected author and message filters while preserving sibling condi
     .locator("..");
   await authorField.getByText("Author", { exact: true }).locator("..").click();
   const authorOption = dialog.getByRole("option", {
-    name: new RegExp(author.slice(0, 8)),
+    name: truncateNpub(author),
   });
   await expect(authorOption).toHaveAttribute("aria-selected", "true");
   await expect(
@@ -751,7 +755,7 @@ test("toggles selected author and message filters while preserving sibling condi
   });
   await authorSearch.fill(replacementAuthor);
   const replacementAuthorOption = dialog.getByRole("option", {
-    name: new RegExp(replacementAuthor.slice(0, 8)),
+    name: truncateNpub(replacementAuthor),
   });
   await expect(replacementAuthorOption).toBeVisible();
   await authorSearch.press("Enter");

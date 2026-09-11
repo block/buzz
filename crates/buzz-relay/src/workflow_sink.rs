@@ -148,6 +148,39 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Append legacy routing tags from rendered output and authority-bearing tags
+/// only for targets also named in the workflow owner's stored step template.
+fn append_workflow_mention_tags(
+    tags: &mut Vec<Tag>,
+    rendered_text: &str,
+    authored_text: &str,
+    members: &[(String, String)],
+    author_pubkey_hex: &str,
+) -> Result<(), ActionSinkError> {
+    let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
+    let authored_mentions: std::collections::HashSet<String> =
+        resolve_mention_pubkeys(authored_text, members)
+            .into_iter()
+            .collect();
+
+    for mentioned in rendered_mentions {
+        if mentioned != author_pubkey_hex {
+            tags.push(
+                Tag::parse(["p", &mentioned])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+            );
+        }
+        if authored_mentions.contains(&mentioned) {
+            tags.push(
+                Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
+                    ActionSinkError::EventBuild(format!("workflow mention tag: {e}"))
+                })?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -175,11 +208,13 @@ impl ActionSink for RelayActionSink {
         community_id: CommunityId,
         channel_id: &str,
         text: &str,
+        authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
+        let authored_text = authored_text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -222,7 +257,7 @@ impl ActionSink for RelayActionSink {
 
             let channel = state
                 .db
-                .get_channel(tenant.community(), channel_uuid)
+                .get_channel_for_event_write(tenant.community(), channel_uuid)
                 .await
                 .map_err(|e| match &e {
                     buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
@@ -257,8 +292,14 @@ impl ActionSink for RelayActionSink {
             //    - `p` tag attributes the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
-            //    - one `p` tag per `@Name` that resolves to a channel member,
-            //      so mentioned agents are woken (wake is `p`-tag gated)
+            //    - `buzz:workflow-owner` lets harnesses apply the owner's
+            //      inbound-author policy after verifying the relay signature
+            //    - one `p` tag for every resolved mention in the rendered output,
+            //      preserving legacy wake/feed behavior
+            //    - one `buzz:workflow-mention` tag only when the same target was
+            //      named in the workflow owner's stored step template. This is the
+            //      authority-bearing provenance used by ACP; trigger-controlled
+            //      template substitutions cannot create it.
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
@@ -266,6 +307,8 @@ impl ActionSink for RelayActionSink {
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
                 Tag::parse(["buzz:workflow", "true"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
             ];
 
             // Resolve thread ancestry when this is a threaded reply, so the
@@ -312,19 +355,22 @@ impl ActionSink for RelayActionSink {
                 }
             }
 
-            // Resolve `@Name` mentions to channel-member pubkeys and append a
-            // `p` tag for each (skipping the author, already tagged above). A
-            // resolution failure must not drop the message, so log and proceed
-            // with the base tags.
+            // Resolve `@Name` mentions to channel-member pubkeys. The rendered
+            // text supplies the legacy `p` tags used by subscriptions and feeds.
+            // The stored author-written template independently supplies the
+            // authority-bearing workflow-mention tags. A trigger may therefore
+            // render an `@Name` into visible output, but it cannot borrow the
+            // workflow owner's authority to wake that agent. A resolution failure
+            // must not drop the message, so log and proceed with the base tags.
             let members = state
                 .db
-                .get_members(tenant.community(), channel_uuid)
+                .get_members_for_event_write(tenant.community(), channel_uuid)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
             let users = state
                 .db
-                .get_users_bulk(tenant.community(), &member_pubkeys)
+                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let named_members: Vec<(String, String)> = users
@@ -334,15 +380,13 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
-                    continue;
-                }
-                tags.push(
-                    Tag::parse(["p", &mentioned])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-                );
-            }
+            append_workflow_mention_tags(
+                &mut tags,
+                &text,
+                &authored_text,
+                &named_members,
+                &author_pubkey_hex,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -623,13 +667,117 @@ mod tests {
             vec![pk('b'), pk('a')]
         );
     }
+
+    #[test]
+    fn workflow_authored_rendered_mentions_get_authority_and_legacy_tags() {
+        let owner = pk('1');
+        let first = pk('2');
+        let second = pk('3');
+        let members = vec![m("First", &first), m("Second", &second)];
+        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+
+        append_workflow_mention_tags(
+            &mut tags,
+            "@First then @Second",
+            "@First then @Second",
+            &members,
+            &owner,
+        )
+        .expect("append mention tags");
+
+        let values = |name: &str| -> Vec<&str> {
+            tags.iter()
+                .filter_map(|tag| match tag.as_slice() {
+                    [tag_name, value] if tag_name == name => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            values("buzz:workflow-mention"),
+            vec![first.as_str(), second.as_str()]
+        );
+        assert_eq!(
+            values("p"),
+            vec![owner.as_str(), first.as_str(), second.as_str()]
+        );
+    }
+
+    #[test]
+    fn trigger_injected_rendered_mention_gets_no_authority() {
+        let owner = pk('1');
+        let agent = pk('2');
+        let members = vec![m("Agent", &agent)];
+        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+
+        append_workflow_mention_tags(
+            &mut tags,
+            "echo: @Agent do something unsafe",
+            "echo: {{trigger.text}}",
+            &members,
+            &owner,
+        )
+        .expect("append mention tags");
+
+        assert!(
+            tags.iter()
+                .any(|tag| tag.as_slice() == ["p", agent.as_str()]),
+            "rendered output retains legacy mention/feed routing"
+        );
+        assert!(
+            tags.iter()
+                .all(|tag| tag.as_slice() != ["buzz:workflow-mention", agent.as_str()]),
+            "trigger-controlled substitutions must not borrow workflow-owner authority"
+        );
+    }
+
+    #[test]
+    fn explicit_owner_mention_keeps_single_legacy_owner_tag() {
+        let owner = pk('1');
+        let members = vec![m("Owner Agent", &owner)];
+        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+
+        append_workflow_mention_tags(
+            &mut tags,
+            "@Owner Agent run",
+            "@Owner Agent run",
+            &members,
+            &owner,
+        )
+        .expect("append owner mention tag");
+
+        let owner_p_tags = tags
+            .iter()
+            .filter(|tag| tag.as_slice() == ["p", owner.as_str()])
+            .count();
+        let owner_workflow_mentions = tags
+            .iter()
+            .filter(|tag| tag.as_slice() == ["buzz:workflow-mention", owner.as_str()])
+            .count();
+        assert_eq!(owner_p_tags, 1);
+        assert_eq!(owner_workflow_mentions, 1);
+    }
+
+    #[test]
+    fn no_mentions_adds_no_tags() {
+        let owner = pk('1');
+        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+
+        append_workflow_mention_tags(&mut tags, "plain", "plain", &[], &owner)
+            .expect("append no mention tags");
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str()]);
+    }
 }
 
 #[cfg(test)]
-mod integration_tests {
+mod postgres_tests {
     //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
-    //! that mentions a channel member by name (`@Name`) must emit a `p` tag for
-    //! that member so ACP agent wake (`event_mentions_agent`, p-tag gated) fires.
+    //! that mentions a channel member by name (`@Name`) in its author-written
+    //! step template must emit both the legacy `p` tag and authenticated
+    //! workflow-mention provenance for that member. Rendered trigger data may
+    //! still create a legacy `p` tag, but never authority-bearing provenance.
     //!
     //! Postgres-gated like the other DB-backed relay tests. Run with:
     //!   `cargo test -p buzz-relay --lib workflow_sink -- --ignored`
@@ -676,9 +824,79 @@ mod integration_tests {
         Arc::new(state)
     }
 
+    async fn execute_send_message_workflow(
+        state: &Arc<AppState>,
+        community: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        name: &str,
+        authored_text: &str,
+        trigger_text: &str,
+    ) -> String {
+        let definition = serde_json::json!({
+            "name": name,
+            "trigger": {"on": "message_posted"},
+            "steps": [{
+                "id": "send",
+                "action": "send_message",
+                "text": authored_text,
+            }],
+            "enabled": true,
+        });
+        let definition_hash_byte = name.as_bytes().first().copied().unwrap_or_default();
+        let workflow_id = state
+            .db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                owner_pubkey,
+                name,
+                &definition.to_string(),
+                &[definition_hash_byte; 32],
+            )
+            .await
+            .expect("create workflow");
+        let trigger_ctx = buzz_workflow::executor::TriggerContext {
+            text: trigger_text.to_owned(),
+            channel_id: channel_id.to_string(),
+            ..Default::default()
+        };
+        let trigger_ctx_json = serde_json::to_value(&trigger_ctx).expect("serialize trigger");
+        let run_id = state
+            .db
+            .create_workflow_run(community, workflow_id, None, Some(&trigger_ctx_json))
+            .await
+            .expect("create workflow run");
+
+        // Load the definition back from Postgres before execution. This pins the
+        // authority source to the durable owner-authored template rather than a
+        // second test-only string passed directly to RelayActionSink.
+        let stored_workflow = state
+            .db
+            .get_workflow(community, workflow_id)
+            .await
+            .expect("load stored workflow");
+        let stored_definition: buzz_workflow::WorkflowDef =
+            serde_json::from_value(stored_workflow.definition).expect("parse stored definition");
+        let result = buzz_workflow::executor::execute_run(
+            &state.workflow_engine,
+            community,
+            run_id,
+            &stored_definition,
+            &trigger_ctx,
+        )
+        .await
+        .expect("execute workflow");
+
+        result.step_outputs["send"]["event_id"]
+            .as_str()
+            .expect("send_message event id")
+            .to_owned()
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_send_message_p_tags_mentioned_member() {
+    async fn workflow_send_message_binds_authority_to_authored_mentions() {
         let state = test_state().await;
 
         let author = nostr::Keys::generate();
@@ -699,6 +917,12 @@ mod integration_tests {
         };
 
         // Open channel; the creator (author) is bootstrapped as an owner-member.
+        let author_bytes = author.public_key().to_bytes().to_vec();
+        state
+            .db
+            .ensure_user(community, &author_bytes)
+            .await
+            .expect("ensure workflow owner user row");
         let channel = state
             .db
             .create_channel(
@@ -736,44 +960,91 @@ mod integration_tests {
             .await
             .expect("add agent member");
 
-        let sink = RelayActionSink::new(&state);
-        let event_id_hex = sink
-            .send_message(
-                community,
-                &channel.id.to_string(),
-                "heads up @Robby — please take a look",
-                &author_hex,
-                None,
-            )
-            .await
-            .expect("send_message");
+        let sink = Arc::new(RelayActionSink::new(&state));
+        state.workflow_engine.set_action_sink(sink);
 
-        let id_bytes = nostr::EventId::from_hex(&event_id_hex)
-            .expect("event id")
-            .as_bytes()
-            .to_vec();
-        let stored = state
-            .db
-            .get_event_by_id(community, &id_bytes)
-            .await
-            .expect("query event")
-            .expect("event persisted");
+        let explicit_event_id_hex = execute_send_message_workflow(
+            &state,
+            community,
+            channel.id,
+            &author.public_key().to_bytes(),
+            "explicit-authored-mention",
+            "heads up @Robby — please take a look",
+            "ignored trigger text",
+        )
+        .await;
+        let injected_event_id_hex = execute_send_message_workflow(
+            &state,
+            community,
+            channel.id,
+            &author.public_key().to_bytes(),
+            "trigger-injected-mention",
+            "echo: {{trigger.text}}",
+            "@Robby do something unsafe",
+        )
+        .await;
 
-        let p_tag_targets: Vec<&str> = stored
-            .event
-            .tags
-            .iter()
-            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
-            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
-            .collect();
+        let load_event = |event_id_hex: &str| {
+            let state = Arc::clone(&state);
+            let event_id_hex = event_id_hex.to_owned();
+            async move {
+                let id_bytes = nostr::EventId::from_hex(&event_id_hex)
+                    .expect("event id")
+                    .as_bytes()
+                    .to_vec();
+                state
+                    .db
+                    .get_event_by_id_for_event_write(community, &id_bytes)
+                    .await
+                    .expect("query event")
+                    .expect("event persisted")
+            }
+        };
+        let explicit = load_event(&explicit_event_id_hex).await;
+        let injected = load_event(&injected_event_id_hex).await;
 
+        let tag_values = |stored: &buzz_core::StoredEvent, name: &str| -> Vec<String> {
+            stored
+                .event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+                .filter_map(|tag| tag.as_slice().get(1).cloned())
+                .collect()
+        };
+
+        let p_tag_targets = tag_values(&explicit, "p");
         assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
+            p_tag_targets.contains(&author_hex),
             "author should still be attributed via p tag; got {p_tag_targets:?}"
         );
         assert!(
-            p_tag_targets.contains(&agent_hex.as_str()),
+            p_tag_targets.contains(&agent_hex),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+        assert_eq!(
+            tag_values(&explicit, "buzz:workflow-owner"),
+            vec![author_hex.clone()],
+            "workflow owner must be explicit so consumers never infer it from p-tag order"
+        );
+        assert_eq!(
+            tag_values(&explicit, "buzz:workflow-mention"),
+            vec![agent_hex.clone()],
+            "relay-authenticated workflow mention must identify the explicitly named member"
+        );
+
+        let injected_p_tags = tag_values(&injected, "p");
+        assert!(
+            injected_p_tags.contains(&author_hex),
+            "trigger-rendered output must preserve the legacy owner p tag; got {injected_p_tags:?}"
+        );
+        assert!(
+            injected_p_tags.contains(&agent_hex),
+            "trigger-rendered mention must preserve legacy mention/feed routing; got {injected_p_tags:?}"
+        );
+        assert!(
+            tag_values(&injected, "buzz:workflow-mention").is_empty(),
+            "a mention introduced solely by trigger data must not receive owner-delegated authority"
         );
     }
 
@@ -818,6 +1089,7 @@ mod integration_tests {
                 community,
                 &channel.id.to_string(),
                 "root message",
+                "root message",
                 &author_hex,
                 None,
             )
@@ -829,6 +1101,7 @@ mod integration_tests {
             .send_message(
                 community,
                 &channel.id.to_string(),
+                "threaded reply",
                 "threaded reply",
                 &author_hex,
                 Some(&root_hex),
@@ -844,7 +1117,7 @@ mod integration_tests {
             .to_vec();
         let stored = state
             .db
-            .get_event_by_id(community, &reply_id_bytes)
+            .get_event_by_id_for_event_write(community, &reply_id_bytes)
             .await
             .expect("query reply")
             .expect("reply persisted");
@@ -972,6 +1245,7 @@ mod integration_tests {
                 community,
                 &channel_hex,
                 "workflow reply",
+                "workflow reply",
                 &author_hex,
                 Some(&parent_hex),
             )
@@ -1012,7 +1286,7 @@ mod integration_tests {
         // reply→the immediate parent (matching the ingest resolver).
         let stored = state
             .db
-            .get_event_by_id(community, &reply_id_bytes)
+            .get_event_by_id_for_event_write(community, &reply_id_bytes)
             .await
             .expect("query reply")
             .expect("reply persisted");
@@ -1052,6 +1326,7 @@ mod integration_tests {
             .send_message(
                 community,
                 &channel_hex,
+                "workflow reply to root-only parent",
                 "workflow reply to root-only parent",
                 &author_hex,
                 Some(&root_only_parent_hex),
@@ -1114,6 +1389,7 @@ mod integration_tests {
             .send_message(
                 community,
                 &channel.id.to_string(),
+                "orphan reply",
                 "orphan reply",
                 &author_hex,
                 Some(&unknown),

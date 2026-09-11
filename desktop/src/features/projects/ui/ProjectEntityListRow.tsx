@@ -34,19 +34,27 @@ export function ProjectEntityFacepile({
     <span className="flex shrink-0 items-center">
       {shown.map((pubkey, index) => {
         const label = resolveUserLabel({ profiles, pubkey });
+        const isAgent = profiles?.[pubkey]?.isAgent === true;
+        const separatorClassName = cn(
+          "isolate relative inline-flex before:pointer-events-none before:absolute before:-inset-0.5 before:bg-background before:content-['']",
+          isAgent ? "before:rounded-squircle" : "before:rounded-full",
+        );
+        const avatar = (
+          <UserAvatar
+            avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
+            displayName={label}
+            shape={isAgent ? "squircle" : "circle"}
+            size="xs"
+          />
+        );
         if (!interactive) {
           return (
             <span
-              className={cn(index > 0 && "-ml-1.5")}
+              className={cn(separatorClassName, index > 0 && "-ml-1.5")}
               key={pubkey}
               title={label}
             >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
+              <span className="relative z-10">{avatar}</span>
             </span>
           );
         }
@@ -54,20 +62,17 @@ export function ProjectEntityFacepile({
           <UserProfilePopover
             key={pubkey}
             pubkey={pubkey}
+            triggerClassName={cn(
+              separatorClassName,
+              "rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:before:opacity-0",
+              index > 0 && "-ml-1.5",
+            )}
             triggerElement="span"
+            triggerAriaLabel={`View ${label}'s profile`}
           >
-            <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
-              title={label}
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </button>
+            <span className="relative z-10" title={label}>
+              {avatar}
+            </span>
           </UserProfilePopover>
         );
       })}
@@ -295,7 +300,7 @@ export function ProjectEntityListRow({
       {affiliation ? (
         <span
           className={cn(
-            "hidden w-36 shrink-0 truncate text-right text-xs text-muted-foreground/65 md:block",
+            "hidden w-36 shrink-0 truncate text-left text-xs text-muted-foreground/65 md:block",
             affiliationClassName,
           )}
           data-projects-text-priority="secondary"
@@ -314,18 +319,22 @@ export function ProjectEntityListRow({
       >
         {peopleContent}
       </span>
-      {count != null ? (
+      {count != null || countTestId ? (
         <span
           className="flex w-12 shrink-0 items-center gap-1 text-xs text-muted-foreground/65"
           data-projects-text-priority="secondary"
           data-testid={countTestId}
           title={countTitle}
         >
-          <MessageSquare className="h-3.5 w-3.5" />
-          <span className="tabular-nums">
-            {count}
-            {countSuffix}
-          </span>
+          {count != null ? (
+            <>
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span className="tabular-nums">
+                {count}
+                {countSuffix}
+              </span>
+            </>
+          ) : null}
         </span>
       ) : null}
       {beforeDate ? (

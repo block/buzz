@@ -311,7 +311,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-  }) {
+  }) async {
+    final generation = _connectionGeneration;
+    if (_rateLimitGate.isActive) await _rateLimitGate.wait();
+    if (!_isActiveConnection(generation) || !_socketConnected) {
+      throw StateError('Relay session is not connected');
+    }
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -737,7 +743,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final retrySeconds = parseRateLimitRetrySeconds(message);
       _rateLimitGate.activate(retrySeconds);
       final fallbackMs =
-          (retrySeconds != null && retrySeconds > 0
+          (retrySeconds != null
               ? min(retrySeconds, RelayRateLimitGate.maxRetrySeconds)
               : RelayRateLimitGate.defaultRetrySeconds) *
           1000;
@@ -824,6 +830,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
     } else {
+      // Back-pressure now arrives here rather than as a NOTICE: the relay
+      // rejects an over-quota EVENT on the OK channel so this pending publish
+      // can be settled at all. Without arming the gate the send would fail
+      // without ever backing off.
+      if (message.startsWith('rate-limited:')) {
+        _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
+      }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           Exception(message.isNotEmpty ? message : 'Event rejected'),

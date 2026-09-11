@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'buzz_navigation_metrics.dart';
 import 'directional_transition_scope.dart';
+import 'frosted_scroll_under_scope.dart';
 import 'ios_glass_navigation_button.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
-const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
+const _kBarContentMinHeight = buzzNavigationRowHeight;
 const _kBottomBorderWidth = 1.0;
 
 TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
@@ -160,7 +162,7 @@ class FrostedAppBar extends StatelessWidget {
     this.frostedSurfaceOpacity = 0.5,
     this.frostedBlurSigma = 20,
     this.showBottomDivider = true,
-    this.bottomDividerOpacity = 0.07,
+    this.bottomDividerOpacity = 0.05,
   }) : assert(bottom == null || bottomHeight > 0),
        assert(bottomOverlap >= 0),
        assert(bottom != null || bottomOverlap == 0),
@@ -170,6 +172,9 @@ class FrostedAppBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final topPadding = MediaQuery.paddingOf(context).top;
+    final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
+    final paintsBottomDivider =
+        showBottomDivider && (scrollUnder?.isScrolledUnder ?? true);
     final canPop = Navigator.canPop(context);
     final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
     final barContentHeight = _barContentHeight(
@@ -296,7 +301,9 @@ class FrostedAppBar extends StatelessWidget {
         border: showBottomDivider
             ? Border(
                 bottom: BorderSide(
-                  color: navigationDivider(context, bottomDividerOpacity),
+                  color: paintsBottomDivider
+                      ? navigationDivider(context, bottomDividerOpacity)
+                      : Colors.transparent,
                   width: _kBottomBorderWidth,
                 ),
               )

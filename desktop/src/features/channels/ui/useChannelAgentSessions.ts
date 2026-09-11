@@ -8,7 +8,7 @@ import type {
   RelayAgent,
 } from "@/shared/api/types";
 import { usePanelReturnTarget } from "@/shared/hooks/usePanelReturnTarget";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import {
   channelBotMemberPubkeySet,
   channelMemberPubkeySet,
@@ -19,10 +19,8 @@ import {
 } from "./agentSessionSelection";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
-export type ChannelAgentSessionAgent = Pick<
-  ManagedAgent,
-  "pubkey" | "name" | "status"
-> & {
+export type ChannelAgentSessionAgent = Pick<ManagedAgent, "pubkey" | "name"> & {
+  status: ManagedAgent["status"] | "unknown";
   agentSource: "managed" | "member-bot" | "relay";
   canInterruptTurn: boolean;
   channelIds?: string[];
@@ -52,7 +50,8 @@ type UseChannelAgentSessionsOptions = {
 
 function relayStatusToManagedStatus(
   status: RelayAgent["status"],
-): ManagedAgent["status"] {
+): ChannelAgentSessionAgent["status"] {
+  if (status === "unknown") return "unknown";
   return status === "offline" ? "stopped" : "deployed";
 }
 
@@ -101,7 +100,7 @@ export function buildChannelAgentSessionCandidates({
 
     byPubkey.set(key, {
       pubkey: member.pubkey,
-      name: member.displayName ?? truncatePubkey(member.pubkey),
+      name: member.displayName ?? truncateNpub(member.pubkey),
       status: "deployed",
       agentSource: "member-bot",
       canInterruptTurn: false,

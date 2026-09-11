@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../animated_avatar.dart';
+import '../community/community_provider.dart';
 import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
+import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
 
-/// A circular avatar that supports both remote URLs and inline image data.
+/// An avatar that supports both remote URLs and inline image data.
 ///
 /// Flutter's [NetworkImage] only loads network URLs, while desktop browsers also
 /// accept `data:image/*` sources directly. Agent emoji avatars are inline SVGs,
@@ -19,6 +23,7 @@ class AvatarImage extends StatelessWidget {
   final double radius;
   final Color? backgroundColor;
   final Widget fallback;
+  final bool isAgent;
 
   const AvatarImage({
     super.key,
@@ -26,33 +31,38 @@ class AvatarImage extends StatelessWidget {
     required this.radius,
     required this.fallback,
     this.backgroundColor,
+    this.isAgent = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
-    return CircleAvatar(
-      radius: radius,
-      // Animated avatar posters carry their own backdrop disc; preserve their
-      // transparent surroundings on static/list surfaces, matching desktop.
-      backgroundColor: animatedAvatar == null
-          ? backgroundColor
-          : Colors.transparent,
-      child: ClipOval(
-        child: SizedBox.square(
-          dimension: radius * 2,
-          child: AvatarImageContent(
-            imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
-            fallback: fallback,
-          ),
-        ),
+    final color = animatedAvatar == null ? backgroundColor : Colors.transparent;
+    final content = SizedBox.square(
+      dimension: radius * 2,
+      child: AvatarImageContent(
+        imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
+        fallback: fallback,
       ),
+    );
+    if (!isAgent) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: color,
+        child: ClipOval(child: content),
+      );
+    }
+
+    final borderRadius = BorderRadius.circular(radius * 0.6);
+    return DecoratedBox(
+      decoration: BoxDecoration(color: color, borderRadius: borderRadius),
+      child: ClipRRect(borderRadius: borderRadius, child: content),
     );
   }
 }
 
 /// Image content for avatar surfaces whose shape is supplied by their parent.
-class AvatarImageContent extends StatefulWidget {
+class AvatarImageContent extends ConsumerStatefulWidget {
   final String? imageUrl;
   final Widget fallback;
   final BoxFit fit;
@@ -65,11 +75,12 @@ class AvatarImageContent extends StatefulWidget {
   });
 
   @override
-  State<AvatarImageContent> createState() => _AvatarImageContentState();
+  ConsumerState<AvatarImageContent> createState() => _AvatarImageContentState();
 }
 
-class _AvatarImageContentState extends State<AvatarImageContent> {
+class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
   late _AvatarSource? _source = _AvatarSource.parse(widget.imageUrl);
+  String? _scheduledPushAvatar;
 
   @override
   void didUpdateWidget(AvatarImageContent oldWidget) {
@@ -82,6 +93,7 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
   @override
   Widget build(BuildContext context) {
     final centeredFallback = Center(child: widget.fallback);
+    final communityID = ref.watch(activeCommunityProvider).value?.id;
 
     return switch (_source) {
       _EmojiAvatarSource(:final emoji, :final color) => ColoredBox(
@@ -105,18 +117,49 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
         placeholderBuilder: (_) => centeredFallback,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
-      _RasterDataAvatarSource(:final bytes) => Image.memory(
-        bytes,
-        fit: widget.fit,
-        errorBuilder: (_, _, _) => centeredFallback,
+      _RasterDataAvatarSource(:final bytes) => _rasterImage(
+        communityID: communityID,
+        sourceURL: widget.imageUrl,
+        bytes: bytes,
+        fallback: centeredFallback,
       ),
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
         fit: widget.fit,
+        onBytesLoaded: communityID == null
+            ? null
+            : (bytes) => unawaited(
+                cacheBuzzPushAvatarFromLoadedBytes(communityID, url, bytes),
+              ),
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,
     };
+  }
+
+  Widget _rasterImage({
+    required String? communityID,
+    required String? sourceURL,
+    required Uint8List bytes,
+    required Widget fallback,
+  }) {
+    if (communityID != null && sourceURL != null) {
+      final identity = '$communityID\u0000$sourceURL';
+      if (_scheduledPushAvatar != identity) {
+        _scheduledPushAvatar = identity;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _scheduledPushAvatar != identity) return;
+          unawaited(
+            cacheBuzzPushAvatarFromLoadedBytes(communityID, sourceURL, bytes),
+          );
+        });
+      }
+    }
+    return Image.memory(
+      bytes,
+      fit: widget.fit,
+      errorBuilder: (_, _, _) => fallback,
+    );
   }
 }
 

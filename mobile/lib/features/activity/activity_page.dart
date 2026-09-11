@@ -22,6 +22,7 @@ import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
@@ -31,6 +32,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
 import 'compose_drafts_provider.dart';
+import 'dm_resurface.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
@@ -189,7 +191,7 @@ class ActivityPage extends HookConsumerWidget {
           .markUnread(groupedInboxItemIds(item));
     }
 
-    void openItem(InboxItem item) {
+    Future<void> openItem(InboxItem item) async {
       final channelId = item.item.channelId;
       if (channelId == null) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
@@ -197,13 +199,53 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      final channel = channelById[channelId];
+      var channel = channelById[channelId];
+      if (channel == null &&
+          myPk != null &&
+          ref.read(channelsProvider.notifier).hiddenDmIds.contains(channelId)) {
+        final expectedPubkey = myPk.toLowerCase();
+        final expectedRelayUrl = ref.read(relayConfigProvider).baseUrl;
+        bool isCurrentScope() =>
+            context.mounted &&
+            ref.read(myPubkeyProvider)?.toLowerCase() == expectedPubkey &&
+            ref.read(relayConfigProvider).baseUrl == expectedRelayUrl;
+        try {
+          final members = await ref.read(
+            channelMembersProvider(channelId).future,
+          );
+          if (!isCurrentScope()) return;
+          final peers = dmPeerPubkeysFromMembers(
+            members.map((member) => member.pubkey),
+            expectedPubkey,
+          );
+          if (peers.isEmpty) {
+            throw StateError('Could not determine the DM membership.');
+          }
+          final reopened = await ref
+              .read(channelActionsProvider)
+              .openDm(pubkeys: peers.toList());
+          if (!isCurrentScope()) return;
+          if (reopened.id != channelId) {
+            throw StateError('Relay reopened a different DM conversation.');
+          }
+          channel = reopened;
+        } catch (error) {
+          if (!isCurrentScope()) return;
+          if (!context.mounted) return;
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text('Could not reopen conversation: $error')),
+          );
+          return;
+        }
+      }
       if (channel == null) {
+        if (!context.mounted) return;
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(content: Text('Channel not found in this workspace.')),
         );
         return;
       }
+      final resolvedChannel = channel;
 
       // Deep-link to the represented message: oldest unread in the group,
       // falling back to the latest event.
@@ -214,10 +256,11 @@ class ActivityPage extends HookConsumerWidget {
           ? null
           : thread.parentId;
 
+      if (!context.mounted) return;
       Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
-            channel: channel,
+            channel: resolvedChannel,
             initialMessageId: target.id,
             initialThreadRootId: threadRootId,
             initialThreadRouteBehavior:
@@ -356,7 +399,7 @@ class ActivityPage extends HookConsumerWidget {
                           channel: channel,
                           currentPubkey: myPk,
                           isDone: isDone(item),
-                          onTap: () => openItem(item),
+                          onTap: () => unawaited(openItem(item)),
                           onMarkRead: () => markItemRead(item),
                           onMarkUnread: () => markItemUnread(item),
                         ),

@@ -16,6 +16,7 @@ import {
 } from "./agentConfigOptions";
 
 export function PersonaDropdownField({
+  ariaDescribedBy,
   contentClassName,
   disabled,
   id,
@@ -24,6 +25,7 @@ export function PersonaDropdownField({
   placeholder,
   value,
 }: {
+  ariaDescribedBy?: string;
   contentClassName?: string;
   disabled?: boolean;
   id: string;
@@ -40,6 +42,7 @@ export function PersonaDropdownField({
       <DropdownMenu modal={false} onOpenChange={setOpen} open={open}>
         <DropdownMenuTrigger asChild>
           <button
+            aria-describedby={ariaDescribedBy}
             className={cn(
               "flex h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm leading-6",
               PERSONA_FIELD_CONTROL_CLASS,

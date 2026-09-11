@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 
 const ipcHandlers = new Map();
@@ -23,8 +24,11 @@ globalThis.window = {
 };
 globalThis.__TAURI_INTERNALS__ = tauriInternals;
 
-const { listenForNavigationDeepLinks, resetNavigationDeepLinkDrain } =
-  await import("@/shared/deep-link.ts");
+const {
+  listenForEntityDeepLinks,
+  listenForNavigationDeepLinks,
+  resetNavigationDeepLinkDrain,
+} = await import("@/shared/deep-link.ts");
 
 function deferred() {
   let resolve;
@@ -449,3 +453,58 @@ test("rejected navigation remains queued and is not acknowledged", async () => {
     console.warn = originalWarn;
   }
 });
+
+for (const delivery of ["cold-start", "running-instance"]) {
+  test(`canonical native demo entity payloads navigate before acknowledgement: ${delivery}`, async () => {
+    // Rust's canonical_entity_deep_link test proves all demo transport URLs
+    // produce these exact shared values, rather than passing demo schemes on.
+    const golden = JSON.parse(
+      readFileSync(
+        new URL("../../../test-fixtures/entity-links.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const { parseEntityLink } = await import("@/shared/lib/entityLink.ts");
+    const pending = Object.entries(golden.links).map(([id, href]) => ({
+      id,
+      href,
+    }));
+    const queue = delivery === "cold-start" ? [...pending] : [];
+    const opened = [];
+    const acknowledged = [];
+    let notify;
+    ipcHandlers.set("plugin:event|listen", ({ handler }) => {
+      notify = callbacks.get(handler);
+      return handler;
+    });
+    ipcHandlers.set("plugin:event|unlisten", () => {});
+    ipcHandlers.set("take_pending_entity_deep_link", () => queue[0] ?? null);
+    ipcHandlers.set("acknowledge_pending_entity_deep_link", ({ id }) => {
+      assert.equal(queue[0]?.id, id);
+      assert.equal(opened.length, acknowledged.length + 1);
+      acknowledged.push(id);
+      queue.shift();
+      return true;
+    });
+    const unlisten = await listenForEntityDeepLinks((href) => {
+      const parsed = parseEntityLink(href);
+      assert.equal(parsed.ok, true, href);
+      opened.push(parsed.value);
+      return true;
+    });
+    await settle();
+    if (delivery === "running-instance") {
+      queue.push(...pending);
+      notify({ payload: pending[0] });
+    }
+    await settle();
+    await settle();
+    assert.deepEqual(
+      acknowledged,
+      pending.map(({ id }) => id),
+    );
+    assert.equal(opened.length, pending.length);
+    assert.equal(queue.length, 0);
+    unlisten();
+  });
+}

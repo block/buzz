@@ -38,7 +38,10 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       let initialValue = arguments["initialValue"] as? String,
       let placeholder = arguments["placeholder"] as? String,
       let multiline = arguments["multiline"] as? Bool,
-      let brightness = arguments["brightness"] as? String
+      let brightness = arguments["brightness"] as? String,
+      let pageBackgroundArgb = arguments["pageBackgroundArgb"] as? NSNumber,
+      let containerBackgroundArgb = arguments["containerBackgroundArgb"] as? NSNumber,
+      let containerCornerRadius = arguments["containerCornerRadius"] as? NSNumber
     else {
       result(
         FlutterError(
@@ -59,6 +62,9 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         placeholder: placeholder,
         multiline: multiline,
         brightness: brightness,
+        pageBackgroundColor: UIColor(argb: pageBackgroundArgb.uint32Value),
+        containerBackgroundColor: UIColor(argb: containerBackgroundArgb.uint32Value),
+        containerCornerRadius: CGFloat(containerCornerRadius.doubleValue),
         allowUnchangedSubmission: allowUnchangedSubmission,
         result: result
       )
@@ -72,6 +78,9 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     placeholder: String,
     multiline: Bool,
     brightness: String,
+    pageBackgroundColor: UIColor,
+    containerBackgroundColor: UIColor,
+    containerCornerRadius: CGFloat,
     allowUnchangedSubmission: Bool,
     result: @escaping FlutterResult
   ) {
@@ -105,6 +114,9 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       initialValue: initialValue,
       placeholder: placeholder,
       multiline: multiline,
+      pageBackgroundColor: pageBackgroundColor,
+      containerBackgroundColor: containerBackgroundColor,
+      containerCornerRadius: containerCornerRadius,
       allowUnchangedSubmission: allowUnchangedSubmission,
       onCancel: { [weak self] in self?.finish(value: nil) },
       onSet: { [weak self] value in self?.finish(value: value) }
@@ -184,6 +196,9 @@ private final class NativeProfileTextEditorViewController:
   private let initialValue: String
   private let placeholder: String
   private let multiline: Bool
+  private let pageBackgroundColor: UIColor
+  private let containerBackgroundColor: UIColor
+  private let containerCornerRadius: CGFloat
   private let allowUnchangedSubmission: Bool
   private let onCancel: () -> Void
   private let onSet: (String) -> Void
@@ -233,6 +248,9 @@ private final class NativeProfileTextEditorViewController:
     initialValue: String,
     placeholder: String,
     multiline: Bool,
+    pageBackgroundColor: UIColor,
+    containerBackgroundColor: UIColor,
+    containerCornerRadius: CGFloat,
     allowUnchangedSubmission: Bool,
     onCancel: @escaping () -> Void,
     onSet: @escaping (String) -> Void
@@ -240,6 +258,9 @@ private final class NativeProfileTextEditorViewController:
     self.initialValue = initialValue
     self.placeholder = placeholder
     self.multiline = multiline
+    self.pageBackgroundColor = pageBackgroundColor
+    self.containerBackgroundColor = containerBackgroundColor
+    self.containerCornerRadius = containerCornerRadius
     self.allowUnchangedSubmission = allowUnchangedSubmission
     self.onCancel = onCancel
     self.onSet = onSet
@@ -254,8 +275,22 @@ private final class NativeProfileTextEditorViewController:
 
   override func viewDidLoad() {
     super.viewDidLoad()
+    view.backgroundColor = pageBackgroundColor
+    tableView.backgroundColor = pageBackgroundColor
     tableView.keyboardDismissMode = .interactive
     tableView.alwaysBounceVertical = false
+    let navigationAppearance = UINavigationBarAppearance()
+    navigationAppearance.configureWithOpaqueBackground()
+    navigationAppearance.backgroundColor = pageBackgroundColor
+    navigationAppearance.shadowColor = UIColor.separator.withAlphaComponent(0.2)
+    let scrollEdgeAppearance = UINavigationBarAppearance()
+    scrollEdgeAppearance.configureWithOpaqueBackground()
+    scrollEdgeAppearance.backgroundColor = pageBackgroundColor
+    scrollEdgeAppearance.shadowColor = .clear
+    navigationItem.standardAppearance = navigationAppearance
+    navigationItem.scrollEdgeAppearance = scrollEdgeAppearance
+    navigationItem.compactAppearance = navigationAppearance
+    navigationItem.compactScrollEdgeAppearance = scrollEdgeAppearance
     navigationItem.leftBarButtonItem = UIBarButtonItem(
       barButtonSystemItem: .cancel,
       target: self,
@@ -360,6 +395,10 @@ private final class NativeProfileTextEditorViewController:
   ) -> UITableViewCell {
     let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
     cell.selectionStyle = .none
+    cell.backgroundColor = containerBackgroundColor
+    cell.layer.cornerRadius = containerCornerRadius
+    cell.layer.cornerCurve = .continuous
+    cell.clipsToBounds = true
     if multiline {
       cell.contentView.addSubview(textView)
       textView.addSubview(placeholderLabel)
@@ -383,5 +422,16 @@ private final class NativeProfileTextEditorViewController:
       ])
     }
     return cell
+  }
+}
+
+private extension UIColor {
+  convenience init(argb: UInt32) {
+    self.init(
+      red: CGFloat((argb >> 16) & 0xff) / 255,
+      green: CGFloat((argb >> 8) & 0xff) / 255,
+      blue: CGFloat(argb & 0xff) / 255,
+      alpha: CGFloat((argb >> 24) & 0xff) / 255
+    )
   }
 }

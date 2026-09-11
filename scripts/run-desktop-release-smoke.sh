@@ -89,7 +89,7 @@ export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=5432 PGSCHEMA_PLAN_DB="${
 export PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
-  psql -U buzz -d "${DB_NAME}" -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
+  psql -U buzz -d "${DB_NAME}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
 BUZZ_DB_NAME="${DB_NAME}" BUZZ_COMMUNITY_HOST="${COMMUNITY_HOST}" ./scripts/setup-desktop-test-data.sh
 docker exec buzz-redis redis-cli -n "${REDIS_DB}" FLUSHDB >/dev/null
 phase database "${phase_start}"

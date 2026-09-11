@@ -33,6 +33,7 @@ class JumpToLatestButton extends HookWidget {
     final nativeChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
+    final routeIsCurrent = ModalRoute.isCurrentOf(context) ?? true;
 
     useEffect(() {
       final channel = nativeChannel.value;
@@ -101,6 +102,7 @@ class JumpToLatestButton extends HookWidget {
           child: ValueListenableBuilder<bool>(
             valueListenable: messageActionBackdropActive,
             builder: (context, backdropActive, _) {
+              if (!routeIsCurrent) return const SizedBox.shrink();
               if (!usesNativeIosGlass || backdropActive) {
                 return buildFlutterSurface();
               }

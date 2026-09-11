@@ -181,16 +181,18 @@ export function selectDeferredListRenderState(
   return "pending";
 }
 
-export type TimelineBodySurface = "skeleton" | "empty" | "list";
+export type TimelineBodySurface = "skeleton" | "error" | "empty" | "list";
 
 export function selectTimelineBodySurface({
   deferredCount,
   preserveSettledEmptyIntro = false,
+  isError = false,
   isLoading,
   liveCount,
 }: {
   deferredCount: number;
   preserveSettledEmptyIntro?: boolean;
+  isError?: boolean;
   isLoading: boolean;
   liveCount: number;
 }): TimelineBodySurface {
@@ -199,6 +201,12 @@ export function selectTimelineBodySurface({
   }
 
   const renderState = selectDeferredListRenderState(deferredCount, liveCount);
+  if (renderState === "list") {
+    return "list";
+  }
+  if (isError && liveCount === 0) {
+    return "error";
+  }
   if (renderState === "pending") {
     // Preserve a channel/DM intro across a new append only when this channel
     // already committed an authoritative empty timeline. On first load, the

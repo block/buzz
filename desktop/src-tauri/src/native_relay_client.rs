@@ -771,11 +771,16 @@ impl ClosedRetry {
                 self.due_at = None;
             }
             ClosedClass::RateLimited => {
-                // Arm the process-wide gate so the HTTP bridge backs off too,
-                // rather than keeping a second private notion of the same
-                // relay's back-pressure.
+                // WS quota/concurrency limits do not consume HTTP's ApiCalls
+                // budget. Only an explicit failure of the shared admission
+                // service warrants damping the other transport too.
                 let hint = parse_retry_in_seconds(message);
-                crate::relay_admission::activate_rate_limit(hint);
+                if message
+                    .trim()
+                    .eq_ignore_ascii_case("rate-limited: shared admission unavailable")
+                {
+                    crate::relay_admission::activate_rate_limit(None);
+                }
                 let hinted = hint
                     .map(Duration::from_secs)
                     .unwrap_or(CLOSED_RATE_LIMIT_DEFAULT);

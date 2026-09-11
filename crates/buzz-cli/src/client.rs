@@ -728,6 +728,27 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///
@@ -847,6 +868,97 @@ impl BuzzClient {
             }
         })
         .await
+    }
+
+    /// POST a JSON body to a relay-relative path with NIP-98 authentication.
+    ///
+    /// Used by `buzz gifs search` and `buzz gifs share` to reach the relay's
+    /// KLIPY proxy endpoints.  Returns the raw response body as a string (may
+    /// be empty for 204 No Content responses).
+    pub async fn post_json_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body_bytes = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body_bytes = body_bytes.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body_bytes),
+                    )
+                    .send()
+                    .await?;
+                // 204 No Content: return empty string rather than failing on
+                // an empty body that cannot be parsed as JSON.
+                if resp.status() == reqwest::StatusCode::NO_CONTENT {
+                    return Ok(String::new());
+                }
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
+    /// Send a state-changing JSON command exactly once. Ambiguous delivery
+    /// never invites an automatic re-run with a newly observed version.
+    pub async fn post_json_once_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
+        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+        let unknown = |detail: String| CliError::DeliveryUnknown(detail);
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
+            .build()?;
+        let response = self
+            .with_auth_tag(
+                http.post(&url)
+                    .header("Authorization", auth)
+                    .header("Content-Type", "application/json")
+                    .body(body),
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_builder() {
+                    CliError::Network(e)
+                } else {
+                    unknown(e.to_string())
+                }
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|e| unknown(e.to_string()))?;
+        let message = extract_relay_message_field(&body).unwrap_or_else(|| body.clone());
+        if status.is_server_error()
+            || status.is_redirection()
+            || (status.as_u16() == 429 && !message.starts_with("rate-limited:"))
+        {
+            return Err(unknown(format!("HTTP {}: {message}", status.as_u16())));
+        }
+        if !status.is_success() {
+            return Err(CliError::Relay {
+                status: status.as_u16(),
+                body: message,
+            });
+        }
+        Ok(body)
     }
 
     /// Submit a signed Nostr event via POST /events.
