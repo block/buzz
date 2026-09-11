@@ -244,3 +244,108 @@ async fn test_with_conn_read_guard_blocks_writer_until_connection_drops() {
         "write guard is free again after the connection drops"
     );
 }
+
+/// The prune single-flight admits exactly one holder: while the winner's guard
+/// is live, every later `try_prune_guard()` returns `None` and — critically —
+/// leaves the flag SET, so the winner keeps its claim. The flag clears only
+/// when the winner's guard drops, after which a fresh caller wins.
+///
+/// This pins the eager-vs-lazy guard-construction contract directly. Reverting
+/// `try_prune_guard` to `.then_some(PruneGuard(..))` makes each losing caller
+/// construct and immediately drop a `PruneGuard`, whose `Drop` clears the flag
+/// under the running winner — the third assertion below then wins wrongly.
+#[test]
+fn test_try_prune_guard_admits_one_and_holds_until_dropped() {
+    let (_dir, path) = temp_db();
+    let db = ArchiveDb::with_test_path(path);
+
+    let guard = db.try_prune_guard().expect("first caller claims the flag");
+
+    // Two more contenders while the winner holds the guard. The SECOND losing
+    // call is the mutation trip-wire: if a prior loser had cleared the flag,
+    // this call would wrongly win.
+    assert!(
+        db.try_prune_guard().is_none(),
+        "a contender must lose while the guard is held"
+    );
+    assert!(
+        db.try_prune_guard().is_none(),
+        "the flag must still be set — no prior loser may have cleared it"
+    );
+
+    // Only the winner's drop releases the flag.
+    drop(guard);
+    let next = db
+        .try_prune_guard()
+        .expect("a fresh caller wins once the guard drops");
+    assert!(
+        db.try_prune_guard().is_none(),
+        "single-flight holds again for the new holder"
+    );
+    drop(next);
+}
+
+/// The `maybe_prune`-shaped trigger admits exactly one prune body across a burst
+/// of simultaneous triggers: the admitted pass holds its guard across the
+/// awaited `with_conn` work, so every concurrent trigger that loses the
+/// single-flight returns without entering the body.
+///
+/// Each task mirrors the shipped control flow verbatim — `let Some(_guard) =
+/// try_prune_guard() else { return }` then an awaited `with_conn` pass. The one
+/// admitted pass parks on a latch so all triggers are in flight together; the
+/// held count must never exceed one. This is Gurney's live-lane regression
+/// reproduced deterministically: under the eager-`then_some` bug, losers cleared
+/// the flag and multiple passes entered concurrently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_prune_triggers_admit_exactly_one_pass() {
+    let (_dir, path) = temp_db();
+    let db = Arc::new(ArchiveDb::with_test_path(path));
+    db.warm_init().await.expect("init must succeed");
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let hold = Latch::new();
+
+    let triggers: Vec<_> = (0..8)
+        .map(|_| {
+            let db = Arc::clone(&db);
+            let entered = Arc::clone(&entered);
+            let hold = Arc::clone(&hold);
+            tokio::spawn(async move {
+                let Some(_guard) = db.try_prune_guard() else {
+                    return;
+                };
+                db.with_conn(move |_conn| {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    hold.wait();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            })
+        })
+        .collect();
+
+    // Exactly one pass enters and then parks on the latch. Any second admission
+    // would race in and push the count past one.
+    await_until("one prune pass to enter", Duration::from_secs(10), || {
+        entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "single-flight admits exactly one prune while a pass is held"
+    );
+
+    // Release the held pass; the losers already returned, so nothing new enters.
+    hold.release();
+    for trigger in triggers {
+        trigger.await.unwrap();
+    }
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "no further pass entered after the held one completed"
+    );
+}

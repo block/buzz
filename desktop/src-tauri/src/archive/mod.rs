@@ -21,6 +21,7 @@ mod agent_usage;
 mod archive_db;
 mod metric_store;
 mod pipeline;
+mod prune;
 pub mod retention;
 pub mod store;
 mod store_migrations;
@@ -53,12 +54,22 @@ const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
 /// `await`s this barrier before its first write, so warming it early avoids a
 /// stall on the first observer frame. Non-fatal: the first real archive command
 /// retries and surfaces any error.
+///
+/// This is also the archive's unconditional-startup prune trigger. After
+/// warming init, it runs one opportunistic global prune pass, so a launch whose
+/// archive sync never starts (reconciliation never succeeds) and which takes no
+/// new archive commits still prunes stale observer frames once the ≥24h gate
+/// allows — the plan's "startup" trigger. `maybe_prune` rides the same gated
+/// adapter (its own init `await`), and its single-flight flag + gate collapse
+/// this pass with the post-commit trigger into at most one real prune per day.
 pub fn spawn_warm_init(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         use tauri::Manager;
-        if let Err(error) = app.state::<AppState>().archive_db.warm_init().await {
+        let state = app.state::<AppState>();
+        if let Err(error) = state.archive_db.warm_init().await {
             eprintln!("buzz-desktop: archive DB init deferred: {error}");
         }
+        prune::maybe_prune(&state).await;
     });
 }
 
@@ -186,7 +197,7 @@ pub(crate) async fn archive_candidates(
     };
     let commit_identity_pk = identity_pk.clone();
     let commit_relay_url = relay_url.clone();
-    state
+    let result = state
         .archive_db
         .with_conn(move |conn| {
             commit_archive(
@@ -200,7 +211,19 @@ pub(crate) async fn archive_candidates(
                 conn,
             )
         })
-        .await
+        .await?;
+
+    // Post-commit prune trigger, detached from this write. The prune's own
+    // single-flight flag and ≥24h gate collapse the frequent per-batch triggers
+    // into at most one real prune per day; a prune failure is swallowed inside
+    // the spawned task and never affects this archive result. Requires the app
+    // handle (absent in headless tests that drive `archive_candidates`
+    // directly), so a missing handle simply skips the trigger.
+    if let Some(app) = state.app_handle.lock().ok().and_then(|g| g.clone()) {
+        prune::trigger_prune(app);
+    }
+
+    Ok(result)
 }
 
 /// Validate an ephemeral observer frame (kind 24200) against ALL local rules.

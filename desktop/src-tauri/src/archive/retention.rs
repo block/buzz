@@ -31,6 +31,13 @@ pub const DEFAULT_OBSERVER_RETENTION_DAYS: i64 = 30;
 /// admitting any realistic user choice.
 pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
+/// `archive_meta` key holding the unix-seconds timestamp of the last successful
+/// prune pass, stored as its decimal text. The prune worker reads this to
+/// enforce its ≥24h gate and writes it after a clean pass (see
+/// [`super::prune`]). Kept here beside the retention window because
+/// `retention.rs` owns every `archive_meta` accessor.
+pub const PRUNE_LAST_SUCCESS_AT_KEY: &str = "prune_last_success_at";
+
 // ── Schema (created by migration M4, not the base SCHEMA) ─────────────────────
 
 /// `archive_meta`. Created inside M4 under `BEGIN IMMEDIATE` (see
@@ -145,6 +152,42 @@ pub fn set_observer_retention_days(conn: &Connection, days: i64) -> Result<(), S
         params![OBSERVER_RETENTION_DAYS_KEY, days.to_string()],
     )
     .map_err(|e| format!("set observer retention days: {e}"))?;
+    Ok(())
+}
+
+// ── Prune timestamp (archive_meta accessor) ─────────────────────────────────────
+
+/// Read the unix-seconds timestamp of the last successful prune pass, or `None`
+/// when no prune has ever completed (the seeded DB has no such row). A `None`
+/// means "never pruned", which the ≥24h gate treats as immediately eligible.
+pub fn get_prune_last_success_at(conn: &Connection) -> Result<Option<i64>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM archive_meta WHERE key = ?1",
+            params![PRUNE_LAST_SUCCESS_AT_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read prune last success at: {e}"))?;
+
+    match raw {
+        Some(s) => s
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|e| format!("prune last success at not an integer ({s:?}): {e}")),
+        None => Ok(None),
+    }
+}
+
+/// Record `at` (unix seconds) as the timestamp of the most recent successful
+/// prune pass. A single idempotent upsert, atomic under autocommit.
+pub fn set_prune_last_success_at(conn: &Connection, at: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO archive_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        params![PRUNE_LAST_SUCCESS_AT_KEY, at.to_string()],
+    )
+    .map_err(|e| format!("set prune last success at: {e}"))?;
     Ok(())
 }
 

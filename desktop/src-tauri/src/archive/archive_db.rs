@@ -30,6 +30,7 @@
 //! durability.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use tokio::sync::{OnceCell, RwLock};
@@ -65,6 +66,11 @@ pub struct ArchiveDb {
     /// Maintenance lock. Ordinary connections hold the read guard for their
     /// whole lifetime; the Phase-4 conversion holds the write guard.
     maintenance: RwLock<()>,
+    /// In-process single-flight flag for the opportunistic prune worker
+    /// (observer-frame retention). A `compare_exchange` admits exactly one
+    /// prune at a time in this process; a trigger arriving while a prune runs
+    /// is dropped, not queued. See [`super::prune`].
+    prune_running: AtomicBool,
     /// Test-only path/hook overrides; always `None` in production.
     #[cfg(test)]
     test_seam: Option<TestSeam>,
@@ -154,6 +160,27 @@ impl ArchiveDb {
         .await
         .map_err(|e| format!("archive db task failed: {e}"))?
     }
+
+    /// Try to claim the prune single-flight flag. Returns `Some(guard)` for the
+    /// one caller that transitions the flag `false -> true`; the guard clears it
+    /// on drop (including on early return or panic). A caller that arrives while
+    /// a prune is already running gets `None` and skips its pass.
+    pub(super) fn try_prune_guard(&self) -> Option<PruneGuard<'_>> {
+        self.prune_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then(|| PruneGuard(&self.prune_running))
+    }
+}
+
+/// RAII guard that clears the prune single-flight flag when a prune finishes.
+/// Held across the blocking prune dispatch.
+pub(super) struct PruneGuard<'a>(&'a AtomicBool);
+
+impl Drop for PruneGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +191,7 @@ impl ArchiveDb {
         Self {
             init: OnceCell::new(),
             maintenance: RwLock::new(()),
+            prune_running: AtomicBool::new(false),
             test_seam: Some(TestSeam {
                 path,
                 on_init: None,
@@ -178,6 +206,7 @@ impl ArchiveDb {
         Self {
             init: OnceCell::new(),
             maintenance: RwLock::new(()),
+            prune_running: AtomicBool::new(false),
             test_seam: Some(TestSeam {
                 path,
                 on_init: Some(hook),

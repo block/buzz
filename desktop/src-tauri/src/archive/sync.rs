@@ -587,13 +587,14 @@ pub async fn start_archive_sync(
         .await;
 
     let io = AppIo {
-        app: app.clone(),
+        app,
         session: Arc::clone(&session),
     };
     tauri::async_runtime::spawn(async move {
         run_sync(&io, reload, events, cancel).await;
         session.set_subscriptions(Vec::new()).await;
     });
+
     Ok(())
 }
 
