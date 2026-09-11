@@ -30,6 +30,7 @@ import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
+import 'package:buzz/features/channels/initial_thread_tail_settle.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
@@ -108,6 +109,84 @@ NostrEvent _textMsg({
   content: content,
   sig: '',
 );
+
+// A user-reported thread shape: a short head, two long multi-paragraph CJK
+// agent replies, and a short human reply between them. At a phone-sized
+// viewport the last reply plus its trailing padding is shorter than the area
+// below the app bar, which is the geometry that made the initial tail
+// placement overshoot the scroll extent on iOS.
+const _aigeCharlie = 'charlie';
+const _aigeBot = 'aige-bot';
+const _aigeRootId = 'aige-thread-root';
+const _aigeUsers = {
+  _aigeCharlie: UserProfile(pubkey: _aigeCharlie, displayName: 'Charlie'),
+  _aigeBot: UserProfile(pubkey: _aigeBot, displayName: 'AIGE QA'),
+};
+const _aigeLongReplyOne =
+    '@Charlie 有，但只在你已经授权的范围内。我不会自己给自己开一摊新活。\n\n'
+    '活到我手里之后，拆任务、派谁、自己干还是等人交卷、卡住怎么绕，这些我自己排。'
+    '你说过要快就自己干、别双开，我就按这个来。\n\n'
+    '起不了步的是这几件事：没人点名、也没有新证据，我不会自己找事做；飞书往外发、'
+    '提 Meego、改生产，没有你点头我不做；也不会自己循环刷状态。我这边是被 @ 才醒，'
+    '没有你设的定时，我醒不过来。\n\n'
+    '你要是希望我日常自己找活，比如每天稳定性、待填排期、未回的评测问题，得先给我'
+    '一条常驻授权，写清范围和能不能对外动手。没这条，我继续等你叫。';
+const _aigeLongReplyTwo =
+    '@Charlie 行，稳定性这条我接下来就按常驻授权来。先把范围钉死，免得我自己加戏。\n\n'
+    '每天看加州昨天的 AIGE Agame 稳定性，口径走现有日报：Agent 服务端昨天、Effect '
+    'supply 本月累计、AGame submission rate 近 7 天、客户端失败率和 P90 昨天。我自己拉，'
+    '不派 Stability Analyst，避免双开。只读数据。异常分开写事实、假设、未知。不提单、'
+    '不改生产、不往群里发——除非你另说。\n\n'
+    '默认播报发你飞书私信（Charlie the Shadow）。这个频道只在数字明显不对时顶一条，'
+    '平时不刷。\n\n'
+    '我还是被 @ 才醒。你要每天自动跑，得另设定时（Cursor loop 或 workflow），或者你'
+    '每天叫我一声。我自己醒不过来。\n\n'
+    '就差这两件你拍一下：播报只发你飞书，还是也要发某个群？唤醒是你每天 @ 我，还是'
+    '你去设定时？你定了我就写进记忆，从下一轮开始跟。';
+
+NostrEvent _aigeHead() => _textMsg(
+  id: _aigeRootId,
+  pubkey: _aigeCharlie,
+  content: '@AIGE QA 我想问一下你有没有能力去自己给自己安排事情做？',
+  extraTags: const [
+    ['p', _aigeBot],
+  ],
+);
+
+/// The three replies; [lastReplyRepeats] > 1 makes the final reply taller
+/// than the visible area so its tail settles below the composer.
+List<NostrEvent> _aigeReplies({int lastReplyRepeats = 1}) => [
+  _textMsg(
+    id: 'aige-reply-1',
+    pubkey: _aigeBot,
+    createdAt: 1100,
+    content: _aigeLongReplyOne,
+    extraTags: const [
+      ['e', _aigeRootId, '', 'reply'],
+      ['p', _aigeCharlie],
+    ],
+  ),
+  _textMsg(
+    id: 'aige-reply-2',
+    pubkey: _aigeCharlie,
+    createdAt: 1200,
+    content: '@AIGE QA 我可以给你常驻授权让你看一下每天的稳定性。',
+    extraTags: const [
+      ['e', _aigeRootId, '', 'reply'],
+      ['p', _aigeBot],
+    ],
+  ),
+  _textMsg(
+    id: 'aige-reply-3',
+    pubkey: _aigeBot,
+    createdAt: 1300,
+    content: List.filled(lastReplyRepeats, _aigeLongReplyTwo).join('\n\n'),
+    extraTags: const [
+      ['e', _aigeRootId, '', 'reply'],
+      ['p', _aigeCharlie],
+    ],
+  ),
+];
 
 NostrEvent _systemMsg({
   required String id,
@@ -14028,6 +14107,611 @@ void main() {
         );
       },
     );
+
+    ScrollPosition threadScrollPosition(WidgetTester tester) => tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byKey(const ValueKey('thread-message-list')),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+
+    Future<void> pushAigeThread(
+      WidgetTester tester,
+      NostrEvent head, {
+      List<NostrEvent> allMessages = const [],
+    }) async {
+      final timeline = formatTimeline([
+        head,
+        ...allMessages,
+      ], currentPubkey: _aigeCharlie);
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: timeline.first,
+            allMessages: timeline,
+            channelId: _channelId,
+            currentPubkey: _aigeCharlie,
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+    }
+
+    testWidgets(
+      'iOS ordinary thread entry reveals the settled viewport at rest at the tail',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          final hydration = Completer<List<NostrEvent>>();
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              pendingThreadReplies: {_aigeRootId: hydration.future},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await pushAigeThread(tester, head);
+          await tester.pumpAndSettle();
+
+          hydration.complete(_aigeReplies());
+          final gate = find.byKey(
+            const ValueKey('thread-initial-viewport-gate'),
+          );
+          var revealed = false;
+          for (var frame = 0; frame < 60 && !revealed; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            revealed = tester.widget<Opacity>(gate).opacity == 1;
+          }
+          expect(revealed, isTrue, reason: 'The hydrated thread must reveal.');
+
+          final position = threadScrollPosition(tester);
+          expect(
+            position.pixels,
+            lessThanOrEqualTo(position.maxScrollExtent + 0.5),
+            reason:
+                'The placement must not reveal while overscrolled past the '
+                'tail; iOS bouncing physics springs that back as a visible '
+                'entry bounce.',
+          );
+          expect(
+            position.pixels,
+            greaterThanOrEqualTo(position.minScrollExtent - 0.5),
+          );
+          expect(
+            position.isScrollingNotifier.value,
+            isFalse,
+            reason: 'The viewport must first paint at rest.',
+          );
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+
+          final tailAnchor = find.byKey(const ValueKey('thread-tail-anchor'));
+          final settledTailY = tester.getTopLeft(tailAnchor).dy;
+          for (var frame = 0; frame < 40; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getTopLeft(tailAnchor).dy,
+              closeTo(settledTailY, 0.5),
+              reason: 'frame $frame: the revealed thread must not drift.',
+            );
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason: 'frame $frame: Latest has nowhere to go at the tail.',
+            );
+          }
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'ordinary thread entry exposes Latest when the settled tail ends below the composer',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              threadReplies: {_aigeRootId: _aigeReplies(lastReplyRepeats: 3)},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await pushAigeThread(tester, head);
+          await tester.pumpAndSettle();
+
+          final position = threadScrollPosition(tester);
+          final composerTop = tester
+              .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+              .dy;
+          expect(
+            position.extentAfter,
+            greaterThan(50),
+            reason:
+                'Fixture: the last reply must be taller than the visible area '
+                'so the settle leaves its tail below the fold.',
+          );
+          expect(
+            tester
+                .getBottomLeft(
+                  find.byKey(
+                    const ValueKey('thread-message-group-aige-reply-3'),
+                  ),
+                )
+                .dy,
+            greaterThan(composerTop),
+          );
+          const latest = ValueKey('thread-jump-to-latest');
+          expect(
+            find.byKey(latest),
+            findsOneWidget,
+            reason:
+                'A settled tail below the composer needs Latest without '
+                'waiting for a drag; hiding the only way back strands the '
+                'reader.',
+          );
+
+          // iOS renders Latest as a native glass control; a press arrives
+          // over its platform channel rather than through Flutter hit testing.
+          const viewId = 7;
+          const glassChannel = MethodChannel(
+            'buzz/jump_to_latest_glass/$viewId',
+          );
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            glassChannel,
+            (_) async => null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(glassChannel, null),
+          );
+          tester
+              .widget<UiKitView>(
+                find.byKey(const ValueKey('thread-jump-to-latest-ios-glass')),
+              )
+              .onPlatformViewCreated!(viewId);
+          await tester.pump();
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            glassChannel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              const MethodCall('pressed'),
+            ),
+            (_) {},
+          );
+          await tester.pumpAndSettle();
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'thread Latest stays hidden while a programmatic scroll leaves and returns to the tail',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              threadReplies: {_aigeRootId: _aigeReplies()},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await pushAigeThread(tester, head);
+          await tester.pumpAndSettle();
+
+          const latest = ValueKey('thread-jump-to-latest');
+          final list = find.byKey(const ValueKey('thread-message-list'));
+          final position = threadScrollPosition(tester);
+          // Browse history and come back the way a reader does, so the entry
+          // gate is behind us and only tail geometry governs Latest.
+          await tester.drag(list, const Offset(0, 300));
+          await tester.pumpAndSettle();
+          expect(find.byKey(latest), findsOneWidget);
+          await tester.drag(list, const Offset(0, -600));
+          await tester.pumpAndSettle();
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+
+          // A correction or an iOS rubber-band moves the list with no finger
+          // on it and ends back at the tail. Intermediate positions report
+          // the tail out of view on every frame.
+          final away = position.animateTo(
+            position.maxScrollExtent - 120,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.linear,
+          );
+          final back = away.then(
+            (_) => position.animateTo(
+              position.maxScrollExtent,
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.linear,
+            ),
+          );
+          for (var frame = 0; frame < 24; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(latest),
+              findsNothing,
+              reason:
+                  'frame $frame: motion no finger started must not mount '
+                  'Latest; on iOS that is a native control strobing.',
+            );
+          }
+          await back;
+          await tester.pumpAndSettle();
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+
+          // Motion that ends off the tail is held while it moves, then the
+          // idle re-check releases the hold: Latest must come back on its
+          // own, or the reader has no way to the tail without a drag.
+          final strand = position.animateTo(
+            position.maxScrollExtent - 200,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.linear,
+          );
+          for (var frame = 0; frame < 8; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(latest),
+              findsNothing,
+              reason: 'frame $frame: still moving, still held.',
+            );
+          }
+          // Let the animation finish under the pump before awaiting it.
+          await tester.pumpAndSettle();
+          await strand;
+          expect(position.extentAfter, greaterThan(100));
+          expect(
+            find.byKey(latest),
+            findsOneWidget,
+            reason: 'An idle position off the tail must release the hold.',
+          );
+
+          // The released control is live: an iOS press reaches the tail.
+          const viewId = 11;
+          const glassChannel = MethodChannel(
+            'buzz/jump_to_latest_glass/$viewId',
+          );
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            glassChannel,
+            (_) async => null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(glassChannel, null),
+          );
+          tester
+              .widget<UiKitView>(
+                find.byKey(const ValueKey('thread-jump-to-latest-ios-glass')),
+              )
+              .onPlatformViewCreated!(viewId);
+          await tester.pump();
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            glassChannel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              const MethodCall('pressed'),
+            ),
+            (_) {},
+          );
+          await tester.pumpAndSettle();
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'a remote reply arriving at the thread tail does not flash Latest',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          final messagesNotifier = _FakeMessagesNotifier([head]);
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              messagesNotifier: messagesNotifier,
+              threadReplies: {_aigeRootId: _aigeReplies()},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await pushAigeThread(tester, head);
+          await tester.pumpAndSettle();
+
+          const latest = ValueKey('thread-jump-to-latest');
+          final position = threadScrollPosition(tester);
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+
+          // The bot's next reply lands over the channel socket while the
+          // reader rests on the tail. The follow correction jumps before the
+          // new row is measured; that stale frame must not show Latest.
+          messagesNotifier.setMessages([
+            head,
+            _textMsg(
+              id: 'aige-reply-4',
+              pubkey: _aigeBot,
+              createdAt: 2000,
+              content: '@Charlie 收到，明天早上我先跑一遍。',
+              extraTags: const [
+                ['e', _aigeRootId, '', 'reply'],
+                ['p', _aigeCharlie],
+              ],
+            ),
+          ]);
+          for (var frame = 0; frame < 12; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(latest),
+              findsNothing,
+              reason:
+                  'frame $frame: a reply arrival at the tail is followed, '
+                  'not announced.',
+            );
+          }
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('thread-message-group-aige-reply-4')),
+            findsOneWidget,
+          );
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(find.byKey(latest), findsNothing);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'iOS ordinary entry into a long short-reply thread reveals at rest at the tail',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          // Far enough down that the placement runs through the package's
+          // temporary second list rather than a direct scroll.
+          final replies = [
+            for (var i = 0; i < 40; i += 1)
+              _textMsg(
+                id: 'aige-short-$i',
+                pubkey: i.isEven ? _aigeBot : _aigeCharlie,
+                createdAt: 1100 + i,
+                content: 'Reply $i',
+                extraTags: const [
+                  ['e', _aigeRootId, '', 'reply'],
+                ],
+              ),
+          ];
+          final hydration = Completer<List<NostrEvent>>();
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              pendingThreadReplies: {_aigeRootId: hydration.future},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+            ),
+          );
+          await tester.pumpAndSettle();
+          await pushAigeThread(tester, head);
+          await tester.pumpAndSettle();
+
+          hydration.complete(replies);
+          final gate = find.byKey(
+            const ValueKey('thread-initial-viewport-gate'),
+          );
+          var revealed = false;
+          for (var frame = 0; frame < 60 && !revealed; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            revealed = tester.widget<Opacity>(gate).opacity == 1;
+          }
+          expect(revealed, isTrue, reason: 'The hydrated thread must reveal.');
+
+          final position = threadScrollPosition(tester);
+          expect(
+            position.pixels,
+            inInclusiveRange(
+              position.minScrollExtent - 0.5,
+              position.maxScrollExtent + 0.5,
+            ),
+            reason: 'The swapped-in list must be revealed inside its range.',
+          );
+          expect(position.isScrollingNotifier.value, isFalse);
+          expect(position.extentAfter, lessThanOrEqualTo(0.5));
+          expect(
+            find.byKey(const ValueKey('thread-message-group-aige-short-39')),
+            findsOneWidget,
+          );
+          final tailAnchor = find.byKey(const ValueKey('thread-tail-anchor'));
+          final settledTailY = tester.getTopLeft(tailAnchor).dy;
+          for (var frame = 0; frame < 40; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getTopLeft(tailAnchor).dy,
+              closeTo(settledTailY, 0.5),
+              reason: 'frame $frame: the revealed thread must not drift.',
+            );
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+            );
+          }
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'a deep-linked thread does not unmount Latest between the provisional snapshot and the hydrated placement',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final head = _aigeHead();
+          // Replies this phone sent stay in the local overlay until a thread
+          // query confirms them, so a deep link into the thread renders them
+          // as its provisional snapshot while that query is still in flight.
+          final localReplies = [
+            for (var i = 1; i <= 3; i += 1)
+              _textMsg(
+                id: 'local-reply-$i',
+                pubkey: _aigeCharlie,
+                createdAt: 1000 + 100 * i,
+                content: i.isOdd ? _aigeLongReplyTwo : _aigeLongReplyOne,
+                extraTags: const [
+                  ['e', _aigeRootId, '', 'reply'],
+                  ['p', _aigeBot],
+                ],
+              ),
+          ];
+          final hydration = Completer<List<NostrEvent>>();
+          final timeline = formatTimeline([
+            head,
+            ...localReplies,
+          ], currentPubkey: _aigeCharlie);
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [head],
+              pendingThreadReplies: {_aigeRootId: hydration.future},
+              localThreadReplies: {_aigeRootId: localReplies},
+              users: _aigeUsers,
+              knownAgentPubkeys: const {_aigeBot},
+              home: ThreadDetailPage(
+                threadHead: timeline.first,
+                allMessages: timeline,
+                channelId: _channelId,
+                currentPubkey: _aigeCharlie,
+                isMember: true,
+                isArchived: false,
+                initialMessageId: 'local-reply-3',
+              ),
+            ),
+          );
+
+          const latest = ValueKey('thread-jump-to-latest');
+          final mounted = <bool>[];
+          for (var frame = 0; frame < 12; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            mounted.add(find.byKey(latest).evaluate().isNotEmpty);
+          }
+          hydration.complete(localReplies);
+          for (var frame = 0; frame < 30; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            mounted.add(find.byKey(latest).evaluate().isNotEmpty);
+          }
+          await tester.pumpAndSettle();
+          mounted.add(find.byKey(latest).evaluate().isNotEmpty);
+
+          expect(
+            mounted.first,
+            isFalse,
+            reason:
+                'Latest must not mount against the provisional snapshot '
+                'while the relay query is still in flight: $mounted',
+          );
+          final firstMount = mounted.indexOf(true);
+          expect(
+            firstMount,
+            isNonNegative,
+            reason:
+                'The linked reply lands with its tail below the fold, so '
+                'Latest must mount after the placement: $mounted',
+          );
+          expect(
+            mounted.sublist(firstMount).contains(false),
+            isFalse,
+            reason:
+                'Once mounted at the hydrated placement Latest must stay; a '
+                'native control that unmounts and remounts strobes: $mounted',
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets('settleThreadScrollPositionInRange ends an iOS overscroll', (
+      tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ListView(
+            controller: controller,
+            physics: const BouncingScrollPhysics(),
+            children: [
+              for (var i = 0; i < 30; i += 1) const SizedBox(height: 100),
+            ],
+          ),
+        ),
+      );
+      final position = controller.position;
+      expect(settleThreadScrollPositionInRange(null), isFalse);
+      expect(settleThreadScrollPositionInRange(position), isFalse);
+
+      // A driven placement that lands past the extent leaves a spring behind.
+      position.jumpTo(position.maxScrollExtent + 120);
+      expect(position.pixels, position.maxScrollExtent + 120);
+      expect(position.isScrollingNotifier.value, isTrue);
+      expect(settleThreadScrollPositionInRange(position), isTrue);
+      expect(position.pixels, position.maxScrollExtent);
+      expect(position.isScrollingNotifier.value, isFalse);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(position.pixels, position.maxScrollExtent);
+      expect(settleThreadScrollPositionInRange(position), isFalse);
+
+      // Under-scroll past the leading edge is clamped the same way.
+      position.jumpTo(position.minScrollExtent - 80);
+      expect(settleThreadScrollPositionInRange(position), isTrue);
+      expect(position.pixels, position.minScrollExtent);
+      expect(position.isScrollingNotifier.value, isFalse);
+    });
 
     testWidgets('a reaction landing while the thread is open shows up there', (
       tester,
