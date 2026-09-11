@@ -43,6 +43,11 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     isInlineMentionSelection: () => false,
     isMentionOpen: true,
     openMentionPicker: (...args) => openPickerCalls.push(args),
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -82,7 +87,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     },
   ]);
   assert.equal(cancelCount, 0);
-  assert.deepEqual(openPickerCalls, [[text.length, "preserve"]]);
+  assert.deepEqual(openPickerCalls, [[text.length]]);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
   assert.equal(
@@ -117,6 +122,11 @@ test("always addressing a new agent delegates the first add for immediate confir
         getMentionDisplayName: () => "Agent Ada",
         isInlineMentionSelection: () => false,
         isMentionOpen: false,
+        canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: () => {},
       },
       onAddressAgentMention: (value) => addressedSuggestions.push(value),
@@ -156,6 +166,11 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
       },
     ],
     getMentionDisplayName: () => "Agent Ada",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -216,8 +231,17 @@ test("selecting an already addressed agent from the explicit picker pulses its b
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 5,
@@ -275,8 +299,17 @@ test("selecting an agent from a typed query immediately auto-addresses it", asyn
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => true,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 6,
@@ -342,6 +375,11 @@ test("selecting a human mention never changes automatic addressing", async () =>
       audienceScope: "channel-scope",
       mentions: {
         getMentionDisplayName: () => "Alice",
+        isInlineMentionSelection: () => true,
+        selectMention(_row, _cursor, valid, commit) {
+          const edit = this.insertMention();
+          if (valid() && edit.insertText) commit(edit);
+        },
         insertMention: () => ({
           replaceFromOffset: 0,
           replaceToOffset: 3,
@@ -394,6 +432,11 @@ test("restoring a multi-word automatic mention into an empty composer focuses af
       mentions: {
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "claude code",
+        canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: (...args) => {
           registeredMentions.push(args);
           return args[0];
@@ -443,6 +486,11 @@ test("restoring before authored text preserves its selection", async () => {
       mentions: {
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "Morgarita",
+        canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: () => {},
       },
       onPulseAddressLock: () => {},
@@ -497,6 +545,11 @@ test("restoring an existing automatic mention re-registers its agent chip", asyn
               ]
             : [],
         getMentionDisplayName: () => "claude code",
+        canSelectMention: () => true,
+        cancelMentionAdmission: () => {},
+        admitMention(_row, _cursor, valid, commit) {
+          if (valid()) commit();
+        },
         registerMentionPubkey: (...args) => {
           registeredMentions.push(args);
           return args[0];
@@ -638,8 +691,17 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 5,
@@ -704,8 +766,17 @@ test("repeatedly selecting an explicitly unpinned agent keeps its mentions manua
       { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
     ],
     getMentionDisplayName: () => "Agent Ada",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => true,
+    selectMention(_row, _cursor, valid, commit) {
+      const edit = this.insertMention();
+      if (valid() && edit.insertText) commit(edit);
+    },
     insertMention: () => ({
       replaceFromOffset: 0,
       replaceToOffset: 0,
@@ -818,6 +889,11 @@ test("restoring after an agent rename keeps the existing automatic mention", asy
             { displayName: oldName, pubkey: "agent-pubkey", isAgent: true },
           ],
           getMentionDisplayName: () => displayName,
+          canSelectMention: () => true,
+          cancelMentionAdmission: () => {},
+          admitMention(_row, _cursor, valid, commit) {
+            if (valid()) commit();
+          },
           registerMentionPubkey: (...args) => {
             registeredMentions.push(args);
             return args[0];
@@ -899,6 +975,11 @@ test("automatic mention insertion and restoration use the registered collision-s
       snapshotDraftMentionRefs(value, bindings, [...bindings.keys()]),
     getMentionDisplayName: (pubkey) =>
       [...bindings].find(([, key]) => key === pubkey)?.[0] ?? "carl",
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: (name, pubkey) => {
       const label = selectedMentionLabel(name, pubkey, bindings);
       bindings.set(label, pubkey);
@@ -998,6 +1079,11 @@ test("inverse deletion and toggle preserve B and exclude A from the composed sen
       snapshotDraftMentionRefs(value, bindings, [...bindings.keys()]),
     getMentionDisplayName: (key) =>
       [...bindings].find(([, k]) => k === key)?.[0],
+    canSelectMention: () => true,
+    cancelMentionAdmission: () => {},
+    admitMention(_row, _cursor, valid, commit) {
+      if (valid()) commit();
+    },
     registerMentionPubkey: (name, key) => {
       const label = selectedMentionLabel(name, key, bindings);
       bindings.set(label, key);
@@ -1077,6 +1163,7 @@ test("implicit prefix removal uses the present exact label rather than a stale a
       audience: { pubkeys: [key], excludePubkey: () => {} },
       audienceScope: "channel",
       mentions: {
+        cancelMentionAdmission: () => {},
         getDraftMentionRefs: () => [
           { displayName: "Historical Scout", pubkey: key, isAgent: true },
         ],
@@ -1096,4 +1183,44 @@ test("implicit prefix removal uses the present exact label rather than a stale a
   );
   act(() => result.current.removeAddressedAgent(key));
   assert.equal(text, "hello");
+});
+
+test("rejected stale selection never pins, tracks, announces or edits", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const effects = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: () => effects.push("edit"),
+      audience: { pubkeys: [], addPubkey: () => effects.push("audience") },
+      audienceScope: "room",
+      mentions: {
+        getMentionDisplayName: () => "Scout",
+        isInlineMentionSelection: () => true,
+        selectMention(_row, _cursor, valid, commit) {
+          const edit = this.insertMention();
+          if (valid() && edit.insertText) commit(edit);
+        },
+        insertMention: () => ({
+          replaceFromOffset: 1,
+          replaceToOffset: 1,
+          insertText: "",
+        }),
+      },
+      onAutoPinAgentMention: () => effects.push("pin"),
+      onPulseAddressLock: () => effects.push("pulse"),
+      richText: { getPlainTextAndCursor: () => ({ text: "@", cursor: 1 }) },
+    }),
+  );
+  act(() =>
+    result.current.selectMentionSuggestion({
+      pubkey: "a".repeat(64),
+      displayName: "Scout",
+      isAgent: true,
+    }),
+  );
+  assert.deepEqual(effects, []);
+  assert.equal(result.current.announcement, "");
 });

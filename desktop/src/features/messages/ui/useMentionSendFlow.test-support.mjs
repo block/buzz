@@ -70,7 +70,13 @@ export async function setup({ lifecycle = false } = {}) {
   dom.window.localStorage.clear();
   draftStore.initDraftStore("test-author", "wss://test.example");
   const calls = [];
-  const control = { prepare: null, add: null, publish: null, inventory: null };
+  const control = {
+    prepare: null,
+    add: null,
+    publish: null,
+    inventory: null,
+    canInvite: true,
+  };
   const refs = [{ displayName: "RemoteScout", pubkey: KEY, isAgent: true }];
   const query = {
     data: [],
@@ -125,7 +131,7 @@ export async function setup({ lifecycle = false } = {}) {
       useAddChannelMembersMutation: () => mutation,
     },
     "@/features/channels/useCanAddChannelMembers": {
-      useCanAddChannelMembers: () => true,
+      useCanAddChannelMembers: () => control.canInvite,
     },
     "@/features/channels/lib/channelMemberAdmission": {},
     "@/features/messages/lib/dmThreadAgentMentionError": {

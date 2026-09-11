@@ -1,3 +1,4 @@
+import { useMentionAdmissionEditor } from "@/features/messages/lib/useMentionAdmissionEditor";
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
@@ -74,7 +75,11 @@ export function ForumComposer({
     if (compact) setIsCompactExpanded(true);
   }, [compact]);
 
-  const mentions = useMentions(channelId, members, profiles, { channelType });
+  const mentions = useMentions(channelId, members, profiles, {
+    channelType,
+    getEditorSnapshot: (): { text: string; cursor: number } =>
+      richText.getPlainTextAndCursor(),
+  });
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
@@ -127,6 +132,8 @@ export function ForumComposer({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    onSelectionUpdate: ({ text, cursor }) =>
+      mentions.updateMentionQuery(text, cursor),
     onUpdate: ({ cursor, text }) => {
       const markdown = richText.getMarkdown();
       setContent(markdown);
@@ -136,6 +143,8 @@ export function ForumComposer({
       channelLinks.updateChannelQuery(text, cursor);
     },
   });
+
+  useMentionAdmissionEditor(richText.editor, mentions.cancelMentionAdmission);
 
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
@@ -148,16 +157,21 @@ export function ForumComposer({
     (suggestion: MentionSuggestion) => {
       if (isSubmissionPendingRef.current) return;
       const { cursor } = richText.getPlainTextAndCursor();
-      const { replaceFromOffset, replaceToOffset, insertText } =
-        mentions.insertMention(suggestion, cursor);
-      richText.replacePlainTextRange(
-        replaceFromOffset,
-        replaceToOffset,
-        insertText,
+      mentions.selectMention(
+        suggestion,
+        cursor,
+        () => !isSubmissionPendingRef.current && !disabledRef.current,
+        ({ replaceFromOffset, replaceToOffset, insertText }) => {
+          richText.replacePlainTextRange(
+            replaceFromOffset,
+            replaceToOffset,
+            insertText,
+          );
+        },
       );
     },
     [
-      mentions.insertMention,
+      mentions.selectMention,
       richText.getPlainTextAndCursor,
       richText.replacePlainTextRange,
     ],
@@ -223,6 +237,7 @@ export function ForumComposer({
   // ── Submit ──────────────────────────────────────────────────────────
   const submitMessage = React.useCallback(
     async (submitter = onSubmitRef.current) => {
+      mentions.cancelMentionAdmission();
       const trimmed = contentRef.current.trim();
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
@@ -293,6 +308,7 @@ export function ForumComposer({
       media.pendingImetaRef,
       media.setPendingImeta,
       mentions.cancelMentionAutocomplete,
+      mentions.cancelMentionAdmission,
       mentions.extractMentionPubkeys,
       mentions.revalidateMentionPubkeys,
       mentions.clearMentions,
@@ -474,6 +490,9 @@ export function ForumComposer({
   const autocompletePosition = autocompleteBelow ? "below" : "above";
   return (
     <>
+      <output aria-live="polite" className="text-xs text-muted-foreground">
+        {mentions.mentionAdmissionStatus}
+      </output>
       <form
         className={cn(
           "relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4",
@@ -540,7 +559,8 @@ export function ForumComposer({
               }
               onChannelSelect={applyChannelInsert}
               onMentionDismiss={mentions.cancelMentionAutocomplete}
-              onMentionFetchMore={mentions.fetchMoreSuggestions}
+              isMentionOpen={mentions.isMentionOpen}
+              isMentionLoading={mentions.isMentionLoading}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
             />
@@ -572,7 +592,10 @@ export function ForumComposer({
                     {onCancel ? (
                       <Button
                         disabled={isSending || isSubmissionPending}
-                        onClick={onCancel}
+                        onClick={() => {
+                          mentions.cancelMentionAdmission();
+                          onCancel();
+                        }}
                         size="sm"
                         type="button"
                         variant="ghost"

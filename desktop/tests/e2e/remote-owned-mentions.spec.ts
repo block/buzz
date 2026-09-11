@@ -40,7 +40,10 @@ async function install(page: Page) {
 async function select(page: Page) {
   await page.getByTestId("message-input").fill("@Remote");
   const row = page.getByTestId(`mention-suggestion-${REMOTE}`);
-  await expect(row).toContainText("RemoteScout");
+  // New DMs have no destination roster yet. Do not let PR6's five-second
+  // evidence expiry conceal a disabled-query readiness deadlock in PR5.
+  await expect(row).toContainText("RemoteScout", { timeout: 4000 });
+  await expect(row.locator("button").first()).toBeEnabled();
   await row.locator("button").first().click();
   await page.keyboard.type("hello");
 }
@@ -245,7 +248,9 @@ test("membership revoked at final publish keeps draft and emits no message", asy
   });
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(
-    page.getByText(/Could not authorize a mentioned agent/),
+    page.getByText(
+      /Could not check access for a mentioned agent\. Retry or remove the mention\./,
+    ),
   ).toBeVisible();
   await expect(page.getByTestId("message-input")).toHaveText(
     "@RemoteScout hello",
@@ -459,8 +464,13 @@ for (const stage of ["add", "publish"] as const) {
   }
 }
 
-for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
-  test(`B1 authored deletion before thread switch preserves storage and ${incoming}`, async ({
+for (const { incoming, savedFirst } of [
+  "unrelated thread B draft",
+  "@RemoteScout hello",
+].flatMap((incoming) =>
+  [false, true].map((savedFirst) => ({ incoming, savedFirst })),
+)) {
+  test(`B1 authored deletion before thread switch preserves storage and ${incoming} (${savedFirst ? "persisted" : "unsaved"})`, async ({
     page,
   }) => {
     await install(page);
@@ -520,8 +530,6 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
     await page.getByRole("button", { name: "Invite", exact: true }).click();
     await waitForInviteGate(page);
     await expect(input).toHaveText("");
-    await input.fill("new authored text");
-    await input.fill("");
     const sourceRecord = () =>
       page.evaluate(([root, otherRoot]) => {
         const key = Object.keys(localStorage).find((key) =>
@@ -533,12 +541,67 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
           throw new Error("control B draft missing");
         return drafts[`thread:${root}`] ?? null;
       }, roots);
-    expect(await sourceRecord()).toBeNull();
-    // Expando proves the actual editor DOM host survived A -> B.
-    await input.evaluate((el) =>
-      el.setAttribute("data-lifecycle-host", "retained"),
-    );
+    await input.fill("new authored text");
+    if (savedFirst) {
+      // Additional positive control: real scope cleanup saves live nonempty
+      // text, exact refs and selection. Keep the rapid unsaved case above.
+      await navigate(roots[1]);
+      expect(await sourceRecord()).toMatchObject({
+        content: "new authored text",
+        mentionRefs: [],
+        selectionStart: 17,
+        selectionEnd: 17,
+      });
+      await navigate(roots[0]);
+      await expect(input).toHaveText("new authored text");
+    }
+    // Native fill can return before DOMObserver dispatches the PM edit.
+    // Arm before deletion; observe the first update FROM the authored document,
+    // not eventual emptiness/storage quiescence. Production onUpdate was
+    // registered first and synchronously owns empty-authority persistence.
+    const deletion = await input.evaluateHandle((el, root) => {
+      el.setAttribute("data-lifecycle-host", "retained");
+      const editor = (
+        el as HTMLElement & { editor: import("@tiptap/core").Editor }
+      ).editor;
+      return {
+        completed: new Promise((resolve) => {
+          const onUpdate = ({
+            transaction,
+          }: import("@tiptap/core").EditorEvents["update"]) => {
+            if (transaction.before.textContent !== "new authored text") return;
+            editor.off("update", onUpdate);
+            const key = Object.keys(localStorage).find((key) =>
+              key.startsWith("buzz-drafts.v2"),
+            );
+            resolve({
+              dom: el.textContent,
+              doc: editor.getJSON(),
+              from: editor.state.selection.from,
+              to: editor.state.selection.to,
+              source: key
+                ? (JSON.parse(localStorage.getItem(key) ?? "{}")[
+                    `thread:${root}`
+                  ] ?? null)
+                : "draft storage scope missing",
+            });
+          };
+          editor.on("update", onUpdate);
+        }),
+      };
+    }, roots[0]);
+    await input.fill("");
+    const deleted = await deletion.evaluate(({ completed }) => completed);
+    // No assertion/poll between action completion and outgoing-key cleanup.
     await navigate(roots[1]);
+    expect(deleted).toEqual({
+      dom: "",
+      doc: { type: "doc", content: [{ type: "paragraph" }] },
+      from: 1,
+      to: 1,
+      source: null,
+    });
+    await deletion.dispose();
     await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
     await expect(input).toHaveText(incoming);
     await expect(page.getByRole("alertdialog")).toHaveCount(0);

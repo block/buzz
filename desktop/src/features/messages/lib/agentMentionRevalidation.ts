@@ -13,12 +13,18 @@ export type MentionRevalidationOptions = {
   intendedAgentPubkeys?: readonly string[];
 };
 
+/** Distinguishes missing authority from an incomplete fresh lookup, not policy. */
 export class AgentMentionAuthorizationError extends Error {
-  constructor() {
+  readonly reason: "denied" | "lookup-failed";
+
+  constructor(reason: "denied" | "lookup-failed" = "denied") {
     super(
-      "Could not authorize a mentioned agent. Check its access and channel membership, then retry or remove the mention.",
+      reason === "lookup-failed"
+        ? "Could not check access for a mentioned agent. Retry or remove the mention."
+        : "Could not authorize a mentioned agent. Check its access and channel membership, then retry or remove the mention.",
     );
     this.name = "AgentMentionAuthorizationError";
+    this.reason = reason;
   }
 }
 
@@ -90,7 +96,16 @@ export async function revalidateAgentMentionPubkeys({
   if (
     [...requestedAgentPubkeys].some((pubkey) => !admittedPubkeys.has(pubkey))
   ) {
-    throw new AgentMentionAuthorizationError();
+    // Either directory may independently prove an identity. If evidence is
+    // incomplete, failure to admit is not proof of a policy denial. Classify
+    // only after admission so unrelated outages cannot veto valid evidence.
+    const lookupFailed =
+      !relayDirectoryReady ||
+      managedResult?.error !== null ||
+      managedResult.data === undefined;
+    throw new AgentMentionAuthorizationError(
+      lookupFailed ? "lookup-failed" : "denied",
+    );
   }
   return [...pubkeys];
 }

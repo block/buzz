@@ -63,7 +63,10 @@ async function addMessageStep(
 ) {
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The outgoing trigger input has the same label during inspector exit.
+  const message = dialog.locator("textarea#wf-step-0-text");
+  await expect(message).toBeVisible();
+  await message.fill("Workflow notification");
 }
 
 async function createEnabled(
@@ -288,9 +291,30 @@ test("round-trips and reopens structured message-text conditions", async ({
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
   const operatorButtons = matchControls.getByRole("button");
-  const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
-  const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
-  const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
+  // Motion updates inspector geometry in JS; sample all boxes in the same frame.
+  const boxes = await operatorButtons.evaluateAll(async (buttons) => {
+    if (buttons.length < 3) throw new Error("Missing workflow match operators");
+    const inspector = buttons[0].closest(
+      '[data-testid="workflow-node-inspector"]',
+    );
+    if (!inspector) throw new Error("Missing workflow inspector");
+    let previous = "";
+    let stable = 0;
+    for (let frame = 0; frame < 120; frame++) {
+      await new Promise(requestAnimationFrame);
+      const boxes = buttons
+        .slice(0, 3)
+        .map((button) => button.getBoundingClientRect().toJSON());
+      const style = getComputedStyle(inspector);
+      const sample = { boxes, width: style.width, transform: style.transform };
+      const current = JSON.stringify(sample);
+      stable = current === previous ? stable + 1 : 0;
+      if (stable >= 2) return boxes;
+      previous = current;
+    }
+    throw new Error("Workflow inspector geometry did not settle");
+  });
+  const [firstOperatorBox, secondOperatorBox, thirdOperatorBox] = boxes;
   expect(firstOperatorBox).not.toBeNull();
   expect(secondOperatorBox).not.toBeNull();
   expect(thirdOperatorBox).not.toBeNull();
@@ -315,6 +339,17 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await addMessageStep(page, dialog);
   await createEnabled(page, dialog);
+  const savedYaml = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((candidate) => candidate.command === "create_workflow");
+    return (call?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  const saved = parseYaml(savedYaml ?? "");
+  expect(saved.name).toBe(name);
+  expect(saved.trigger.filter).toBe(expression);
+  expect(saved.steps[0].text).toBe("Workflow notification");
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
   await expect(

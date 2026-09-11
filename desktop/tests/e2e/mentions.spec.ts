@@ -60,6 +60,35 @@ function autocomplete(page: import("@playwright/test").Page) {
     .getByTestId("mention-autocomplete");
 }
 
+async function waitForCompleteMentionSearch(
+  page: import("@playwright/test").Page,
+  query: string,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate((query) => {
+        const state = window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
+          "user-search",
+          "infinite",
+          query,
+          50,
+        ]) as
+          | {
+              status: string;
+              fetchStatus: string;
+              data?: { pages: { nextCursor: string | null }[] };
+            }
+          | undefined;
+        return (
+          state?.status === "success" &&
+          state.fetchStatus === "idle" &&
+          state.data?.pages.at(-1)?.nextCursor === null
+        );
+      }, query),
+    )
+    .toBe(true);
+}
+
 async function readCommandLog(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     return (
@@ -82,6 +111,69 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
       ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     );
   });
+}
+
+// AppShell defers usePresenceSession until startup is ready. Observe its
+// initial online sign_event entry before creating the raw query, not a timer
+// or cached presence lookup. This fences that signing count only: it does not
+// establish signing completion, relay delivery, or immunity to later heartbeats.
+async function waitForInitialPresenceSigning(
+  page: import("@playwright/test").Page,
+) {
+  await expect
+    .poll(
+      async () =>
+        (await readCommandPayloadLog(page)).some(({ command, payload }) => {
+          const event = payload as {
+            kind?: number;
+            content?: string;
+            tags?: string[][];
+          } | null;
+          return (
+            command === "sign_event" &&
+            event?.kind === 20001 &&
+            event.content === "online" &&
+            Array.isArray(event.tags) &&
+            event.tags.length === 0
+          );
+        }),
+      {
+        message:
+          "initial online presence sign_event entered before mention probe",
+      },
+    )
+    .toBe(true);
+}
+
+// Capture both logs in one browser turn so diagnostics describe the exact
+// unfiltered command snapshot used by the assertions, including unsigned events.
+async function captureMentionCommandBoundary(
+  page: import("@playwright/test").Page,
+  phase: "baseline" | "final",
+) {
+  const snapshot = await page.evaluate(() => ({
+    capturedAt: Date.now(),
+    commands: [...(window.__BUZZ_E2E_COMMANDS__ ?? [])],
+    payloads: window.__BUZZ_E2E_COMMAND_LOG__ ?? [],
+  }));
+  const counts: Record<string, number> = {
+    add_channel_members: 0,
+    start_managed_agent: 0,
+    attach_managed_agent: 0,
+    sync_agents_to_active_huddle: 0,
+    send_channel_message: 0,
+    sign_event: 0,
+    revalidate_relay_agents: 0,
+    list_relay_agents: 0,
+  };
+  for (const command of snapshot.commands) {
+    counts[command] = (counts[command] ?? 0) + 1;
+  }
+  await test.info().attach(`mention-commands-${phase}`, {
+    body: JSON.stringify({ phase, counts, ...snapshot }),
+    contentType: "application/json",
+  });
+  return snapshot.commands;
 }
 
 async function readOutgoingMentionPubkeys(
@@ -409,8 +501,8 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(relayProvenanceMarker).toBeVisible();
   await expect(relayProvenanceMarker).toHaveText("");
   await expect(relayProvenanceMarker.locator("svg")).toBeVisible();
-  await expect(managedRow).not.toContainText("managed by you");
-  await expect(relayRow).not.toContainText("managed by you");
+  await expect(managedRow).toContainText("managed by you");
+  await expect(relayRow).toContainText("managed by you");
 
   await page.setViewportSize({ width: 760, height: 640 });
   await expect(relayProvenanceMarker).toBeVisible();
@@ -642,6 +734,7 @@ test("Space inside a code block leaves an exact agent name literal", async ({
   await expect(input.locator("pre")).toBeVisible();
 
   await page.keyboard.type("deploy @ALICE");
+  await waitForCompleteMentionSearch(page, "alice");
   await page.keyboard.press(" ");
   await page.keyboard.type("now");
 
@@ -666,6 +759,7 @@ test("Space inside an inline code span leaves an exact agent name literal", asyn
   // backticks from the text the mention pipeline reads.
   await page.keyboard.type("run `@ALICE`");
   await expect(input.locator("code")).toHaveText("@ALICE");
+  await waitForCompleteMentionSearch(page, "alice");
 
   await page.keyboard.press(" ");
   await page.keyboard.type("now");
@@ -679,27 +773,52 @@ test("Space inside an inline code span leaves an exact agent name literal", asyn
     .toEqual([]);
 });
 
-test("Space still resolves an exact agent name typed after a code span", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+for (const separator of [" ", "\u00a0"]) {
+  test(`Space still resolves an exact agent name typed after a code span (${separator === " " ? "space" : "NBSP"})`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  const input = page.getByTestId("message-input");
-  await input.click();
-  await page.keyboard.type("run `deploy` @ALICE");
-  await page.keyboard.press(" ");
-  await page.keyboard.type("now");
+    const input = page.getByTestId("message-input");
+    await input.click();
+    await page.keyboard.type(`run \`deploy\`${separator}@ALICE`);
+    await waitForCompleteMentionSearch(page, "alice");
+    await expect(input.locator("code")).toHaveText("deploy");
+    await expect(
+      autocomplete(page).getByText("alice", { exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press(" ");
+    await page.keyboard.type("now");
 
-  const content = "run `deploy` @alice now";
-  await expect(input).toHaveText("run deploy @alice now");
+    await expect(input).toHaveText("run deploy @alice now");
 
-  await page.getByTestId("send-message").click();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, content))
-    .toContain(TEST_IDENTITIES.alice.pubkey);
-});
+    await page.getByTestId("send-message").click();
+    // Chromium may author NBSP after the code mark. Require the full signed
+    // body (including its code mark and single separator), not an ASCII-only
+    // lookup that reports null even when the exact recipient was published.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__BUZZ_E2E_SIGNED_EVENTS__
+            ?.filter((event) => event.kind === 9)
+            .map((event) => ({
+              content: event.content,
+              recipients: event.tags
+                .filter((tag) => tag[0] === "p")
+                .map((tag) => tag[1]),
+            })),
+        ),
+      )
+      .toEqual([
+        {
+          content: expect.stringMatching(/^run `deploy`[ \u00a0]@alice now$/),
+          recipients: [TEST_IDENTITIES.alice.pubkey],
+        },
+      ]);
+  });
+}
 
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
@@ -804,7 +923,11 @@ test("blocks non-participant persona mentions in DM threads", async ({
       .getByTestId("mention-autocomplete")
       .locator("button", { hasText: "Fizz" }),
   ).toBeVisible();
-  await input.press("Enter");
+  await threadPanel
+    .getByTestId("mention-autocomplete")
+    .locator("button", { hasText: "Fizz" })
+    .click();
+  await expect(input).toHaveText("Ask @Fizz ");
   await page.keyboard.type(" in this thread");
   const baselineCommands = await readCommandLog(page);
 
@@ -816,6 +939,9 @@ test("blocks non-participant persona mentions in DM threads", async ({
     ),
   ).toBeVisible();
   const commands = await readCommandLog(page);
+  expect(commandCount(await readCommandLog(page), "sign_event")).toBe(
+    commandCount(baselineCommands, "sign_event"),
+  );
   expect(commandCount(commands, "create_managed_agent")).toBe(
     commandCount(baselineCommands, "create_managed_agent"),
   );
@@ -856,14 +982,7 @@ test("defers agent mentions until DM members finish loading", async ({
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const input = threadPanel.getByTestId("message-input");
-  await input.fill("Ask @ali");
-  await expect(
-    threadPanel
-      .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "alice" }),
-  ).toBeVisible();
-  await input.press("Enter");
-  await page.keyboard.type(" before members resolve");
+  await input.fill("Ask @alice before members resolve");
   const baselineCommands = await readCommandLog(page);
   await threadPanel.getByTestId("send-message").click();
 
@@ -871,6 +990,9 @@ test("defers agent mentions until DM members finish loading", async ({
     page.getByText(DM_THREAD_MEMBERS_LOADING_ERROR_TEXT).first(),
   ).toBeVisible();
   await page.mouse.move(0, 0);
+  expect(commandCount(await readCommandLog(page), "sign_event")).toBe(
+    commandCount(baselineCommands, "sign_event"),
+  );
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
@@ -885,8 +1007,12 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toHaveText("@alice ");
+  // A one-time mention does not opt into automatic addressing after send.
+  await expect(input).toHaveText("");
   await expect(threadPanel).toContainText("before members resolve");
+  expect(
+    await readOutgoingMentionPubkeys(page, "Ask @alice before members resolve"),
+  ).toEqual([TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("autocomplete filters managed-agent suggestions as user types", async ({
@@ -1297,7 +1423,8 @@ test("selecting a persona mention creates a channel agent before sending", async
   await expect(fizzRow.getByTestId("mention-agent-icon")).toBeVisible();
   await expect(fizzRow.getByText("agent")).toBeVisible();
   await expect(fizzRow.getByText("not in channel")).toBeVisible();
-  await input.press("Enter");
+  await fizzRow.click();
+  await expect(input).toHaveText("Ask @Fizz ");
   await page.keyboard.type(" for a hand");
 
   const composerChip = input.locator(".agent-mention-highlight", {
@@ -1382,7 +1509,8 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   const dropdown = autocomplete(page);
   const fizzRow = dropdown.locator("button", { hasText: "Fizz" });
   await expect(fizzRow).toBeVisible();
-  await input.press("Enter");
+  await fizzRow.click();
+  await expect(input).toHaveText("Ask @Fizz ");
   await page.keyboard.type(" for a hand");
 
   const baselineCommands = await readCommandLog(page);
@@ -1474,7 +1602,7 @@ test("managed relay-profile agents with member roles can be addressed explicitly
   ).toBeVisible();
 });
 
-test("other-owned agents without a shared channel are hidden from mentions", async ({
+test("other-owned agents without a shared channel remain unavailable", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1495,12 +1623,24 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   const input = page.getByTestId("message-input");
   await input.fill("@mira");
 
-  const dropdown = autocomplete(page);
-  await expect(dropdown).not.toBeVisible();
+  await expect(
+    autocomplete(page).getByRole("button", {
+      name: "Checking mira",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable mira",
+    exact: true,
+  });
+  // The product intentionally gives unknown evidence a five-second window.
+  await expect(action).toBeDisabled({ timeout: 7000 });
+  await input.press("Tab");
+  await expect(input).toHaveText("@mira");
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
-test("stale channel-member agents absent from managed and relay directories stay hidden", async ({
+test("stale channel-member agents absent from managed and relay directories remain unavailable", async ({
   page,
 }) => {
   await installMockBridge(page, { userSearchDelayMs: 1_000 });
@@ -1511,7 +1651,20 @@ test("stale channel-member agents absent from managed and relay directories stay
   const input = page.getByTestId("message-input");
   await input.fill("@mira");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect(
+    autocomplete(page).getByRole("button", {
+      name: "Checking mira",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable mira",
+    exact: true,
+  });
+  // The product intentionally gives unknown evidence a five-second window.
+  await expect(action).toBeDisabled({ timeout: 7000 });
+  await input.press("Tab");
+  await expect(input).toHaveText("@mira");
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
@@ -1546,7 +1699,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("relay-only shared agents stay hidden from DM mentions", async ({
+test("relay-only shared agents remain unavailable from DM mentions", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1555,13 +1708,19 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
 
   await page.getByTestId("message-input").fill("@alice");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const action = autocomplete(page).getByRole("button", {
+    name: "Unavailable alice",
+    exact: true,
+  });
+  await expect(action).toBeDisabled();
+  await page.getByTestId("message-input").press("Tab");
+  await expect(page.getByTestId("message-input")).toHaveText("@alice");
 });
 
-test("cached relay-agent suggestions are removed when channel authorization disappears", async ({
+test("cached relay-agent members become unavailable when channel authorization disappears", async ({
   page,
 }) => {
-  await installMockBridge(page, { userSearchDelayMs: 10_000 });
+  await installMockBridge(page, { userSearchDelayMs: 100 });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1594,7 +1753,24 @@ test("cached relay-agent suggestions are removed when channel authorization disa
     await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   }, GENERAL_CHANNEL_ID);
 
-  await expect(aliceSuggestion).toHaveCount(0);
+  const action = aliceSuggestion.getByRole("button", {
+    name: "Unavailable alice",
+    exact: true,
+  });
+  await expect(action).toBeDisabled();
+  await expect(
+    aliceSuggestion.getByRole("button", { name: "Retry" }),
+  ).toBeEnabled();
+  await expect(
+    aliceSuggestion.getByRole("button", { name: /automatic/i }),
+  ).toHaveCount(0);
+  await action.dispatchEvent("click");
+  for (const key of ["Tab", "Enter"]) await input.press(key);
+  await expect(input).toHaveText("@alice");
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.alice.pubkey}`),
+  ).toHaveCount(0);
+  expect(await readOutgoingMentionPubkeys(page, "@alice")).toBeNull();
 });
 
 test("relay-only shared agents appear in forum mentions", async ({ page }) => {
@@ -1701,7 +1877,9 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
 
   const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
   await expect(
-    page.getByText(/Could not authorize a mentioned agent/),
+    page.getByText(
+      /Could not check access for a mentioned agent\. Retry or remove the mention\./,
+    ),
   ).toBeVisible();
   await expect(input).toContainText("@quinn hello");
   expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
@@ -1747,6 +1925,9 @@ test("managed agents use the channel roster for membership labels", async ({
         queryKey: ["channels"],
         exact: true,
       });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
     },
     {
       channelId: GENERAL_CHANNEL_ID,
@@ -1761,66 +1942,122 @@ test("managed agents use the channel roster for membership labels", async ({
   await expect(carlRow).toBeVisible();
   await expect(carlRow.getByText("agent")).toBeVisible();
   await expect(carlRow.getByText("not in channel")).toHaveCount(0);
+  await expect(carlRow).toContainText("Member · Mention");
+  await expect(carlRow).not.toContainText("Invite");
 });
 
-test("relay-agent directory errors fail closed and recover after a fresh fetch", async ({
-  page,
-}) => {
-  await installMockBridge(page, {
-    relayAgentListErrors: ["mock directory unavailable", null],
-    relayAgents: [
-      {
-        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
-        name: "quinn",
-        respondTo: "allowlist",
-        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
-        channelNames: ["general"],
+for (const explicitPicker of [false, true]) {
+  test(`relay-agent directory errors fail closed and recover after a fresh fetch (${explicitPicker ? "explicit picker" : "typed query"})`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      searchProfiles: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          displayName: "quinn",
+          isAgent: true,
+        },
+      ],
+      relayAgentListErrors: Array(20).fill("mock directory unavailable"),
+      relayAgents: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          name: "quinn",
+          respondTo: "allowlist",
+          respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+          channelNames: ["general"],
+        },
+      ],
+    });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    // Failed discovery cannot disclose an unknown directory-only identity.
+    // Seed a known channel member independently, so Retry has an existing row.
+    await page.evaluate(
+      async ({ channelId, pubkey }) => {
+        await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+          channelId,
+          pubkeys: [pubkey],
+          role: "bot",
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["channels", channelId, "members"],
+        });
       },
-    ],
-  });
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  const input = page.getByTestId("message-input");
-  await input.fill("@quinn");
-  await expect(autocomplete(page)).toHaveCount(0);
+      { channelId: GENERAL_CHANNEL_ID, pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY },
+    );
+    const input = page.getByTestId("message-input");
+    await input.fill("@quinn");
+    if (explicitPicker) {
+      // Clear the draft with native select-all + Backspace instead of
+      // fill(""): the programmatic selectAll inside fill can lose the
+      // selection to ProseMirror's own selection sync and leave "@quinn"
+      // behind in CI. Real key events let the editor apply both steps
+      // itself.
+      await input.press("ControlOrMeta+A");
+      await input.press("Backspace");
+      await expect(input).toBeEmpty();
+      await page
+        .getByRole("button", { name: "Mention someone", exact: true })
+        .click();
+    }
+    await expect(
+      autocomplete(page).getByRole("button", {
+        name: "Unavailable quinn",
+        exact: true,
+      }),
+    ).toBeDisabled();
+    await input.press("Tab");
+    if (explicitPicker) await expect(input).toBeEmpty();
+    else await expect(input).toHaveText("@quinn");
+    await expect(input.locator(".mention-chip")).toHaveCount(0);
 
-  await page.evaluate(async () => {
-    await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-      queryKey: ["relay-agents"],
+    await page.evaluate(async () => {
+      window.__BUZZ_E2E__.mock!.relayAgentListErrors = [];
     });
-  });
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
+    await autocomplete(page)
+      .getByRole("button", {
+        name: "Retry access check for quinn",
+        exact: true,
+      })
+      .click();
+    await expect(
+      autocomplete(page).getByRole("button", {
+        name: /^(Mention|Invite) quinn$/,
+      }),
+    ).toBeEnabled();
 
-  await page.evaluate(() => {
-    window.__BUZZ_E2E__.mock ??= {};
-    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
-    void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-      queryKey: ["relay-agents"],
+    await page.evaluate(() => {
+      window.__BUZZ_E2E__.mock ??= {};
+      window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
+      void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["relay-agents"],
+      });
     });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+              ?.fetchStatus,
+        ),
+      )
+      .toBe("fetching");
+    await expect(autocomplete(page).getByText("quinn")).toBeVisible({
+      timeout: 200,
+    });
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+              ?.fetchStatus,
+        ),
+      )
+      .toBe("idle");
+    await expect(autocomplete(page).getByText("quinn")).toBeVisible();
   });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
-            ?.fetchStatus,
-      ),
-    )
-    .toBe("fetching");
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible({
-    timeout: 200,
-  });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
-            ?.fetchStatus,
-      ),
-    )
-    .toBe("idle");
-  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
-});
+}
 
 test("relay-only allowlisted agents emit a p tag when sent", async ({
   page,
@@ -2000,6 +2237,491 @@ test("targeted revocation before send causes no agent side effects", async ({
   }
 });
 
+test("cached-visible revoked relay agent selection is denied without a directory refetch", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+
+  // Backend-only policy revocation: the targeted revalidation command omits
+  // quinn while nothing refreshes or invalidates the installed chooser cache.
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
+  }, ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  // The cached directory keeps serving the same eligible row.
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow).toBeEnabled();
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
+
+  await quinnRow.click();
+  await expect(page.getByTestId("composer-address-lock-status")).toHaveText(
+    /Access changed\. Selection was not inserted\./,
+  );
+  await expect(input).toHaveText("@quinn");
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
+
+  const deniedCommands = await captureMentionCommandBoundary(page, "final");
+  // The denial came from the targeted prepare-phase revalidation seam…
+  expect(commandCount(deniedCommands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
+  );
+  // …not from a directory refresh: the cached row was never refetched.
+  expect(commandCount(deniedCommands, "list_relay_agents")).toBe(
+    commandCount(baselineCommands, "list_relay_agents"),
+  );
+  // Nothing was inserted, invited, started, or published.
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+    "send_channel_message",
+    "sign_event",
+  ]) {
+    expect(
+      commandCount(deniedCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
+  }
+  expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
+
+  // Control: the identical cached row and click admit once the backend policy
+  // re-allows the agent, still with no directory refetch.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [];
+  });
+  await quinnRow.click();
+  await expect(input.locator(".mention-chip")).toHaveCount(1);
+  await page.keyboard.type("hello");
+  await expect(input).toHaveText("@quinn hello");
+  const controlCommands = await readCommandLog(page);
+  expect(commandCount(controlCommands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(controlCommands, "list_relay_agents")).toBe(
+    commandCount(baselineCommands, "list_relay_agents"),
+  );
+});
+
+// Deferred IPC seam, the remote-owned-mentions.spec.ts holdInviteCommand
+// pattern: hold the exact next targeted revalidation so a real click
+// admission parks at the authority boundary instead of racing the browser.
+type MentionGateWindow = Window & {
+  __TAURI_INTERNALS__: {
+    invoke: (command: string, payload?: unknown) => Promise<unknown>;
+  };
+  mentionGateEntered?: boolean;
+  releaseMentionGate?: () => void;
+};
+async function holdMentionGateCommand(
+  page: import("@playwright/test").Page,
+  command: string,
+) {
+  await page.evaluate(
+    ({ heldCommand }) => {
+      const state = window as unknown as MentionGateWindow;
+      const invoke = state.__TAURI_INTERNALS__.invoke;
+      const gate = new Promise<void>((resolve) => {
+        state.releaseMentionGate = resolve;
+      });
+      state.__TAURI_INTERNALS__.invoke = async (command, payload) => {
+        if (command !== heldCommand) return invoke(command, payload);
+        state.__TAURI_INTERNALS__.invoke = invoke;
+        state.mentionGateEntered = true;
+        await gate;
+        return invoke(command, payload);
+      };
+    },
+    { heldCommand: command },
+  );
+}
+async function waitForMentionGate(page: import("@playwright/test").Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as MentionGateWindow).mentionGateEntered,
+      ),
+    )
+    .toBe(true);
+}
+async function releaseMentionGate(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    (window as unknown as MentionGateWindow).releaseMentionGate?.();
+  });
+}
+
+test("navigating to mention Options during a held selection inserts nothing late", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow).toBeEnabled();
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
+
+  // Hold the fresh targeted revalidation, then start the selection normally.
+  await holdMentionGateCommand(page, "revalidate_relay_agents");
+  await quinnRow.click();
+  await waitForMentionGate(page);
+  await expect(page.getByTestId("composer-address-lock-status")).toContainText(
+    "Checking access",
+  );
+
+  // Native Shift+Tab from the editor the click never defocused: the app's
+  // real handler must hand focus to the overlay's Options trigger.
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(
+    page.getByTestId("message-composer").getByTestId("mention-options-trigger"),
+  ).toBeFocused();
+
+  // Release the held authority response and settle the downstream DOM.
+  await releaseMentionGate(page);
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+  await page.waitForTimeout(300);
+
+  // A selection navigated away from the editor must not insert late: the
+  // draft keeps its raw text, no chip or addressed-agent side effect appears,
+  // and nothing is invited, started, or published.
+  await expect(input).toHaveText("@quinn");
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
+  await expect(
+    page.getByTestId("composer-address-lock-status"),
+  ).not.toContainText("Automatically mentioning");
+  const settledCommands = await captureMentionCommandBoundary(page, "final");
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+    "send_channel_message",
+    "sign_event",
+  ]) {
+    expect(
+      commandCount(settledCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
+  }
+  expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
+});
+
+test("navigating away from the mention row pin during its held revalidation pins nothing late", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForInitialPresenceSigning(page);
+
+  const composer = page.getByTestId("message-composer");
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow).toBeEnabled();
+  const baselineCommands = await captureMentionCommandBoundary(
+    page,
+    "baseline",
+  );
+
+  // Keyboard route into the overlay, no pointer and no test-side focus: the
+  // app's editor handler hands focus to the Options trigger, then a native
+  // Tab reaches the row's pin control (row buttons are pointer-guarded
+  // non-tab stops).
+  const optionsTrigger = composer.getByTestId("mention-options-trigger");
+  const quinnPinToggle = composer.getByTestId(
+    `mention-always-address-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(optionsTrigger).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(quinnPinToggle).toBeFocused();
+  // The focused control is the pin by role, name and pressed state, and the
+  // editor is not focused: an Enter here is a pin activation, not a
+  // selection duplicate.
+  await expect(
+    composer.getByRole("button", {
+      name: "Automatically mention quinn",
+      exact: true,
+    }),
+  ).toBeFocused();
+  await expect(quinnPinToggle).toHaveAttribute("aria-pressed", "false");
+  await expect(input).not.toBeFocused();
+
+  // Start the PIN with a native Enter on the focused pin control and hold
+  // the pin's fresh targeted revalidation at the deferred-IPC seam.
+  await holdMentionGateCommand(page, "revalidate_relay_agents");
+  await page.keyboard.press("Enter");
+  await waitForMentionGate(page);
+  await expect(page.getByTestId("composer-address-lock-status")).toContainText(
+    "Checking access",
+  );
+
+  // Native Shift+Tab from the pin — the editor's key handler sees no overlay
+  // events — must really move focus off the pin control.
+  await page.keyboard.press("Shift+Tab");
+  await expect(optionsTrigger).toBeFocused();
+  await expect(quinnPinToggle).not.toBeFocused();
+
+  // Release the held authority response and settle the downstream DOM.
+  const draftAtDeparture = await input.evaluate(
+    (element) => element.textContent,
+  );
+  await releaseMentionGate(page);
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+  await page.waitForTimeout(300);
+
+  // A pin navigated away from must not apply late: the draft keeps its raw
+  // query text, no implicit prefix or highlight appears, no chip, no
+  // address-lock audience, no announcement, the pin stays unpressed, and
+  // nothing is invited, started, or published.
+  await expect
+    .poll(() => input.evaluate((element) => element.textContent))
+    .toBe(draftAtDeparture);
+  await expect(input).toHaveText("@quinn");
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+  await expect(
+    composer.getByTestId(
+      `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("composer-address-lock-status"),
+  ).not.toContainText("Automatically mentioning");
+  await expect(quinnPinToggle).toHaveAttribute("aria-pressed", "false");
+  const settledCommands = await captureMentionCommandBoundary(page, "final");
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+    "send_channel_message",
+    "sign_event",
+  ]) {
+    expect(
+      commandCount(settledCommands, command),
+      `${command} must equal baseline`,
+    ).toBe(commandCount(baselineCommands, command));
+  }
+  expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
+
+  // Positive control: the same native pin activation without navigating
+  // away must pin through the same real gate, proving the exercised control
+  // is a working pin and the quiet settlement above was not an inert route.
+  await page.keyboard.press("Tab");
+  await expect(quinnPinToggle).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 2);
+  await expect(quinnPinToggle).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    composer.getByTestId(
+      `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+    ),
+  ).toBeVisible();
+  await expect(page.getByTestId("composer-address-lock-status")).toContainText(
+    "Automatically mentioning quinn",
+  );
+  await expect(input).toHaveText("@quinn ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("quinn");
+});
+
+for (const change of ["draft", "selection range"] as const) {
+  test(`editing and restoring the ${change} during a held mention selection inserts nothing late`, async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      relayAgents: [
+        {
+          pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          name: "quinn",
+          respondTo: "allowlist",
+          respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+          channelNames: ["general"],
+        },
+      ],
+    });
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForInitialPresenceSigning(page);
+
+    const composer = page.getByTestId("message-composer");
+    const input = page.getByTestId("message-input");
+    // Read-only DOM offsets: no editor state or browser selection is changed.
+    const readCaret = () =>
+      input.evaluate((element) => {
+        const selection = window.getSelection();
+        if (
+          !selection?.anchorNode ||
+          !selection.focusNode ||
+          !element.contains(selection.anchorNode) ||
+          !element.contains(selection.focusNode)
+        ) {
+          return null;
+        }
+        const offset = (node: Node, position: number) => {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          range.setEnd(node, position);
+          return range.toString().length;
+        };
+        return {
+          anchor: offset(selection.anchorNode, selection.anchorOffset),
+          focus: offset(selection.focusNode, selection.focusOffset),
+          collapsed: selection.isCollapsed,
+        };
+      });
+    await input.fill("@quinn");
+    const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+    await expect(quinnRow).toBeVisible();
+    await expect(quinnRow).toBeEnabled();
+    await expect(input).toBeFocused();
+    const originalCaret = await readCaret();
+    expect(originalCaret).toEqual({ anchor: 6, focus: 6, collapsed: true });
+    const baselineCommands = await captureMentionCommandBoundary(
+      page,
+      "baseline",
+    );
+
+    await holdMentionGateCommand(page, "revalidate_relay_agents");
+    await quinnRow.click();
+    await waitForMentionGate(page);
+    const status = page.getByTestId("composer-address-lock-status");
+    await expect(status).toContainText("Checking access");
+    await expect(input).toBeFocused();
+    await expect.poll(readCaret).toEqual(originalCaret);
+
+    if (change === "draft") {
+      // Behavior coverage: text edits also invalidate the query revision.
+      await page.keyboard.press("Backspace");
+      await expect(input).toHaveText("@quin");
+      await expect(input).toBeFocused();
+      await page.keyboard.type("n");
+    } else {
+      // Query snapshots use the selection ANCHOR, not its moving head.
+      // Extend and retract a real native range without changing text/anchor:
+      // query revision cannot mask removal of editor cancellation listeners.
+      await page.keyboard.press("Shift+ArrowLeft");
+      await expect(input).toHaveText("@quinn");
+      await expect(input).toBeFocused();
+      await expect.poll(readCaret).toEqual({
+        anchor: 6,
+        focus: 5,
+        collapsed: false,
+      });
+      await page.keyboard.press("Shift+ArrowRight");
+    }
+    await expect(input).toHaveText("@quinn");
+    await expect(input).toBeFocused();
+    await expect.poll(readCaret).toEqual(originalCaret);
+
+    await releaseMentionGate(page);
+    await expect
+      .poll(async () =>
+        commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+      )
+      .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+    // Same downstream settlement window as the adjacent held-gate probes.
+    await page.waitForTimeout(300);
+
+    await expect(input).toBeFocused();
+    await expect(input).toHaveText("@quinn");
+    await expect.poll(readCaret).toEqual(originalCaret);
+    await expect(input.locator(".mention-chip")).toHaveCount(0);
+    await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+    await expect(
+      composer.getByTestId(
+        `composer-address-lock-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+      ),
+    ).toHaveCount(0);
+    await expect(status).not.toContainText("Checking access");
+    await expect(status).not.toContainText("Automatically mentioning");
+    const settledCommands = await captureMentionCommandBoundary(page, "final");
+    for (const command of [
+      "add_channel_members",
+      "start_managed_agent",
+      "attach_managed_agent",
+      "sync_agents_to_active_huddle",
+      "send_channel_message",
+      "sign_event",
+    ]) {
+      expect(
+        commandCount(settledCommands, command),
+        `${command} must equal baseline`,
+      ).toBe(commandCount(baselineCommands, command));
+    }
+    expect(await readOutgoingMentionPubkeys(page, "@quinn")).toBeNull();
+  });
+}
+
 test("selected relay agents are invited as bots before sending", async ({
   page,
 }) => {
@@ -2021,7 +2743,10 @@ test("selected relay agents are invited as bots before sending", async ({
   await input.fill("@quinn");
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
-  await expect(quinnRow.getByText("not in channel")).toHaveCount(0);
+  await expect(quinnRow.getByText("not in channel")).toBeVisible();
+  await expect(quinnRow).toContainText("Invite");
+  await expect(quinnRow).not.toContainText("Member · Mention");
+  await expect(quinnRow).toBeEnabled();
   await quinnRow.click();
   await page.keyboard.type("hello");
 
@@ -2032,11 +2757,17 @@ test("selected relay agents are invited as bots before sending", async ({
     exact: true,
   });
   await expect(inviteButton).toBeVisible();
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
+  expect(
+    (await readCommandPayloadLog(page))
+      .slice(baselinePayloadCount)
+      .some((entry) => entry.command === "add_channel_members"),
+  ).toBe(false);
   await inviteButton.click();
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+    .toEqual([ALLOWLIST_RELAY_AGENT_PUBKEY]);
   const sendCommands = (await readCommandPayloadLog(page)).slice(
     baselinePayloadCount,
   );
@@ -2089,7 +2820,9 @@ test("selected relay agents revoked after the invite prompt cause no side effect
   await inviteButton.click();
 
   await expect(
-    page.getByText(/Could not authorize a mentioned agent/),
+    page.getByText(
+      /Could not check access for a mentioned agent\. Retry or remove the mention\./,
+    ),
   ).toBeVisible();
   await expect(input).toHaveText("@quinn hello");
   expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
@@ -2143,7 +2876,9 @@ test("selected relay agents revoked during send emit no p tag", async ({
   });
 
   await expect(
-    page.getByText(/Could not authorize a mentioned agent/),
+    page.getByText(
+      /Could not check access for a mentioned agent\. Retry or remove the mention\./,
+    ),
   ).toBeVisible();
   await expect(input).toHaveText("@quinn hello");
   expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
@@ -2256,7 +2991,12 @@ test("relay-only allowlisted agents stay hidden outside their channel", async ({
 
   await page.getByTestId("message-input").fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect(
+    page.getByRole("status").filter({ hasText: "No mentions found" }),
+  ).toBeVisible();
+  await expect(
+    autocomplete(page).locator("[data-testid^=mention-suggestion-]"),
+  ).toHaveCount(0);
 });
 
 test("owner-only builds admit cross-owner relay agents authorized for anyone", async ({
@@ -2311,14 +3051,19 @@ test("relay-only excluded agents stay hidden from channel mentions", async ({
 
   await page.getByTestId("message-input").fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect(
+    page.getByRole("status").filter({ hasText: "No mentions found" }),
+  ).toBeVisible();
+  await expect(
+    autocomplete(page).locator("[data-testid^=mention-suggestion-]"),
+  ).toHaveCount(0);
 });
 
 test("shared agents wait for initial directory authorization", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    agentListDelayMs: 1_000,
+    deferAgentList: true,
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
@@ -2335,7 +3080,15 @@ test("shared agents wait for initial directory authorization", async ({
 
   await page.getByTestId("message-input").fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect(
+    page.getByRole("status").filter({ hasText: "Loading mentions" }),
+  ).toBeVisible();
+  await expect(autocomplete(page).getByText("quinn")).toHaveCount(0);
+  await page.evaluate(() => {
+    const release = window.__BUZZ_E2E_RELEASE_AGENT_LIST__;
+    if (!release) throw new Error("Directory release seam unavailable");
+    release();
+  });
   await expect(autocomplete(page).getByText("quinn")).toBeVisible({
     timeout: 3_000,
   });
@@ -2469,7 +3222,8 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   const fizzRow = dropdown.locator("button", { hasText: "fizz" });
   await expect(fizzRow).toBeVisible();
   await expect(fizzRow.getByText("not in channel")).toBeVisible();
-  await input.press("Enter");
+  await fizzRow.click();
+  await expect(input).toHaveText("Loop in @fizz ");
 
   const baselineCommands = await readCommandLog(page);
   const baselineAddCount = commandCount(
@@ -2575,7 +3329,8 @@ test("mentioning a non-member provider managed agent deploys it before sending",
   const portalRow = dropdown.locator("button", { hasText: "portal" });
   await expect(portalRow).toBeVisible();
   await expect(portalRow.getByText("not in channel")).toBeVisible();
-  await input.press("Enter");
+  await portalRow.click();
+  await expect(input).toHaveText("Loop in @portal ");
 
   const baselineCommands = await readCommandLog(page);
   const baselineAddCount = commandCount(
@@ -3015,7 +3770,7 @@ test("global non-member people can be selected from channel mentions", async ({
   await expect(dropdown.getByText("not in channel")).toBeVisible();
 });
 
-test("duplicate global people with the same visible identity collapse in channel mentions", async ({
+test("distinct same-name global people remain independently selectable", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -3039,7 +3794,34 @@ test("duplicate global people with the same visible identity collapse in channel
   await input.fill("@pip");
 
   const dropdown = autocomplete(page);
-  await expect(dropdown.locator("button", { hasText: "Pip" })).toHaveCount(1);
+  const keys = [CASEY_PROFILE_PUBKEY, "2".repeat(64)];
+  await waitForCompleteMentionSearch(page, "pip");
+  const displayedKey = await dropdown
+    .locator("[data-testid^=mention-suggestion-]")
+    .first()
+    .getAttribute("data-testid");
+  await input.press("Tab");
+  await expect(input).toHaveText("@Pip ");
+  expect(keys.some((key) => displayedKey === `mention-suggestion-${key}`)).toBe(
+    true,
+  );
+  for (const key of keys) {
+    await input.fill("@pip");
+    const row = dropdown.getByTestId(`mention-suggestion-${key}`);
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("Pip");
+    await expect(row.locator("[title^=npub]")).toHaveCount(1);
+    await row.locator("button").first().click();
+    await page.keyboard.type(key.slice(0, 1));
+    const content = `@Pip ${key.slice(0, 1)}`;
+    await page.getByTestId("send-message").click();
+    await expect(page.getByRole("alertdialog")).toBeVisible();
+    expect(await readOutgoingMentionPubkeys(page, content)).toBeNull();
+    await page.getByRole("button", { name: "Invite", exact: true }).click();
+    await expect
+      .poll(() => readOutgoingMentionPubkeys(page, content))
+      .toEqual([key]);
+  }
 });
 
 test("sent non-member person mention uses the normal mention style", async ({
@@ -3052,10 +3834,15 @@ test("sent non-member person mention uses the normal mention style", async ({
   const input = page.getByTestId("message-input");
   await input.fill("Loop in @out");
 
+  const baselineCommands = await readCommandLog(page);
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("outsider")).toBeVisible();
-  await input.press("Enter");
+  await expect(dropdown).toContainText("Mention without inviting");
+  await expect(dropdown).not.toContainText("Invite…");
+  await dropdown.getByText("outsider", { exact: true }).click();
+  await expect(input).toHaveText("Loop in @outsider ");
   await page.keyboard.type(" please");
+  const content = await input.innerText();
   await page.getByTestId("send-message").click();
 
   const mentionChip = page
@@ -3064,6 +3851,24 @@ test("sent non-member person mention uses the normal mention style", async ({
     .locator("[data-mention]", { hasText: "outsider" });
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
+  await expect(page.getByRole("alertdialog")).toBeHidden();
+  expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
+    commandCount(baselineCommands, "add_channel_members"),
+  );
+  const signed = await page.evaluate(
+    (content) =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+        (event) => event.content === content,
+      ),
+    content,
+  );
+  expect(signed?.tags.filter((tag) => tag[0] === "h")).toEqual([
+    ["h", "7eb9f239-9393-50b0-bd76-d85eef0511c7"],
+  ]);
+  expect(await readOutgoingMentionPubkeys(page, content)).toEqual([
+    TEST_IDENTITIES.outsider.pubkey,
+    TEST_IDENTITIES.bob.pubkey,
+  ]);
 });
 
 test("sent managed non-member agent mention uses the agent mention style", async ({
@@ -3087,7 +3892,8 @@ test("sent managed non-member agent mention uses the agent mention style", async
 
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("charlie")).toBeVisible();
-  await input.press("Enter");
+  await dropdown.getByText("charlie", { exact: true }).click();
+  await expect(input).toHaveText("Loop in @charlie ");
   await page.keyboard.type(" too");
   await page.getByTestId("send-message").click();
 
@@ -3146,23 +3952,38 @@ test("inserting a mention preserves Shift+Enter newlines (regression: bug #2)", 
   await expect(input.locator("br")).toHaveCount(1);
 });
 
-test("keyboard navigation selects mention with Enter", async ({ page }) => {
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+for (const channel of ["general", "watercooler"]) {
+  test(`keyboard navigation selects mention with Enter in ${channel}`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId(`channel-${channel}`).click();
+    await expect(page.getByTestId("chat-title")).toHaveText(channel);
+    if (channel === "watercooler")
+      await page.getByRole("button", { name: "Start a new post..." }).click();
 
-  const input = page.getByTestId("message-input");
-  await input.fill("@bo");
+    const input = page.getByTestId("message-input");
+    await input.click();
+    await page.keyboard.type("@bo");
 
-  const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("bob")).toBeVisible();
+    const dropdown = page.getByTestId("mention-autocomplete");
+    await expect(dropdown.getByText("bob")).toBeVisible();
 
-  // Press Enter to select the first (and only) suggestion
-  await input.press("Enter");
+    // Select deliberately after the current search settles; a visible row alone
+    // does not authorize implicit completion while more results may arrive.
+    await waitForCompleteMentionSearch(page, "bo");
+    const baselineCommands = await readCommandLog(page);
+    await input.press("ArrowDown");
+    await input.press("Enter");
 
-  // Should insert @bob and NOT send the message
-  await expect(input).toHaveText("@bob ");
-});
+    // Should insert @bob and NOT send the message
+    await expect(input).toHaveText("@bob ");
+    await expect(input.locator("p")).toHaveCount(1);
+    expect(commandCount(await readCommandLog(page), "sign_event")).toBe(
+      commandCount(baselineCommands, "sign_event"),
+    );
+  });
+}
 
 test("Escape dismisses autocomplete dropdown", async ({ page }) => {
   await page.goto("/");
@@ -3694,3 +4515,84 @@ test("delayed inaccessible agent profile keeps all actions hidden", async ({
     ),
   ).toHaveCount(0);
 });
+
+for (const channel of ["general", "watercooler"]) {
+  test(`leaving completion dismisses the ${channel} picker without editing the draft`, async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await page.getByTestId(`channel-${channel}`).click();
+    if (channel === "watercooler")
+      await page.getByRole("button", { name: "Start a new post..." }).click();
+    const input = page.getByTestId("message-input");
+    await input.click();
+    // ProseMirror restores a DOM-only jump to document start within 200ms
+    // of focus (domobserver.ts). Type at a human pace rather than filling
+    // and moving in that browser-focus recovery window.
+    await input.pressSequentially("hello @bo", { delay: 30 });
+    await expect(page.getByTestId("mention-autocomplete-layer")).toBeVisible();
+    await expect(
+      page.locator("[data-mention-suggestion-index]").first(),
+    ).toBeVisible();
+    await waitForAnimations(page);
+    await expect(input).toBeFocused();
+    // Native line-start movement differs by browser host OS; Meta+ArrowLeft
+    // leaves the caret unchanged in Linux Chromium (including CI).
+    await input.press(
+      process.platform === "darwin" ? "Meta+ArrowLeft" : "Home",
+    );
+    await expect
+      .poll(() => input.evaluate(() => window.getSelection()?.anchorOffset))
+      .toBe(0);
+    await expect(page.getByTestId("mention-autocomplete-layer")).toBeHidden();
+    await input.press("Tab");
+    await expect(input).toHaveText("hello @bo");
+  });
+}
+
+for (const action of ["Invite", "Send anyway", "Cancel"]) {
+  test(`private-channel active member nonmember mention: ${action}`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.getByTestId("channel-secret-projects").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("secret-projects");
+    const baseline = await readCommandLog(page);
+    const input = page.getByTestId("message-input");
+    await input.fill("Private @out");
+    const dropdown = autocomplete(page);
+    await expect(dropdown).toContainText("Invite…");
+    await dropdown.getByText("outsider", { exact: true }).click();
+    const draft = await input.innerText();
+    const content = draft.trim();
+    await page.getByTestId("send-message").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Invite", exact: true }),
+    ).toBeEnabled();
+    if (action === "Cancel") await page.keyboard.press("Escape");
+    else
+      await dialog
+        .getByRole("button", {
+          name: action === "Send anyway" ? "Do nothing" : action,
+          exact: true,
+        })
+        .click();
+    await expect(dialog).toBeHidden();
+    if (action === "Cancel") {
+      await expect(input).toHaveText(draft);
+      expect(await readOutgoingMentionPubkeys(page, content)).toBeNull();
+    } else {
+      await expect(input).toBeEmpty();
+      await expect
+        .poll(() => readOutgoingMentionPubkeys(page, content))
+        .toEqual(action === "Invite" ? [TEST_IDENTITIES.outsider.pubkey] : []);
+    }
+    expect(
+      commandCount(await readCommandLog(page), "add_channel_members") -
+        commandCount(baseline, "add_channel_members"),
+    ).toBe(action === "Invite" ? 1 : 0);
+  });
+}

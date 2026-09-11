@@ -248,3 +248,24 @@ for (const extractor of [
     }
   });
 }
+
+// DMs bypass the channel invitation prompt: preserve the existing send contract.
+test("DM nonmember sends directly without invitation side effects", async () => {
+  const s = await setup();
+  s.dismiss();
+  s.options.channelType = "dm";
+  s.options.mentions.isAgentPubkey = () => false;
+  s.control.canInvite = false;
+  s.rerender();
+  await s.act(async () =>
+    s.result.current.sendMessageWithMentionFlow({
+      capturedChannelId: "general",
+      pendingImeta: [],
+      trimmed: TEXT,
+    }),
+  );
+  assert.equal(s.result.current.nonMemberPromptProps.open, false);
+  assert.equal(s.events("add").length, 0);
+  assert.equal(s.events("SEND").length, 1);
+  assert.deepEqual(s.events("SEND")[0][2], [KEY]);
+});

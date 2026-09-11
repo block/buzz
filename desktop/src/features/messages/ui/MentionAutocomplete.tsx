@@ -1,3 +1,8 @@
+import {
+  isMentionActionable,
+  type MentionAction,
+  type MentionPresence,
+} from "../lib/mentionPresentation";
 import * as React from "react";
 import { Bot, ChevronRight, Pin, Users } from "lucide-react";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
@@ -32,6 +37,13 @@ export type MentionSuggestion = {
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
+  action?: MentionAction;
+  unavailableReason?: string;
+  presence?: MentionPresence;
+  localLifecycle?: string;
+  localError?: boolean;
+  hasNameCollision?: boolean;
+  onRetry?: () => void;
 };
 
 type MentionAutocompleteProps = {
@@ -46,7 +58,8 @@ type MentionAutocompleteProps = {
    * Options controls keeps the overlay mounted.
    */
   composerOwnsFocus: boolean;
-  onFetchMore?: () => void;
+  isOpen?: boolean;
+  isLoading?: boolean;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
   onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
@@ -86,7 +99,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
   composerOwnsFocus,
-  onFetchMore,
+  isOpen = suggestions.length > 0,
+  isLoading = false,
   onSelect,
   lockedAgentPubkeys,
   onToggleAlwaysAddressAgent,
@@ -101,6 +115,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   const optionsSurfaceRef = React.useRef<HTMLDivElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const optionsId = React.useId();
+  const reasonIdPrefix = React.useId();
   const keepPinnedSwitchId = React.useId();
   const [optionsOpen, setOptionsOpen] = React.useState(false);
   const handledOptionsRequestRef = React.useRef(0);
@@ -163,15 +178,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       document.removeEventListener("pointerdown", handlePointerDown, true);
   }, [onDismiss]);
 
-  const handleScroll = React.useCallback(() => {
-    const list = listRef.current;
-    if (!list || !onFetchMore) return;
-
-    if (list.scrollHeight - list.scrollTop - list.clientHeight < 48) {
-      onFetchMore();
-    }
-  }, [onFetchMore]);
-
   // Escape from inside the overlay is the keyboard counterpart of pressing
   // outside it: hand focus back to the editor the overlay belongs to, then
   // dismiss. Focusing first keeps the composer's focus ownership unbroken, so
@@ -192,7 +198,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     [onDismiss],
   );
 
-  if (!composerOwnsFocus || suggestions.length === 0) {
+  if (!composerOwnsFocus || !isOpen) {
     return null;
   }
 
@@ -217,6 +223,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       ref={rootRef}
     >
       <div className="w-full max-w-2xl">
+        {isLoading || suggestions.length === 0 ? (
+          <div
+            role="status"
+            className="rounded-xl bg-popover p-3 text-sm text-muted-foreground"
+          >
+            {isLoading ? "Loading mentions…" : "No mentions found"}
+          </div>
+        ) : null}
         {onKeepMentionedAgentsPinnedChange ? (
           <div className="mb-2 flex justify-end">
             {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown on this surface (its padding, the switch's label) blurs the editor, and the focus gate above would unmount the overlay before the click lands. */}
@@ -317,7 +331,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           )}
           data-testid="mention-autocomplete"
           onMouseDown={(event) => event.preventDefault()}
-          onScroll={handleScroll}
           ref={listRef}
           style={POPOVER_SHADOW_STYLE}
         >
@@ -330,15 +343,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
               suggestion.displayName;
             const hasNameCollision =
+              suggestion.hasNameCollision ||
               (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
             const showAgentProvenanceMarker = showMentionAgentProvenanceMarker(
               suggestion,
               hasNameCollision,
             );
-            const ownerLabel =
-              hasNameCollision && suggestion.agentProvenance
-                ? null
-                : suggestion.ownerLabel;
+            const reasonId = `${reasonIdPrefix}-${suggestionKey}-reason`;
+            const ownerLabel = suggestion.ownerLabel;
             const collisionNpub =
               hasNameCollision && suggestion.pubkey
                 ? safeNpub(suggestion.pubkey)
@@ -348,10 +360,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 suggestion.isAgent ||
                 suggestion.role ||
                 ownerLabel ||
-                suggestion.notInChannel,
+                suggestion.notInChannel ||
+                suggestion.action,
             );
             const canAlwaysAddress = Boolean(
-              onToggleAlwaysAddressAgent &&
+              isMentionActionable(suggestion) &&
+                onToggleAlwaysAddressAgent &&
                 suggestion.isAgent &&
                 suggestion.pubkey,
             );
@@ -373,14 +387,18 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 key={suggestionKey}
               >
                 <button
-                  aria-label={`Mention ${suggestion.displayName}`}
+                  aria-label={`${suggestion.action === "invite" ? "Invite" : suggestion.action === "checking" ? "Checking" : suggestion.action === "unavailable" ? "Unavailable" : "Mention"} ${suggestion.displayName}${hasNameCollision && suggestion.pubkey ? ` (${suggestion.pubkey})` : ""}`}
+                  disabled={!isMentionActionable(suggestion)}
+                  aria-describedby={
+                    suggestion.unavailableReason ? reasonId : undefined
+                  }
                   className={cn(
                     "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
                     canAlwaysAddress && "pr-11",
                   )}
                   onMouseDown={(event) => {
                     event.preventDefault();
-                    onSelect(suggestion);
+                    if (isMentionActionable(suggestion)) onSelect(suggestion);
                   }}
                   tabIndex={-1}
                   type="button"
@@ -412,7 +430,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     {hasMetadataBeforeNpub || collisionNpub ? (
                       <span
                         className={cn(
-                          "flex min-h-3.5 min-w-0 items-center gap-1.5 text-2xs leading-none",
+                          "flex min-h-3.5 min-w-0 flex-wrap items-center gap-1.5 text-2xs leading-snug",
                           index === selectedIndex
                             ? "text-accent-foreground/60"
                             : "text-muted-foreground",
@@ -442,7 +460,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           >
                             {suggestion.role}
                           </Badge>
-                        ) : null}
+                        ) : (
+                          <span>person</span>
+                        )}
                         {ownerLabel || suggestion.notInChannel ? (
                           <span
                             className="min-w-0 truncate"
@@ -461,6 +481,33 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                                 : "not in channel"}
                           </span>
                         ) : null}
+                        {suggestion.action ? (
+                          <span>
+                            {suggestion.action === "mention"
+                              ? "Member · Mention"
+                              : suggestion.action === "invite"
+                                ? "Invite…"
+                                : suggestion.action === "mention-without-invite"
+                                  ? "Nonmember · Mention without inviting"
+                                  : suggestion.action === "checking"
+                                    ? "Checking access…"
+                                    : "Unavailable"}
+                          </span>
+                        ) : null}
+                        {suggestion.isAgent && suggestion.presence ? (
+                          <span>
+                            {suggestion.presence === "online"
+                              ? "Online"
+                              : suggestion.presence === "away"
+                                ? "Away"
+                                : suggestion.presence === "offline"
+                                  ? "Offline"
+                                  : "Presence unknown"}
+                          </span>
+                        ) : null}
+                        {suggestion.localError ? (
+                          <span>Local start failed</span>
+                        ) : null}
                         {collisionNpub ? (
                           <span
                             className="-translate-y-0.5 shrink-0 font-mono leading-none"
@@ -472,8 +519,40 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         ) : null}
                       </span>
                     ) : null}
+                    {suggestion.unavailableReason ? (
+                      <span
+                        id={reasonId}
+                        className="text-2xs text-muted-foreground"
+                      >
+                        {suggestion.unavailableReason}
+                      </span>
+                    ) : null}
                   </span>
                 </button>
+                {suggestion.action === "unavailable" && suggestion.onRetry ? (
+                  <button
+                    type="button"
+                    className="px-2 text-xs text-muted-foreground"
+                    aria-label={`Retry access check for ${suggestion.displayName}`}
+                    aria-describedby={
+                      suggestion.unavailableReason ? reasonId : undefined
+                    }
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      // Retry disappears while checking. Transfer keyboard focus
+                      // before it unmounts so the composer retains its chooser.
+                      rootRef.current
+                        ?.closest("form")
+                        ?.querySelector<HTMLElement>(
+                          '[data-testid="message-input"]',
+                        )
+                        ?.focus();
+                      suggestion.onRetry?.();
+                    }}
+                  >
+                    Retry
+                  </button>
+                ) : null}
                 {canAlwaysAddress ? (
                   <Tooltip>
                     <TooltipTrigger asChild>

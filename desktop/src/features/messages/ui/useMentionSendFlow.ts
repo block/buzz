@@ -31,7 +31,7 @@ import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
-  formatMessageSendError,
+  formatMentionSendError,
   getErrorMessage,
   mentionRevalidationOptions,
   withoutInvitingRecipients,
@@ -44,7 +44,6 @@ import {
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
-import { AgentMentionAuthorizationError } from "@/features/messages/lib/agentMentionRevalidation";
 import type { UseMentionSendFlowOptions } from "./useMentionSendFlow.types";
 
 export function useMentionSendFlow({
@@ -650,11 +649,7 @@ export function useMentionSendFlow({
                 await finishSend(uploaded, signal);
               } catch (error) {
                 restoreComposerAfterFailure();
-                toast.error(
-                  error instanceof AgentMentionAuthorizationError
-                    ? error.message
-                    : formatMessageSendError(error),
-                );
+                toast.error(formatMentionSendError(error));
               } finally {
                 settleUpload();
               }
@@ -682,11 +677,7 @@ export function useMentionSendFlow({
             await finishSend([]);
           } catch (error) {
             restoreComposerAfterFailure();
-            toast.error(
-              error instanceof AgentMentionAuthorizationError
-                ? error.message
-                : formatMessageSendError(error),
-            );
+            toast.error(formatMentionSendError(error));
           }
         }
       } catch (error) {

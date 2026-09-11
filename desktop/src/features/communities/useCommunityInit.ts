@@ -1,3 +1,4 @@
+import { resetMentionSelectionHistory } from "@/features/messages/lib/mentionSelectionHistory";
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -38,6 +39,7 @@ import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useS
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
+import { resetMembershipDirectorySync } from "@/features/channels/membershipDirectorySync";
 
 import {
   initFirstCommunity,
@@ -58,6 +60,8 @@ async function resetCommunityState({
   resetAvatarState: boolean;
 }): Promise<void> {
   relayClient.disconnect();
+  resetMembershipDirectorySync();
+  resetMentionSelectionHistory();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();
