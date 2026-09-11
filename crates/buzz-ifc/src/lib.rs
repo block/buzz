@@ -6,10 +6,14 @@
 //! and membership version, so a change produces a different key.
 //!
 //! The broker must verify events and membership before supplying [`DomainFacts`].
-//! It uses the resulting key to select an [`IfcSession`], then checks reads and
-//! calls before executing them. Publications must pass [`IfcSession::publish`]
-//! before reaching a sink. This crate does not verify signatures, load saved
-//! sessions, or execute operations itself.
+//! It uses the resulting key to select both the agent's saved state and its
+//! [`IfcSession`]. Keep that session across turns: recreating it would forget
+//! whether unlabeled input had reached the agent.
+//!
+//! Check reads before delivering data, calls before executing them, and
+//! publications with [`IfcSession::publish`] before sending them to a sink.
+//! This crate does not verify signatures, check live membership, load saved
+//! sessions, isolate agent processes, or execute operations itself.
 
 #![forbid(unsafe_code)]
 

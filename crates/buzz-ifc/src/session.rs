@@ -89,19 +89,25 @@ impl AuthorizedPublication {
 /// sink. The audience checks follow the flow ordering in
 /// [Appendix G of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-g-security-labels-as-a-lattice).
 ///
-/// The broker supplies the labels and serialized outbound request:
+/// The broker keeps this value for as long as it keeps the agent's history,
+/// files, or other state. The same domain key selects both. This example uses a
+/// broker-owned pool so a later turn cannot reset the session's restrictions:
 ///
 /// ```
+/// # use std::collections::HashMap;
 /// # use buzz_ifc::{AuthorizedPublication, ConfidentialityLabel, ExecutionDomain,
-/// #     IfcError, IfcSession, ResourceLabel};
+/// #     DomainKey, IfcError, IfcSession, ResourceLabel};
 /// # fn broker_sink(_: AuthorizedPublication) {}
 /// # fn run_turn(
+/// #     sessions: &mut HashMap<DomainKey, IfcSession>,
 /// #     domain: ExecutionDomain,
 /// #     resource: &ResourceLabel,
 /// #     destination: &ConfidentialityLabel,
 /// #     request_bytes: Vec<u8>,
 /// # ) -> Result<(), IfcError> {
-/// let session = IfcSession::enter(domain);
+/// let session = sessions
+///     .entry(domain.key())
+///     .or_insert_with(|| IfcSession::enter(domain));
 /// session.call("buzz.read.current")?;
 /// session.read(resource)?;
 ///
@@ -122,6 +128,9 @@ impl IfcSession {
     /// The domain's audience is observed immediately because retained agent
     /// state and broker-provided instructions may already influence the next
     /// output before the first explicit resource read.
+    ///
+    /// Do not replace an existing session while retaining the agent's state.
+    /// A fresh session would forget any earlier [`Self::mark_unknown_input`].
     pub fn enter(domain: ExecutionDomain) -> Self {
         let mut flow = FlowState::default();
         flow.observe(&domain.audience);
@@ -138,6 +147,8 @@ impl IfcSession {
     /// The broker must not deliver a rejected resource. Every admitted resource
     /// is readable by the domain's entire audience, so reading it does not
     /// further restrict output: `enter` already applied that audience.
+    /// The broker must check current resource permissions separately; matching
+    /// stored membership epochs does not prove that membership is still current.
     pub fn read(&self, resource: &ResourceLabel) -> Result<(), IfcError> {
         if !resource.audience.can_flow_to(&self.domain.audience) {
             return Err(IfcError::ReadAudienceDenied);
