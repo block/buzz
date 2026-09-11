@@ -27,6 +27,7 @@ members = [
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
     "crates/buzz-relay-mesh",
+    "crates/buzz-mesh-smoke",
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",

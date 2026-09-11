@@ -1,0 +1,40 @@
+[package]
+name = "buzz-mesh-smoke"
+description = "Hardware/CI mesh-llm smoke harnesses (examples only; no library or binary ships)"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+publish = false
+
+# Examples-only crate. These harnesses link the mesh-llm SDK and native
+# runtime, which is by far the most expensive subtree in the repository.
+# They live here rather than in `crates/buzz-relay/examples/` because a
+# dev-dependency feeds every target of its own package: with these harnesses
+# under buzz-relay, `cargo nextest archive -p buzz-relay` had to build the
+# whole mesh-llm + skippy + rmcp tree before it could compile a single relay
+# unit test. That is what pushed the Desktop E2E Relay job past its 30 minute
+# budget. None of the harnesses reference `buzz_relay::` — they drive the
+# relay as an external process — so nothing is lost by isolating them.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.76.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.76.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+# Relay-driven mesh lifecycle smoke (examples/mesh_relay_lifecycle_smoke.rs):
+# the relay client for discovery notes and the exact ed25519 the mesh owner
+# keys use for binding verification.
+buzz-test-client = { path = "../buzz-test-client" }
+ed25519-dalek = "=3.0.0"
+nostr = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

@@ -39,7 +39,13 @@ libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+# `crypto-rust` is what selects `EncryptionType::Dh` over `Plain` for the
+# Secret Service session (keyring-3.6.3/src/secret_service.rs:140-143,333-336),
+# i.e. Diffie-Hellman transit encryption of secrets over the D-Bus session bus.
+# Until MeshLLM 0.76 it arrived implicitly via feature unification with
+# mesh-llm's own keyring 3; mesh-llm now uses keyring 4, so request it here
+# explicitly rather than inheriting it by accident.
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"], optional = true }
 # Used directly (alongside tauri-plugin-notification) so we can hold the posting
 # D-Bus connection open. GNOME 46+ dismisses a notification the moment that
 # connection is dropped, which the plugin does immediately. Default features

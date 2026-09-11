@@ -12,7 +12,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'crates/buzz-relay/examples/mesh_*.rs'
+      - 'crates/buzz-mesh-smoke/**'
       - 'crates/buzz-relay/Cargo.toml'
       - 'crates/buzz-admin/**'
       - 'crates/buzz-test-client/**'
@@ -24,7 +24,7 @@ on:
       - '.github/workflows/mesh-lifecycle.yml'
   pull_request:
     paths:
-      - 'crates/buzz-relay/examples/mesh_*.rs'
+      - 'crates/buzz-mesh-smoke/**'
       - 'crates/buzz-relay/Cargo.toml'
       - 'crates/buzz-admin/**'
       - 'crates/buzz-test-client/**'
