@@ -59,6 +59,22 @@ for (const channel of ["general", "watercooler"]) {
     await page.screenshot({
       path: `test-results/mention-recipients/ambiguous-${channel}.png`,
     });
+    if (channel === "general") {
+      await input.focus();
+      await input.press("ControlOrMeta+a");
+      expect(
+        await input.evaluate(() => window.getSelection()?.toString()),
+      ).toBe("@Scout hello");
+      await page.keyboard.insertText("@Scout");
+      await page.getByTestId(`mention-suggestion-${FIRST}`).click();
+      await page.keyboard.type("hello");
+      await expect(input).toHaveText("@Scout hello");
+      await page.getByTestId("send-message").click();
+      await expect
+        .poll(() => recipients(page, "@Scout hello"))
+        .toEqual([[FIRST]]);
+      await expect(input).toHaveText("");
+    }
   });
 }
 
