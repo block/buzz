@@ -55,14 +55,15 @@ echo "Test MP4: ${FILE_SIZE} bytes, sha256=${SHA256:0:16}..."
 echo ""
 
 # ── Helper: build Blossom auth header ──────────────────────────────────────────
-# Creates a kind:24242 event with t=upload, x=<sha256>, expiration=+5min.
+# Creates a kind:24242 event with t=upload, x=<sha256>, expiration=+60s, server=<relay>.
 
 blossom_auth() {
     local sha256="$1"
-    local now exp auth_event auth_b64
+    local now exp server auth_event auth_b64
 
     now=$(date +%s)
-    exp=$((now + 300))
+    exp=$((now + 60))
+    server=$(echo "$RELAY_URL" | sed -E 's|^https?://||' | cut -d'/' -f1)
 
     auth_event=$(nak event \
         --sec "$NSEC" \
@@ -71,6 +72,7 @@ blossom_auth() {
         -t t=upload \
         -t "x=$sha256" \
         -t "expiration=$exp" \
+        -t "server=$server" \
         2>/dev/null)
 
     auth_b64=$(echo -n "$auth_event" | base64 | tr -d '\n')

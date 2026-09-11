@@ -19,6 +19,17 @@ fn relay_ws_url() -> String {
         .replace("https://", "wss://")
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(15))
@@ -28,10 +39,12 @@ fn http_client() -> Client {
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
@@ -43,10 +56,12 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
 /// unconditionally, so round-trip GETs must present one of these.
 fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "get"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Get test")
         .tags(tags)
@@ -259,7 +274,7 @@ async fn test_auth_wrong_kind() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -281,7 +296,7 @@ async fn test_auth_missing_t_tag() {
         "Upload test",
         vec![
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -348,7 +363,7 @@ async fn test_auth_empty_content() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -371,7 +386,7 @@ async fn test_auth_server_tag_mismatch() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "evil.example.com"]).unwrap(),
         ],
     );
@@ -395,7 +410,7 @@ async fn test_auth_server_tag_correct() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "localhost:3000"]).unwrap(),
         ],
     );

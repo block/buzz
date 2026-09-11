@@ -3,6 +3,21 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+/// Coarse Blossom denial kind for NIP-FI response shaping.
+///
+/// Callers that know the active [`crate::auth::BlossomStrictness`] use this to
+/// choose the correct HTTP response shape — NIP-FI fixed text/plain in Strict
+/// mode, legacy JSON in Permissive mode — without requiring `buzz-media` to
+/// depend on `buzz-auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlossomDenialKind {
+    /// `Authorization` header was absent. Maps to HTTP 401 + `WWW-Authenticate: Nostr`.
+    MissingEvidence,
+    /// Authorization header or proof was present but structurally invalid,
+    /// malformed, expired, or otherwise rejected. Maps to HTTP 403.
+    EvidenceRejected,
+}
+
 /// Errors from media operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -26,6 +41,9 @@ pub enum MediaError {
     InvalidAuthVerb,
     #[error("missing required tag: {0}")]
     MissingTag(&'static str),
+    /// A tag that must appear exactly once appeared more than once.
+    #[error("duplicate tag: {0}")]
+    DuplicateTag(&'static str),
     #[error("hash mismatch")]
     HashMismatch,
     #[error("server mismatch")]
@@ -109,6 +127,40 @@ impl From<serde_json::Error> for MediaError {
     }
 }
 
+impl MediaError {
+    /// Classify this error as a Blossom denial kind for response-shape selection.
+    ///
+    /// Returns `Some(BlossomDenialKind::MissingEvidence)` when the
+    /// `Authorization` header was absent, `Some(BlossomDenialKind::EvidenceRejected)`
+    /// for any structurally present but invalid/malformed/expired proof, and
+    /// `None` for non-auth errors.
+    ///
+    /// Relay call sites that know the active `BlossomStrictness` use this to
+    /// select the appropriate response shape: NIP-FI fixed text/plain in Strict
+    /// mode, legacy JSON 401 in Permissive mode.
+    pub fn blossom_denial_kind(&self) -> Option<BlossomDenialKind> {
+        match self {
+            Self::MissingAuth => Some(BlossomDenialKind::MissingEvidence),
+            Self::InvalidAuthScheme
+            | Self::InvalidBase64
+            | Self::InvalidAuthEvent
+            | Self::InvalidAuthKind
+            | Self::InvalidAuthVerb
+            | Self::DuplicateTag(_)
+            | Self::InvalidSignature
+            | Self::TokenExpired
+            | Self::TimestampOutOfWindow
+            | Self::Unauthorized
+            | Self::TokenRevoked
+            | Self::PubkeyMismatch
+            | Self::HashMismatch
+            | Self::ServerMismatch
+            | Self::MissingTag(_) => Some(BlossomDenialKind::EvidenceRejected),
+            _ => None,
+        }
+    }
+}
+
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {
@@ -119,9 +171,15 @@ impl IntoResponse for MediaError {
             Self::FileTooLarge { .. } | Self::ImageTooLarge => {
                 (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
             }
-            // All authentication failures return the same generic 401 to prevent oracle enumeration.
-            // InsufficientScope is intentionally 403 — it's an authorization (not authentication)
-            // failure and is safe to distinguish since it requires a valid identity first.
+            // All authentication failures return the same generic 401 to prevent oracle
+            // enumeration in the legacy/Permissive path [FI-INV-15].  Off-mode deployments
+            // preserve this pre-NIP-FI behavior.  InsufficientScope is intentionally 403
+            // below — it is an authorization (not authentication) failure and is safe to
+            // distinguish because it requires a valid identity first.
+            //
+            // Strict mode routes through MediaDenial (buzz-relay) and applies the full
+            // NIP-FI rejection table (missing_evidence → 401, evidence_rejected → 403)
+            // independently of this path.
             Self::MissingAuth
             | Self::InvalidAuthScheme
             | Self::InvalidBase64
@@ -129,6 +187,7 @@ impl IntoResponse for MediaError {
             | Self::InvalidSignature
             | Self::InvalidAuthKind
             | Self::InvalidAuthVerb
+            | Self::DuplicateTag(_)
             | Self::TokenExpired
             | Self::TimestampOutOfWindow
             | Self::Unauthorized
@@ -172,6 +231,122 @@ impl IntoResponse for MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── BlossomDenialKind classification ─────────────────────────────────────
+
+    #[test]
+    fn missing_auth_is_missing_evidence() {
+        assert_eq!(
+            MediaError::MissingAuth.blossom_denial_kind(),
+            Some(BlossomDenialKind::MissingEvidence)
+        );
+    }
+
+    #[test]
+    fn structural_proof_errors_are_evidence_rejected() {
+        for error in [
+            MediaError::InvalidAuthScheme,
+            MediaError::InvalidBase64,
+            MediaError::InvalidAuthEvent,
+            MediaError::InvalidAuthKind,
+            MediaError::InvalidAuthVerb,
+            MediaError::DuplicateTag("Authorization"),
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::TimestampOutOfWindow,
+            MediaError::Unauthorized,
+            MediaError::TokenRevoked,
+            MediaError::PubkeyMismatch,
+            MediaError::HashMismatch,
+            MediaError::ServerMismatch,
+            MediaError::MissingTag("t"),
+        ] {
+            assert_eq!(
+                error.blossom_denial_kind(),
+                Some(BlossomDenialKind::EvidenceRejected),
+                "expected EvidenceRejected for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_auth_errors_have_no_denial_kind() {
+        for error in [
+            MediaError::NotFound,
+            MediaError::FileTooLarge { size: 1, max: 0 },
+            MediaError::Internal,
+            MediaError::ServiceUnavailable,
+            MediaError::InsufficientScope,
+        ] {
+            assert_eq!(
+                error.blossom_denial_kind(),
+                None,
+                "expected None for {error:?}"
+            );
+        }
+    }
+
+    // ── IntoResponse status code pins ──────────────────────────────────────
+    // These pins cover the legacy/Permissive path (MediaError::into_response).
+    // Strict mode overrides this via MediaDenial in buzz-relay [FI-INV-15].
+
+    #[tokio::test]
+    async fn all_auth_failures_return_json_401_in_permissive_path() {
+        // In the legacy/Permissive path all auth failures collapse to a single
+        // JSON 401 to prevent oracle enumeration [FI-INV-15].  Strict mode
+        // (MediaDenial in buzz-relay) applies the NIP-FI 401/403 split instead.
+        for error in [
+            MediaError::MissingAuth,
+            MediaError::InvalidAuthScheme,
+            MediaError::InvalidBase64,
+            MediaError::InvalidAuthEvent,
+            MediaError::InvalidAuthKind,
+            MediaError::InvalidAuthVerb,
+            MediaError::DuplicateTag("Authorization"),
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::TimestampOutOfWindow,
+            MediaError::Unauthorized,
+            MediaError::TokenRevoked,
+            MediaError::PubkeyMismatch,
+            MediaError::HashMismatch,
+            MediaError::ServerMismatch,
+            MediaError::MissingTag("t"),
+        ] {
+            let label = format!("{error:?}");
+            let resp = error.into_response();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "Permissive path: expected 401 for {label}"
+            );
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                ct.contains("application/json"),
+                "expected JSON CT for {label}, got: {ct}"
+            );
+            // No WWW-Authenticate in the legacy JSON path.
+            assert!(
+                resp.headers().get("www-authenticate").is_none(),
+                "Permissive path must not include WWW-Authenticate for {label}"
+            );
+            // Exact body: legacy path emits {"error":"authentication failed"} [FI-INV-15].
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body collect");
+            assert_eq!(
+                body.as_ref(),
+                br#"{"error":"authentication failed"}"#,
+                "Permissive path: wrong body for {label}"
+            );
+        }
+    }
+
+    // ── Existing non-auth response map tests ────────────────────────────────
 
     #[test]
     fn serving_backend_failures_map_to_5xx_but_fences_remain_403() {

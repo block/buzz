@@ -678,10 +678,15 @@ constitutes a **known gap** in this section's security guarantees.
 
 #### Compliance note
 
-The implementation as of PR #7264 pairs via a permissive Blossom verifier and
-is explicitly non-compliant with this section.  The named gaps are:
-multi-tag acceptance, a 3600-second proof window, and an optional `server`
-tag.  These are resolved when the bounded hardening task lands.
+The strict verifier (exact cardinality, mandatory `server` tag, 60-second proof
+window, and 401/403 denial-class split) is implemented in `buzz-media/src/auth.rs`
+as `BlossomStrictness::Strict`.  It is engaged when NIP-FI active modes are
+configured; deployment requires the NIP-FI HTTP enforcement PR (#7264) to be
+merged first.  Until that PR lands the verifier runs in `Permissive` mode,
+which preserves pre-NIP-FI behavior [FI-INV-15].
+
+The deny-map gap described above remains a **known gap** pending the S4
+issuer-scoped deny-map integration.
 
 ### Request format
 

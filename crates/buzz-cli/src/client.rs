@@ -327,7 +327,7 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 600).to_string();
+    let exp_str = (now + 60).to_string();
     let domain = relay_server_tag(media_url)
         .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
     let tags = vec![
@@ -350,28 +350,23 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
 fn sign_blossom_upload(
     keys: &Keys,
     sha256: &str,
-    mime: &str,
+    _mime: &str,
     relay_url: &str,
 ) -> Result<String, CliError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let expiry: u64 = if mime.starts_with("video/") {
-        3600
-    } else {
-        600
-    };
-    let exp_str = (now + expiry).to_string();
+    let exp_str = (now + 60).to_string();
+    let domain = relay_server_tag(relay_url)
+        .ok_or_else(|| CliError::Usage(format!("invalid relay URL: {relay_url}")))?;
 
-    let mut tags = vec![
+    let tags = vec![
         Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
         Tag::parse(["x", sha256]).map_err(|e| CliError::Other(e.to_string()))?,
         Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
     ];
-    if let Some(domain) = relay_server_tag(relay_url) {
-        tags.push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
-    }
 
     let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
         .tags(tags)
