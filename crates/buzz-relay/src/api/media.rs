@@ -339,6 +339,11 @@ pub async fn upload_blob(
     // stored/hash-verified body remains byte-identical.
     use futures_util::StreamExt;
     const SNIFF_BYTES: usize = 4096;
+    let media_body_limit = state
+        .config
+        .media
+        .max_image_bytes
+        .max(state.config.media.max_video_bytes);
     let mut source = body.into_data_stream();
     let mut replay_chunks = Vec::new();
     let mut sniff = Vec::with_capacity(SNIFF_BYTES);
@@ -349,7 +354,20 @@ pub async fn upload_blob(
                 sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
                 replay_chunks.push(chunk);
             }
-            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            // Classify by error type: a withheld body tripping the media
+            // router's idle deadline is the client's fault (408), a body-limit
+            // breach is a policy rejection (413) — neither is a storage
+            // failure, and collapsing them into `Io` would page as 500.
+            Some(Err(error)) => {
+                return Err(match buzz_media::classify_body_error(&error) {
+                    buzz_media::BodyErrorKind::IdleTimeout => MediaError::RequestBodyTimeout,
+                    buzz_media::BodyErrorKind::LengthLimit => MediaError::FileTooLarge {
+                        size: 0,
+                        max: media_body_limit,
+                    },
+                    buzz_media::BodyErrorKind::Other => MediaError::Io(error.to_string()),
+                })
+            }
             None => break,
         }
     }
@@ -386,10 +404,22 @@ pub async fn upload_blob(
                     .media
                     .max_image_bytes
                     .max(state.config.media.max_file_bytes);
+                // `to_bytes` errors on either the inner (buffered) limit or a
+                // stream error from the layered body. Classify instead of
+                // assuming 413: an idle-deadline trip must answer 408, not
+                // read as too-large or as a storage failure.
                 let bytes =
                     axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
                         .await
-                        .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
+                        .map_err(|error| match buzz_media::classify_body_error(&error) {
+                            buzz_media::BodyErrorKind::IdleTimeout => {
+                                MediaError::RequestBodyTimeout
+                            }
+                            buzz_media::BodyErrorKind::LengthLimit => {
+                                MediaError::FileTooLarge { size: 0, max }
+                            }
+                            buzz_media::BodyErrorKind::Other => MediaError::Io(error.to_string()),
+                        })?;
 
                 let is_image = matches!(
                     infer::get(&bytes).map(|t| t.mime_type()),

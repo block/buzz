@@ -33,6 +33,15 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 futures-core = "0.3"
 quick-xml = { version = "0.38", features = ["serialize"] }
+# `timeout` only: names `tower_http::timeout::TimeoutError` so the upload
+# stream can classify an idle-timeout body error by *type* (not by Display
+# string) and map it to `MediaError::RequestBodyTimeout` / 408.
+tower-http = { version = "0.6", default-features = false, features = ["timeout"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# BodyExt::frame — drives a real TimeoutBody in classify_body_error tests so
+# the typed-detection test exercises a genuine tower-http TimeoutError chain.
+http-body-util = "0.1"
+# http_body::Body impl for the never-yielding test body driving TimeoutBody.
+http-body = "1"
