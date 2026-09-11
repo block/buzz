@@ -22,6 +22,15 @@ type ActivityRowProps = {
   openToneScope?: Exclude<ActivityRowToneScope, "none">;
   testId?: string;
   title?: string;
+  /**
+   * Controlled disclosure. When provided, the row's open state is owned by the
+   * caller — needed for tool-run groups, whose expansion must survive the
+   * remount that re-grouping causes and must be reverted by automatic policy
+   * when work completes. Omit both to keep the default uncontrolled `<details>`
+   * behavior every other row uses.
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 type ActivityRowContentProps = {
@@ -38,6 +47,8 @@ type ActivityRowContentComponent = React.FC<ActivityRowContentProps> & {
 export function ActivityRow({
   children,
   className,
+  onOpenChange,
+  open,
   openToneScope = "tool",
   testId,
   title,
@@ -60,6 +71,8 @@ export function ActivityRow({
     );
   }
 
+  const isControlled = onOpenChange !== undefined;
+
   return (
     <details
       className={cn(
@@ -68,8 +81,10 @@ export function ActivityRow({
         className,
       )}
       data-testid={testId}
+      open={open}
       title={title}
     >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: <summary> is natively an interactive disclosure control, not a static element */}
       <summary
         className={cn(
           "group/row flex min-h-6 w-full max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
@@ -77,6 +92,24 @@ export function ActivityRow({
             ? "group-open/summary:text-foreground"
             : "group-open:text-foreground",
         )}
+        // A controlled row drives disclosure from the reader's click rather
+        // than from the element's `toggle` event. `toggle` is dispatched
+        // asynchronously and also fires when React sets `open` on mount, so it
+        // cannot distinguish "the reader clicked" from "React rendered the
+        // state we already hold" — and React re-asserts the declared `open`
+        // before the event is delivered, which loses the click entirely.
+        // Preventing the default keeps the DOM in step with our state, so the
+        // caller's value stays the single source of truth. `onClick` also
+        // covers keyboard activation, which browsers deliver as a click on the
+        // summary, so no extra key handling is needed.
+        onClick={
+          isControlled
+            ? (event) => {
+                event.preventDefault();
+                onOpenChange(!open);
+              }
+            : undefined
+        }
       >
         {summaryChildren}
         <ChevronDown
