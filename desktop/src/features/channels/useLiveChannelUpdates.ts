@@ -4,9 +4,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  channelMessagesKey,
+  threadRepliesKey,
+} from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
+  getThreadReference,
   isThreadReply,
 } from "@/features/messages/lib/threading";
 import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
@@ -280,6 +284,7 @@ export function useLiveChannelUpdates(
         event.id,
         SEEN_NOTIFICATION_EVENT_LIMIT,
       );
+    const threadReference = getThreadReference(event.tags);
     const isThreadedReply = isThreadReply(event.tags);
 
     // DM alerts and every other notification side effect share this delivery
@@ -318,6 +323,23 @@ export function useLiveChannelUpdates(
           (channelId !== activeChannelId || options.notifyForActiveChannel)
         ) {
           options.onThreadReplyDesktopNotification?.(channelId, event);
+        }
+      }
+    }
+
+    if (threadReference.parentId != null) {
+      const rootId = threadReference.rootId;
+      if (rootId) {
+        const queryKey = threadRepliesKey(channelId, rootId);
+        if (
+          queryClient.getQueryCache().find({
+            queryKey,
+            exact: true,
+          }) !== undefined
+        ) {
+          queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
+            mergeTimelineCacheMessages(current, event),
+          );
         }
       }
     }
