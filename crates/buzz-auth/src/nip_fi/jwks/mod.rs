@@ -734,5 +734,74 @@ impl<F> std::fmt::Debug for ProductionJwksSource<F> {
     }
 }
 
+/// A toggle-controlled [`JwksFetcher`] for use in downstream-crate integration
+/// tests. Returns a minimal but valid JWKS document when the toggle is `true`,
+/// and `NetworkError` when `false`.
+///
+/// This is the only path by which a crate outside `buzz-auth` can build a
+/// `ProductionJwksSource` with a controllable fetch outcome — `sealed::Sealed`
+/// is crate-private, so downstream crates cannot implement `JwksFetcher`
+/// directly. Because the returned JWKS is real (not a synthetic shortcut), the
+/// full `ProductionJwksSource` code path — parse, bound, cache, hard-deadline —
+/// exercises itself normally, and the resulting `AssertionKeySet` is valid for
+/// verifier lookups.
+///
+/// Only available with the `test-utils` feature enabled.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Debug)]
+pub struct ToggleJwksFetcher {
+    /// When `true` the fetcher returns a minimal valid JWKS body; when `false`
+    /// it returns `JwksFetchError::NetworkError`.
+    pub available: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Fired (via `notify_one`) after every fetch attempt completes, whether
+    /// successful or not. Tests can await this to deterministically observe
+    /// that the fetch loop executed a given attempt before proceeding.
+    pub fetch_done: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl ToggleJwksFetcher {
+    /// Construct a new `ToggleJwksFetcher`. Pass `initial` as the starting
+    /// availability state; `available` and `fetch_done` are externally
+    /// observable and can be driven from the test after construction.
+    pub fn new(initial: bool) -> Self {
+        Self {
+            available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial)),
+            fetch_done: std::sync::Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl super::verifier::sealed::Sealed for ToggleJwksFetcher {}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl JwksFetcher for ToggleJwksFetcher {
+    fn fetch_jwks<'a>(
+        &'a self,
+        _uri: &'a str,
+    ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a {
+        // A minimal P-256 JWK.  The coordinates are the same values used in
+        // buzz-auth's own test suite (tests.rs `minimal_jwks_json`).
+        const TOGGLE_JWKS: &str = concat!(
+            r#"{"keys":[{"kty":"EC","crv":"P-256","#,
+            r#""x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","#,
+            r#""y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0","#,
+            r#""use":"sig","alg":"ES256","kid":"toggle-kid"}]}"#
+        );
+        let available = self.available.load(std::sync::atomic::Ordering::SeqCst);
+        let fetch_done = std::sync::Arc::clone(&self.fetch_done);
+        async move {
+            let result = if available {
+                Ok(TOGGLE_JWKS.to_string())
+            } else {
+                Err(JwksFetchError::NetworkError)
+            };
+            fetch_done.notify_one();
+            result
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
