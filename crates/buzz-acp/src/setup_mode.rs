@@ -279,7 +279,7 @@ impl SetupPayload {
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
             } else if all_missing_binary {
-                "Install the missing binary or update PATH, then restart the agent.".to_string()
+                "Install the missing binary or update PATH, then restart Buzz.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
@@ -763,6 +763,7 @@ mod tests {
         ));
         let body = payload.nudge_body();
         assert!(body.contains("install `buzz-pi-acp` or add it to PATH"));
+        assert!(body.contains("restart Buzz"));
         assert!(!body.contains("Open Edit Agent"));
     }
 
