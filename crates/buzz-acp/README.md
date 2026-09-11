@@ -72,13 +72,17 @@ That's it. The harness spawns `goose acp`, connects to the relay, discovers chan
 # Install the adapter (npm package — no Rust build required)
 npm install -g @agentclientprotocol/codex-acp
 
-# Run
-export OPENAI_API_KEY="sk-..."   # required — use an OpenAI API key, not a ChatGPT subscription
+# Authenticate once — either a ChatGPT subscription or an API key
+codex login
 
 buzz-acp
 ```
 
-> **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
+> **Auth note:** a ChatGPT subscription works. `codex-acp` reuses the Codex CLI's stored
+> login at `~/.codex/auth.json`, and `buzz-acp` spawns it with the parent environment intact,
+> so no API key is involved. `CODEX_API_KEY`/`OPENAI_API_KEY` are read only when the
+> API-key auth method is selected — set one if you would rather bill the API. Do not set
+> `NO_BROWSER=1`, which hides the ChatGPT auth method.
 
 ## Running with Claude Code
 
@@ -88,12 +92,21 @@ buzz-acp
 # Install the current adapter package
 npm install -g @agentclientprotocol/claude-agent-acp
 
+# Authenticate once — a Claude Pro/Max subscription or the Anthropic Console
+claude-agent-acp --cli auth login --claudeai
+
 # Run
-export ANTHROPIC_API_KEY="sk-ant-..."
 export BUZZ_ACP_AGENT_COMMAND="claude-agent-acp"
 
 buzz-acp
 ```
+
+> **Auth note:** a Claude Pro/Max subscription works, and no `ANTHROPIC_API_KEY` is needed.
+> The adapter advertises two methods — `claude-ai-login` ("Claude Subscription") and
+> `console-login` ("Anthropic Console (API usage billing)") — and keeps its own credential
+> store, so it does **not** inherit an existing Claude Code login; run the `--claudeai`
+> command above once. Set `ANTHROPIC_API_KEY` only if you would rather bill the API.
+> Do not pass `--hide-claude-auth`, which makes the adapter reject subscription sessions.
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
