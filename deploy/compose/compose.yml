@@ -33,6 +33,8 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      git-data-init:
+        condition: service_completed_successfully
     # Probe /_readiness over /dev/tcp because the runtime image has bash but no curl/wget/socat.
     healthcheck:
       test:
@@ -117,6 +119,19 @@ services:
         mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
         mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
       '
+    restart: "no"
+    networks:
+      - buzz-net
+
+  # Named volumes are root-owned on first create; the relay runs as uid 1000
+  # (Dockerfile USER buzz) and must create BUZZ_GIT_PACK_CACHE_PATH under
+  # /data/git. Mirror the minio-init pattern so a fresh stack reaches healthy.
+  git-data-init:
+    image: busybox:1.37.0
+    user: "0:0"
+    volumes:
+      - buzz-git-data:/data/git
+    command: ["sh", "-ec", "chown -R 1000:1000 /data/git"]
     restart: "no"
     networks:
       - buzz-net

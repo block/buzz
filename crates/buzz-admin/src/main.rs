@@ -30,7 +30,7 @@ use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{EventBuilder, Keys, Kind, Tag, ToBech32};
 use tracing::warn;
 
 #[derive(Parser)]
@@ -143,9 +143,21 @@ async fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::GenerateKey => {
             let keys = Keys::generate();
-            println!("Public key:  {}", keys.public_key().to_hex());
-            println!("Secret key:  {}", keys.secret_key().display_secret());
-            println!("\nSet BUZZ_PRIVATE_KEY to the secret key to use this identity.");
+            let npub = keys
+                .public_key()
+                .to_bech32()
+                .map_err(|e| anyhow::anyhow!("encode npub: {e}"))?;
+            let nsec = keys
+                .secret_key()
+                .to_bech32()
+                .map_err(|e| anyhow::anyhow!("encode nsec: {e}"))?;
+            println!("Public key (hex):   {}", keys.public_key().to_hex());
+            println!("Public key (npub):  {npub}");
+            println!("Secret key (hex):   {}", keys.secret_key().display_secret());
+            println!("Secret key (nsec):  {nsec}");
+            println!(
+                "\nSet BUZZ_PRIVATE_KEY to the hex or nsec secret. Desktop onboarding accepts nsec."
+            );
             Ok(0)
         }
         Command::Migrate => {
