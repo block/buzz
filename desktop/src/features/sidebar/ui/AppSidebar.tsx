@@ -515,13 +515,12 @@ export function AppSidebar({
       variant="sidebar"
     >
       <div
-        className={`relative flex min-h-0 flex-1 flex-col overflow-hidden ${
-          communities.length > 1 ? "md:-ml-[11px] md:w-[calc(100%+11px)]" : ""
-        }`}
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         data-sidebar-background
         data-testid="app-sidebar-scroll-anchor"
       >
         <AppSidebarPinnedHeader
+          className={communities.length > 1 ? "md:-ml-2" : undefined}
           channelLabels={dmChannelLabels}
           currentPubkey={currentPubkey}
           currentChannelId={
