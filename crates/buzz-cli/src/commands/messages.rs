@@ -12,6 +12,57 @@ use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
 
+/// Default and maximum `--limit` for `messages get`.
+const GET_LIMIT_DEFAULT: u32 = 50;
+const GET_LIMIT_MAX: u32 = 200;
+/// Default and maximum `--limit` for `messages thread`.
+const THREAD_LIMIT_DEFAULT: u32 = 100;
+const THREAD_LIMIT_MAX: u32 = 500;
+/// Default and maximum `--limit` for `messages search`.
+const SEARCH_LIMIT_DEFAULT: u32 = 20;
+const SEARCH_LIMIT_MAX: u32 = 100;
+
+/// Resolve a `--limit` against a command's default and cap.
+fn effective_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
+    requested.unwrap_or(default).min(max)
+}
+
+/// Build the stderr note for a read that came back full.
+///
+/// A read that returns exactly its limit is indistinguishable from a complete
+/// one on stdout, which is how an agent rebuilding context from `messages get`
+/// silently reconstructs a prefix of the conversation as if it were the whole
+/// thing. There is no total to report — the relay answers a filter, not a
+/// count — so the note states what bound was hit and how to raise it, and says
+/// "may" because a result set exactly the size of the limit is also possible.
+///
+/// Returns `None` for a short read, which is the only case that is provably
+/// complete.
+fn truncation_notice(
+    returned: usize,
+    requested: Option<u32>,
+    default: u32,
+    max: u32,
+) -> Option<String> {
+    let limit = effective_limit(requested, default, max);
+    if returned < limit as usize {
+        return None;
+    }
+    let bound = match requested {
+        None => format!("the default limit of {default}"),
+        Some(r) if r > max => format!("--limit {r}, capped at {max}"),
+        Some(r) => format!("--limit {r}"),
+    };
+    let advice = if limit < max {
+        format!("pass a larger --limit (max {max})")
+    } else {
+        "narrow the window with --since / --before to page through the rest".to_string()
+    };
+    Some(format!(
+        "showing {returned} results — {bound} was reached, so more may exist; {advice}"
+    ))
+}
+
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Delegates marker parsing and collapse to [`buzz_core::nip10`] (shared with
@@ -363,7 +414,8 @@ pub async fn cmd_get_messages(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
-    let limit = limit.unwrap_or(50).min(200);
+    let requested_limit = limit;
+    let limit = effective_limit(requested_limit, GET_LIMIT_DEFAULT, GET_LIMIT_MAX);
 
     let mut filter = serde_json::json!({
         "kinds": [9, 40002, 40008, 45001, 45003],
@@ -389,6 +441,14 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    if let Some(notice) = truncation_notice(
+        events.len(),
+        requested_limit,
+        GET_LIMIT_DEFAULT,
+        GET_LIMIT_MAX,
+    ) {
+        eprintln!("{notice}");
+    }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -435,7 +495,8 @@ pub async fn cmd_get_thread(
         expected_root_id,
         &selected_event,
     )?;
-    let limit = limit.unwrap_or(100).min(500);
+    let requested_limit = limit;
+    let limit = effective_limit(requested_limit, THREAD_LIMIT_DEFAULT, THREAD_LIMIT_MAX);
 
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
@@ -459,6 +520,20 @@ pub async fn cmd_get_thread(
             .and_then(|value| value.as_u64())
             .unwrap_or(0)
     });
+    // The root rides along in the same response but is not part of the reply
+    // page, so it must not count toward the limit.
+    let reply_count = events
+        .iter()
+        .filter(|e| e.get("id").and_then(|v| v.as_str()) != Some(root_event_id.as_str()))
+        .count();
+    if let Some(notice) = truncation_notice(
+        reply_count,
+        requested_limit,
+        THREAD_LIMIT_DEFAULT,
+        THREAD_LIMIT_MAX,
+    ) {
+        eprintln!("{notice}");
+    }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -477,7 +552,8 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
-    let limit = limit.unwrap_or(20).min(100);
+    let requested_limit = limit;
+    let limit = effective_limit(requested_limit, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
@@ -505,6 +581,14 @@ pub async fn cmd_search(
         events.sort_by_key(|e| {
             std::cmp::Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
         });
+    }
+    if let Some(notice) = truncation_notice(
+        events.len(),
+        requested_limit,
+        SEARCH_LIMIT_DEFAULT,
+        SEARCH_LIMIT_MAX,
+    ) {
+        eprintln!("{notice}");
     }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
@@ -1887,5 +1971,82 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::{
+        truncation_notice, GET_LIMIT_DEFAULT, GET_LIMIT_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX,
+    };
+
+    #[test]
+    fn a_short_read_is_provably_complete_and_says_nothing() {
+        assert_eq!(
+            truncation_notice(49, None, GET_LIMIT_DEFAULT, GET_LIMIT_MAX),
+            None
+        );
+        assert_eq!(
+            truncation_notice(0, Some(10), GET_LIMIT_DEFAULT, GET_LIMIT_MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn a_full_read_on_the_default_names_the_default() {
+        let notice = truncation_notice(50, None, GET_LIMIT_DEFAULT, GET_LIMIT_MAX)
+            .expect("a full read must be reported");
+        assert!(notice.contains("showing 50 results"), "{notice}");
+        assert!(notice.contains("the default limit of 50"), "{notice}");
+        assert!(notice.contains("max 200"), "{notice}");
+    }
+
+    #[test]
+    fn a_full_read_on_an_explicit_limit_names_that_limit() {
+        let notice = truncation_notice(30, Some(30), GET_LIMIT_DEFAULT, GET_LIMIT_MAX)
+            .expect("a full read must be reported");
+        assert!(notice.contains("--limit 30"), "{notice}");
+        assert!(!notice.contains("capped"), "{notice}");
+    }
+
+    #[test]
+    fn a_limit_above_the_cap_reports_the_cap_that_actually_applied() {
+        // The silent case from the report: a --limit far above the cap comes
+        // back at the cap with nothing saying so.
+        let notice = truncation_notice(200, Some(1000), GET_LIMIT_DEFAULT, GET_LIMIT_MAX)
+            .expect("a capped read must be reported");
+        assert!(notice.contains("--limit 1000, capped at 200"), "{notice}");
+        // At the cap there is no larger limit to suggest.
+        assert!(notice.contains("--since / --before"), "{notice}");
+    }
+
+    #[test]
+    fn a_read_at_the_cap_suggests_paging_not_a_bigger_limit() {
+        let notice = truncation_notice(200, Some(200), GET_LIMIT_DEFAULT, GET_LIMIT_MAX)
+            .expect("a full read must be reported");
+        assert!(!notice.contains("pass a larger"), "{notice}");
+    }
+
+    #[test]
+    fn the_search_cap_is_reported_even_though_the_flag_asked_for_more() {
+        // The reported case: `messages search --limit 500` returns 100.
+        let notice = truncation_notice(100, Some(500), SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX)
+            .expect("a capped search must be reported");
+        assert!(notice.contains("--limit 500, capped at 100"), "{notice}");
+    }
+
+    #[test]
+    fn the_search_default_of_20_is_named() {
+        let notice = truncation_notice(20, None, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX)
+            .expect("a full search must be reported");
+        assert!(notice.contains("the default limit of 20"), "{notice}");
+        assert!(notice.contains("max 100"), "{notice}");
+    }
+
+    #[test]
+    fn more_rows_than_the_limit_still_reports() {
+        // Defensive: the relay is not supposed to overshoot the filter limit,
+        // but a longer response is still not a complete-read proof.
+        assert!(truncation_notice(51, None, GET_LIMIT_DEFAULT, GET_LIMIT_MAX).is_some());
     }
 }
