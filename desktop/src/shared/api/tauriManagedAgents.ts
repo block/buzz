@@ -56,6 +56,20 @@ export async function setManagedAgentStartOnAppLaunch(
   return fromRawManagedAgent(response);
 }
 
+export async function setManagedAgentDisableLocalSpawn(
+  pubkey: string,
+  disableLocalSpawn: boolean,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_disable_local_spawn",
+    {
+      pubkey,
+      disableLocalSpawn,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
 export async function setManagedAgentAutoRestart(
   pubkey: string,
   autoRestartOnConfigChange: boolean,

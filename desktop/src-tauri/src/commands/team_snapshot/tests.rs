@@ -218,6 +218,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         persona_source_version: None,
         env_vars: Default::default(),
         start_on_app_launch: false,
+        disable_local_spawn: false,
         auto_restart_on_config_change: true,
         runtime_pid: None,
         backend: crate::managed_agents::BackendKind::Local,

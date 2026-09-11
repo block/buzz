@@ -628,6 +628,7 @@ pub async fn confirm_agent_snapshot_import(
             persona_source_version: None,
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
+            disable_local_spawn: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: crate::managed_agents::BackendKind::Local,

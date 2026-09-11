@@ -364,6 +364,8 @@ export type ManagedAgent = {
   lastErrorCode: number | null;
   logPath: string;
   startOnAppLaunch: boolean;
+  /** When true, Desktop never spawns a local process for this agent — neither at boot nor on reactive triggers. */
+  disableLocalSpawn: boolean;
   autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;

@@ -149,6 +149,7 @@ export type RawManagedAgent = {
   last_error_code: number | null;
   log_path: string;
   start_on_app_launch: boolean;
+  disable_local_spawn?: boolean;
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
@@ -663,6 +664,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     lastErrorCode: agent.last_error_code ?? null,
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
+    disableLocalSpawn: agent.disable_local_spawn ?? false,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
