@@ -4,13 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-/// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
-///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
+/// Live-stream behavior alongside the authenticated snapshot backstop.
 void main() {
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
@@ -167,10 +161,11 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
-  Future<void Function()> subscribe(
+  Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
   }) async {
     filters.add(filter);
     _listeners.add(onEvent);
@@ -179,6 +174,12 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       _listeners.remove(onEvent);
     };
   }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
 
   /// Emit an event synchronously to all live subscribers.
   void emit(NostrEvent event) {
