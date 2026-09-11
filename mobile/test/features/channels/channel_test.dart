@@ -68,7 +68,13 @@ void main() {
       expect(channel.isPrivate, isTrue);
     });
 
-    test('defaults is_member to false when missing', () {
+    test('defaults is_member to true when missing (aligns with desktop)', () {
+      // Desktop (`desktop/src-tauri/src/models.rs`) uses
+      // `#[serde(default = "default_true")]` for the same field, so legacy
+      // payloads that omit `is_member` land users as members on desktop and
+      // as non-members on mobile. The two platforms disagreeing on identity
+      // for the same wire data is the cross-platform symptom tracked as
+      // #4307; pin the same default here so the behaviour matches.
       final json = {
         'id': 'abc-123',
         'name': 'test',
@@ -81,7 +87,7 @@ void main() {
 
       final channel = Channel.fromJson(json);
 
-      expect(channel.isMember, isFalse);
+      expect(channel.isMember, isTrue);
       expect(channel.isForum, isTrue);
     });
   });
