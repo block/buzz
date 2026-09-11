@@ -42,7 +42,7 @@ export function ExternalLinkAnchor({
     <a
       {...anchorProps}
       className={cn(
-        "font-medium underline underline-offset-4 transition-colors",
+        "font-medium no-underline underline-offset-4 transition-colors hover:underline",
         isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
       )}
       href={href}
