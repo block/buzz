@@ -6,6 +6,8 @@ import {
   managedAgentsQueryKey,
   relayAgentsQueryKey,
 } from "@/features/agents/hooks";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
@@ -50,13 +52,22 @@ function seedWelcomeExperience(
   pubkey: string | null,
   communityScope: string | null,
 ) {
-  const key = `${communityScope ?? ""}:${channelId}`;
+  const key = JSON.stringify([
+    communityScope,
+    channelId,
+    normalizePubkey(pubkey ?? ""),
+  ]);
   const current = welcomeSeedPromises.get(key);
-  if (current) return current;
+  // Seed callers can also arrive with a replacement scoped client. Do not
+  // let this outer dedup bypass that participant's roster settlement.
+  if (current)
+    return current.finally(() =>
+      invalidateChannelMembersRosters(queryClient, [channelId]),
+    );
 
   const promise = (async () => {
     try {
-      await ensureWelcomeTeam(channelId, communityScope);
+      await ensureWelcomeTeam(channelId, communityScope, queryClient);
       await ensureWelcomeCanvas(channelId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
