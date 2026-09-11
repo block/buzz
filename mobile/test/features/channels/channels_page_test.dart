@@ -21,6 +21,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
@@ -32,6 +33,8 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+
+part 'channels_page_test/presence_tests.dart';
 
 void main() {
   Widget buildTestable({
@@ -136,6 +139,11 @@ void main() {
       isMember: true,
     ),
   ];
+
+  presenceListTests(
+    (overrides) => buildTestable(overrides: overrides),
+    testChannels,
+  );
 
   testWidgets('DM tile presence observation failure hides the dot', (
     tester,
