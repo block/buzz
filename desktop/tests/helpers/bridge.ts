@@ -610,6 +610,9 @@ type MockBridgeOptions = {
     projection?: {
       issues?: Record<string, string>;
       issue_fields?: Record<string, Record<string, unknown>>;
+      issue_state?: Record<string, Record<string, unknown>>;
+      issue_state_id?: Record<string, string>;
+      leaf?: Record<string, boolean>;
       conflicts?: string[];
       children?: Record<string, string[]>;
       relations?: unknown[];
@@ -620,6 +623,9 @@ type MockBridgeOptions = {
    *  message for that call; `null` succeeds. The last entry repeats once
    *  the array is exhausted. */
   bwSubmitErrors?: (string | null)[];
+  /** Sequenced `submit_project_bw_assignment` (P4E) failures: same
+   *  semantics as `bwSubmitErrors`. */
+  bwAssignmentErrors?: (string | null)[];
 };
 
 type BridgeOptions = {

@@ -57,7 +57,7 @@ impl<'a> History<'a> {
             .filter(|r| !self.operationally_blocked(r, &conflicts))
             .copied()
             .collect();
-        let mut p = json!({"issues":{},"issue_fields":{},"artifact_verdicts":{},"conflicts":conflicts.keys().collect::<Vec<_>>(),"children":{},"sets":{},"handoffs":{},"active_members":[],"dispatch_count":0,"building":false});
+        let mut p = json!({"issues":{},"issue_fields":{},"issue_state":{},"issue_state_id":{},"leaf":{},"artifact_verdicts":{},"conflicts":conflicts.keys().collect::<Vec<_>>(),"children":{},"sets":{},"handoffs":{},"active_members":[],"dispatch_count":0,"building":false});
         for root in valid.iter().filter(|e| e.typ() == "root") {
             let states: Vec<_> = operational
                 .iter()
@@ -101,6 +101,17 @@ impl<'a> History<'a> {
             }
             p["issues"][root.id()] = json!(state);
             p["issue_fields"][root.id()] = self.fields_at(root.id(), self.now);
+            // Literal passthrough of the current, unambiguous issue-state head's
+            // already-accepted body (stream/assignment/commit/tests/remote_readback
+            // as applicable to that state) and its own event ID — no new
+            // authority decision, only display of one Core already made when
+            // it accepted that event. The ID lets a producer chain the next
+            // transition's `previous` tag without re-deriving this head itself.
+            if let Some(h) = head {
+                p["issue_state"][root.id()] = h.body.clone();
+                p["issue_state_id"][root.id()] = json!(h.id());
+            }
+            p["leaf"][root.id()] = json!(self.is_executable_leaf(root.id(), &valid));
         }
         for e in valid.iter().filter(|r| r.typ() == "issue-relation") {
             if e.field("relation") == "parent-of" {

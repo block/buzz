@@ -196,6 +196,9 @@ type MockBwSnapshotOverride = {
   projection?: {
     issues?: Record<string, string>;
     issue_fields?: Record<string, Record<string, unknown>>;
+    issue_state?: Record<string, Record<string, unknown>>;
+    issue_state_id?: Record<string, string>;
+    leaf?: Record<string, boolean>;
     conflicts?: string[];
     children?: Record<string, string[]>;
     relations?: unknown[];
@@ -631,6 +634,9 @@ type E2eConfig = {
      *  message for that call; `null` succeeds. The last entry repeats once
      *  the array is exhausted. */
     bwSubmitErrors?: (string | null)[];
+    /** Sequenced `submit_project_bw_assignment` (P4E) failures: same
+     *  semantics as `bwSubmitErrors`. */
+    bwAssignmentErrors?: (string | null)[];
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -11582,6 +11588,9 @@ export function maybeInstallE2eTauriMocks() {
           projection: {
             issues: override?.projection?.issues ?? {},
             issue_fields: override?.projection?.issue_fields ?? {},
+            issue_state: override?.projection?.issue_state ?? {},
+            issue_state_id: override?.projection?.issue_state_id ?? {},
+            leaf: override?.projection?.leaf ?? {},
             conflicts: override?.projection?.conflicts ?? [],
             children: override?.projection?.children ?? {},
             relations: override?.projection?.relations ?? [],
@@ -11608,6 +11617,34 @@ export function maybeInstallE2eTauriMocks() {
           projection: activeConfig?.mock?.bwSnapshot?.projection ?? {
             issues: {},
             issue_fields: {},
+            issue_state: {},
+            issue_state_id: {},
+            leaf: {},
+            conflicts: [],
+            children: {},
+            relations: [],
+            artifact_verdicts: {},
+          },
+        };
+      }
+      // P4E: signs and "submits" a kind:1 assignment/unassignment candidate
+      // over the existing assignment wire. Same discipline as
+      // `submit_project_bw_record` above — no Core validation here, only
+      // proof the UI calls the command with the right shape and surfaces a
+      // refusal via `bwAssignmentErrors`.
+      case "submit_project_bw_assignment": {
+        const error = activeConfig?.mock?.bwAssignmentErrors?.shift();
+        if (error) {
+          throw new Error(error);
+        }
+        return {
+          eventId: `mock-bw-assignment-${window.__BUZZ_E2E_COMMAND_PAYLOADS__?.length ?? 0}`,
+          projection: activeConfig?.mock?.bwSnapshot?.projection ?? {
+            issues: {},
+            issue_fields: {},
+            issue_state: {},
+            issue_state_id: {},
+            leaf: {},
             conflicts: [],
             children: {},
             relations: [],

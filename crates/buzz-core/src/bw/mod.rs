@@ -646,4 +646,143 @@ mod tests {
         short["content"] = json!(42);
         assert!(consumer.preflight(&short).is_err());
     }
+    // P4E: the desktop assignment/relation/implemented-handoff UI reads its
+    // writer, stream and implemented details from `issue_state`, and its
+    // parent/leaf eligibility from `leaf`, rather than re-deriving either from
+    // raw history. These prove Core is the sole source of both.
+    #[test]
+    fn projection_exposes_the_current_issue_state_head_for_display() {
+        let f = fixtures();
+        let consumer = case(
+            &f,
+            "issue-state-positive",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+            ],
+        );
+        let root = s(&f["events"]["root_a"]["event"]["id"]);
+        let assign_id = s(&f["events"]["assign_a"]["event"]["id"]);
+        let ready_id = s(&f["events"]["ready_a"]["event"]["id"]);
+        let p = consumer.projection();
+        assert_eq!(p["issue_state"][root]["state"], "ready");
+        assert_eq!(p["issue_state"][root]["stream"], "windows-integration");
+        assert_eq!(p["issue_state"][root]["assignment"], assign_id);
+        assert_eq!(p["issue_state_id"][root], ready_id);
+        // Not yet implemented: no commit/tests/remote_readback leak into a
+        // state that never carried them.
+        assert!(p["issue_state"][root]["commit"].is_null());
+
+        let mut consumer = consumer;
+        for label in ["dev_a", "implemented_a"] {
+            consumer.ingest(&serde_json::to_vec(&f["events"][label]["event"]).expect("event"));
+        }
+        let implemented_id = s(&f["events"]["implemented_a"]["event"]["id"]);
+        let p = consumer.projection();
+        assert_eq!(p["issue_state"][root]["state"], "implemented");
+        assert_eq!(p["issue_state"][root]["assignment"], assign_id);
+        assert_eq!(p["issue_state_id"][root], implemented_id);
+        assert_eq!(
+            p["issue_state"][root]["commit"],
+            "1111111111111111111111111111111111111111"
+        );
+        assert!(p["issue_state"][root]["remote_readback"].is_object());
+        assert!(!p["issue_state"][root]["tests"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
+        // The resolving human acceptance is a separate overlay: `issues` can
+        // move to `resolved` later without erasing the underlying transition
+        // record a writer actually signed.
+        assert_eq!(p["issues"][root], "implemented");
+    }
+    #[test]
+    fn projection_marks_a_parent_with_an_open_child_as_not_an_executable_leaf() {
+        let f = fixtures();
+        let consumer = case(
+            &f,
+            "non-leaf",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+                "dev_a",
+                "implemented_a",
+                "root_b",
+                "enroll_b",
+                "update_b",
+                "accept_b",
+                "backlog_b",
+                "assign_b",
+                "ready_b",
+                "dev_b",
+                "implemented_b",
+                "relation",
+            ],
+        );
+        let parent = s(&f["events"]["root_a"]["event"]["id"]);
+        let child = s(&f["events"]["root_b"]["event"]["id"]);
+        let p = consumer.projection();
+        // `relation` is a parent-of edge from root_a to root_b, and root_b is
+        // still open (implemented, not resolved/closed): root_a cannot be a
+        // freeze member while it still has an active child.
+        assert_eq!(p["leaf"][parent], false);
+        assert_eq!(p["leaf"][child], true);
+    }
+    #[test]
+    fn projection_marks_a_resolved_issue_as_no_longer_a_leaf_candidate() {
+        let f = fixtures();
+        let consumer = case(
+            &f,
+            "old-verdict",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+                "dev_a",
+                "implemented_a",
+                "root_b",
+                "enroll_b",
+                "update_b",
+                "accept_b",
+                "backlog_b",
+                "assign_b",
+                "ready_b",
+                "dev_b",
+                "implemented_b",
+                "pipeline",
+                "set",
+                "request",
+                "run",
+                "artifact",
+                "handoff",
+                "handoff-next",
+                "late-verdict",
+            ],
+        );
+        let root = s(&f["events"]["root_a"]["event"]["id"]);
+        let p = consumer.projection();
+        assert_eq!(p["issues"][root], "resolved");
+        // An already-resolved issue is not eligible for a later freeze either.
+        assert_eq!(p["leaf"][root], false);
+    }
 }

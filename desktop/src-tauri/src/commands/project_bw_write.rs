@@ -13,18 +13,34 @@
 //!
 //! Legacy 1630-1633 issue status kinds are untouched and unreferenced here;
 //! see `project_issue_status.rs`. This module never routes through them.
+//!
+//! P4E adds the `issue-relation` record type (parent/child/blocks/duplicate
+//! edges — still fully decided by Core's own cycle/conflict checks, never
+//! simplified here) and a narrow, explicit-action-only extension for the
+//! `implemented` issue-state transition: NIP-BW.md requires that transition's
+//! `commit`/`remote_readback` to match an *externally observed* canonical
+//! Relay Git head, never a caller's claim. This command resolves that one
+//! fact itself (`git ls-remote` against the repository's own owner-signed
+//! clone URL, read at the moment of this explicit "mark implemented"
+//! submission — never from rendering the issue) and overwrites whatever the
+//! caller sent for those two fields before Core ever sees the candidate, the
+//! same way `assemble_bw_tags` already overwrites a caller-supplied `policy`.
 
 use super::project_bw::load as load_bw_input;
+use super::project_git_exec::{
+    build_git_auth_config, run_git, validate_workspace_clone_url, GitAuthConfig,
+};
 use crate::app_state::AppState;
 use crate::bw_projection;
 use crate::relay::{query_relay, submit_signed_event_with_keys};
+use buzz_core_pkg::bw::parse_json;
 use buzz_sdk_pkg::bw::{record as bw_record, Publication, RecordType};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::State;
 
-/// The three P4D-scoped 46100 record types this command will sign. Every
+/// The four P4D/P4E-scoped 46100 record types this command will sign. Every
 /// other BW record type (release/build/test/verdict machinery) belongs to a
 /// later phase and is deliberately not reachable through this command, even
 /// though Core would refuse an unauthorized attempt at any of them anyway.
@@ -33,10 +49,93 @@ fn record_type(name: &str) -> Result<RecordType, String> {
         "issue-state" => Ok(RecordType::IssueState),
         "issue-update" => Ok(RecordType::IssueUpdate),
         "triage-action" => Ok(RecordType::TriageAction),
+        "issue-relation" => Ok(RecordType::IssueRelation),
         other => Err(format!(
             "Unsupported BW record type for this command: {other}"
         )),
     }
+}
+
+/// Defensive shape gate before a stream name reaches a `git` argv, mirroring
+/// (not replacing) NIP-BW.md's own `stream` grammar
+/// (`crates/buzz-core/src/bw/shape.rs`). This never decides BW validity —
+/// Core's own shape/causality checks still run on the assembled candidate —
+/// it only keeps a hostile stream value from being interpreted as a git flag
+/// or an out-of-repo ref before that point.
+fn validate_stream_for_git(stream: &str) -> Result<(), String> {
+    let bytes = stream.as_bytes();
+    let ok = !stream.is_empty()
+        && stream.len() <= 128
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes.iter().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'/' | b'-')
+        })
+        && !stream.contains("..")
+        && !stream.contains("@{")
+        && !stream.ends_with(['.', '/'])
+        && stream
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"));
+    if ok {
+        Ok(())
+    } else {
+        Err("Invalid BW stream name.".to_string())
+    }
+}
+
+/// The owner-signed repository genesis's `clone` URL — read only from the
+/// exact record Core's own `activation()` already authenticated (`genesis`),
+/// never from any other same-coordinate 30617 event that happened to be
+/// fetched alongside it.
+fn genesis_clone_url(bw_input: &bw_projection::Input, genesis_id: &str) -> Result<String, String> {
+    bw_input
+        .events
+        .iter()
+        .find_map(|raw| {
+            let wire = parse_json(raw.as_bytes()).ok()?;
+            if wire["id"].as_str() != Some(genesis_id) {
+                return None;
+            }
+            wire["tags"].as_array()?.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == "clone")
+                    .then(|| tag.get(1)?.as_str())
+                    .flatten()
+                    .map(str::to_owned)
+            })
+        })
+        .ok_or_else(|| "Repository announcement has no clone URL on record.".to_string())
+}
+
+/// Read the real current commit of `stream` from the repository's own git
+/// hosting. A blocking `git` subprocess call, run only for this one explicit
+/// write (never from a render): the only way NIP-BW.md's `implemented`
+/// transition can carry a fact instead of a claim.
+fn resolve_stream_head_blocking(
+    clone_url: &str,
+    stream: &str,
+    auth: &GitAuthConfig,
+) -> Result<String, String> {
+    let refname = format!("refs/heads/{stream}");
+    let output = run_git(
+        &[
+            "ls-remote",
+            "--exit-code",
+            "--end-of-options",
+            clone_url,
+            refname.as_str(),
+        ],
+        None,
+        auth,
+    )
+    .map_err(|error| format!("Could not read the repository's current {stream} head: {error}"))?;
+    output
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_ascii_lowercase)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("Could not resolve a commit for stream {stream}."))
 }
 
 /// Extra, record-specific tags supplied by the caller (`issue`, `previous`,
@@ -105,12 +204,53 @@ pub async fn submit_project_bw_record(
         .activation()
         .map_err(|refusal| refusal.to_string())?;
     let keys = state.signing_keys()?;
+    let created_at = Timestamp::now();
+
+    let mut content = input.content;
+    if matches!(kind, RecordType::IssueState)
+        && content.get("state").and_then(Value::as_str) == Some("implemented")
+    {
+        let stream = content
+            .get("stream")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "A BW implemented transition requires a stream.".to_string())?
+            .to_string();
+        validate_stream_for_git(&stream)?;
+        let clone_url = genesis_clone_url(&bw_input, &activation.genesis)?;
+        validate_workspace_clone_url(&clone_url, &state)?;
+        let auth = build_git_auth_config(&state)?;
+        let head = {
+            let clone_url = clone_url.clone();
+            let stream = stream.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                resolve_stream_head_blocking(&clone_url, &stream, &auth)
+            })
+            .await
+            .map_err(|error| format!("git readback task failed: {error}"))??
+        };
+        // The externally observed fact overwrites whatever the caller sent
+        // for `commit`/`remote_readback` — NIP-BW.md: "The signed claim
+        // alone proves no remote fact." `observed_at` is pinned to this same
+        // `created_at` so the age/ordering check Core applies
+        // (`external.rs`: observed_at <= created_at, age <= 300s) is met by
+        // construction, not by a race between this read and signing.
+        let remote_readback = json!({
+            "repo": input.repo,
+            "stream": stream,
+            "head": head,
+            "observed_at": created_at.as_secs(),
+        });
+        content["commit"] = json!(head);
+        content["remote_readback"] = remote_readback.clone();
+        let mut evidence = bw_input.external.clone();
+        evidence.git_readbacks = vec![remote_readback];
+        consumer.observe(evidence, created_at.as_secs());
+    }
 
     let tags = assemble_bw_tags(&activation.policy, &input.repo, input.delegate, &input.tags)?;
-    let draft = bw_record(kind, tags, input.content).map_err(|error| error.to_string())?;
+    let draft = bw_record(kind, tags, content).map_err(|error| error.to_string())?;
     let dry = draft.dry_run().map_err(|error| error.to_string())?;
 
-    let created_at = Timestamp::now();
     let candidate = json!({
         "pubkey": keys.public_key().to_hex(),
         "created_at": created_at.as_secs(),
@@ -369,6 +509,7 @@ mod tests {
         assert!(record_type("issue-state").is_ok());
         assert!(record_type("issue-update").is_ok());
         assert!(record_type("triage-action").is_ok());
+        assert!(record_type("issue-relation").is_ok());
     }
 
     #[test]
@@ -426,5 +567,259 @@ mod tests {
             &[vec!["issue".into()]],
         )
         .is_err());
+    }
+
+    // P4E: relations/parent-leaf-cycle handling and the implemented handoff's
+    // external-evidence requirement. Relation authority, cycle detection and
+    // leaf eligibility are still decided exclusively by Core
+    // (`crates/buzz-core/src/bw/semantics.rs::causality`,
+    // `is_executable_leaf`) — this command only ever assembles the candidate.
+
+    #[test]
+    fn direct_issue_relation_candidate_accepts_a_coordinator_signed_parent_of_edge() {
+        let f = fixtures();
+        let consumer = case(
+            &f,
+            "issue-relation-positive",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+                "dev_a",
+                "implemented_a",
+                "root_b",
+                "enroll_b",
+                "update_b",
+                "accept_b",
+                "backlog_b",
+                "assign_b",
+                "ready_b",
+                "dev_b",
+                "implemented_b",
+            ],
+        );
+        let activation = consumer.activation().expect("activation");
+        let candidate = candidate_for(
+            &f,
+            "relation",
+            RecordType::IssueRelation,
+            &activation.policy,
+            &activation.repo,
+        );
+        Publication::prepare(&consumer, candidate).expect("relation accepted");
+    }
+
+    #[test]
+    fn direct_issue_relation_candidate_rejects_an_unauthorized_signer() {
+        let f = fixtures();
+        let consumer = case(
+            &f,
+            "issue-relation-negative",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+                "dev_a",
+                "implemented_a",
+                "root_b",
+                "enroll_b",
+                "update_b",
+                "accept_b",
+                "backlog_b",
+                "assign_b",
+                "ready_b",
+                "dev_b",
+                "implemented_b",
+            ],
+        );
+        let activation = consumer.activation().expect("activation");
+        let candidate = candidate_for(
+            &f,
+            "relation-role",
+            RecordType::IssueRelation,
+            &activation.policy,
+            &activation.repo,
+        );
+        let refusal = Publication::prepare(&consumer, candidate).expect_err("wrong role");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid input: bw:reject:role:unauthorized"
+        );
+    }
+
+    #[test]
+    fn validate_stream_for_git_accepts_ordinary_branch_names_and_rejects_argv_or_traversal_hazards()
+    {
+        assert!(validate_stream_for_git("windows-integration").is_ok());
+        assert!(validate_stream_for_git("feature/p4e").is_ok());
+        // Would otherwise be interpreted as a git flag rather than a ref.
+        assert!(validate_stream_for_git("--upload-pack=/tmp/evil").is_err());
+        assert!(validate_stream_for_git("").is_err());
+        assert!(validate_stream_for_git("feature/..").is_err());
+        assert!(validate_stream_for_git("feature/x.lock").is_err());
+        assert!(validate_stream_for_git("feature@{1}").is_err());
+        assert!(validate_stream_for_git("trailing/").is_err());
+        assert!(validate_stream_for_git(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn genesis_clone_url_reads_only_the_activation_authenticated_genesis() {
+        let genesis_id = "g".repeat(64);
+        let foreign_id = "f".repeat(64);
+        let bw_input = bw_projection::Input {
+            trust: serde_json::from_value(json!({
+                "community": "https://relay.example.invalid",
+                "repo": "30617:owner:repo",
+                "owner": "owner",
+            }))
+            .expect("trust"),
+            external: serde_json::from_value(json!({
+                "git_readbacks": [], "git_ancestry": [], "provider_readbacks": [],
+                "downloads": [], "host_authorization": {"allowed": false},
+            }))
+            .expect("evidence"),
+            now: 0,
+            events: vec![
+                json!({
+                    "id": foreign_id, "pubkey": "owner", "created_at": 0, "kind": 30617,
+                    "tags": [["d", "repo"], ["clone", "https://wrong.example.invalid"]],
+                    "content": "", "sig": "0".repeat(128),
+                })
+                .to_string(),
+                json!({
+                    "id": genesis_id, "pubkey": "owner", "created_at": 0, "kind": 30617,
+                    "tags": [["d", "repo"], ["clone", "https://relay.example.invalid/repo.git"]],
+                    "content": "", "sig": "0".repeat(128),
+                })
+                .to_string(),
+            ],
+        };
+        assert_eq!(
+            genesis_clone_url(&bw_input, &genesis_id).expect("clone url"),
+            "https://relay.example.invalid/repo.git"
+        );
+        assert!(genesis_clone_url(&bw_input, &"0".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn resolve_stream_head_blocking_reads_the_real_current_commit() {
+        use super::super::project_git_exec::{build_test_git_auth_config, run_git};
+
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let remote = root.path().join("remote.git");
+        let worktree = root.path().join("worktree");
+        let remote_path = remote.to_str().expect("remote path");
+        let worktree_path = worktree.to_str().expect("worktree path");
+
+        run_git(&["init", "--bare", "--", remote_path], None, &auth).expect("init remote");
+        run_git(&["init", "--", worktree_path], None, &auth).expect("init worktree");
+        std::fs::write(worktree.join("README.md"), "p4e\n").expect("write fixture");
+        run_git(&["add", "README.md"], Some(&worktree), &auth).expect("stage fixture");
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "Initial commit",
+            ],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("commit fixture");
+        run_git(
+            &["branch", "-M", "windows-integration"],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("rename branch");
+        run_git(
+            &["remote", "add", "origin", remote_path],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("add remote");
+        run_git(
+            &["push", "origin", "windows-integration"],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("push branch");
+        let commit = run_git(&["rev-parse", "HEAD"], Some(&worktree), &auth)
+            .expect("resolve fixture commit")
+            .trim()
+            .to_ascii_lowercase();
+
+        let head = resolve_stream_head_blocking(remote_path, "windows-integration", &auth)
+            .expect("resolve head");
+        assert_eq!(head, commit);
+        assert!(resolve_stream_head_blocking(remote_path, "no-such-branch", &auth).is_err());
+    }
+
+    #[test]
+    fn an_implemented_candidate_without_matching_external_evidence_stays_pending() {
+        let f = fixtures();
+        let mut consumer = case(
+            &f,
+            "issue-state-positive",
+            &[
+                "repo",
+                "policy",
+                "root_a",
+                "enroll_a",
+                "update_a",
+                "accept_a",
+                "backlog_a",
+                "assign_a",
+                "ready_a",
+                "dev_a",
+            ],
+        );
+        // No `observe()` call: the consumer keeps the case's own fixture
+        // evidence — this instead proves the opposite direction, that the
+        // *unmodified* evidence is what makes `implemented_a` acceptable, by
+        // first accepting it once...
+        let ok_candidate = json!({
+            "pubkey": f["events"]["implemented_a"]["event"]["pubkey"],
+            "created_at": f["events"]["implemented_a"]["event"]["created_at"],
+            "kind": f["events"]["implemented_a"]["event"]["kind"],
+            "tags": f["events"]["implemented_a"]["event"]["tags"],
+            "content": f["events"]["implemented_a"]["event"]["content"],
+        });
+        Publication::prepare(&consumer, ok_candidate.clone()).expect("evidenced claim accepted");
+        // ...then proving an otherwise-identical claim is refused, never
+        // silently trusted, once the external Git evidence is withdrawn —
+        // exactly the caller-supplied-evidence path this command's own
+        // `consumer.observe()` call replaces with a freshly resolved fact.
+        consumer.observe(
+            serde_json::from_value(json!({
+                "git_readbacks": [], "git_ancestry": [], "provider_readbacks": [],
+                "downloads": [], "host_authorization": {"allowed": false},
+            }))
+            .expect("empty evidence"),
+            f["events"]["implemented_a"]["event"]["created_at"]
+                .as_u64()
+                .expect("now"),
+        );
+        let refusal = Publication::prepare(&consumer, ok_candidate).expect_err("unevidenced claim");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid input: bw:pending:external:relay-head"
+        );
     }
 }

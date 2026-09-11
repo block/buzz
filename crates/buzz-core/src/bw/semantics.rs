@@ -670,31 +670,10 @@ impl<'a> History<'a> {
                     return Err(err("wrong-previous"));
                 }
                 let valid = self.known_before(e);
-                let edges = self.relations(&valid);
                 for m in a(&e.body["members"]) {
                     let issue = s(&m["issue"]);
                     self.current_binding(e, self.get(s(&m["implemented"]))?, "implemented-head")?;
-                    if valid.iter().any(|v| {
-                        v.typ() == "member-verdict"
-                            && v.issue() == issue
-                            && v.field("verdict") == "accepted"
-                    }) || valid.iter().any(|r| {
-                        r.typ() == "triage-action"
-                            && r.issue() == issue
-                            && matches!(r.field("action"), "duplicate" | "decline")
-                    }) || edges.iter().any(|r| {
-                        (r.issue() == issue
-                            && (r.field("relation") == "duplicate-of"
-                                || r.field("relation") == "parent-of"
-                                    && !self.closed_issue(r.field("target"), &valid)))
-                            || (r.field("target") == issue
-                                && r.field("relation") == "blocks"
-                                && !valid.iter().any(|v| {
-                                    v.typ() == "member-verdict"
-                                        && v.issue() == r.issue()
-                                        && v.field("verdict") == "accepted"
-                                }))
-                    }) {
+                    if !self.is_executable_leaf(issue, &valid) {
                         return Err(err("non-leaf"));
                     }
                 }
@@ -771,6 +750,28 @@ impl<'a> History<'a> {
                     || r.typ() == "triage-action"
                         && matches!(r.field("action"), "duplicate" | "decline"))
         })
+    }
+    /// An executable leaf per NIP-BW.md: "a non-closed, non-resolved issue with
+    /// no active child, no duplicate-of edge and no unresolved blocker." Shared
+    /// by the freeze-time membership check and the read-side projection, so a
+    /// `parent-of`/`blocks`/`duplicate-of` conflict is judged identically in
+    /// both places — the UI never re-derives this on its own.
+    pub fn is_executable_leaf(&self, issue: &str, valid: &[&'a Record]) -> bool {
+        let edges = self.relations(valid);
+        !(self.closed_issue(issue, valid)
+            || edges.iter().any(|r| {
+                (r.issue() == issue
+                    && (r.field("relation") == "duplicate-of"
+                        || r.field("relation") == "parent-of"
+                            && !self.closed_issue(r.field("target"), valid)))
+                    || (r.field("target") == issue
+                        && r.field("relation") == "blocks"
+                        && !valid.iter().any(|v| {
+                            v.typ() == "member-verdict"
+                                && v.issue() == r.issue()
+                                && v.field("verdict") == "accepted"
+                        }))
+            }))
     }
     fn run_terminal_before(&self, e: &Record, request: &str) -> bool {
         self.before(e, "build-run").iter().any(|r| {

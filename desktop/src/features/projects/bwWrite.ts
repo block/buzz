@@ -9,7 +9,12 @@
 // overwrite a concurrent one, and surface a real fork as a visible conflict
 // instead of guessing a winner.
 import { invokeTauri } from "@/shared/api/tauri";
-import { bwChainHead, type BwSnapshot } from "./bwProjection";
+import {
+  bwAssignmentHead,
+  bwChainHead,
+  type BwAssignmentOperation,
+  type BwSnapshot,
+} from "./bwProjection";
 
 export class BwConflictError extends Error {
   constructor(
@@ -100,5 +105,243 @@ export async function submitBwTriageAction({
     tags,
     content: fields,
     delegate,
+  });
+}
+
+// P4E: assignment (the *existing* kind:1 wire — no new grammar), relation
+// (parent/child/blocks/duplicate-of) and the ready/in-development/implemented
+// handoff. Every function below computes only the `previous`/`prior` pointer
+// from the already-fetched snapshot and refuses up front on a visible fork;
+// the actual role/causality/evidence decision is exclusively Core's, via
+// `submit_project_bw_assignment` / `submit_project_bw_record`
+// (`desktop/src-tauri/src/commands/project_bw_assignment.rs`,
+// `project_bw_write.rs`).
+
+/** Select or release the sole BW delegate for an issue, chaining off the
+ * exact current kind:1 assignment-chain head. Whether this signer may
+ * perform the operation at all (Owner or the coordinator active at this
+ * moment) is decided exclusively by Core; an unauthorized attempt is
+ * refused with its own `bw:reject:role:unauthorized`, never simplified or
+ * pre-filtered here. */
+export async function submitBwAssignment({
+  repo,
+  issueId,
+  snapshot,
+  delegate,
+  operation,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  delegate: string;
+  operation: BwAssignmentOperation;
+}): Promise<{ eventId: string; projection: unknown }> {
+  const { headId, conflict } = bwAssignmentHead(snapshot, issueId);
+  if (conflict) {
+    throw new BwConflictError();
+  }
+  return invokeTauri("submit_project_bw_assignment", {
+    repo,
+    issueId,
+    delegate,
+    operation,
+    prior: headId,
+  });
+}
+
+/** Move an issue from `backlog` to `ready`: binds a stream, the exact
+ * current assignment-chain head (or `null` for an unassigned ready reset)
+ * and the exact current text head. Core alone decides whether the signer is
+ * Owner/coordinator, whether the bound assignment is actually current, and
+ * whether a prior `implemented` requires a rework verdict or a terminal
+ * failed/aborted set before this reset is allowed
+ * (`crates/buzz-core/src/bw/semantics.rs::causality`, `"ready"` branch). */
+export async function submitBwReadyTransition({
+  repo,
+  issueId,
+  snapshot,
+  stream,
+  reworkVerdictId = null,
+  terminalSetId = null,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  stream: string;
+  reworkVerdictId?: string | null;
+  terminalSetId?: string | null;
+}): Promise<{ eventId: string; projection: unknown }> {
+  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  const { headId: updateId, conflict: updateConflict } = bwChainHead(
+    snapshot,
+    issueId,
+    "issue-update",
+  );
+  if (updateConflict) {
+    throw new BwConflictError();
+  }
+  const { headId: assignmentId, conflict: assignmentConflict } =
+    bwAssignmentHead(snapshot, issueId);
+  if (assignmentConflict) {
+    throw new BwConflictError();
+  }
+  const tags: string[][] = [["issue", issueId]];
+  if (previousId) tags.push(["previous", previousId]);
+  const content: Record<string, unknown> = {
+    state: "ready",
+    stream,
+    assignment: assignmentId,
+    update: updateId,
+    rework: reworkVerdictId,
+  };
+  if (terminalSetId) content.terminal_set = terminalSetId;
+  return invokeTauri("submit_project_bw_record", {
+    repo,
+    record: "issue-state",
+    tags,
+    content,
+    delegate: false,
+  });
+}
+
+/** Move an issue from `ready` to `in-development`. Reuses the exact
+ * stream/assignment the current `ready` head already carries — NIP-BW.md's
+ * "writer-binding" rule requires an exact match, so this never lets a stale
+ * or hand-typed value drift from what was actually selected at `ready`.
+ * Only the delegate bound by that exact assignment head may sign; Core
+ * decides that, never this function. */
+export async function submitBwInDevelopmentTransition({
+  repo,
+  issueId,
+  snapshot,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+}): Promise<{ eventId: string; projection: unknown }> {
+  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  const current = snapshot.projection.issue_state[issueId];
+  if (!previousId || !current?.stream || !current.assignment) {
+    throw new Error(
+      "This issue has no valid ready state with a bound assignment yet.",
+    );
+  }
+  const tags: string[][] = [
+    ["issue", issueId],
+    ["previous", previousId],
+  ];
+  return invokeTauri("submit_project_bw_record", {
+    repo,
+    record: "issue-state",
+    tags,
+    content: {
+      state: "in-development",
+      stream: current.stream,
+      assignment: current.assignment,
+    },
+    delegate: false,
+  });
+}
+
+/** Move an issue from `in-development` to `implemented`. `commit` and
+ * `remote_readback` are deliberately omitted here: the Tauri command
+ * resolves both from an externally observed Git read of the repository's
+ * own stream at submit time and overwrites anything sent for them —
+ * NIP-BW.md: "The signed claim alone proves no remote fact." This function
+ * cannot fabricate that evidence and does not try to; `tests` remains a
+ * human-authored summary, exactly as the contract allows. */
+export async function submitBwImplementedTransition({
+  repo,
+  issueId,
+  snapshot,
+  tests,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  tests: string;
+}): Promise<{ eventId: string; projection: unknown }> {
+  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  const current = snapshot.projection.issue_state[issueId];
+  if (!previousId || !current?.stream || !current.assignment) {
+    throw new Error("This issue is not in development yet.");
+  }
+  const normalizedTests = tests.trim();
+  if (!normalizedTests) {
+    throw new Error("A tests summary is required.");
+  }
+  const tags: string[][] = [
+    ["issue", issueId],
+    ["previous", previousId],
+  ];
+  return invokeTauri("submit_project_bw_record", {
+    repo,
+    record: "issue-state",
+    tags,
+    content: {
+      state: "implemented",
+      stream: current.stream,
+      assignment: current.assignment,
+      tests: normalizedTests,
+    },
+    delegate: false,
+  });
+}
+
+/** Add or remove a relation edge between two enrolled issues in the same
+ * repository. Cycle rejection, active-membership locking and role
+ * (Owner/coordinator-only) are all Core's decision
+ * (`crates/buzz-core/src/bw/semantics.rs::causality`, `"issue-relation"`
+ * branch) — this only chains off the exact current head for this precise
+ * `(issue, relation, target)` triple, which is its own independent causal
+ * chain distinct from any other relation on the same issue. */
+export async function submitBwRelation({
+  repo,
+  issueId,
+  snapshot,
+  relation,
+  target,
+  operation,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  relation: "blocks" | "related" | "duplicate-of" | "parent-of";
+  target: string;
+  operation: "add" | "remove";
+}): Promise<{ eventId: string; projection: unknown }> {
+  const records = Object.values(snapshot.records).filter((event) => {
+    if (event.kind !== 46100) return false;
+    if (event.tags.find((tag) => tag[0] === "record")?.[1] !== "issue-relation")
+      return false;
+    if (event.tags.find((tag) => tag[0] === "issue")?.[1] !== issueId)
+      return false;
+    try {
+      const body = JSON.parse(event.content) as {
+        relation?: string;
+        target?: string;
+      };
+      return body.relation === relation && body.target === target;
+    } catch {
+      return false;
+    }
+  });
+  const referenced = new Set(
+    records
+      .map((event) => event.tags.find((tag) => tag[0] === "previous")?.[1])
+      .filter((value): value is string => Boolean(value)),
+  );
+  const heads = records.filter((event) => !referenced.has(event.id));
+  if (heads.length > 1) {
+    throw new BwConflictError();
+  }
+  const tags: string[][] = [["issue", issueId]];
+  if (heads.length === 1) tags.push(["previous", heads[0].id]);
+  return invokeTauri("submit_project_bw_record", {
+    repo,
+    record: "issue-relation",
+    tags,
+    content: { relation, target, operation },
+    delegate: false,
   });
 }

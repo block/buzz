@@ -10,6 +10,29 @@ export type BwNotice = {
   stage: string;
   code: string;
 };
+/** The current issue-state chain head's own already-accepted content body
+ * (P4E), passed through verbatim from Core
+ * (`crates/buzz-core/src/bw/projection.rs`) — never re-derived here. Only
+ * the fields valid for the record's own `state` are present; see
+ * NIP-BW.md "issue-state and the existing assignment wire". */
+export type BwIssueStateFields = {
+  state: string;
+  stream?: string;
+  assignment?: string | null;
+  update?: string;
+  rework?: string | null;
+  terminal_set?: string;
+  triage?: string;
+  commit?: string;
+  tests?: string;
+  remote_readback?: {
+    repo: string;
+    stream: string;
+    head: string;
+    observed_at: number;
+  };
+};
+export type BwRelation = { issue: string; relation: string; target: string };
 export type BwSnapshot = {
   repo: string;
   activation: { policy: string; genesis: string } | null;
@@ -27,9 +50,18 @@ export type BwSnapshot = {
         priority: string;
       }
     >;
+    /** Current issue-state head body, keyed by issue ID — absent when the
+     * head is ambiguous (fork) or the issue was never enrolled. */
+    issue_state: Record<string, BwIssueStateFields>;
+    /** The current issue-state head's own event ID, so a producer can chain
+     * the next transition's `previous` tag without re-deriving this head. */
+    issue_state_id: Record<string, string>;
+    /** Executable-leaf eligibility per issue, decided by Core
+     * (`is_executable_leaf`) — never re-derived client-side. */
+    leaf: Record<string, boolean>;
     conflicts: string[];
     children: Record<string, string[]>;
-    relations: unknown[];
+    relations: BwRelation[];
     artifact_verdicts: Record<string, unknown>;
   };
   records: Record<string, RelayEvent>;
@@ -87,6 +119,58 @@ export function bwChainHead(
   if (heads.length === 0) return { headId: null, conflict: false };
   if (heads.length > 1) return { headId: null, conflict: true };
   return { headId: heads[0].id, conflict: false };
+}
+
+export type BwAssignmentOperation = "assignment" | "unassignment";
+export type BwAssignmentHead = {
+  headId: string | null;
+  /** The sole delegate an `assignment` head adds; `null` when the head is
+   * an `unassignment` (no current writer) or there is no head at all. */
+  writer: string | null;
+  operation: BwAssignmentOperation | null;
+  conflict: boolean;
+};
+
+/** The current head of an issue's *existing* kind:1 assignment/unassignment
+ * chain (NIP-BW.md "issue-state and the existing assignment wire" — no new
+ * record type or kind), computed only from records the snapshot already
+ * returned as accepted. Mirrors `bwChainHead`'s fork handling: two accepted
+ * heads with no successor is a conflict, never a guessed winner. Because
+ * Core's own `roles()`/`causality()` already decided which kind:1 events are
+ * historically valid before they ever reached `snapshot.records`, this is
+ * display of an already-made decision, not a second authority check. */
+export function bwAssignmentHead(
+  snapshot: BwSnapshot,
+  issueId: string,
+): BwAssignmentHead {
+  const records = Object.values(snapshot.records).filter((event) => {
+    if (event.kind !== 1) return false;
+    const operation = bwTag(event, "t");
+    return (
+      (operation === "assignment" || operation === "unassignment") &&
+      bwTag(event, "e") === issueId
+    );
+  });
+  const referenced = new Set(
+    records
+      .map((event) => bwTag(event, "prior"))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const heads = records.filter((event) => !referenced.has(event.id));
+  if (heads.length === 0) {
+    return { headId: null, writer: null, operation: null, conflict: false };
+  }
+  if (heads.length > 1) {
+    return { headId: null, writer: null, operation: null, conflict: true };
+  }
+  const head = heads[0];
+  const operation = bwTag(head, "t") as BwAssignmentOperation;
+  return {
+    headId: head.id,
+    writer: operation === "assignment" ? (bwTag(head, "p") ?? null) : null,
+    operation,
+    conflict: false,
+  };
 }
 
 /** True when any accepted issue-update for this issue is part of a visible
@@ -153,6 +237,13 @@ export function mergeBwIssues(
       : state
         ? (labels[state] ?? "Triage")
         : "Triage";
+    // Display only: the selected writer (`bwAssignmentHead`, the existing
+    // kind:1 chain) so the facepile and detail rail show the current
+    // assignee without a separate BW-unaware read path. Writing an
+    // assignment for a BW issue goes through `submitBwAssignment`
+    // (`bwWrite.ts`) — never the legacy `issueAssignments.ts` mutations,
+    // which do not consult Core at all.
+    const assignmentHead = bwAssignmentHead(snapshot, id);
     byId.set(id, {
       ...issue,
       title: fields?.title ?? issue.title,
@@ -160,7 +251,7 @@ export function mergeBwIssues(
       status,
       workflowStatus: null,
       currentReview: null,
-      assignees: [],
+      assignees: assignmentHead.writer ? [assignmentHead.writer] : [],
       assigneeOperationHeads: {},
       bw: {
         state,

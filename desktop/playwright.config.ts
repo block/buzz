@@ -113,6 +113,7 @@ export default defineConfig({
         "**/projects-v3-screenshots.spec.ts",
         "**/project-issue-comments.spec.ts",
         "**/project-bw-issues.spec.ts",
+        "**/project-bw-assignment.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",

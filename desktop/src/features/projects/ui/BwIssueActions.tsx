@@ -6,14 +6,27 @@ import type {
   ProjectIssue,
   Repository as Project,
 } from "@/features/projects/hooks";
+import { bwAssignmentHead } from "@/features/projects/bwProjection";
 import {
   BwConflictError,
+  submitBwAssignment,
+  submitBwImplementedTransition,
+  submitBwInDevelopmentTransition,
   submitBwIssueTextUpdate,
+  submitBwReadyTransition,
+  submitBwRelation,
   submitBwTriageAction,
   type BwTriageAction,
   type BwTriageActionFields,
 } from "@/features/projects/bwWrite";
 import { invokeTauri } from "@/shared/api/tauri";
+
+const RELATION_TYPES = [
+  "blocks",
+  "related",
+  "duplicate-of",
+  "parent-of",
+] as const;
 
 function useInvalidateProjectIssues(project: Project) {
   const queryClient = useQueryClient();
@@ -399,11 +412,457 @@ function BwTriageActions({
   );
 }
 
+/** Select or release the sole delegate for a `backlog`/`ready` issue, over
+ * the *existing* kind:1 assignment wire (NIP-BW.md: "no new assignment
+ * grammar"). Unassign always resubmits the exact current writer as `p` —
+ * Core's own causality check refuses an unassignment whose `p` does not
+ * match the head it chains from, so this never lets the UI invent a
+ * mismatched release. */
+function BwAssignmentSection({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const [delegate, setDelegate] = React.useState("");
+  const [pending, setPending] = React.useState(false);
+  const invalidate = useInvalidateProjectIssues(project);
+  if (!issue.bw) return null;
+  const snapshot = issue.bw.snapshot;
+  const head = bwAssignmentHead(snapshot, issue.id);
+
+  const run = async (operation: "assignment" | "unassignment", who: string) => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await submitBwAssignment({
+        delegate: who,
+        issueId: issue.id,
+        operation,
+        repo: project.repoAddress,
+        snapshot,
+      });
+      toast.success(
+        operation === "assignment" ? "Writer assigned." : "Writer unassigned.",
+      );
+      setDelegate("");
+      await invalidate();
+    } catch (error) {
+      toast.error(
+        error instanceof BwConflictError
+          ? error.message
+          : errorMessage(error, "Assignment was refused."),
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  if (head.conflict) {
+    return (
+      <p
+        className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+        data-testid="bw-assignment-conflict"
+        role="alert"
+      >
+        Concurrent assignment changes are in conflict. Resolve manually.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5" data-testid="bw-assignment-section">
+      {head.writer ? (
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="font-mono" data-testid="bw-assignment-writer">
+            {head.writer}
+          </span>
+          <button
+            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+            data-testid="bw-unassign"
+            disabled={pending}
+            onClick={() => void run("unassignment", head.writer as string)}
+            type="button"
+          >
+            {pending ? "Unassigning…" : "Unassign"}
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <input
+            className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+            data-testid="bw-assign-delegate"
+            onChange={(event) => setDelegate(event.target.value)}
+            placeholder="Delegate pubkey"
+            value={delegate}
+          />
+          <button
+            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+            data-testid="bw-assign"
+            disabled={pending || !/^[0-9a-f]{64}$/i.test(delegate.trim())}
+            onClick={() =>
+              void run("assignment", delegate.trim().toLowerCase())
+            }
+            type="button"
+          >
+            {pending ? "Assigning…" : "Assign"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** `backlog` -> `ready`: bind a stream and the exact current assignment
+ * head. Core alone decides whether the signer is Owner/coordinator and
+ * whether a prior implemented needs a rework verdict or terminal set first;
+ * this only offers those two optional pointers as plain event-id inputs. */
+function BwReadyAction({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const [stream, setStream] = React.useState("");
+  const [reworkVerdictId, setReworkVerdictId] = React.useState("");
+  const [terminalSetId, setTerminalSetId] = React.useState("");
+  const [pending, setPending] = React.useState(false);
+  const invalidate = useInvalidateProjectIssues(project);
+
+  const handleSubmit = async () => {
+    if (pending || !issue.bw || !stream.trim()) return;
+    setPending(true);
+    try {
+      await submitBwReadyTransition({
+        issueId: issue.id,
+        repo: project.repoAddress,
+        reworkVerdictId: reworkVerdictId.trim() || null,
+        snapshot: issue.bw.snapshot,
+        stream: stream.trim(),
+        terminalSetId: terminalSetId.trim() || null,
+      });
+      toast.success("Issue moved to ready.");
+      await invalidate();
+    } catch (error) {
+      toast.error(
+        error instanceof BwConflictError
+          ? error.message
+          : errorMessage(error, "Ready transition was refused."),
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5" data-testid="bw-ready-action">
+      <input
+        className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+        data-testid="bw-ready-stream"
+        onChange={(event) => setStream(event.target.value)}
+        placeholder="Stream (branch)"
+        value={stream}
+      />
+      <input
+        className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+        data-testid="bw-ready-rework-verdict"
+        onChange={(event) => setReworkVerdictId(event.target.value)}
+        placeholder="Rework verdict id (optional)"
+        value={reworkVerdictId}
+      />
+      <input
+        className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+        data-testid="bw-ready-terminal-set"
+        onChange={(event) => setTerminalSetId(event.target.value)}
+        placeholder="Terminal release-set id (optional)"
+        value={terminalSetId}
+      />
+      <button
+        className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
+        data-testid="bw-ready-submit"
+        disabled={pending || !stream.trim()}
+        onClick={() => void handleSubmit()}
+        type="button"
+      >
+        {pending ? "Moving…" : "Move to ready"}
+      </button>
+    </div>
+  );
+}
+
+/** `ready` -> `in-development`. Reuses the exact stream/assignment the
+ * current `ready` head already carries, so this never needs its own
+ * inputs. */
+function BwInDevelopmentAction({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const [pending, setPending] = React.useState(false);
+  const invalidate = useInvalidateProjectIssues(project);
+
+  const handleSubmit = async () => {
+    if (pending || !issue.bw) return;
+    setPending(true);
+    try {
+      await submitBwInDevelopmentTransition({
+        issueId: issue.id,
+        repo: project.repoAddress,
+        snapshot: issue.bw.snapshot,
+      });
+      toast.success("Issue moved to in-development.");
+      await invalidate();
+    } catch (error) {
+      toast.error(
+        error instanceof BwConflictError
+          ? error.message
+          : errorMessage(error, "In-development transition was refused."),
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <button
+      className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
+      data-testid="bw-in-development-submit"
+      disabled={pending}
+      onClick={() => void handleSubmit()}
+      type="button"
+    >
+      {pending ? "Moving…" : "Start development"}
+    </button>
+  );
+}
+
+/** `in-development` -> `implemented`. `commit`/`remote_readback` are never
+ * collected here — the Tauri command resolves both from an externally
+ * observed Git read at submit time (NIP-BW.md: "The signed claim alone
+ * proves no remote fact"). Only a human-authored tests summary is taken. */
+function BwImplementedAction({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const [tests, setTests] = React.useState("");
+  const [pending, setPending] = React.useState(false);
+  const invalidate = useInvalidateProjectIssues(project);
+
+  const handleSubmit = async () => {
+    if (pending || !issue.bw || !tests.trim()) return;
+    setPending(true);
+    try {
+      await submitBwImplementedTransition({
+        issueId: issue.id,
+        repo: project.repoAddress,
+        snapshot: issue.bw.snapshot,
+        tests: tests.trim(),
+      });
+      toast.success("Issue marked implemented.");
+      await invalidate();
+    } catch (error) {
+      toast.error(
+        error instanceof BwConflictError
+          ? error.message
+          : errorMessage(error, "Implemented transition was refused."),
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5" data-testid="bw-implemented-action">
+      <textarea
+        className="min-h-16 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
+        data-testid="bw-implemented-tests"
+        onChange={(event) => setTests(event.target.value)}
+        placeholder="Tests summary"
+        value={tests}
+      />
+      <button
+        className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
+        data-testid="bw-implemented-submit"
+        disabled={pending || !tests.trim()}
+        onClick={() => void handleSubmit()}
+        type="button"
+      >
+        {pending ? "Submitting…" : "Mark implemented"}
+      </button>
+    </div>
+  );
+}
+
+/** Read-only display of the `implemented` transition's own accepted
+ * content — commit, tests summary and the externally observed readback
+ * that proved it — literal passthrough of `issue_state`, never re-derived
+ * or re-verified here. */
+function BwImplementedDetails({ issue }: { issue: ProjectIssue }) {
+  const fields = issue.bw?.snapshot.projection.issue_state[issue.id];
+  if (!fields?.commit) return null;
+  return (
+    <dl
+      className="space-y-1 text-xs text-muted-foreground"
+      data-testid="bw-implemented-details"
+    >
+      <div>
+        <dt className="inline font-medium text-foreground">Commit: </dt>
+        <dd className="inline font-mono">{fields.commit}</dd>
+      </div>
+      {fields.tests ? (
+        <div>
+          <dt className="font-medium text-foreground">Tests</dt>
+          <dd className="whitespace-pre-wrap">{fields.tests}</dd>
+        </div>
+      ) : null}
+      {fields.remote_readback ? (
+        <div>
+          <dt className="inline font-medium text-foreground">
+            Verified readback:{" "}
+          </dt>
+          <dd className="inline font-mono">
+            {fields.remote_readback.stream}@{fields.remote_readback.head}
+          </dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
+/** Parent/child/blocks/duplicate-of relations for this issue, plus its
+ * executable-leaf eligibility — both read verbatim from Core's projection
+ * (`is_executable_leaf`, `relations`), never re-derived or simplified here
+ * (cycles and closed-target checks are exclusively Core's decision on
+ * submit). Only the four directly-owned relation kinds this issue is the
+ * `issue` side of offer a Remove button; the displayed inverse edges
+ * (child-of/blocked-by/duplicates) are read-only from here. */
+function BwRelations({
+  issue,
+  project,
+}: {
+  issue: ProjectIssue;
+  project: Project;
+}) {
+  const [relation, setRelation] =
+    React.useState<(typeof RELATION_TYPES)[number]>("blocks");
+  const [target, setTarget] = React.useState("");
+  const [pending, setPending] = React.useState(false);
+  const invalidate = useInvalidateProjectIssues(project);
+  if (!issue.bw) return null;
+
+  const relations = issue.bw.snapshot.projection.relations.filter(
+    (r) => r.issue === issue.id,
+  );
+  const leaf = issue.bw.snapshot.projection.leaf[issue.id];
+  const normalizedTarget = target.trim().toLowerCase();
+  const targetIsKnownRoot =
+    issue.bw.snapshot.records[normalizedTarget]?.kind === 1621;
+
+  const run = async (op: "add" | "remove", rel: string, tgt: string) => {
+    if (pending || !issue.bw) return;
+    setPending(true);
+    try {
+      await submitBwRelation({
+        issueId: issue.id,
+        operation: op,
+        relation: rel as (typeof RELATION_TYPES)[number],
+        repo: project.repoAddress,
+        snapshot: issue.bw.snapshot,
+        target: tgt,
+      });
+      toast.success(op === "add" ? "Relation added." : "Relation removed.");
+      setTarget("");
+      await invalidate();
+    } catch (error) {
+      toast.error(
+        error instanceof BwConflictError
+          ? error.message
+          : errorMessage(error, "Relation change was refused."),
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2" data-testid="bw-relations">
+      <p className="text-xs text-muted-foreground" data-testid="bw-leaf-state">
+        {leaf
+          ? "Executable leaf: eligible for a release freeze."
+          : "Not an executable leaf (open child, duplicate or unresolved blocker)."}
+      </p>
+      <ul className="space-y-1">
+        {relations.map((r) => (
+          <li
+            className="flex items-center justify-between gap-2 text-xs"
+            data-testid="bw-relation-row"
+            key={`${r.relation}:${r.target}`}
+          >
+            <span>
+              {r.relation} <span className="font-mono">{r.target}</span>
+            </span>
+            {(RELATION_TYPES as readonly string[]).includes(r.relation) ? (
+              <button
+                className="rounded-md border border-border/60 px-2 py-0.5 text-xs disabled:opacity-60"
+                data-testid="bw-relation-remove"
+                disabled={pending}
+                onClick={() => void run("remove", r.relation, r.target)}
+                type="button"
+              >
+                Remove
+              </button>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <div className="flex items-center gap-2">
+        <select
+          className="h-8 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+          data-testid="bw-relation-type"
+          onChange={(event) =>
+            setRelation(event.target.value as (typeof RELATION_TYPES)[number])
+          }
+          value={relation}
+        >
+          {RELATION_TYPES.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+        <input
+          className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
+          data-testid="bw-relation-target"
+          onChange={(event) => setTarget(event.target.value)}
+          placeholder="Target issue id"
+          value={target}
+        />
+        <button
+          className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+          data-testid="bw-relation-add"
+          disabled={pending || !targetIsKnownRoot}
+          onClick={() => void run("add", relation, normalizedTarget)}
+          type="button"
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** BW write surface for one issue: enroll retry for a not-yet-enrolled BW
- * root, text/acceptance-criteria editing while triage/backlog, and the
- * fixed triage actions while in triage. Renders nothing outside those
- * states (e.g. once in-development/implemented) — there is no writer
- * assignment or release UI here; that is a later phase. */
+ * root, text/acceptance-criteria editing while triage/backlog, the fixed
+ * triage actions while in triage, writer assignment, the ready/
+ * in-development/implemented handoff, and parent/child/blocks/duplicate-of
+ * relations. */
 export function BwIssueActions({
   issue,
   project,
@@ -436,6 +895,20 @@ export function BwIssueActions({
       {issue.bw.state === "triage" ? (
         <BwTriageActions issue={issue} project={project} />
       ) : null}
+      {issue.bw.state === "backlog" || issue.bw.state === "ready" ? (
+        <BwAssignmentSection issue={issue} project={project} />
+      ) : null}
+      {issue.bw.state === "backlog" ? (
+        <BwReadyAction issue={issue} project={project} />
+      ) : null}
+      {issue.bw.state === "ready" ? (
+        <BwInDevelopmentAction issue={issue} project={project} />
+      ) : null}
+      {issue.bw.state === "in-development" ? (
+        <BwImplementedAction issue={issue} project={project} />
+      ) : null}
+      <BwImplementedDetails issue={issue} />
+      <BwRelations issue={issue} project={project} />
     </div>
   );
 }

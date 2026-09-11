@@ -1,9 +1,18 @@
 //! Agent-signed NIP-34 issue lifecycle status commands.
+//!
+//! P4E: once an issue has a NIP-BW issue-state history (enrolled), its
+//! lifecycle belongs exclusively to that state machine
+//! (`crates/buzz-core/src/bw/semantics.rs`) — never this legacy 1630-1633
+//! mirror. `sign_project_issue_status` refuses for such an issue before it
+//! ever builds or signs the legacy event, the same "no separate, weaker
+//! gate" discipline `project_bw_write.rs` applies to its own record types.
 
+use super::project_bw::load as load_bw_input;
 use super::project_git_workflow::{
     normalize_event_id, project_owner_identity, validate_repo_address,
 };
 use crate::app_state::AppState;
+use crate::bw_projection;
 use crate::relay::submit_signed_event_with_keys;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use serde::Deserialize;
@@ -64,6 +73,35 @@ fn build_issue_status_event(
         .map_err(|error| format!("sign issue status: {error}"))
 }
 
+/// Refuse a legacy 1630-1633 lifecycle change for an issue whose NIP-BW
+/// history already carries an `issue-state` chain (i.e. it is enrolled).
+/// A repository the BW bridge cannot even load (not BW-addressable, or a
+/// transient fetch failure) is treated as not-yet-determined rather than
+/// blocked: this legacy command must not go globally unavailable for
+/// ordinary non-BW projects whenever that read fails. It is deliberately
+/// not fail-open on the *enrolled* branch itself — once Core's own
+/// projection shows a state for this issue, this command refuses
+/// unconditionally, with no override.
+async fn reject_if_bw_enrolled(
+    state: &AppState,
+    repo_address: &str,
+    issue_id: &str,
+) -> Result<(), String> {
+    let bw_input = match load_bw_input(state, repo_address).await {
+        Ok(input) => input,
+        Err(_) => return Ok(()),
+    };
+    let (consumer, _) = bw_projection::replay(&bw_input);
+    if !consumer.projection()["issues"][issue_id].is_null() {
+        return Err(
+            "This issue is enrolled in NIP-BW workflow tracking; legacy issue-status \
+             changes are disabled for it. Use the BW record commands instead."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Sign and submit an issue lifecycle status as the repository owner.
 #[tauri::command]
 pub async fn sign_project_issue_status(
@@ -75,6 +113,9 @@ pub async fn sign_project_issue_status(
     if normalize_event_id(&target_owner).is_none() {
         return Err("Invalid target repository owner.".to_string());
     }
+    let issue_id =
+        normalize_event_id(&input.issue_id).ok_or_else(|| "Invalid issue event ID.".to_string())?;
+    reject_if_bw_enrolled(&state, &input.repo_address, &issue_id).await?;
     let identity = project_owner_identity(&app, &state, &target_owner)?;
     let event = Event::from_json(build_issue_status_event(
         &identity.keys,
