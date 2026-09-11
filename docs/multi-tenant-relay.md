@@ -7,7 +7,7 @@
 This document specifies the data and authorization model that lets one shared
 Postgres instance, served by N stateless relay processes, host M independent
 **communities** without one community observing or acting on another, and gives
-a formal proof of its safety properties. It proves two families of property:
+a formal proof of its safety properties. It proves two families of properties:
 **isolation** — a community is *non-interfering* with every other community
 across the relay's logical interface (query results, authorization decisions,
 emitted errors, and audit-chain contents) — and **authorization soundness** — no
@@ -443,9 +443,9 @@ predicate fail closed rather than leak (Theorem I4).
   at `:84-86` references this obligation as "P3."
 
 P-RESOLVE is the load-bearing *application* assumption for channel-bearing events
-and P-RESOLVE-HOST is its channel-less counterpart — together the fence the
-`h`-tag and claimed-community adversary cannot circumvent. A-RLS-1..5 are the
-load-bearing *backstop*.
+and P-RESOLVE-HOST is its channel-less counterpart — together they form the fence
+that an adversary cannot circumvent by manipulating the `h` tag or claimed
+community. A-RLS-1..5 are the load-bearing *backstop*.
 
 ## Safety Theorems
 
@@ -478,7 +478,7 @@ load-bearing *backstop*.
 - **I5 (Admission fence).** Channel membership and channel-less read capability
   exist only for actors admitted to *that* community. The NIP-43 allowlist is the
   `admittedMembers` relation keyed on `(community, actor)`; `AddMembership` and
-  every channel-less read are gated on `IsAdmitted(c, a)`, and `Inv_AdmissionFence`
+  every channel-less read is gated on `IsAdmitted(c, a)`, and `Inv_AdmissionFence`
   quantifies over every membership *and* every recorded channel-less read,
   requiring same-community admission on both — the channel-less branch additionally
   binding `HostCommunity[host] = community`, so the host axis is fenced here too.
