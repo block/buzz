@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { ManagerController } from './manager-controller.ts';
 import type { Readable, Writable } from 'node:stream';
 
-if (process.versions.node !== '24.15.0') throw Error('The OpenTUI manager controller requires Node 24.15.0. Use the packaged launcher/runtime.');
+if (process.versions.node !== '24.15.0') throw Error('Beehive requires Node 24.15.0. Use the packaged Beehive launcher.');
 const bun = process.env.BEEHIVE_BUN ?? fileURLToPath(new URL('../runtime/bun', import.meta.url));
 const child = spawn(bun, [fileURLToPath(new URL('./manager-view.ts', import.meta.url))], {
   stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
@@ -28,6 +28,6 @@ input.on('line', line => {
 });
 const refresh = setInterval(() => controller.refresh(), 2000);
 child.once('spawn', () => controller.refresh());
-child.once('error', () => { console.error('Beehive presentation runtime unavailable; install the pinned app-local Bun runtime.'); process.exitCode = 1; });
+child.once('error', () => { console.error('Beehive could not start its terminal interface. The packaged Bun runtime is unavailable.'); process.exitCode = 1; });
 child.once('close', code => { closed = true; clearInterval(refresh); controller.close(); input.close(); process.exitCode = code ?? 1; });
 for (const signal of ['SIGINT','SIGTERM'] as const) process.on(signal, () => { controller.close(); child.kill(signal); });

@@ -39,7 +39,7 @@ test('manager config save is real/keyless owner routing; retained configuration 
     await f.controller.request({ id: 1, action: 'configure', values: { owner, relay: 'wss://example.invalid' } });
     assert.ok(existsSync(join(f.home,'.beehive','host','host-identity.json')));
     assert.match(f.snapshot.status,/saved/);
-    assert.match(f.snapshot.local[0]!.detail, /Service: not checked/);
+    assert.match(f.snapshot.local[0]!.detail, /Host service: not checked/);
     assert.ok(!f.snapshot.local[0]!.detail.includes('{'));
     assert.match(f.snapshot.local[0]!.evidence!, /nonce/);
     assert.equal(f.backend.read(credentialReference('owner',owner)),null);
@@ -61,22 +61,22 @@ test('manager gates owner, exact selection/revision/freshness, unresolved operat
     await request('signin',{ values: { owner, relay: 'wss://example.invalid', secret } }); assert.equal(f.snapshot.owner,owner);
     const m = message('inventory','host-a','agent-a',3,{ observedAt: Date.now(), phase: 'stopped', actualRun: null, assignedHost: 'host-a', configurations: { default: {} }, selectedNext: {} });
     f.receive(m);
-    assert.match(f.snapshot.agents[0]!.detail, /Actual run \(reported\)/);
-    assert.match(f.snapshot.agents[0]!.detail, /Selected for next Start/);
+    assert.match(f.snapshot.agents[0]!.detail, /Current run \(host report\)/);
+    assert.match(f.snapshot.agents[0]!.detail, /Configuration for next start/);
     assert.ok(!f.snapshot.agents[0]!.detail.includes('{'));
     assert.equal(f.snapshot.agents[0]!.disabled!.start, '');
     const target = JSON.stringify(['host-a','agent-a']);
-    await request('start',{ target, revision: 2 }); assert.match(f.snapshot.status,/Selection changed/);
+    await request('start',{ target, revision: 2 }); assert.match(f.snapshot.status,/selection changed/);
     await request('start',{ target, revision: 3 }); assert.equal(f.submitted.length,1); assert.equal(f.submitted[0]!.type,'start');
     await f.controller.request({ id, action: 'start', target, revision: 3 }); assert.equal(f.submitted.length,1,'duplicate request cannot act twice');
-    await request('restart',{ target, revision: 3 }); assert.match(f.snapshot.status,/Not available/); assert.equal(f.submitted.length,1,'handler refuses even if directly invoked');
+    await request('restart',{ target, revision: 3 }); assert.match(f.snapshot.status,/No Restart request is sent/); assert.equal(f.submitted.length,1,'handler refuses even if directly invoked');
     f.states([{ request: f.submitted[0], state: 'unknown' }]);
-    await request('stop',{ target, revision: 3 }); assert.match(f.snapshot.status,/Unresolved/); assert.equal(f.submitted.length,1);
+    await request('stop',{ target, revision: 3 }); assert.match(f.snapshot.status,/no confirmed result/); assert.equal(f.submitted.length,1);
     f.states([{ request: f.submitted[0], state: 'completed' }]);
     await request('select-config',{ target, revision: 3, values: { name: 'Alternative' } }); assert.equal(f.submitted[1]!.type,'save');
     await request('stop',{ target, revision: 3 }); assert.equal(f.submitted[2]!.type,'stop');
     f.receive({ ...m, revision: 4, body: { ...m.body, observedAt: Date.now()+1, phase: 'running', actualRun: { run: 'actual' } } });
-    await request('start',{ target, revision: 4 }); assert.match(f.snapshot.status,/fresh assigned stopped/);
+    await request('start',{ target, revision: 4 }); assert.match(f.snapshot.status,/recent report from the assigned host/);
     await request('signout'); assert.equal(f.snapshot.owner,undefined); assert.equal(f.submitted.length,3); assert.equal(f.closed,1);
     f.receive(m); assert.equal(f.controller.snapshot().agents.length,0,'late receive is fenced after signout');
   } finally { f.cleanup(); }
@@ -110,4 +110,38 @@ test('credential orchestration uses explicit Node, strips loaders, and awaits ow
     abort.abort(); await assert.rejects(pending,/cancelled/);
     assert.throws(() => process.kill(pid,0),{ code: 'ESRCH' });
   } finally { abort.abort(); rmSync(home,{ recursive: true, force: true }); }
+});
+
+test('manager presentation preserves raw evidence, unknown states and literal configuration values', async () => {
+  const f = fixture();
+  try {
+    await f.controller.request({ id: 1, action: 'signin', values: { owner, relay: 'wss://example.invalid', secret } });
+    const m = message('inventory','host-a','agent-a',3,{ observedAt: Date.now() - 10000, phase: 'running', assignedHost: 'host-a', actualRun: { selection: { model: 'accepted', workspace: 'unconfirmed', profile: 'default' }, future: { diagnostic: 'raw detail' } }, selectedNext: { configuration: { name: 'accepted', revision: 2 }, harnessSetup: { id: 'setup', fingerprint: 'fingerprint' } } });
+    f.receive(m);
+    const row = f.snapshot.agents[0]!;
+    assert.match(row.label, /Unknown/);
+    assert.match(row.detail, /Current status unknown/);
+    assert.match(row.detail, /Reported status: running/);
+    assert.match(row.detail, /Model: accepted\nWorkspace: unconfirmed/);
+    assert.match(row.detail, /Configuration name: accepted/);
+    assert.match(row.detail, /future: diagnostic: raw detail/);
+    assert.deepEqual(JSON.parse(row.evidence!), m);
+    assert.match(row.disabled!.start!, /host report is old/);
+    const request = message('save','host-a','agent-a',3,{ configurationAction: 'select', name: 'accepted' });
+    const operation = { request, state: 'unknown', publication: 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair', result: 'new backend diagnostic' };
+    f.states([operation]); f.controller.refresh();
+    const shown = f.snapshot.agents.find(r => r.id === `operation:${request.id}`)!;
+    assert.match(shown.label, /Choose configuration · Unknown/);
+    assert.match(shown.detail, /Automatic retry is disabled/);
+    assert.match(shown.detail, /Host result: new backend diagnostic/);
+    assert.deepEqual(JSON.parse(shown.evidence!), operation);
+    await f.controller.request({ id: 2, action: 'operations' });
+    assert.match(f.snapshot.status, /Choose configuration · Unknown: new backend diagnostic/);
+    await f.controller.request({ id: 3, action: 'reconcile' });
+    assert.equal(f.snapshot.status, 'Checking operation results. Operations blocked by relay policy will not be retried.');
+    assert.equal(f.submitted.length, 0);
+    assert.equal(operation.state, 'unknown');
+    f.receive(message('availability','host-b','',0,{ observedAt: Date.now(), configuration: { label: 'Host B', relay: 'wss://example.invalid' } }));
+    assert.match(f.snapshot.agents.find(r => r.id === 'host:host-b')!.detail, /Host configuration: Host name: Host B/);
+  } finally { f.cleanup(); }
 });

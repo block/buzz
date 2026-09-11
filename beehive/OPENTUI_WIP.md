@@ -21,14 +21,16 @@ Arguments still route to the supported existing Node CLI; no renderer/domain for
   owner verified before OS-only persistence. Sign-out retains the saved key and does
   not Stop hosts/agents. Missing, locked, denied and mismatched keys are not reset.
 - Actual private host availability and per-host agent inventory, selectable JSON
-  detail with actual run versus selected-next and explicit stale/UNKNOWN wording.
+  detail with Current run (host report) versus Configuration for next start and
+  explicit unknown status.
   This is **not an independent agent catalog**. No fabricated inventory rows.
 - Select an existing named next configuration; exact host/agent/revision confirmation.
   Explicit Start and Stop through the existing durable management intent client.
   Start requires a fresh assigned stopped report without actual run. Unresolved
   operations fence further lifecycle submissions; inspect/reconcile remains available.
 - Selectable operation records include operation ID, exact target, CAS revision,
-  receipt/publication and unknown state. Reconcile does not retry blocked work.
+  receipt/publication and unknown state. Check operation results reconnects and can
+  resend pending work, but does not retry operations blocked by relay policy.
 - Offline multiline private instruction draft creation, atomically persisted using
   the existing draft API. Publishing/applying remains a distinct existing CLI action.
 
@@ -38,7 +40,8 @@ Arguments still route to the supported existing Node CLI; no renderer/domain for
   Existing backend Restart can consume a different selected binding. Rather than
   relying on a disabled button or changing established service semantics in this
   bounded prototype, this manager sends no Restart at all. Explicit Stop, inspect
-  accepted stopped state, then Start is available. Existing advanced CLI retains
+  a recent host report that confirms the agent is stopped, then Start is available.
+  Existing advanced CLI retains
   its prior explicit Restart behavior; it does not promise same-runtime Restart.
 - Foreground host service launch remains `beehive host --owner-present`; Quit this
   manager first. No daemon, process ownership transfer or auto service management.
@@ -48,7 +51,7 @@ Arguments still route to the supported existing Node CLI; no renderer/domain for
 - Existing draft editing/resume, profile publication/application, public metadata
   editing/publication and policy retry remain supported through `beehive drafts`
   and `beehive tui discover <relay> ~/.beehive/owner`. New forms explicitly say
-  “Not available in this build”; these are not simulated failures or fake success.
+  “unavailable”; these are not simulated failures or fake success.
 - No owner-key generation/reveal UI, independent relay catalog, zero-agent reusable
   runtime catalog, identity-only registration, Move UI or remote provider login.
 - For lists/actions longer than their visible pane, use keyboard arrows/Enter.
@@ -118,18 +121,56 @@ Node 24.15.0 and Bun 1.4.2 executables at `beehive/runtime/node` and
 `beehive/runtime/bun`. Link `~/.local/bin/beehive` to the exported package's
 `bin/beehive`, not to a worktree. See the immutable delivery recipe for the exact pin.
 
-## Local visual-polish candidate (not installed)
+## Ordinary-key and plain-language candidate (not installed)
 
-The subsequent presentation candidate replaces default JSON walls with Node-built
-public summaries and F3 technical evidence; uses ≥88×24 split / narrow Enter-to-detail;
-puts contextual guarded commands in F2; retains permanent keys with F4 scrollable
-outcomes; and uses compact validated inputs plus a named configuration chooser.
-The installed `6390e594` exports are deliberately unchanged pending independent
-implementation-vs-design review.
+The presentation candidate replaces default JSON walls with Node-built plain-language
+summaries and `i` technical evidence; uses ≥88×24 split / narrow Enter-to-detail;
+puts contextual guarded commands in the `a` actions list; retains a persistent
+footer with `?` help and `o` scrollable latest status message; and uses compact validated
+inputs plus a named configuration chooser. Every affordance is reachable
+without a function key: `?` help, `a` actions, `i` inspect, `o` Status, `q` or
+Ctrl-Q quit; Tab/Shift-Tab, arrows, Enter and Esc keep their existing routing,
+including pending-Esc priority. Letter shortcuts never fire inside public,
+secret or multiline forms — there they type as text — and never clear values,
+bypass confirmations or double-invoke operations. F1–F4 remain undocumented
+compatibility aliases; footer, help and instructions never lead with function
+keys. Quit and sign out are never Stop, and Restart remains refused at the
+controller.
 
-Evidence and the corrected external design are under
+Earlier polish evidence and the corrected external design are under
 `/Users/loganj/.buzz/artifacts/beehive-opentui-polish-6390e594/implementation/`.
-Read `IMPLEMENTATION.md` there for the eight-point self-review, scoped deviations,
-actual PTY comparisons versus offscreen fixtures, exact runtime commands and limits.
-This candidate does not claim exhaustive design conformance, real relay inventory,
-light-terminal visual proof, or safe scrolled-action mouse activation.
+Ordinary-key correction evidence is under
+`/Users/loganj/.buzz/artifacts/beehive-opentui-keys-cb1b341/`. Neither claims
+exhaustive design conformance, real relay inventory, light-terminal visual
+proof, or safe scrolled-action mouse activation.
+
+
+### Combined candidate validation
+
+Copy follows the bounded packet at
+`/Users/loganj/.buzz/artifacts/beehive-plain-language-0d962712/COPY_CHANGES.md`.
+Status is the latest message, not history. Display translations do not rename
+protocol fields or change operation classification. Configuration names, model
+names and workspace values remain literal even if they match an operation result.
+Inspect retains raw evidence. Unknown status never means stopped.
+
+Integration evidence: `/Users/loganj/.buzz/artifacts/beehive-integration-abe68e43/`.
+Direct Node 24.15.0 typecheck passed; Bun 1.4.2 renderer tests passed 3/3.
+One initial renderer failure was a stale “Terminal too small” text assertion;
+only that assertion changed, and the failure log is retained. The one full Node
+package run completed in 28.910s: **150 pass, 2 fail, 19 skip** (171 total).
+All five manager tests passed, including the new raw-evidence/literal-value and
+unknown-state presentation test. Full-suite failures remain unmodified:
+`broker.test.ts:31` expected a successful verification value, and
+`credential-helper.test.ts:33` received its 1000ms deadline error where cancellation
+was expected. Neither path imports this presentation change; the broker cause is
+not established. No rerun-to-green, timing changes or full-suite green claim.
+
+Actual 100×30 worktree PTY smoke used the committed installed-manager loader,
+synthetic credentials and disconnected transport in a fresh fixture directory.
+Ordinary-key Help, Actions, configuration form/confirmation, Inspect, Status and
+Quit passed; exit 0 and alternate-screen restoration were verified. No production
+credentials, relay, provider, host lifecycle or installed-package change was used.
+Narrow renderer checks cover the 40-column footer, input and pane routing; this is
+not an exhaustive screenshot matrix for every prompt or launch error. Publication
+and installed desktop/laptop smoke belong to the next continuation.

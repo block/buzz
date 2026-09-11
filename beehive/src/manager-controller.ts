@@ -15,11 +15,104 @@ export type ManagerRequest = { id: number; action: string; values?: Record<strin
 export type ManagerItem = { id: string; label: string; detail: string; evidence?: string; disabled?: Record<string, string> };
 export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string };
 const short = (s: string) => s.length > 22 ? `${s.slice(0,8)}…${s.slice(-6)}` : s;
-const describe = (v: unknown): string => {
+
+/** Final plain display text thrown by this boundary; never rewrapped or retranslated. */
+class PlainStatus extends Error {}
+const plain = (text: string) => new PlainStatus(text);
+/** Shared backend validation/protocol sentinels are translated here, at the manager
+ * display boundary only. Legacy CLI text, tests and result sentinels stay exact;
+ * unknown diagnostics are retained after a plain failure context, never replaced. */
+const backendMessages: Record<string, string> = {
+  'Unsupported Beehive controller configuration': 'Saved Beehive configuration uses an unsupported version.',
+  'Invalid retained management relay URL': 'The saved relay URL is invalid.',
+  'Controller already configured; use Settings for deliberate changes': 'Owner and relay are already configured. They cannot be changed in this view.',
+  'Management relay requires wss:// (ws://127.0.0.1 for fixtures)': 'Enter a relay URL that starts with ws:// or wss://.',
+  'Owner PUBLIC npub or 64-character hex key required; never enter a private key': 'Enter the owner’s public key as an npub or 64 hex characters. Do not enter a private key.',
+  'Legacy identity retained; explicit consent required for migration': 'The saved host identity uses an older format. It has not been changed. Migration requires explicit permission.',
+  'Invalid host credential reference': 'The saved host key reference is invalid.',
+  'Explicit stopped migrate-slots required': 'This installation needs migration. Stop its agents before you use migrate-slots.',
+  'Installation requires 1..32 slots': 'The installation must contain 1 to 32 agent records.',
+  'Invalid slot identity': 'An agent record has an invalid identity.',
+  'Invalid slot binding': 'An agent record refers to an invalid local setup.',
+  'Public slot binding mismatch': 'The saved agent record does not match its host, owner or agent identity.',
+  'Shared harness inventory must not copy key material': 'Shared local setups must not contain identity keys.',
+  'Binding cannot carry identity': 'A local setup must not contain host or agent identity fields.',
+  'Binding cannot change conversation authority': 'A local setup cannot change permission to use the conversation.',
+  'Invalid retired binding definition': 'A retired local setup does not match its saved definition.',
+  'Public credential installation required; no automatic plaintext migration': 'This installation must use secure key references. Plain-text keys will not be migrated automatically.',
+  'Invalid agent credential reference': 'The saved agent key reference is invalid.',
+  'Draft directory must be owner-only': 'Only the local user may access the draft folder.',
+  'Draft storage exceeds limit': 'The draft file exceeds the size limit.',
+  'Invalid draft storage': 'The saved draft file is invalid.',
+  'Invalid draft identity': 'A saved draft has an invalid or duplicate ID.',
+  'Draft changed; resume again': 'The draft changed. Open it again before you edit.',
+  'Draft storage full; discard unused drafts': 'Draft storage is full. Discard unused drafts through beehive drafts.',
+  'Invalid profile name/parent': 'The instructions name or previous revision is invalid. Do not use default as the name.',
+  'Invalid nonsecret instructions': 'Enter instructions of no more than 2048 UTF-8 bytes. Do not use control characters.',
+  'Profile revision conflict': 'The instructions do not match their revision.',
+  'Management journal directory must be owner-only': 'Only the local user may access the operation records folder.',
+  'Management journal full': 'Operation storage is full.',
+  'Management journal full; no operation submitted': 'Operation storage is full. No operation was submitted.',
+  'Oversized intent': 'A saved operation request exceeds the size limit.',
+  'Oversized receipt': 'A saved host result exceeds the size limit.',
+  'Oversized blocked intent': 'A saved blocked request exceeds the size limit.',
+  'Wrong journal scope': 'Saved operation records do not match this owner and relay.',
+  'Invalid intent': 'A saved operation request is invalid.',
+  'Unmatched journal receipt': 'A saved host result does not match its operation.',
+  'Invalid blocked intent': 'A saved blocked request is invalid.',
+  'Unmatched durable receipt': 'A saved host result does not match its operation.',
+  'Operation ID already prepared': 'This operation ID is already saved.',
+  'UI closed': 'Beehive is closed.',
+  'Relay disconnected; result unknown': 'The relay disconnected. The operation result is unknown.',
+};
+const plainBackendMessage = (message: string) => backendMessages[message] ?? `Could not complete the operation: ${message}`;
+
+/** Raw management values keep their exact protocol/evidence bytes; only the default
+ * summary gets plain labels. Unknown nested fields stay technical, never discarded. */
+const plainValues: Record<string, string> = {
+  'immutable publication observed; no agent application': 'Private instructions published. Not applied to an agent.',
+  'host terminal receipt': 'Host result received.',
+  'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair': 'Relay policy blocked the operation. Automatic retry is disabled. Check operation results. Correct the policy problem before you retry through the CLI.',
+  'relay observed; not host admission': 'Relay publication confirmed. Host acceptance not confirmed.',
+  'unconfirmed': 'Not confirmed.',
+  'accepted': 'Accepted by host.',
+  'saved; running configuration unchanged': 'Configuration saved. Current run unchanged.',
+  'interrupted-reconcile-locally': 'Operation interrupted. Result unknown. Inspect and repair the saved state on the host before you try again.',
+};
+const plainStates: Record<string, string> = { pending: 'Pending', completed: 'Completed', failed: 'Failed', unknown: 'Unknown' };
+const plainTypes: Record<string, string> = { start: 'Start', stop: 'Stop', restart: 'Restart', move: 'Move', metadata: 'Publish profile', profile: 'Publish instructions' };
+const plainOperationType = (request: Message) => request.type === 'save' && request.body.configurationAction === 'select' ? 'Choose configuration' : plainTypes[request.type] ?? request.type;
+const operationText = (value: unknown) => typeof value === 'string' ? plainValues[value] ?? value : describe(value);
+/** Named launch choice: the model/workspace/instruction selection of one agent. */
+const selectionLabels: Record<string, string> = {
+  'model': 'Model', 'workspace': 'Workspace', 'profile': 'Instructions revision',
+  'harnessSetup.id': 'Local setup', 'harnessSetup.fingerprint': 'Local setup fingerprint',
+  'configuration.name': 'Configuration name', 'configuration.revision': 'Configuration revision',
+  'behavior.name': 'Instructions name', 'behavior.instructions': 'Private instructions',
+  'behavior.revision': 'Instructions revision', 'behavior.parent': 'Previous instructions revision',
+};
+const runLabels: Record<string, string> = { ...selectionLabels, ...Object.fromEntries(Object.entries(selectionLabels).map(([key, value]) => [`selection.${key}`, value])) };
+/** Host availability pairing: host infrastructure, not agent configuration. */
+const availabilityLabels: Record<string, string> = {
+  'configuration': 'Host configuration', 'configuration.host': 'Host', 'configuration.owner': 'Owner',
+  'configuration.relay': 'Relay', 'configuration.label': 'Host name', 'configuration.observedAt': 'Report time', 'observedAt': 'Report time',
+};
+/** These containers hold only labelled choice fields; their children speak alone. */
+const inlineChoice = new Set(['harnessSetup', 'configuration', 'behavior', 'selection', 'selection.harnessSetup', 'selection.configuration', 'selection.behavior']);
+const describe = (v: unknown, labels: Record<string, string> = {}, path = ''): string => {
   if (v === undefined || v === null) return 'Not reported';
-  if (typeof v !== 'object') return typeof v === 'string' && /^[0-9a-f]{32,}$/i.test(v) ? short(v) : String(v);
+  if (typeof v !== 'object') {
+    if (typeof v !== 'string') return String(v);
+    if ((path === 'profile' || path.endsWith('.profile')) && v === 'default') return 'Default instructions';
+    return /^[0-9a-f]{32,}$/i.test(v) ? short(v) : v;
+  }
   if (!Object.keys(v).length) return 'Not reported';
-  return Object.entries(v).map(([k, value]) => `${k}: ${describe(value)}`).join('\n');
+  return Object.entries(v).map(([k, value]) => {
+    const child = path ? `${path}.${k}` : k;
+    const rendered = describe(value, labels, child);
+    if (labels !== availabilityLabels && inlineChoice.has(child) && value !== null && !Array.isArray(value) && typeof value === 'object') return rendered;
+    return `${labels[child] ?? k}: ${rendered}`;
+  }).join('\n');
 };
 
 /** One bounded Node helper per explicit credential operation. Completion waits for exit.
@@ -40,7 +133,7 @@ export function managerCredential(input: object, signal: AbortSignal, helper = n
     child.once('message', value => { result = value; });
     child.once('close', code => {
       clearTimeout(timer); signal.removeEventListener('abort', cancel);
-      if (code !== 0 || failed || signal.aborted || !result?.ok) reject(Error('Credential operation cancelled, timed out, denied, mismatched or unavailable. Persistence may have completed; inspect before retry. No reset or plaintext fallback.'));
+      if (code !== 0 || failed || signal.aborted || !result?.ok) reject(plain('Could not complete key access. It may have been cancelled, timed out, denied, or unavailable. The key may not match. Changes may already be saved. Inspect before you try again. No key was reset or saved as plain text.'));
       else resolve(result);
     });
     child.send(input, error => { if (error) cancel(); });
@@ -58,7 +151,7 @@ export class ManagerController {
   private active?: AbortController;
   private closed = false;
   private lastId = 0;
-  private status = 'Local Host does not require owner sign-in. Quit/sign out never Stop.';
+  private status = 'Local Host does not require owner sign-in. Quitting or signing out does not stop hosts or agents.';
   readonly home: string;
   readonly changed: (snapshot: ManagerSnapshot) => void;
   private credential: typeof managerCredential;
@@ -78,52 +171,51 @@ export class ManagerController {
 Configuration: saved
 Relay: ${identity.pairing.relay}
 Owner: ${short(identity.pairing.owner)}
-Service: not checked by this view
+Host service: not checked
 
-Registration is not Start authority.
+Host configuration alone does not permit an agent to start.
 
-Next steps
-F2: provision from prepared binding/genesis files.
-Quit manager before foreground CLI use:
+Open Actions to add an agent from prepared files.
+Quit before you run:
 beehive host --owner-present
-Service launch and binding authoring forms are unavailable.` });
-        if (existsSync(join(this.hostDirectory, 'setup.json'))) for (const slot of installationPublicSlots(this.hostDirectory)) local.push({ id: slot.agent, label: slot.agent, detail: `Local public slot (not current run status)\nAgent ${slot.agent}\nBindings: ${Object.keys(slot.bindings).join(', ')}` });
-      } else local.push({ id: 'missing', label: 'Configure this computer', detail: 'No local host configuration. Save owner PUBLIC npub and relay; host identity is created in OS credentials. No owner sign-in, agent or service Start.' });
-    } catch (error) { local.push({ id: 'error', label: 'Retained configuration needs attention', detail: String(error) + '\nPreserved; no automatic reset.' }); }
+Host start and local setup forms are unavailable.` });
+        if (existsSync(join(this.hostDirectory, 'setup.json'))) for (const slot of installationPublicSlots(this.hostDirectory)) local.push({ id: slot.agent, label: slot.agent, detail: `Local agent record. This is not current run status.\nAgent ${slot.agent}\nLocal setups: ${Object.keys(slot.bindings).join(', ')}` });
+      } else local.push({ id: 'missing', label: 'Configure this computer', detail: 'No local host configuration. Save the owner’s public key and relay URL. Beehive creates a host identity in the secure credential store. No owner sign-in is needed. This does not create an agent or start a host.' });
+    } catch (error) { local.push({ id: 'error', label: 'Saved configuration needs attention', detail: (error instanceof Error ? backendMessages[error.message] ?? `Could not read saved configuration: ${error.message}` : `Could not read saved configuration: ${String(error)}`) + '\nSaved data has not been reset.' }); }
     const agents: ManagerSnapshot['agents'] = [...this.inventory].map(([id, m]) => {
       const fresh = this.fresh(m);
-      const blocked = !fresh ? 'Host stale or unreachable. Refresh before acting.' : this.client?.status().some(o => o.request.host === m.host && o.request.agent === m.agent && !['completed','failed'].includes(o.state)) ? 'Unresolved operation: inspect receipts before acting.' : '';
-      return { id, label: `Agent ${short(m.agent)} · ${fresh ? m.body.phase : 'UNKNOWN'}`, revision: m.revision, configurations: Object.keys((m.body.configurations ?? {}) as object),
-        disabled: { 'select-config': blocked, stop: blocked, start: blocked || (m.body.phase !== 'stopped' || m.body.actualRun || m.body.assignedHost !== m.host ? 'Requires fresh assigned stopped report without an actual run.' : '') },
+      const blocked = !fresh ? 'The host report is old or the host cannot be reached. Wait for a recent report before you act.' : this.client?.status().some(o => o.request.host === m.host && o.request.agent === m.agent && !['completed','failed'].includes(o.state)) ? 'An operation has no confirmed result. Inspect operations before you act.' : '';
+      return { id, label: `Agent ${short(m.agent)} · ${fresh ? m.body.phase : 'Unknown'}`, revision: m.revision, configurations: Object.keys((m.body.configurations ?? {}) as object),
+        disabled: { 'select-config': blocked, stop: blocked, start: blocked || (m.body.phase !== 'stopped' || m.body.actualRun || m.body.assignedHost !== m.host ? 'Start requires a recent report from the assigned host. It must report the agent stopped with no current run.' : '') },
         evidence: JSON.stringify(m, null, 2), detail: `Agent ${short(m.agent)}
 Host ${short(m.host)}
-${fresh ? 'Recent host report' : 'UNKNOWN — stale or unreachable; last reported below'}
-Reported phase: ${m.body.phase}
-Start authority: ${m.body.assignedHost === m.host ? 'Assigned to this host' : 'Not assigned to this host'}
+${fresh ? 'Recent host report' : 'Current status unknown. The report is old or the host cannot be reached. Last report:'}
+Reported status: ${m.body.phase}
+Assigned host: ${m.body.assignedHost === m.host ? 'Assigned to this host' : 'Not assigned to this host'}
 
-Actual run (reported)
-${m.body.actualRun ? describe(m.body.actualRun) : 'No actual run in this report'}
+Current run (host report)
+${m.body.actualRun ? describe(m.body.actualRun, runLabels) : 'No current run in this report'}
 
-Selected for next Start
-${describe(m.body.selectedNext)}
-Choosing next does not change the actual run.` };
+Configuration for next start
+${describe(m.body.selectedNext, selectionLabels)}
+This choice does not change the current run.` };
     });
-    for (const [id, m] of this.offers) agents.push({ id: `host:${id}`, label: `Host ${short(id)}`, revision: m.revision, configurations: [], evidence: JSON.stringify(m, null, 2), detail: `Host availability report
+    for (const [id, m] of this.offers) agents.push({ id: `host:${id}`, label: `Host ${short(id)}`, revision: m.revision, configurations: [], evidence: JSON.stringify(m, null, 2), detail: `Host report
 Host ${short(id)}
-${this.fresh(m) ? 'Recent host report' : 'UNKNOWN — stale or unreachable'}
-${describe(m.body)}
-Availability is not agent Start authority.` });
-    for (const operation of this.client?.status() ?? []) agents.push({ id: `operation:${operation.request.id}`, label: `${operation.request.type} · ${operation.state} · ${operation.request.id.slice(0,8)}`, revision: operation.request.revision, configurations: [], evidence: JSON.stringify(operation, null, 2), detail: `Operation: ${operation.request.type}
-State: ${operation.state}
+${this.fresh(m) ? 'Recent host report' : 'Current status unknown. The report is old or the host cannot be reached.'}
+${describe(m.body, availabilityLabels)}
+A host report does not grant permission to start an agent.` });
+    for (const operation of this.client?.status() ?? []) agents.push({ id: `operation:${operation.request.id}`, label: `${plainOperationType(operation.request)} · ${plainStates[operation.state] ?? operation.state} · ${operation.request.id.slice(0,8)}`, revision: operation.request.revision, configurations: [], evidence: JSON.stringify(operation, null, 2), detail: `Operation: ${plainOperationType(operation.request)}
+State: ${plainStates[operation.state] ?? operation.state}
 Host: ${short(operation.request.host)}
 Agent: ${short(operation.request.agent)}
-Captured revision: ${operation.request.revision}
-Publication: ${describe(operation.publication)}
-Receipt/result: ${describe(operation.result)}
+Revision when requested: ${operation.request.revision}
+Relay status: ${operationText(operation.publication)}
+${operation.request.type === 'profile' ? 'Result' : 'Host result'}: ${operationText(operation.result)}
 
-Publication is not acceptance.
-Outcome unknown? Check receipts; do not submit again.
-A Stop receipt is not a fresh stopped inventory report.` });
+Relay publication does not confirm that the host accepted the operation.
+If the result is unknown, check operation results before you submit again.
+A Stop result is not a recent host report that confirms the agent is stopped.` });
     let routing: ReturnType<typeof readControllerConfig>;
     try { routing = readControllerConfig(this.ownerDirectory); } catch { /* Invalid retained routing is refused by sign-in; never reset here. */ }
     return { local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
@@ -138,25 +230,25 @@ A Stop receipt is not a fresh stopped inventory report.` });
     this.lastId = request.id;
     const abort = new AbortController(); this.active = abort;
     const generation = ++this.generation;
-    const check = () => { abort.signal.throwIfAborted(); if (this.closed || generation !== this.generation) throw Error('Cancelled'); };
+    const check = () => { abort.signal.throwIfAborted(); if (this.closed || generation !== this.generation) throw plain('Stopped waiting. Changes may already be saved or submitted. Inspect before you try again.'); };
     const v = request.values ?? {};
     try {
       if (request.action === 'configure') {
         const owner = ownerPublicInput(v.owner ?? '');
-        if (!/^(wss|ws):\/\//.test(v.relay ?? '')) throw Error('Management relay URL required');
+        if (!/^(wss|ws):\/\//.test(v.relay ?? '')) throw plain('Enter a relay URL that starts with ws:// or wss://.');
         await this.credential({ action: 'configure', directory: this.hostDirectory, label: hostname().slice(0,128), owner, relay: v.relay }, abort.signal);
         check(); this.status = 'Configuration saved. This action did not start a service or agent.';
       } else if (request.action === 'provision') {
         await this.credential({ action: 'provision', directory: this.hostDirectory, binding: v.binding, genesis: v.genesis, secret: v.secret }, abort.signal);
-        check(); this.status = 'Local agent provisioned stopped using existing binding/genesis APIs. No Start or relay publication.';
+        check(); this.status = 'Local agent added and stopped. Nothing was started or published to the relay.';
       } else if (request.action === 'signin') {
         const retained = readControllerConfig(this.ownerDirectory);
         const owner = retained?.owner ?? ownerPublicInput(v.owner ?? '');
         const relay = retained?.relay ?? v.relay ?? '';
-        if (!/^(wss|ws):\/\//.test(relay)) throw Error('Management relay URL required');
+        if (!/^(wss|ws):\/\//.test(relay)) throw plain('Enter a relay URL that starts with ws:// or wss://.');
         const result = await this.credential({ action: 'signin', owner, ...(v.secret ? { secret: v.secret.toLowerCase() } : {}) }, abort.signal);
         delete v.secret; check();
-        if (result.secret === null) throw Error('No saved owner key. Use Import owner key with the matching 64-hex private key.');
+        if (result.secret === null) throw plain('No saved owner key. Choose Import matching owner key and sign in. Enter the matching private key with 64 hex characters.');
         if (!retained) createControllerConfig(this.ownerDirectory, owner, relay);
         this.client?.close(); this.inventory.clear(); this.offers.clear();
         this.owner = owner;
@@ -172,28 +264,28 @@ A Stop receipt is not a fresh stopped inventory report.` });
         }, () => this.refresh(), { catalog: { version: 1, owner, relay, registrations: [] } });
         result.secret = undefined; this.client = client;
         abort.signal.addEventListener('abort', () => client.close(), { once: true });
-        await client.ready; check(); this.status = 'Owner signed in. Inventory scope: privately advertising hosts and their agent slots, not independent catalog.';
+        await client.ready; check(); this.status = 'Owner signed in. This list shows private host reports and their agents. It is not a separate agent directory.';
       } else if (request.action === 'signout') {
         this.client?.close(); this.client = undefined; this.owner = undefined; this.inventory.clear(); this.offers.clear();
-        this.status = 'Signed out. OS key retained. Hosts and agents were NOT stopped.';
+        this.status = 'Signed out. The owner key is still saved on this computer. Hosts and agents were not stopped.';
       } else if (request.action === 'draft') {
         await editProfileDraft(profileDrafts(this.ownerDirectory), async prompt => prompt.startsWith('Profile') ? v.name ?? '' : v.instructions ?? '');
-        this.status = 'Private instruction draft saved locally. Not published/applied. Resume through beehive drafts ~/.beehive/owner or beehive tui.';
-      } else if (request.action === 'reconcile') { this.client?.reconcile(); this.status = 'Querying receipts; not retrying blocked operations.';
+        this.status = 'Private instructions draft saved on this computer. Not published or used by an agent. To resume, use beehive drafts ~/.beehive/owner or beehive tui.';
+      } else if (request.action === 'reconcile') { this.client?.reconcile(); this.status = 'Checking operation results. Operations blocked by relay policy will not be retried.';
       } else if (request.action === 'operations') {
-        this.status = this.client?.status().map(o => `${o.request.id} · ${o.request.host}/${o.request.agent} · ${o.request.type} · ${o.state}: ${o.result ?? o.publication}`).join('\n') || 'No recorded operations in this session.';
+        this.status = this.client?.status().map(o => `${o.request.id} · ${o.request.host}/${o.request.agent} · ${plainOperationType(o.request)} · ${plainStates[o.state] ?? o.state}: ${operationText(o.result ?? o.publication)}`).join('\n') || 'No saved operations.';
       } else if (['start', 'stop', 'restart', 'select-config'].includes(request.action)) {
-        if (!this.owner || !this.client) throw Error('Owner sign-in required');
+        if (!this.owner || !this.client) throw plain('Owner sign-in required');
         const current = this.inventory.get(request.target ?? '');
-        if (!current || !this.fresh(current) || current.revision !== request.revision) throw Error('Selection changed or host stale/unreachable. Refresh; no request sent.');
-        if (request.action === 'restart') throw Error('Restart: Not available in this build. Backend Restart can switch bindings; use explicit Stop, inspect stopped receipt, then Start. No request sent.');
-        if (request.action === 'start' && (current.body.phase !== 'stopped' || current.body.actualRun || current.body.assignedHost !== current.host)) throw Error('Start requires a fresh assigned stopped report without an actual run.');
-        if (this.client.status().some(o => o.request.host === current.host && o.request.agent === current.agent && !['completed','failed'].includes(o.state))) throw Error('Unresolved operation exists. Inspect operations and reconcile before another action.');
+        if (!current || !this.fresh(current) || current.revision !== request.revision) throw plain('The selection changed, or the host report is old or unavailable. Select an agent with a recent report. No request was sent.');
+        if (request.action === 'restart') throw plain('Restart can change the local setup. Use Stop. Inspect a recent host report that confirms the agent is stopped. Then use Start. No Restart request is sent. No request was sent.');
+        if (request.action === 'start' && (current.body.phase !== 'stopped' || current.body.actualRun || current.body.assignedHost !== current.host)) throw plain('Start requires a recent report from the assigned host. It must report the agent stopped with no current run.');
+        if (this.client.status().some(o => o.request.host === current.host && o.request.agent === current.agent && !['completed','failed'].includes(o.state))) throw plain('An operation has no confirmed result. Inspect operations and check operation results before you act again.');
         const operation = message(request.action === 'select-config' ? 'save' : request.action as 'start' | 'stop', current.host, current.agent, current.revision, request.action === 'select-config' ? { configurationAction: 'select', name: v.name } : {});
         this.client.submit(operation);
-        this.status = `Operation ${operation.id} · ${current.host}/${current.agent}: durably pending ${request.action}. Publication is not acceptance. Inspect operations; unknown is not stopped.`;
-      } else if (request.action !== 'refresh') throw Error('Not available in this build');
-    } catch (error) { if (!this.closed) this.status = error instanceof Error ? error.message : 'Operation failed; inspect before retry.'; }
+        this.status = `Operation ${operation.id}: ${plainOperationType(operation)} saved and pending.\nHost: ${current.host}\nAgent: ${current.agent}\nRelay publication does not confirm host acceptance. Inspect operations. Unknown does not mean stopped.`;
+      } else if (request.action !== 'refresh') throw plain('Not available in this build');
+    } catch (error) { if (!this.closed) this.status = error instanceof PlainStatus ? error.message : abort.signal.aborted && error === abort.signal.reason ? 'Stopped waiting. Changes may already be saved or submitted. Inspect before you try again.' : error instanceof Error ? plainBackendMessage(error.message) : `Could not complete the operation: ${String(error)}`; }
     finally { delete v.secret; this.active = undefined; this.refresh(); }
   }
 }

@@ -17,6 +17,7 @@ export class OpenTuiScreen {
   private readonly scroll: ScrollBoxRenderable;
   private readonly actions: SelectRenderable;
   private readonly status: TextRenderable;
+  private readonly footer: TextRenderable;
   private readonly small: TextRenderable;
   private rows: ManagerRow[] = [];
   private commands: ManagerAction[] = [];
@@ -33,6 +34,11 @@ export class OpenTuiScreen {
   onScope: (index: number) => void = () => {};
   onSelect: (id: string) => void = () => {};
 
+  /** Persistent ordinary-key legend, separate from status. Never function-key first.
+   * The compact form keeps every affordance named at the 40-column narrow floor. */
+  private static readonly hintsWide = '? Help · a Actions · i Inspect · o Status · q Quit';
+  private static readonly hintsNarrow = '? a Actions i Inspect o Status q Quit';
+
   constructor(readonly renderer: CliRenderer) {
     this.root = new BoxRenderable(renderer, { width: '100%', height: '100%', flexDirection: 'column', backgroundColor: bg });
     renderer.root.add(this.root);
@@ -47,19 +53,20 @@ export class OpenTuiScreen {
       // Pinned OpenTUI does not expose its scrolling offset. Never map a click
       // to an unrelated row; keyboard navigation remains available for long lists.
       if (this.rows.length <= this.list.height && delta >= 0) this.list.setSelectedIndex(Math.min(this.rows.length - 1, delta));
-      else this.notice('Scrolled list: use arrows to select the exact row. Mouse selection is not available in this build.');
+      else this.notice('Use arrows to select an item in this list. Mouse selection is unavailable.');
     } });
     this.listFrame.add(this.list);
     this.scroll = new ScrollBoxRenderable(renderer, { flexGrow: 1, height: '100%', border: true, title: 'Details', scrollY: true, onMouseDown: () => { this.focusIndex = 1; this.scroll.focus(); } });
     body.add(this.scroll);
     this.detail = new TextRenderable(renderer, { fg, width: '100%', content: 'No items.', selectable: false });
     this.scroll.add(this.detail);
-    this.actions = new SelectRenderable(renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, height: 2, showDescription: false, showSelectionIndicator: true, options: [{name: 'Actions (F2)', description: ''}, {name: 'Inspect (F3)', description: ''}], onMouseDown: event => { this.focusIndex = 2; this.actions.focus(); this.actions.setSelectedIndex(Math.max(0, Math.min(1, event.y - this.actions.y))); this.actions.selectCurrent(); } });
+    this.actions = new SelectRenderable(renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, height: 2, showDescription: false, showSelectionIndicator: true, options: [{name: 'Actions (a)', description: ''}, {name: 'Inspect (i)', description: ''}], onMouseDown: event => { this.focusIndex = 2; this.actions.focus(); this.actions.setSelectedIndex(Math.max(0, Math.min(1, event.y - this.actions.y))); this.actions.selectCurrent(); } });
     this.root.add(this.actions);
     this.status = new TextRenderable(renderer, { fg, height: 2, onMouseDown: () => this.outcome() });
     this.root.add(this.status);
-    this.root.add(new TextRenderable(renderer, { fg, height: 1, content: 'F1 Keys F2 Actions F3 Inspect ^Q Quit' }));
-    this.small = new TextRenderable(renderer, { fg, position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', bg, content: 'Terminal too small. Resize to 40 × 16. Nothing submitted. Ctrl-Q quits.', visible: false });
+    this.footer = new TextRenderable(renderer, { fg, height: 1, content: OpenTuiScreen.hintsWide });
+    this.root.add(this.footer);
+    this.small = new TextRenderable(renderer, { fg, position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', bg, content: 'Resize to at least 40 × 16. Ctrl-Q quits. Existing operations can continue.', visible: false });
     renderer.root.add(this.small);
     this.list.on('selectionChanged', (index: number) => {
       const row = this.rows[index]; this.detail.content = clean(row?.detail ?? 'No items.'); this.scroll.scrollTo(0);
@@ -98,6 +105,7 @@ export class OpenTuiScreen {
     this.scroll.visible = !this.narrow || this.drilled;
     this.listFrame.width = this.narrow ? '100%' : Math.min(32, Math.max(24, Math.floor(this.renderer.width * .28)));
     this.scroll.title = this.narrow ? '[Details] · Esc back' : 'Details';
+    this.footer.content = this.renderer.width >= 52 ? OpenTuiScreen.hintsWide : OpenTuiScreen.hintsNarrow;
   }
   private heading() { this.header.content = `BEEHIVE ${this.scope === 0 ? '[Local Host]' : 'Local Host'} | ${this.scope === 1 ? '[Agents]' : 'Agents'}\n${this.scope === 0 ? 'This computer · no owner sign-in needed' : 'Owner · ' + clean(this.owner)}`; }
   setOwner(publicSuffix?: string) { this.owner = publicSuffix ? `${publicSuffix} · signed in · key saved here` : 'signed out'; this.heading(); }
@@ -111,21 +119,31 @@ export class OpenTuiScreen {
     if (key.name === 'escape' && this.pending) { key.preventDefault(); this.onCancel(); return; }
     if (this.modal) { this.modal.key(key); return; }
     if (key.name === 'escape' && this.drilled) { key.preventDefault(); this.drilled = false; this.resize(); this.focusIndex = 0; this.list.focus(); }
+    // Ordinary keys are the primary map. Every editable field is a modal handled
+    // above, so these never intercept text in public, secret or multiline inputs.
+    if (!key.ctrl && !key.meta) {
+      if (key.name === '?') { key.preventDefault(); this.help(); return; }
+      if (key.name === 'a') { key.preventDefault(); this.drawer(); return; }
+      if (key.name === 'i') { key.preventDefault(); this.inspect(); return; }
+      if (key.name === 'o') { key.preventDefault(); this.outcome(); return; }
+      if (key.name === 'q') { key.preventDefault(); this.close(); return; }
+    }
+    // Legacy compatibility aliases only; the advertised map above uses ordinary keys.
     if (key.name === 'f2') { key.preventDefault(); this.drawer(); return; }
     if (key.name === 'f3') { key.preventDefault(); this.inspect(); return; }
     if (key.name === 'f4') { key.preventDefault(); this.outcome(); return; }
     if (this.focusIndex === 0 && ['home','end','pageup','pagedown'].includes(key.name)) { key.preventDefault(); this.navigate(this.list, key.name); }
     if (key.name === 'left' || key.name === 'right') { key.preventDefault(); this.switchScope(1 - this.scope); }
     if (key.name === 'tab') { key.preventDefault(); this.focusIndex = (this.focusIndex + (key.shift ? 2 : 1)) % 3; if (this.narrow && this.focusIndex === (this.drilled ? 0 : 1)) this.focusIndex = (this.focusIndex + (key.shift ? 2 : 1)) % 3; [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); this.focusStyle(); }
-    if (key.name === 'f1') { key.preventDefault(); this.read('Help', 'F2 Actions · F3 public Inspect · F4 full Outcome · Left/Right: scope · Tab/Shift-Tab: panes · arrows/PgDn/Home/End/wheel: navigate · Enter: open detail/action · Esc: cancel pending first, then dismiss/back · Ctrl-Q: quit, never Stop. Scrolled list/action mouse selection unavailable: use keyboard. No new provider, catalog, publication or Restart capability. Quit before foreground CLI use.'); }
+    if (key.name === 'f1') { key.preventDefault(); this.help(); }
   }
   private async run(index: number, captured?: ManagerAction) {
     const action = captured ?? this.commands[index];
     if (!action || this.pending || this.busy || this.modal || this.small.visible || this.closed) return;
     if (action.disabled) { this.notice(action.disabled); return; }
-    this.busy = true; this.notice('Working… Esc cancels an open form. Quit is not Stop.');
+    this.busy = true; this.notice('Working… Esc cancels an open form. Quitting does not stop agents.');
     try { await action.run(); }
-    catch { this.notice('Action failed. State may be unchanged or outcome unknown; inspect the operation before retrying.'); }
+    catch { this.notice('Action failed. The result is unknown. Inspect the operation before you try again.'); }
     finally { this.busy = false; }
   }
   show(rows: ManagerRow[], actions: ManagerAction[], selected?: string) {
@@ -139,7 +157,7 @@ export class OpenTuiScreen {
 
   }
   notice(text: string) { if (!this.closed) { this.lastNotice = clean(text); this.status.content = this.lastNotice; } }
-  unavailable(feature: string) { this.notice(`${feature}: Not available in this build. No request made. Local Host and existing host observations remain separate.`); }
+  unavailable(feature: string) { this.notice(`${feature} is unavailable in this build. No request was sent. Local Host shows this computer. Agents shows host reports.`); }
 
   choose(title: string, names: string[]): Promise<string | undefined> {
     if (this.modal || !names.length) return Promise.resolve(undefined);
@@ -156,8 +174,9 @@ export class OpenTuiScreen {
     const n = list.options.length, current = list.getSelectedIndex();
     list.setSelectedIndex(Math.max(0, Math.min(n - 1, key === 'home' ? 0 : key === 'end' ? n - 1 : current + (key === 'pageup' ? -1 : 1) * Math.max(1, list.height))));
   }
-  inspect() { const row = this.rows[this.list.getSelectedIndex()]; this.read('Technical details · public evidence', row?.evidence ?? 'Inspect unavailable: no technical evidence for this row.'); }
-  private outcome() { this.read('Outcome · current attempt', this.lastNotice || 'No outcome yet.'); }
+  inspect() { const row = this.rows[this.list.getSelectedIndex()]; this.read('Technical details', row?.evidence ?? 'No technical details for this item.'); }
+  private outcome() { this.read('Status · latest message', this.lastNotice || 'No status message yet.'); }
+  private help() { this.read('Help', '? Help · a Actions · i Inspect · o Status · q Quit\nLeft/Right: switch Local Host and Agents.\nTab/Shift-Tab: switch panes.\nArrows, PgUp/PgDn, Home/End or wheel: scroll.\nEnter: open details or an action.\nEsc: cancel waiting first, then close or go back.\nq or Ctrl-Q: quit. Hosts and agents keep running.\nUse arrows and Enter in scrolled lists. Mouse selection is unavailable.\nShortcuts do not run while you edit a field.\nQuit before you use a foreground CLI command.\nRestart and publication forms are unavailable.'); }
   private read(title: string, content: string) {
     if (this.modal || this.closed) return;
     const box = new ScrollBoxRenderable(this.renderer, { position: 'absolute', top: 2, left: Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2), width: Math.min(72, this.renderer.width - 4), height: this.renderer.height - 4, border: true, title: title + ' · Esc close', backgroundColor: bg, scrollY: true });
@@ -172,9 +191,9 @@ export class OpenTuiScreen {
     this.overlay = box; this.compactOverlay = false; this.renderer.root.add(box);
     box.add(new TextRenderable(this.renderer, { fg, content: clean(this.rows[this.list.getSelectedIndex()]?.label ?? 'No selection'), height: 2 }));
     const reason = new TextRenderable(this.renderer, { fg, height: 4 });
-    const list = new SelectRenderable(this.renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, flexGrow: 1, showDescription: false, showSelectionIndicator: true, showScrollIndicator: true, options: commands.map(a => ({ name: clean((a.disabled || this.pending ? '(unavailable) ' : '') + a.label), description: '' })), onMouseScroll: event => { if (event.scroll?.direction === 'up') list.moveUp(); else if (event.scroll?.direction === 'down') list.moveDown(); }, onMouseDown: () => this.notice('Actions: use arrows then Enter. Mouse activation is unavailable; no request sent.') });
+    const list = new SelectRenderable(this.renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, flexGrow: 1, showDescription: false, showSelectionIndicator: true, showScrollIndicator: true, options: commands.map(a => ({ name: clean((a.disabled || this.pending ? '(unavailable) ' : '') + a.label), description: '' })), onMouseScroll: event => { if (event.scroll?.direction === 'up') list.moveUp(); else if (event.scroll?.direction === 'down') list.moveDown(); }, onMouseDown: () => this.notice('Use arrows, then Enter. Mouse selection is unavailable. No request was sent.') });
     box.add(list); box.add(reason); list.focus();
-    const explain = () => { reason.content = this.pending ? 'Working… Esc cancels waiting. Submitted remote work or OS writes may already have completed; inspect before retry.' : clean(commands[list.getSelectedIndex()]?.disabled || 'Enter opens action · Esc closes · arrows / PgDn scroll'); };
+    const explain = () => { reason.content = this.pending ? 'Working… Esc stops waiting. Remote work or saved changes may already be complete. Inspect before you try again.' : clean(commands[list.getSelectedIndex()]?.disabled || 'Enter opens · Esc closes · arrows/PgDn scroll'); };
     explain(); list.on('selectionChanged', explain);
     const cancel = () => { this.modal = undefined; box.destroyRecursively(); [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); };
     list.on('itemSelected', (i: number) => { if (this.pending || commands[i]?.disabled) { explain(); return; } cancel(); void this.run(i, commands[i]); });
@@ -196,8 +215,8 @@ export class OpenTuiScreen {
         ? new TextareaRenderable(this.renderer, { initialValue: value, flexGrow: 1, width: '100%' })
         : new InputRenderable(this.renderer, { value, maxLength: 8192, width: '100%', backgroundColor: fg, textColor: bg, focusedBackgroundColor: fg, focusedTextColor: bg });
       if (entry) { const field = new BoxRenderable(this.renderer, { border: !multiline, height: multiline ? undefined : 3, flexShrink: 0, flexGrow: multiline ? 1 : 0, width: '100%' }); field.add(entry); box.add(field); entry.focus(); }
-      else { this.list.blur(); this.actions.blur(); this.scroll.blur(); box.add(new TextRenderable(this.renderer, { fg, content: 'Input hidden — no characters or length displayed.', height: 2 })); }
-      box.add(new TextRenderable(this.renderer, { fg, content: multiline ? 'Ctrl-S save · Esc cancel (unsaved text discarded)' : back ? 'Enter next · Shift-Tab back · Esc cancel' : 'Enter accept · Esc cancel · Ctrl-↑/↓ text', height: 2 }));
+      else { this.list.blur(); this.actions.blur(); this.scroll.blur(); box.add(new TextRenderable(this.renderer, { fg, content: 'Your key is hidden. Its length is not shown.', height: 2 })); }
+      box.add(new TextRenderable(this.renderer, { fg, content: multiline ? 'Ctrl-S save · Esc cancel (unsaved text discarded)' : back ? 'Enter next · Shift-Tab back · Esc cancel' : 'Enter continue · Esc cancel · Ctrl-↑/↓ scroll', height: 2 }));
       const error = new TextRenderable(this.renderer, { fg, height: 2, flexShrink: 0 }); box.add(error);
       let settled = false;
       const finish = (answer?: string) => {
@@ -216,7 +235,7 @@ export class OpenTuiScreen {
           if (back && !secret && key.name === 'tab' && key.shift) { key.preventDefault(); back(entry instanceof InputRenderable ? entry.value : entry?.plainText ?? ''); finish('\0back'); return; }
           if (key.name === 'escape') { key.preventDefault(); finish(); return; }
           if ((!multiline && key.name === 'return') || (multiline && key.ctrl && key.name === 's')) {
-            key.preventDefault(); const answer = secret ? hidden : entry instanceof InputRenderable ? entry.value : entry?.plainText ?? ''; const invalid = validate?.(answer); if (invalid) { error.content = secret ? 'Invalid key. Re-enter.' : clean(invalid); if (secret) hidden = ''; return; } finish(answer); return;
+            key.preventDefault(); const answer = secret ? hidden : entry instanceof InputRenderable ? entry.value : entry?.plainText ?? ''; const invalid = validate?.(answer); if (invalid) { error.content = secret ? 'Invalid key. Enter the key again.' : clean(invalid); if (secret) hidden = ''; return; } finish(answer); return;
           }
           if (!secret) return;
           key.preventDefault();
@@ -227,7 +246,7 @@ export class OpenTuiScreen {
       };
     });
   }
-  async confirm(label: string) { return await this.input(`${label}\nType yes to confirm. Empty Enter is Cancel.`) === 'yes'; }
+  async confirm(label: string) { return await this.input(`${label}\nType yes to confirm. Press Enter with no text to cancel.`) === 'yes'; }
   close() {
     if (this.closed) return; this.closed = true; this.modal?.cancel(); this.renderer.destroy(); this.finish();
   }
