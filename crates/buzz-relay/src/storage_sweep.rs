@@ -322,6 +322,13 @@ pub async fn emit_storage_metrics(
     metrics::gauge!("buzz_storage_multi_variant_bytes").set(snapshot.multi_variant_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_bytes").set(snapshot.unknown_key_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_objects").set(snapshot.unknown_key_objects as f64);
+    metrics::gauge!("buzz_storage_community_breakdown_available").set(
+        if snapshot.community_breakdown_available {
+            1.0
+        } else {
+            0.0
+        },
+    );
 
     let mut current = HashSet::new();
     let mut unmapped_bytes = 0u64;
@@ -340,7 +347,9 @@ pub async fn emit_storage_metrics(
         current.insert(StorageEmittedKey::Bytes(host.clone()));
         current.insert(StorageEmittedKey::Objects(host.clone()));
     }
-    metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
+    if snapshot.community_breakdown_available {
+        metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
+    }
 
     // Zero series for communities that were emitted last tick but are no longer
     // present in the current snapshot (community removed, host renamed, or
@@ -891,6 +900,41 @@ mod tests {
             Some(&30.0)
         );
         assert_eq!(values.get("buzz_community_storage_bytes"), Some(&100.0));
+    }
+
+    #[tokio::test]
+    async fn totals_only_snapshot_marks_breakdown_unavailable_without_false_unmapped_zero() {
+        let snapshot = BucketSnapshot {
+            physical_bytes: 100,
+            physical_objects: 1,
+            logical_bytes: 100,
+            logical_objects: 1,
+            community_breakdown_available: false,
+            ..Default::default()
+        };
+        let state = Mutex::new(StorageSweepState {
+            cached: Some(CachedSnapshot {
+                data: snapshot,
+                completed_at: Instant::now(),
+            }),
+            last_attempt: Some(LastAttempt {
+                ok: true,
+                duration: Duration::from_millis(10),
+            }),
+            ..Default::default()
+        });
+        let recorder = DebuggingRecorder::new();
+
+        metrics::with_local_recorder(&recorder, || {
+            futures::executor::block_on(emit_storage_metrics(&state, &HashMap::new(), |_| true));
+        });
+
+        let values = gauge_snapshot(&recorder);
+        assert_eq!(
+            values.get("buzz_storage_community_breakdown_available"),
+            Some(&0.0)
+        );
+        assert!(!values.contains_key("buzz_storage_unmapped_community_bytes"));
     }
 
     // --- F-EXT1 regression: stale per-community series are zeroed ---
