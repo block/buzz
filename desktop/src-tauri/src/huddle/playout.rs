@@ -183,23 +183,6 @@ fn same_occupancy(
         && index_to_epoch.get(&peer_idx) == Some(&epoch)
 }
 
-fn mix_remote_stt_samples(mix: &mut Vec<f32>, samples: &[f32]) {
-    if mix.len() < samples.len() {
-        mix.resize(samples.len(), 0.0);
-    }
-    for (mixed, sample) in mix.iter_mut().zip(samples) {
-        *mixed = (*mixed + *sample).clamp(-1.0, 1.0);
-    }
-}
-
-fn f32_samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
-    for sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-    bytes
-}
-
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
@@ -280,7 +263,6 @@ pub(crate) async fn run_playout_recv_loop(
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
     local_tts_publishers: super::tts::LocalTtsPublishers,
-    remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
     agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
     human_floor: HumanFloor,
 ) {
@@ -338,7 +320,6 @@ pub(crate) async fn run_playout_recv_loop(
                 // per idle peer into rodio forever. `is_active` is a 500 ms
                 // grace past the last received packet, far longer than typical
                 // DTX comfort-noise cadence.
-                let mut remote_stt_mix = Vec::new();
                 for (peer_idx, slot) in peers.iter_mut() {
                     if !slot.is_active() {
                         // Still drain the frame to keep NetEq's internal clock
@@ -360,17 +341,10 @@ pub(crate) async fn run_playout_recv_loop(
                                 );
                                 slot.player.skip_one();
                             }
-                            if !is_locally_synthesized_peer(*peer_idx, &local_tts_publishers) {
-                                let remote_agent = {
-                                    let agents = agent_pubkeys
-                                        .lock()
-                                        .unwrap_or_else(|error| error.into_inner());
-                                    is_agent_peer(*peer_idx, &index_to_pubkey, &agents)
-                                };
-                                if !remote_agent {
-                                    mix_remote_stt_samples(&mut remote_stt_mix, &samples);
-                                }
-                            }
+                            // Remote peers are played out, never transcribed:
+                            // this device signs transcripts with the local
+                            // user's key, so another participant's speech has
+                            // no honest path into that pipeline.
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
                         }
                         Err(e) => {
@@ -378,18 +352,6 @@ pub(crate) async fn run_playout_recv_loop(
                                 "buzz-desktop: jitter get_audio peer {peer_idx}: {e}"
                             );
                         }
-                    }
-                }
-                if !remote_stt_mix.is_empty() {
-                    let pipeline = remote_stt_pipeline
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .as_ref()
-                        .and_then(std::sync::Weak::upgrade);
-                    if let Some(pipeline) = pipeline {
-                        let _ = pipeline.push_remote_audio(f32_samples_to_le_bytes(
-                            &remote_stt_mix,
-                        ));
                     }
                 }
             }
@@ -776,8 +738,10 @@ mod tests {
         assert!(!is_locally_synthesized_peer(9, &local_publishers));
     }
 
+    /// Agent audio plays out, but must never acquire the human floor —
+    /// otherwise one agent's speech would suppress another agent's response.
     #[test]
-    fn remote_agent_identity_is_excluded_from_human_stt() {
+    fn remote_agent_identity_is_excluded_from_the_human_floor() {
         let peers =
             std::collections::HashMap::from([(3, "human".to_owned()), (4, "AGENT".to_owned())]);
         let agents = vec!["agent".to_owned()];
@@ -811,17 +775,5 @@ mod tests {
             !is_current_occupant(9, &index_to_epoch),
             "frame for an unoccupied index is dropped"
         );
-    }
-
-    #[test]
-    fn remote_human_stt_mix_sums_and_clamps_concurrent_speakers() {
-        let mut mix = Vec::new();
-        mix_remote_stt_samples(&mut mix, &[0.4, -0.7, 0.2]);
-        mix_remote_stt_samples(&mut mix, &[0.8, -0.6, -0.1]);
-
-        assert_eq!(mix, vec![1.0, -1.0, 0.1]);
-        let bytes = f32_samples_to_le_bytes(&mix);
-        assert_eq!(bytes.len(), std::mem::size_of_val(mix.as_slice()));
-        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 1.0);
     }
 }
