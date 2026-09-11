@@ -8,7 +8,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | Group | Key commands |
 |-------|-------------|
 | `buzz agents` | `draft-create`, `draft-update` |
-| `buzz messages` | `send`, `get`, `thread`, `search` |
+| `buzz messages` | `send` (`--file <path>` attaches a file), `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
 | `buzz reactions` | `add`, `remove` |
@@ -24,7 +24,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz upload` | `file` |
 | `buzz mem` | `set`, `get`, `ls`, `patch`, `rm` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+To hand someone a file (a document you wrote, an export), attach it: `buzz messages send --channel <uuid> --file <path> 'text'` — any type except executables and active web content, up to 50 MB (500 MB video); Markdown and other text upload fine. A path on your disk is invisible to the people in the channel. Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `<context>`. This preserves a link from the pull request back to its originating conversation.
 

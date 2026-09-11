@@ -20,6 +20,10 @@ pub struct BlobDescriptor {
     /// MIME type (e.g. `image/jpeg`).
     #[serde(rename = "type")]
     pub mime_type: String,
+    /// Original file name, set client-side after upload so the imeta tag can
+    /// carry it (the relay's descriptor has no name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
     /// Unix timestamp when the file was uploaded.
     pub uploaded: i64,
     /// Image dimensions as `<width>x<height>` (optional).
@@ -57,19 +61,46 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(ref name) = d.filename {
+        tag.push(format!("filename {name}"));
+    }
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// MIME types refused for upload — mirrors the relay's generic-file deny-list
+/// (`buzz-media::validation::BLOCKED_FILE_MIME_TYPES`): active web content
+/// and native executables. Everything else uploads; files without magic bytes
+/// (Markdown, plain text, CSV, …) go up as `application/octet-stream`, which
+/// the relay stores and serves as a download.
+const BLOCKED_MIMES: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
-/// Maximum file size for image uploads (50 MB).
+/// Detect the upload MIME type from magic bytes (un-sniffable content is
+/// `application/octet-stream`) and refuse the relay's blocked types.
+pub(crate) fn upload_mime_for(bytes: &[u8]) -> Result<String, CliError> {
+    let mime = infer::get(bytes)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if BLOCKED_MIMES.contains(&mime.as_str()) {
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    }
+    Ok(mime)
+}
+
+/// Maximum file size for non-video uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
@@ -1160,6 +1191,15 @@ impl BuzzClient {
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
+        let mut desc = self.upload_file_inner(file_path).await?;
+        desc.filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string);
+        Ok(desc)
+    }
+
+    async fn upload_file_inner(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
         // 1. Read file — validate it exists and is a regular file
         let metadata = std::fs::metadata(file_path)
             .map_err(|e| CliError::Other(format!("cannot access {file_path}: {e}")))?;
@@ -1170,14 +1210,8 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
+        // 2. Detect MIME from magic bytes; refuse only what the relay refuses.
+        let mime = upload_mime_for(&bytes)?;
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
@@ -2593,5 +2627,46 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+}
+
+#[cfg(test)]
+mod upload_mime_tests {
+    use super::{build_imeta_tag, upload_mime_for, BlobDescriptor};
+
+    #[test]
+    fn plain_text_uploads_as_octet_stream_and_executables_are_refused() {
+        assert_eq!(
+            upload_mime_for(b"# Plan\n\n1. do x\n").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            upload_mime_for(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]).unwrap(),
+            "image/png"
+        );
+        // A PE header ("MZ") is sniffed as an executable and refused.
+        let mut exe = b"MZ".to_vec();
+        exe.extend_from_slice(&[0u8; 64]);
+        let err = upload_mime_for(&exe).unwrap_err().to_string();
+        assert!(err.contains("unsupported file type"), "{err}");
+    }
+
+    #[test]
+    fn imeta_tag_carries_the_filename_when_known() {
+        let desc = BlobDescriptor {
+            url: "https://relay.test/media/abc.bin".into(),
+            sha256: "abc".into(),
+            size: 12,
+            mime_type: "application/octet-stream".into(),
+            filename: Some("plan_v2.md".into()),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        let tag = build_imeta_tag(&desc);
+        assert!(tag.contains(&"filename plan_v2.md".to_string()), "{tag:?}");
+        assert!(tag.contains(&"m application/octet-stream".to_string()));
     }
 }
