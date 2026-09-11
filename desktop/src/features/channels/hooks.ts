@@ -860,6 +860,20 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
       await invalidateChannelState(queryClient, effectiveChannelId);
+      // A just-added agent must become mentionable in this channel without
+      // waiting for the relay-agents 5-minute poll or an app restart. Removing
+      // a member already refreshes the agent lists; adding one must too, or the
+      // mention autocomplete keeps showing a stale set that omits the new agent.
+      // A relay agent's kind:10100 record only lists this channel after the
+      // agent (re)publishes it in response to the membership change, which lands
+      // a moment later — so invalidate now and once more shortly after to catch
+      // that republish rather than racing it.
+      const refreshAgentLists = () => {
+        void queryClient.invalidateQueries({ queryKey: ["managed-agents"] });
+        void queryClient.invalidateQueries({ queryKey: ["relay-agents"] });
+      };
+      refreshAgentLists();
+      setTimeout(refreshAgentLists, 4_000);
     },
   });
 }
