@@ -116,6 +116,8 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom harness command could not be resolved in the current PATH.
+    MissingBinary { command: String },
 }
 
 impl RequirementPayload {
@@ -190,6 +192,9 @@ impl RequirementPayload {
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
+            RequirementPayload::MissingBinary { command } => {
+                format!("install `{command}` or add it to PATH")
+            }
         }
     }
 }
@@ -262,6 +267,10 @@ impl SetupPayload {
                 .requirements
                 .iter()
                 .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let all_missing_binary = self
+                .requirements
+                .iter()
+                .all(|r| matches!(r, RequirementPayload::MissingBinary { .. }));
             let any_external = self
                 .requirements
                 .iter()
@@ -269,6 +278,8 @@ impl SetupPayload {
 
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
+            } else if all_missing_binary {
+                "Install the missing binary or update PATH, then restart the agent.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
@@ -737,6 +748,22 @@ mod tests {
             payload.requirements.as_slice(),
             [RequirementPayload::GitBash]
         ));
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        let payload = SetupPayload::from_raw_env_value(Some(
+            r#"{"agent_name":"Carol","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"buzz-pi-acp"}]}"#.to_string(),
+        ))
+        .unwrap()
+        .expect("missing_binary payload must parse");
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "buzz-pi-acp"
+        ));
+        let body = payload.nudge_body();
+        assert!(body.contains("install `buzz-pi-acp` or add it to PATH"));
+        assert!(!body.contains("Open Edit Agent"));
     }
 
     #[tokio::test]
