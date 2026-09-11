@@ -83,6 +83,19 @@ pub async fn handle_req(
                 (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
             }
             _ => {
+                // JOIN-BY-ADDRESS: the community's join material is the ONE
+                // thing an unauthenticated client may read — a stranger
+                // holding nothing but the relay's wss:// URL needs it to
+                // join (the event carries the canonical origin, the
+                // standing invite and the room list). This branch can
+                // serve nothing else: the kind is admin-published,
+                // community-global, and the request shape guard below
+                // pins the filter to exactly that kind. Anything broader
+                // stays behind the AUTH gate — fail closed for strangers.
+                if is_join_material_request(&filters) {
+                    handle_join_material_req(&sub_id, &filters, conn.clone(), &state).await;
+                    return;
+                }
                 conn.send(RelayMessage::notice(
                     "auth-required: authenticate before subscribing",
                 ));
@@ -492,6 +505,74 @@ pub async fn handle_req(
         count = total_sent,
         "EOSE sent after historical delivery"
     );
+}
+
+/// A REQ qualifies for the unauthenticated join-material branch ONLY when
+/// every filter targets exactly the join kind with no other scoping — no
+/// ids/authors/tags/search/time windows, and a small limit. Anything
+/// broader (or empty) stays behind the AUTH gate: fail closed.
+fn is_join_material_request(filters: &[Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|f| {
+            let kind_ok = f
+                .kinds
+                .as_ref()
+                .map(|ks| {
+                    ks.len() == 1
+                        && ks.iter().any(|k| {
+                            u32::from(k.as_u16())
+                                == buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL
+                        })
+                })
+                .unwrap_or(false);
+            kind_ok
+                && f.ids.as_ref().is_none_or(|s| s.is_empty())
+                && f.authors.as_ref().is_none_or(|a| a.is_empty())
+                && f.generic_tags.is_empty()
+                && f.search.is_none()
+                && f.since.is_none()
+                && f.until.is_none()
+                && f.limit.is_none_or(|l| l <= 8)
+        })
+}
+
+/// Serve the community's join material to an UNAUTHENTICATED connection.
+/// The query is pinned to global rows (`channel_ids = Some([])` = global
+/// only) of the admin-published join kind — no member data can appear on
+/// this path even if a future kind mapping regressed.
+async fn handle_join_material_req(
+    sub_id: &str,
+    filters: &[Filter],
+    conn: Arc<ConnectionState>,
+    state: &AppState,
+) {
+    let mut total_sent: usize = 0;
+    for filter in filters {
+        let mut params = filter_to_query_params(filter, None, conn.tenant.community());
+        params.channel_ids = Some(vec![]); // global-only — the kind is community-global
+        let events = match state.db.query_events_routed("req_join_material", &params).await {
+            Ok(evs) => evs,
+            Err(e) => {
+                warn!(sub_id = %sub_id, "Join-material query failed: {e}");
+                conn.send(RelayMessage::eose(sub_id));
+                return;
+            }
+        };
+        for stored in events {
+            // Belt to the pinned query: re-check the filter (kind 34550
+            // only, per the shape guard) before delivery.
+            if !filters_match(std::slice::from_ref(filter), &stored) {
+                continue;
+            }
+            let msg = RelayMessage::event(sub_id, &stored.event);
+            if !conn.send(msg) {
+                return;
+            }
+            total_sent += 1;
+        }
+    }
+    conn.send(RelayMessage::eose(sub_id));
+    debug!(sub_id = %sub_id, count = total_sent, "join material served (unauthenticated)");
 }
 
 /// FTS candidate hits fetched per page. Pages are always full regardless of
@@ -2541,5 +2622,51 @@ mod tests {
         ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
+    }
+
+    #[test]
+    fn join_material_shape_guard_pins_the_kind() {
+        use nostr::Kind;
+        let ok = Filter::new().kinds(vec![Kind::Custom(
+            buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16,
+        )]);
+        assert!(is_join_material_request(&[ok.clone()]));
+        // small limit is allowed
+        let with_limit = Filter::new()
+            .kinds(vec![Kind::Custom(
+                buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16,
+            )])
+            .limit(3);
+        assert!(is_join_material_request(&[with_limit]));
+
+        // empty filter set — fail closed
+        assert!(!is_join_material_request(&[]));
+        // kindless filter
+        assert!(!is_join_material_request(&[Filter::new().limit(1)]));
+        // mixed kinds
+        let mixed = Filter::new().kinds(vec![
+            Kind::Custom(buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16),
+            Kind::Metadata,
+        ]);
+        assert!(!is_join_material_request(&[mixed]));
+        // other scoping — stays behind the AUTH gate
+        let with_tag = Filter::new()
+            .kinds(vec![Kind::Custom(
+                buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16,
+            )])
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "x");
+        assert!(!is_join_material_request(&[with_tag]));
+        // oversized limit
+        let big_limit = Filter::new()
+            .kinds(vec![Kind::Custom(
+                buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16,
+            )])
+            .limit(64);
+        assert!(!is_join_material_request(&[big_limit]));
+        // one clean filter + one broad filter — the SET fails closed
+        let clean = Filter::new().kinds(vec![Kind::Custom(
+            buzz_core::kind::KIND_COMMUNITY_JOIN_MATERIAL as u16,
+        )]);
+        assert!(!is_join_material_request(&[clean, Filter::new().limit(1)]));
     }
 }

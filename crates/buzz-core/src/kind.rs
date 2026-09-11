@@ -349,6 +349,14 @@ pub const KIND_NIP29_CREATE_INVITE: u32 = 9009;
 pub const KIND_NIP29_JOIN_REQUEST: u32 = 9021;
 /// NIP-29: Request to leave a group.
 pub const KIND_NIP29_LEAVE_REQUEST: u32 = 9022;
+/// Join-by-address: the community's JOIN MATERIAL, served by the relay
+/// itself so a client holding nothing but the wss:// URL can join with no
+/// second machine (NIP-29's community-definition kind, 34550, reused as
+/// the carrier). Owner-signed, parameterized-replaceable by `d` tag,
+/// always community-global; content = the join JSON (v, community,
+/// invite, default_channel, rooms) with `name`/`origin` tags. This is the
+/// ONLY kind an UNAUTHENTICATED REQ may read (see handlers/req.rs).
+pub const KIND_COMMUNITY_JOIN_MATERIAL: u32 = 34550;
 
 // Buzz community moderation commands (mod-signed, processed like 9030-series:
 // validated + executed directly, never stored as regular events; every
