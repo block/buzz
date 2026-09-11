@@ -67,3 +67,25 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |
 | Empty output / no auth | git version is older than 2.46 | Upgrade git |
 | `clock skew` / auth rejected | System clock is off by more than 60 s | Sync your system clock (`ntpdate`, `timedatectl`) |
+
+## Large pushes (> 1 MiB)
+
+Pushing a pack larger than `http.postBuffer` (default **1 MiB**) fails the
+first time with a misleading `HTTP 401 … RPC failed` followed by
+`Everything up-to-date` — nothing was actually pushed.
+
+Why: the helper returns `ephemeral=true`, so git sends the
+`git-receive-pack` POST unauthenticated, gets a 401 challenge, and retries
+with the signed credential. The retry only works if the body is buffered;
+packs bigger than `http.postBuffer` are streamed chunked and cannot be
+replayed, so the retry never happens.
+
+Workaround (verified against a 90 MB push):
+
+```bash
+git config --global http.postBuffer 524288000   # 500 MiB
+```
+
+The fix threshold matches your largest repo. The ±60 s NIP-98 validity
+window is not a concern — the token is minted at challenge time, after
+the buffered body is written.
