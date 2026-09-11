@@ -514,8 +514,24 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
         return CorsLayer::new();
     }
 
+    // Log each rejected origin at `warn!` before falling through to the CORS
+    // denial. Without this, a non-allowlisted origin is silently refused by the
+    // outer CORS layer and never reaches the inner trace layer — turning a
+    // two-minute config fix into hours of invisible debugging (#3636).
+    let allow = AllowOrigin::predicate(move |origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts| {
+        let allowed = origins.contains(origin);
+        if !allowed {
+            tracing::warn!(
+                target: "buzz_relay",
+                origin = %origin.to_str().unwrap_or("<non-utf8>"),
+                "CORS rejected origin — not in BUZZ_CORS_ORIGINS"
+            );
+        }
+        allowed
+    });
+
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(allow)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
