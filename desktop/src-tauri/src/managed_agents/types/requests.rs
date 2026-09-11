@@ -16,8 +16,8 @@ use crate::managed_agents::AcpSessionPolicy;
 /// Grouped (not flat) because `update_persona` has legacy callers that don't
 /// send behavioral fields at all — flat replace semantics would silently wipe
 /// a stored behavior group on every team-import edit. Absent group = don't touch the
-/// stored behavior group; present group = validate and replace the fields as a unit
-/// (mode and allowlist must travel together).
+/// stored behavior group; present group = validate and replace all four fields as a
+/// unit (mode and allowlist must travel together).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonaBehaviorRequest {
@@ -27,7 +27,7 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
-    /// Absent preserves the stored value for legacy update callers.
+    /// Absent inside a present behavior group selects the channel default.
     #[serde(default)]
     pub session_policy: Option<AcpSessionPolicy>,
 }
@@ -72,9 +72,7 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
-    if let Some(session_policy) = behavior.session_policy {
-        record.session_policy = session_policy;
-    }
+    record.session_policy = behavior.session_policy.unwrap_or_default();
     Ok(())
 }
 
@@ -334,6 +332,7 @@ mod tests {
     #[test]
     fn present_behavior_replaces_all_four_as_a_unit() {
         let mut record = record_with_quad();
+        record.session_policy = AcpSessionPolicy::Thread;
         apply_persona_behavior(
             &mut record,
             Some(PersonaBehaviorRequest {
@@ -347,6 +346,7 @@ mod tests {
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
         assert_eq!(record.parallelism, None);
+        assert_eq!(record.session_policy, AcpSessionPolicy::Channel);
     }
 
     #[test]

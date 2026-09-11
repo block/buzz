@@ -6,6 +6,7 @@ export async function applyCommunity(
   token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
+  migrateLegacyThreadScopedAcpSessions?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
@@ -13,6 +14,8 @@ export async function applyCommunity(
     token: token ?? null,
     reposDir: reposDir ?? null,
     agentManagedProfiles: agentManagedProfiles ?? false,
+    migrateLegacyThreadScopedAcpSessions:
+      migrateLegacyThreadScopedAcpSessions ?? false,
   });
 }
 

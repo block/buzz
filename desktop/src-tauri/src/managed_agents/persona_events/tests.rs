@@ -667,6 +667,18 @@ fn channel_policy_stays_wire_compatible_when_absent() {
         parsed.session_policy,
         crate::managed_agents::AcpSessionPolicy::Channel
     );
+
+    for value in [serde_json::json!("conversation"), serde_json::Value::Null] {
+        let parsed: PersonaEventContent = serde_json::from_value(serde_json::json!({
+            "display_name": "Forward-compatible",
+            "session_policy": value,
+        }))
+        .unwrap_or_else(|error| panic!("unknown policy should not drop a persona: {error}"));
+        assert_eq!(
+            parsed.session_policy,
+            crate::managed_agents::AcpSessionPolicy::Channel
+        );
+    }
 }
 
 /// `description` is public display metadata, deliberately excluded from

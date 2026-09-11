@@ -249,11 +249,9 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         .get("parallelism")
         .and_then(Value::as_u64)
         .filter(|value| (1..=32).contains(value));
-    let session_policy = match object.get("session_policy") {
-        None => AcpSessionPolicy::Channel,
-        Some(Value::String(value)) if value == "channel" => AcpSessionPolicy::Channel,
-        Some(Value::String(value)) if value == "thread" => AcpSessionPolicy::Thread,
-        Some(_) => return None,
+    let session_policy = match object.get("session_policy").and_then(Value::as_str) {
+        Some("thread") => AcpSessionPolicy::Thread,
+        _ => AcpSessionPolicy::Channel,
     };
     let name_pool = object
         .get("name_pool")

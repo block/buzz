@@ -1,4 +1,5 @@
 use super::{AgentDefinition, CatalogSource, ManagedAgentRecord};
+use crate::managed_agents::AcpSessionPolicy;
 use std::path::PathBuf;
 
 #[test]
@@ -457,6 +458,19 @@ fn pending_provider_policy_round_trips() {
     let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
 
     assert!(reloaded.provider_policy_pending);
+}
+
+#[test]
+fn stored_record_unknown_or_null_session_policy_degrades_to_channel() {
+    for session_policy in [serde_json::json!("future"), serde_json::Value::Null] {
+        let mut value = serde_json::to_value(sample_agent_record()).expect("serialize fixture");
+        value["session_policy"] = session_policy;
+        let records: Vec<ManagedAgentRecord> = serde_json::from_value(serde_json::json!([value]))
+            .unwrap_or_else(|error| panic!("one policy must not drop the agent store: {error}"));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].session_policy, AcpSessionPolicy::Channel);
+    }
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {

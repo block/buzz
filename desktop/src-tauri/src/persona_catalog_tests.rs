@@ -127,7 +127,16 @@ fn parser_projects_types_and_foreign_allowlists_exactly() {
 
     let mut malformed = valid_content("Malformed");
     malformed["session_policy"] = json!("conversation");
-    assert!(parse_agent(&malformed.to_string()).is_none());
+    assert_eq!(
+        parse_agent(&malformed.to_string()).unwrap().session_policy,
+        AcpSessionPolicy::Channel
+    );
+
+    malformed["session_policy"] = json!(null);
+    assert_eq!(
+        parse_agent(&malformed.to_string()).unwrap().session_policy,
+        AcpSessionPolicy::Channel
+    );
 }
 
 #[test]

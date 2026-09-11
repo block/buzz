@@ -164,6 +164,7 @@ type MockPersonaSeed = {
   namePool?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  sessionPolicy?: "channel" | "thread";
 };
 
 type MockTeamSeed = {
@@ -2655,6 +2656,7 @@ function resetMockPersonas(config?: E2eConfig) {
     model: null,
     provider: null,
     name_pool: [],
+    session_policy: "channel",
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
     shared: false,
@@ -2678,6 +2680,7 @@ function resetMockPersonas(config?: E2eConfig) {
         persona.respondTo === "allowlist"
           ? [...(persona.respondToAllowlist ?? [])]
           : [],
+      session_policy: persona.sessionPolicy ?? "channel",
       is_builtin: false,
       is_active: persona.isActive ?? true,
       shared: persona.shared ?? false,
@@ -8871,9 +8874,7 @@ function applyMockPersonaBehavior(
       ? [...(behavior.respondToAllowlist ?? [])]
       : [];
   persona.parallelism = behavior.parallelism ?? null;
-  if (behavior.sessionPolicy !== undefined) {
-    persona.session_policy = behavior.sessionPolicy;
-  }
+  persona.session_policy = behavior.sessionPolicy ?? "channel";
 }
 
 async function handleCreatePersona(args: {
@@ -12766,6 +12767,18 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
       case "apply_workspace": {
+        if (
+          (payload as { migrateLegacyThreadScopedAcpSessions?: boolean })
+            ?.migrateLegacyThreadScopedAcpSessions === true
+        ) {
+          const now = new Date().toISOString();
+          for (const persona of mockPersonas) {
+            if (persona.session_policy !== "thread") {
+              persona.session_policy = "thread";
+              persona.updated_at = now;
+            }
+          }
+        }
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>

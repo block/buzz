@@ -52,9 +52,7 @@ export function personaBehaviorDraftValid(draft: PersonaBehaviorDraft) {
   return draft.respondTo !== "allowlist" || draft.respondToAllowlist.length > 0;
 }
 
-function behaviorFromDraft(
-  draft: PersonaBehaviorDraft,
-): PersonaBehaviorInput | undefined {
+function behaviorFromDraft(draft: PersonaBehaviorDraft): PersonaBehaviorInput {
   const parallelism = Number.parseInt(draft.parallelism, 10);
   const group: PersonaBehaviorInput = {
     respondTo: draft.respondTo ?? undefined,
@@ -100,5 +98,5 @@ export function behaviorForSubmit(
   if (JSON.stringify(group) === JSON.stringify(seedGroup)) {
     return undefined;
   }
-  return group ?? {};
+  return group;
 }

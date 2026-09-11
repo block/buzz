@@ -459,3 +459,14 @@ fn unchanged_session_policy_does_not_require_restart() {
     let thread = snapshot_under(AcpSessionPolicy::Thread);
     assert!(policy_transition_diff(&thread, &snapshot_under(AcpSessionPolicy::Thread)).is_empty());
 }
+
+#[test]
+fn definitionless_instance_retains_its_stored_session_policy() {
+    let mut instance = record();
+    instance.session_policy = AcpSessionPolicy::Thread;
+
+    assert_eq!(
+        crate::managed_agents::effective_acp_session_policy(&instance, &[]),
+        AcpSessionPolicy::Thread
+    );
+}

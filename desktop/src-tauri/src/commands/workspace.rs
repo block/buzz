@@ -139,8 +139,8 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the
-/// Tauri backend with the selected workspace's relay URL, keys, and repos
-/// directory.
+/// Tauri backend with the selected workspace's relay URL, keys, repos
+/// directory, and any pending one-shot local migrations.
 ///
 /// A bad `repos_dir` is non-fatal: relay/keys always apply (the relay is the
 /// active workspace's own choice — orthogonal to the filesystem repos dir),
@@ -155,6 +155,7 @@ pub async fn apply_workspace(
     nsec: Option<String>,
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
+    migrate_legacy_thread_scoped_acp_sessions: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -210,6 +211,20 @@ pub async fn apply_workspace(
         // cannot advance it until this transaction releases the guard.
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
+        // The retired global preview toggle is a one-shot migration request,
+        // not live experiment state. Persist it onto every definition before
+        // nest regeneration and launch restore; changing definitions preserves
+        // the normal restart-required lifecycle for already-running instances.
+        if migrate_legacy_thread_scoped_acp_sessions.unwrap_or(false) {
+            let migrated =
+                crate::managed_agents::migrate_legacy_thread_scoped_persona_policy(&app)?;
+            if migrated > 0 {
+                eprintln!(
+                    "buzz-desktop: migrated {migrated} agent definition(s) to thread-scoped ACP sessions"
+                );
+            }
+        }
+
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
@@ -230,6 +245,7 @@ pub async fn apply_workspace(
         state
             .managed_agent_profile_reconcile_enabled()
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
         // validation) for the backend to read at boot, then re-point REPOS to

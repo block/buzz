@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
@@ -27,7 +27,7 @@ impl AppState {
 }
 
 /// Defines whether one ACP conversation is shared by a channel or isolated per thread.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpSessionPolicy {
     /// Share one ACP conversation across all threads in a channel.
@@ -35,6 +35,19 @@ pub enum AcpSessionPolicy {
     Channel,
     /// Keep a separate ACP conversation for each channel thread.
     Thread,
+}
+
+impl<'de> Deserialize<'de> for AcpSessionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("thread") => Self::Thread,
+            _ => Self::Channel,
+        })
+    }
 }
 
 impl AcpSessionPolicy {
@@ -70,7 +83,7 @@ pub(crate) fn insert_acp_session_policy_env(
 /// Resolve the policy that a launch would use. Linked instances inherit the
 /// current definition, so an edit takes effect on restart without rewriting
 /// already-deployed records. Orphaned and definition-less instances retain
-/// the historical channel behavior.
+/// the last policy stored on their record.
 pub(crate) fn effective_acp_session_policy(
     record: &ManagedAgentRecord,
     definitions: &[AgentDefinition],
@@ -80,7 +93,7 @@ pub(crate) fn effective_acp_session_policy(
         .as_deref()
         .and_then(|id| definitions.iter().find(|definition| definition.id == id))
         .map(|definition| definition.session_policy)
-        .unwrap_or_default()
+        .unwrap_or(record.session_policy)
 }
 
 #[cfg(test)]
@@ -108,6 +121,17 @@ mod tests {
             "\"thread\""
         );
         assert_eq!(AcpSessionPolicy::Thread.as_str(), "thread");
+    }
+
+    #[test]
+    fn unknown_or_null_policy_degrades_to_channel() {
+        for value in [serde_json::json!("conversation"), serde_json::Value::Null] {
+            assert_eq!(
+                serde_json::from_value::<AcpSessionPolicy>(value)
+                    .unwrap_or_else(|error| panic!("policy should degrade gracefully: {error}")),
+                AcpSessionPolicy::Channel
+            );
+        }
     }
 
     #[test]
