@@ -304,6 +304,39 @@ fn unknown_input_permanently_blocks_publication() {
     );
 }
 
+/// Reusing agent history also reuses its IFC state. Two public channels share
+/// a domain, so routing the next turn through another channel must not clear
+/// the unknown-input flag. This exercises the pool lookup used in the example.
+#[test]
+fn unknown_input_survives_reusing_a_session_in_another_public_channel() {
+    let first_turn = public_domain(community(1), 10, "community:v1");
+    let next_turn = public_domain(community(1), 20, "community:v1");
+    let resource = ResourceLabel::from_domain(&next_turn);
+    let destination = next_turn.audience().clone();
+    let mut pool = HashMap::new();
+
+    pool.entry(first_turn.key())
+        .or_insert_with(|| IfcSession::enter(first_turn))
+        .mark_unknown_input();
+
+    let session = pool
+        .entry(next_turn.key())
+        .or_insert_with(|| IfcSession::enter(next_turn));
+    session
+        .call(READ)
+        .expect("the read operation remains allowed");
+    session.read(&resource).expect("public input is admissible");
+    assert_eq!(
+        session
+            .publish(REPLY, &destination, b"output".to_vec())
+            .err(),
+        Some(IfcError::InformationFlow(
+            ifc_core::EgressError::UnresolvedInput
+        ))
+    );
+    assert_eq!(pool.len(), 1);
+}
+
 /// Retained restricted state from an older membership snapshot cannot enter a
 /// newly routed session for the same conversation.
 #[test]
@@ -366,6 +399,37 @@ fn equal_audiences_do_not_merge_restricted_conversation_contexts() {
     let session = IfcSession::enter(destination);
 
     assert_eq!(session.read(&resource), Err(IfcError::ReadContextDenied));
+}
+
+/// The owner may bring conversation data into owner-private work, but not the
+/// reverse. Equal audiences must not let an ordinary conversation import the
+/// owner's private history or memory.
+#[test]
+fn owner_private_state_cannot_enter_a_conversation_with_the_same_audience() {
+    let owner_private = owner_private_domain(community(1), 10, "membership:v1");
+    let conversation = restricted_domain(community(1), 20, "membership:v1", &[1]);
+    assert_eq!(owner_private.audience(), conversation.audience());
+    let resource = ResourceLabel::from_domain(&owner_private);
+    let session = IfcSession::enter(conversation);
+
+    assert_eq!(session.read(&resource), Err(IfcError::ReadContextDenied));
+}
+
+/// Public means public within one community, not readable across all of them.
+/// A cross-community resource must be rejected before any data is delivered.
+#[test]
+fn public_resource_cannot_cross_communities() {
+    let source = public_domain(community(1), 10, "community:v1");
+    let destination = public_domain(community(2), 10, "community:v1");
+    let resource = ResourceLabel::from_domain(&source);
+    let session = IfcSession::enter(destination);
+    let mut inbox = Vec::new();
+
+    assert_eq!(
+        deliver_to_agent(&session, &resource, "other community", &mut inbox),
+        Err(IfcError::ReadAudienceDenied)
+    );
+    assert!(inbox.is_empty());
 }
 
 /// Universes are isolated even when two communities happen to contain the
