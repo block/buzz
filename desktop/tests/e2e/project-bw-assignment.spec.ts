@@ -84,7 +84,10 @@ async function openIssue(
   await row.click();
 }
 
-async function lastBwCall(page: import("@playwright/test").Page, command: string) {
+async function lastBwCall(
+  page: import("@playwright/test").Page,
+  command: string,
+) {
   const calls = await page.evaluate(
     (cmd) =>
       (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
@@ -116,7 +119,11 @@ test("a backlog issue with no current writer offers assign; assigning submits th
 
   const call = await lastBwCall(page, "submit_project_bw_assignment");
   expect(
-    (call?.payload as { delegate?: string; operation?: string; prior?: unknown }) ?? {},
+    (call?.payload as {
+      delegate?: string;
+      operation?: string;
+      prior?: unknown;
+    }) ?? {},
   ).toMatchObject({ delegate: WRITER, operation: "assignment", prior: null });
 });
 
@@ -136,9 +143,7 @@ test("a backlog issue with a current writer offers unassign, resubmitting the ex
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  await expect(panel.getByTestId("bw-assignment-writer")).toContainText(
-    WRITER,
-  );
+  await expect(panel.getByTestId("bw-assignment-writer")).toContainText(WRITER);
   await panel.getByTestId("bw-unassign").click();
 
   const call = await lastBwCall(page, "submit_project_bw_assignment");
@@ -149,7 +154,15 @@ test("a backlog issue with a current writer offers unassign, resubmitting the ex
   });
 });
 
-test("two competing assignment heads surface a visible conflict instead of guessing the current writer", async ({
+// `bwAssignmentHead` only ever sees `snapshot.records`, and the real desktop
+// bridge (`bw_projection.rs::snapshot`) only ever puts an *accepted* event
+// there — a genuinely forked pair of kind:1 assignment candidates never both
+// reach `accept`, so this exact `records` shape cannot occur against the
+// real backend today (the same is true of the pre-existing `bwFieldConflict`
+// check for 46100 forks). This still proves the frontend's own defensive
+// contract: *if* two accepted heads were ever presented, the UI blocks
+// further assignment actions rather than guessing a winner.
+test("two accepted assignment heads (a belt-and-suspenders case bwAssignmentHead defends against) block further assignment actions", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -169,6 +182,39 @@ test("two competing assignment heads surface a visible conflict instead of guess
   await expect(panel.getByTestId("bw-assignment-conflict")).toBeVisible();
   await expect(panel.getByTestId("bw-assign")).toHaveCount(0);
   await expect(panel.getByTestId("bw-unassign")).toHaveCount(0);
+});
+
+// This is the signal a real forked assignment chain actually produces today:
+// `bw_projection.rs::notice_issue` now covers kind:1 assignment/unassignment
+// candidates the same way it already covered 46100 records, so a rejected or
+// conflicted assignment event surfaces as a per-issue notice — visible,
+// never silently dropped — even though it never appears in `records` itself.
+test("a forked assignment candidate surfaces as a visible per-issue notice", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    bwSnapshot: {
+      activation: ACTIVATION,
+      records: { [ROOT]: rootEvent(ROOT, "Forked assignment") },
+      notices: {
+        [ROOT]: [
+          {
+            event_id: ASSIGN_B,
+            outcome: "conflict",
+            stage: "causality",
+            code: "assignment-operation",
+          },
+        ],
+      },
+      projection: { issues: { [ROOT]: "backlog" } },
+    },
+  });
+  const panel = await openIssuesPanel(page);
+  await openIssue(page, panel, ROOT);
+
+  await expect(
+    panel.getByText("conflict: causality / assignment-operation"),
+  ).toBeVisible();
 });
 
 test("an assignment refused by Core surfaces the refusal instead of a silent state change", async ({
@@ -332,7 +378,9 @@ test("an implemented issue displays the commit, tests and verified readback exac
     "1111111111111111111111111111111111111111",
   );
   await expect(details).toContainText("cargo test: 0 failed");
-  await expect(details).toContainText("windows-integration@1111111111111111111111111111111111111111");
+  await expect(details).toContainText(
+    "windows-integration@1111111111111111111111111111111111111111",
+  );
   await expect(panel.getByTestId("bw-implemented-action")).toHaveCount(0);
 });
 

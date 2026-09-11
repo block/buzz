@@ -48,6 +48,16 @@ pub struct SubmitBwAssignmentInput {
     prior: Option<String>,
 }
 
+/// The only two operations the existing kind:1 assignment wire defines.
+/// Rejected here before any signing or network call, independently of
+/// whatever Core would also refuse the candidate for.
+fn validate_assignment_operation(operation: &str) -> Result<(), String> {
+    match operation {
+        "assignment" | "unassignment" => Ok(()),
+        other => Err(format!("Unsupported BW assignment operation: {other}")),
+    }
+}
+
 fn normalized_pubkey(value: &str) -> Result<String, String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.len() != 64 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -92,10 +102,8 @@ pub async fn submit_project_bw_assignment(
     input: SubmitBwAssignmentInput,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let operation = match input.operation.as_str() {
-        "assignment" | "unassignment" => input.operation.clone(),
-        other => return Err(format!("Unsupported BW assignment operation: {other}")),
-    };
+    validate_assignment_operation(&input.operation)?;
+    let operation = input.operation.clone();
     let delegate = normalized_pubkey(&input.delegate)?;
 
     let bw_input = load_bw_input(&state, &input.repo).await?;
@@ -380,18 +388,10 @@ mod tests {
 
     #[test]
     fn unsupported_operations_are_refused_before_any_network_call() {
-        assert!(matches!(
-            SubmitBwAssignmentInput {
-                repo: "30617:owner:repo".into(),
-                issue_id: "a".repeat(64),
-                delegate: "b".repeat(64),
-                operation: "reassignment".into(),
-                prior: None,
-            }
-            .operation
-            .as_str(),
-            "reassignment"
-        ));
+        assert!(validate_assignment_operation("assignment").is_ok());
+        assert!(validate_assignment_operation("unassignment").is_ok());
+        assert!(validate_assignment_operation("reassignment").is_err());
+        assert!(validate_assignment_operation("").is_err());
     }
 
     #[test]

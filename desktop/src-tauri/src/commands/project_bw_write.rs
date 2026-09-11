@@ -129,11 +129,23 @@ fn resolve_stream_head_blocking(
         auth,
     )
     .map_err(|error| format!("Could not read the repository's current {stream} head: {error}"))?;
+    // `git ls-remote <url> <pattern>` matches a pattern against the *tail* of
+    // a ref, anchored at either the start of the ref or a `/` boundary
+    // (git-ls-remote(1)) — so a ref an attacker pushed as
+    // `refs/heads/x/refs/heads/<stream>` also matches this same pattern and
+    // can sort before the real branch in the output. Anyone who can push to
+    // the repository (the assigned writer, by construction) can otherwise
+    // pick the "externally observed" commit for their own implemented claim.
+    // Only a line whose own ref is byte-for-byte `refs/heads/<stream>` is
+    // ever accepted; any other match is a shadow, not the branch.
     output
         .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().next())
-        .map(str::to_ascii_lowercase)
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let sha = parts.next()?;
+            let matched_ref = parts.next()?;
+            (matched_ref == refname).then(|| sha.to_ascii_lowercase())
+        })
         .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| format!("Could not resolve a commit for stream {stream}."))
 }
@@ -769,6 +781,102 @@ mod tests {
             .expect("resolve head");
         assert_eq!(head, commit);
         assert!(resolve_stream_head_blocking(remote_path, "no-such-branch", &auth).is_err());
+    }
+
+    /// `git ls-remote <url> <pattern>` matches a pattern against the tail of
+    /// a ref, anchored at the start of the ref or a `/` boundary — so a ref
+    /// someone pushed as `refs/heads/x/refs/heads/<stream>` also matches the
+    /// pattern `refs/heads/<stream>` and, sorted lexically, lands before the
+    /// real branch. Anyone with push access to the repository (the assigned
+    /// writer, by construction) could otherwise pick their own commit for
+    /// the "externally observed" implemented readback. This proves the
+    /// resolver rejects that shadow ref and still resolves the real one.
+    #[test]
+    fn resolve_stream_head_blocking_ignores_a_shadow_ref_that_matches_the_ls_remote_pattern() {
+        use super::super::project_git_exec::{build_test_git_auth_config, run_git};
+
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let remote = root.path().join("remote.git");
+        let worktree = root.path().join("worktree");
+        let remote_path = remote.to_str().expect("remote path");
+        let worktree_path = worktree.to_str().expect("worktree path");
+
+        run_git(&["init", "--bare", "--", remote_path], None, &auth).expect("init remote");
+        run_git(&["init", "--", worktree_path], None, &auth).expect("init worktree");
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Real head",
+            ],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("commit real head");
+        run_git(
+            &["branch", "-M", "windows-integration"],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("rename branch");
+        run_git(
+            &["remote", "add", "origin", remote_path],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("add remote");
+        run_git(
+            &["push", "origin", "windows-integration"],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("push real head");
+        let real_commit = run_git(&["rev-parse", "HEAD"], Some(&worktree), &auth)
+            .expect("resolve real commit")
+            .trim()
+            .to_ascii_lowercase();
+
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Attacker-chosen shadow head",
+            ],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("commit shadow head");
+        // Pushed under a ref whose tail is still `refs/heads/windows-integration`.
+        run_git(
+            &[
+                "push",
+                "origin",
+                "HEAD:refs/heads/0/refs/heads/windows-integration",
+            ],
+            Some(&worktree),
+            &auth,
+        )
+        .expect("push shadow ref");
+        let shadow_commit = run_git(&["rev-parse", "HEAD"], Some(&worktree), &auth)
+            .expect("resolve shadow commit")
+            .trim()
+            .to_ascii_lowercase();
+        assert_ne!(real_commit, shadow_commit);
+
+        let head = resolve_stream_head_blocking(remote_path, "windows-integration", &auth)
+            .expect("resolve head");
+        assert_eq!(head, real_commit);
     }
 
     #[test]
