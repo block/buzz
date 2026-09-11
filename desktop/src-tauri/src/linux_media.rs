@@ -102,10 +102,44 @@ pub fn enable_media_capture<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
     }
 }
 
+/// Log when the `WebKitWebProcess` (renderer) terminates, so a renderer crash
+/// surfaces as a diagnosable log line instead of a silent dead window.
+///
+/// Without a handler the renderer can die (e.g. an upstream PipeWire/GStreamer
+/// segfault, OOM, or a WebKit bug) while the main `buzz-desktop` and
+/// `WebKitNetworkProcess` processes stay alive, leaving a frozen window with no
+/// log output. WebKitGTK emits `web-process-terminated` for exactly this case;
+/// `WebProcessTerminationReason` distinguishes `Crashed` / `ExceededMemoryLimit`
+/// / `TerminatedByApi`. A no-op on non-Linux targets.
+#[cfg(target_os = "linux")]
+pub fn install_web_process_terminated_handler<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
+    use webkit2gtk::{glib::prelude::Cast, WebViewExt};
+
+    let webview = webview.clone();
+    let result = webview.with_webview(|platform_webview| {
+        platform_webview
+            .inner()
+            .connect_web_process_terminated(|_webview, reason| {
+                eprintln!(
+                    "buzz-desktop: WebKitWebProcess terminated (reason: {reason:?}); \
+                     the window may appear frozen. See #4359."
+                );
+            });
+    });
+
+    if let Err(error) = result {
+        eprintln!("buzz-desktop: could not install web-process-terminated handler: {error}");
+    }
+}
+
 /// No-op stub so shared startup code can call [`enable_media_capture`] on every
 /// platform. macOS and Windows route media permissions through the OS.
 #[cfg(not(target_os = "linux"))]
 pub fn enable_media_capture<R: tauri::Runtime>(_webview: &tauri::Webview<R>) {}
+
+/// No-op stub on non-Linux targets; there is no `WebKitWebProcess` to observe.
+#[cfg(not(target_os = "linux"))]
+pub fn install_web_process_terminated_handler<R: tauri::Runtime>(_webview: &tauri::Webview<R>) {}
 
 #[cfg(test)]
 mod tests {
