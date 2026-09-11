@@ -221,6 +221,13 @@ abstract final class NostrFilters {
   static NostrFilter relayMembers() =>
       const NostrFilter(kinds: [EventKind.relayMembership], limit: 1);
 
+  /// Relay-scoped archived identity snapshot (NIP-IA, kind:13535).
+  static NostrFilter archivedIdentities(String relayPubkey) => NostrFilter(
+    kinds: const [EventKind.archivedIdentities],
+    authors: [relayPubkey.toLowerCase()],
+    limit: 10,
+  );
+
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>
       const NostrFilter(kinds: [10100], limit: 100);

@@ -18,6 +18,9 @@ abstract final class EventKind {
 
   /// Kind:13534 event containing the current relay-community membership.
   static const relayMembership = 13534;
+
+  /// Kind:13535 relay-signed snapshot of archived identities (NIP-IA).
+  static const archivedIdentities = 13535;
   static const streamMessage = 9;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
