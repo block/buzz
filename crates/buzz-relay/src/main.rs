@@ -191,7 +191,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
     }
 
-    info!("Starting buzz-relay");
+    info!(pid = std::process::id(), "Starting buzz-relay");
 
     let (next_boot, config) = boot
         .run_required(StartupPhase::ConfigLoad, Config::from_env, |_error| {
