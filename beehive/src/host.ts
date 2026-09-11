@@ -1,3 +1,5 @@
+import { publicMetadata, metadataRevision, metadataAuthorization, publishPublicMetadata } from './public-metadata.ts';
+import { readCredentialManifest } from './credential-slots.ts';
 import { systemCredentials, type CredentialBackend } from './credential-store.ts';
 import { trace } from './latency-trace.ts';
 import { validateBuzzProvider, type BuzzProvider } from './buzz-provider.ts';
@@ -28,7 +30,7 @@ export function bindingFingerprint(setup: Setup): string {
 }
 type Selection = import('./handoff.ts').Selection;
 type ActualRun = { harnessSetup?: { id: string; fingerprint: string }; appliedInstructions?: { source: 'profile' | 'upstream-default'; revision: string | null; hash: string | null }; selection: Selection; executableHash: string; run: string; evidence?: Evidence; preparedInputHash?: string };
-type State = { configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
+type State = { publicMetadata?: { operation: string; revision: string; event: import('nostr-tools/pure').Event }; configurations?: Configurations; runs?: Record<string, ActualRun>; assignment: Assignment; move?: { request: Message; prepare: Message }; preparations?: Record<string, { request: Message; token: string; reply: Message; candidate?: Selection; reservedRevision?: number }>; incoming?: Record<string, Message>; binding: { host: string; owner: string; agent: string }; revision: number; phase: 'stopped' | 'transitioning' | 'running' | 'quarantined'; selected: Selection; actual: null | ActualRun; operations: Record<string, { fingerprint: string; reply: Message }>; outbox: Message[] };
 /** Resolve owner authority without requiring a private owner identity on a host.
  * Legacy diagnostic manifests remain readable; contradictory identities refuse. */
 export function setupOwner(setup: Pick<Setup, 'ownerPublic' | 'ownerSecret'>): string {
@@ -115,7 +117,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}, privateSnapshots = false) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}, privateSnapshots = false, metadataCustody?: (signal: AbortSignal) => Promise<{ secret: string; relay: string; authTag: string }>, managementRelay?: string) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -167,7 +169,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
   function receive(m: Message) { trace('slot.receive', { id: m.id, type: m.type, revision: m.revision });
     // Cancellation is signalled outside the serialized mutation queue. Admission is
     // still exact-authority/revision and never bypasses durable receipt processing.
-    const operation = m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type);
+    const operation = m.host === setup.host && ['metadata','save','start','restart','stop','move'].includes(m.type);
     const first = operation && !queuedOperations.has(m.id);
     if (operation) queuedOperations.add(m.id);
     // Reserve receive order too: a conflicting queued ID is not a Stop authority.
@@ -410,8 +412,8 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     }
   }
   async function handle(m: Message) { trace('slot.handle', { id: m.id, type: m.type, revision: m.revision });
-    if (m.host === setup.host && ['save','start','restart','stop','move'].includes(m.type)) queuedOperations.delete(m.id);
-    if (closing || persistenceFailed || m.host !== setup.host || !['inspect','save','start','restart','stop','move','prepare','prepared','grant'].includes(m.type)) return;
+    if (m.host === setup.host && ['metadata','save','start','restart','stop','move'].includes(m.type)) queuedOperations.delete(m.id);
+    if (closing || persistenceFailed || m.host !== setup.host || !['metadata','inspect','save','start','restart','stop','move','prepare','prepared','grant'].includes(m.type)) return;
     if (['prepare','prepared','grant'].includes(m.type)) { await exchange(m); return; }
     // Serialized Stop processing durably resolves that Stop's own retraction.
     if (m.type === 'stop' || m.type === 'save') retracted.delete(m.id);
@@ -436,7 +438,23 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
       state.operations[m.id] = { fingerprint, reply: pending }; save();
       try {
         if (state.move && m.type === 'stop') { fields(m.body, []); finishMove('Move cancelled before grant by stop'); }
-        if (m.type === 'move') {
+        if (m.type === 'metadata') {
+          fields(m.body, ['relay', 'value', 'revision']);
+          const value = publicMetadata(m.body.value);
+          if (!privateSnapshots || !metadataCustody || m.body.relay !== managementRelay || m.body.revision !== metadataRevision(value)) throw Error('Invalid private metadata authorization/binding');
+          if (state.move) throw Error('Move reservation busy');
+          if (state.publicMetadata && state.publicMetadata.event.created_at >= Math.floor(Date.now() / 1000)) throw Error('Retained kind0 attempt occupies this second; deliberately retry later');
+          const revision = state.revision, assignment = hash(state.assignment);
+          const check = () => { if (closing || persistenceFailed || state.revision !== revision || hash(state.assignment) !== assignment || state.assignment.assignedHost !== setup.host) throw Error('Metadata authority invalidated'); };
+          check();
+          const controller = new AbortController(); credentialRead = controller;
+          let custody: Awaited<ReturnType<NonNullable<typeof metadataCustody>>>;
+          try { custody = await metadataCustody(controller.signal); controller.signal.throwIfAborted(); }
+          finally { if (credentialRead === controller) credentialRead = undefined; }
+          check();
+          if (custody.relay !== managementRelay) throw Error('Metadata relay differs from retained agent relay');
+          result = await publishPublicMetadata({ ...custody, agent, owner: state.binding.owner, value, check, retain(event) { state.publicMetadata = { operation: m.id, revision: metadataRevision(value), event }; save(); } });
+        } else if (m.type === 'move') {
           fields(m.body, ['target','targetRevision','selection']);
           const target = text(m.body.target); const destination = selection(m.body.selection);
           if (destination.profile !== state.selected.profile || hash(destination.behavior ?? null) !== hash(state.selected.behavior ?? null)) throw Error('Move must preserve source selected behavior');
@@ -597,7 +615,30 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         if (!value) throw Error('Binding removed');
         if (current.retiredBindings?.[id]) throw Error('Binding retired');
         return value;
-      }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings, !!transport));
+      }, publish, profiles, entry.setupId, entry.bindings, entry.retiredBindings, !!transport, async readSignal => {
+        // Public binding and existing OA checked before the one selected credential read.
+        const raw = object(readPrivate(join(directory, 'setup.json')));
+        if (raw.version === 3) {
+          const manifest = readCredentialManifest(directory), snapshot = JSON.stringify(manifest);
+          const row = manifest.agents[entry.agent];
+          if (!row || manifest.host !== hostKeyForMetadata() || manifest.ownerPublic !== setupOwner(entry.setup)) throw Error('Metadata custody binding changed');
+          const conversation = manifest.conversation ?? manifest.setups[row.setup]?.conversation;
+          if (!conversation?.authTag || conversation.relay !== url) throw Error('Existing agent-owner association/relay required');
+          metadataAuthorization(conversation.authTag, entry.agent, manifest.ownerPublic, Math.floor(Date.now() / 1000));
+          let secret: string | null;
+          try { secret = credentials.readAsync ? await credentials.readAsync(row.key, readSignal) : credentials.read(row.key); }
+          catch { throw Error('Agent credential unavailable; publication not attempted'); }
+          readSignal.throwIfAborted();
+          if (JSON.stringify(readCredentialManifest(directory)) !== snapshot) throw Error('Metadata custody changed during read');
+          if (!secret || publicKey(secret) !== entry.agent) throw Error('Local agent key missing; metadata publication not repaired automatically');
+          return { secret, relay: conversation.relay, authTag: conversation.authTag };
+        }
+        // Legacy diagnostic fixtures retain keys in the existing installation format.
+        const current = (await installationSlotsAsync(directory, credentials, readSignal)).find(e => e.agent === entry.agent)?.setup;
+        if (!current || current.host !== entry.setup.host || setupOwner(current) !== setupOwner(entry.setup) || !current.agentSecret || !current.conversation?.authTag || current.conversation.relay !== url) throw Error('Existing agent key/owner association/relay required');
+        return { secret: current.agentSecret, relay: current.conversation.relay, authTag: current.conversation.authTag };
+        function hostKeyForMetadata() { return transport?.binding.host ?? entry.setup.host; }
+      }, url));
     }
     const setup = entries[0]?.setup;
     const hostKey = transport?.binding.host ?? setup!.host;
@@ -611,7 +652,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
       const selected = slots.get(m.agent); trace('host.route', { id: m.id, type: m.type, selected: !!selected });
       if (selected) selected.receive(m);
       else if (m.type === 'inspect') { for (const s of slots.values()) s.replay(); }
-      else if (['save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',hostKey,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
+      else if (['metadata','save','start','restart','stop','move'].includes(m.type)) publish(message('receipt',hostKey,m.agent,0,{ operation: m.id, fingerprint: digest(JSON.stringify(m)).toString('hex'), result: 'not-authority' }));
     }, () => { if (initialized) for (const s of slots.values()) s.replay(); });
     await client.ready;
     signal?.throwIfAborted();

@@ -43,7 +43,7 @@ export function authorizeManagement(input: AuthenticatedMessage, owner: string, 
   if (role === 'owner') {
     if (!['inventory', 'receipt'].includes(message.type) || hosts[message.host] !== sender) throw Error('Untrusted host response');
   } else {
-    if (message.host !== role.host || sender !== owner || !['profile', 'inspect', 'save', 'start', 'restart', 'stop', 'move'].includes(message.type)) throw Error('Unauthorized owner command');
+    if (message.host !== role.host || sender !== owner || !['metadata', 'profile', 'inspect', 'save', 'start', 'restart', 'stop', 'move'].includes(message.type)) throw Error('Unauthorized owner command');
   }
   return message;
 }

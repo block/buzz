@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { verifyEvent, type Event } from 'nostr-tools/pure';
@@ -7,11 +7,12 @@ import { verifyEvent, type Event } from 'nostr-tools/pure';
  * recipient-scoped REQ, timestamp/size and publication rules. Optional allowed
  * identities model real server AUTH refusal, not a Beehive membership preflight.
  */
-export async function nostrFixture(owner: string, allowedIdentities?: ReadonlySet<string>, access: { open?: boolean; denyAuth?: boolean; denyPublication?: boolean; denyReq?: boolean } = {}) {
+export async function nostrFixture(owner: string, allowedIdentities?: ReadonlySet<string>, access: { open?: boolean; denyAuth?: boolean; denyPublication?: boolean; denyReq?: boolean } = {}, publicHttp?: (req: IncomingMessage, res: ServerResponse) => boolean) {
   const allowed = new Set(allowedIdentities ?? [owner]);
   const httpRequests: string[] = [];
   const http = createServer((req, res) => {
     httpRequests.push(`${req.method} ${req.url}`);
+    if (publicHttp?.(req, res)) return;
     res.setHeader('Content-Type', 'application/json');
     if (req.method === 'GET' && req.url === '/') res.end(JSON.stringify({ supported_nips: [1,2,10,11,16,17,23,25,29,33,38,42,50,56] }));
     else res.writeHead(404).end('{}');

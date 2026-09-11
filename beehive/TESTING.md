@@ -671,3 +671,18 @@ These are synthetic local credential/relay/provider fixtures using installed
 binaries, not live OS credential, community admission, policy acceptance or vendor
 readiness evidence. Authority foundation 91d2246 received a scoped independent
 no-blocker review; it must not be represented as review of this later setup slice.
+
+## Deliberate public metadata
+
+`public-metadata.test.ts` uses the actual offline draft CLI and private host
+management consumer plus a NIP98/kind0 signature-enforcing loopback HTTP relay.
+The isolated selected-agent credential adapter is explicit (not HOME isolation).
+ACP/provider executables do not exist: publication succeeds while stopped, with
+private selected instructions and sibling state preserved. Controls cover foreign
+owner, wrong relay, private fields, retained assignment, invalid owner association,
+stale revision, duplicate ID, removed key, negative ACK, missing latest readback,
+signed timestamp conflicts and host reopen without automatic public side effects.
+The fixture reuses the private NIP42/59 relay via an optional HTTP handler; it does
+not change that relay's existing default admission behavior. No production relay,
+OS credential or installed-native public metadata evidence is claimed.
+See PUBLIC_METADATA.md for the editing and explicit publication path and limits.

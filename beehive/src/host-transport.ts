@@ -19,7 +19,7 @@ export function privateHostTransport(configuration: HostPairing | HostRegistrati
       this.validate(url);
       const wire = connectNostr(url, Buffer.from(secret, 'hex'), input => {
         const m = input.message;
-        if (input.sender !== retained.request.owner || m.host !== retained.request.host || !['inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) return;
+        if (input.sender !== retained.request.owner || m.host !== retained.request.host || !['metadata', 'inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) return;
         receive(m);
       }, () => {}); // Existing durable host outbox survives; no automatic launch retry.
       return {

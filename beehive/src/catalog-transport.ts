@@ -40,7 +40,7 @@ export function catalogTransport(catalog: HostCatalog) {
         void wire.publish({ ...m, body: { relay: url, profile: m.body } }, retained.owner).catch(() => { if (!closed && current === generation) disconnected?.(1008); });
         return;
       }
-      if (!['inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) throw Error('Operation not integrated with private host transport');
+      if (!['metadata', 'inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) throw Error('Operation not integrated with private host transport');
       const host = catalogHost(retained, m.host, Math.floor(Date.now() / 1000), offers);
       const current = generation;
       void wire.publish(m, host.request.host).catch(() => { if (!closed && current === generation) disconnected?.(1008); });

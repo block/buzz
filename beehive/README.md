@@ -857,3 +857,7 @@ Restart/Move prerequisite evidence is sealed after probe teardown before old act
 teardown. Installed acceptance uses real Buzz transport/CLI with source-shaped
 TypeScript provider fixtures, not live vendor authentication or inference. See
 CHECKPOINT's MODEL_PROVIDER_CORRECTION entry for validation and observation limits.
+
+Public identity editing/publication is separate from private instructions: see
+[PUBLIC_METADATA.md](PUBLIC_METADATA.md) for offline metadata drafts, deliberate
+agent-signed kind0 publication while stopped, and pending/error recovery.

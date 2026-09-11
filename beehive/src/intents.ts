@@ -37,7 +37,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     const value = object(readPrivate(path)); fields(value, ['scope', 'envelope']);
     if (value.scope !== scope) throw Error('Wrong journal scope');
     const request = open(value.envelope, secret);
-    if (!['profile','save','start','restart','stop','move'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
+    if (!['metadata','profile','save','start','restart','stop','move'].includes(request.type) || name !== `${request.id}.intent`) throw Error('Invalid intent');
     const intent: Intent = { envelope: value.envelope as Envelope, request, published: false };
     const receiptPath = join(dir, `${request.id}.receipt`);
     if (existsSync(receiptPath)) {
@@ -102,8 +102,8 @@ export function managementClient(root: string, url: string, secret: string, rece
     get socket() { return transport.socket; },
     submit(request: Message) {
       if (closed) throw Error('UI closed');
-      if (!['profile','save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
-      if (privateHosts && !['profile', 'save', 'start', 'restart', 'stop'].includes(request.type)) throw Error('Private Move authority is not integrated; no operation prepared');
+      if (!['metadata','profile','save','start','restart','stop','move'].includes(request.type)) throw Error('Invalid operation');
+      if (privateHosts && !['metadata', 'profile', 'save', 'start', 'restart', 'stop'].includes(request.type)) throw Error('Private Move authority is not integrated; no operation prepared');
       if (request.type === 'profile') {
         profile(request.body);
         if (request.host !== 'profiles' || request.agent !== 'profiles' || request.revision !== 0) throw Error('Invalid profile publication');
@@ -129,7 +129,7 @@ export function managementClient(root: string, url: string, secret: string, rece
     },
     status() {
       return [...intents.values()].map(i => ({ request: structuredClone(i.request),
-        state: i.request.type === 'profile' && i.published ? 'completed' : i.receipt ? (['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
+        state: i.request.type === 'profile' && i.published ? 'completed' : i.receipt ? ((['accepted','saved; running configuration unchanged'].includes(String(i.receipt.body.result)) || (i.request.type === 'metadata' && /^published; signed latest kind0 [a-f0-9]{64}$/.test(String(i.receipt.body.result)))) ? 'completed' : i.receipt.body.result === 'interrupted-reconcile-locally' ? 'unknown' : 'failed') : i.blocked ? 'unknown' : 'pending',
         retryAvailable: !i.receipt && !(i.request.type === 'profile' && i.published) && !!i.blocked,
         publication: i.request.type === 'profile' && i.published ? 'immutable publication observed; no agent application' : i.receipt ? 'host terminal receipt' : i.blocked ? 'relay policy failure; automatic retry disabled; reconcile, then retry after policy repair' : i.published ? 'relay observed; not host admission' : 'unconfirmed',
         result: i.receipt?.body.result }));

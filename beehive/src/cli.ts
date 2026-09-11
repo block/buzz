@@ -1,3 +1,5 @@
+import { metadataDrafts, editMetadataDraft } from './metadata-drafts.ts';
+import { metadataRevision } from './public-metadata.ts';
 import { setupPath } from './setup-path.ts';
 import { randomUUID } from 'node:crypto';
 import { credentialHelperReader } from './credential-helper.ts';
@@ -69,7 +71,7 @@ Command: beehive <command> from any directory once installed (one-time user link
   host --owner-present                     Default host and retained configured relay
   host <relay> --owner-present              Private foreground host on the default host folder; bounded OS key reads
   host <host-directory> <relay> --owner-present Private foreground host on an explicit folder; bounded OS key reads
-  drafts <state-directory>                Offline instruction drafts; no signer/network; same state directory as TUI
+  drafts <state-directory>                Offline public metadata + instruction drafts; no signer/network; same state directory as TUI
   tui discover <relay> <state-directory>   Private availability discovery; no approval file
   tui <catalog-file> [relay]                Private owner UI; hidden existing owner signer
 setup/add-agent accept optional <local-key-file> <public-genesis-file> for standby import.
@@ -80,13 +82,27 @@ Move is fixture-only experimental; containment acceptance remains gated. No prov
 async function main() {
   if (command === 'drafts') {
     const drafts = profileDrafts(setupPath(text(args[0])));
+    const metadata = metadataDrafts(setupPath(text(args[0])));
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Offline instruction drafts. Commands: drafts, profile-new, profile-resume <id>, profile-discard <id>, quit. Saved after a complete valid instructions line (Enter), not per keystroke. No publication, signer, host or model needed.');
+    console.log('Offline instruction drafts. Commands: metadata-drafts, metadata-new, metadata-edit <id>, metadata-discard <id>, drafts, profile-new, profile-resume <id>, profile-discard <id>, quit. Saved after a complete valid instructions line (Enter), not per keystroke. No publication, signer, host or model needed.');
     try {
       for (;;) {
         const line = (await ui.question('drafts> ')).trim();
         if (line === 'quit') break;
         try {
+          if (line === 'metadata-drafts') { for (const d of metadata.list()) console.log(`${d.id} | draft | ${d.relay} | ${d.agent} | ${JSON.stringify(d.value)}`); continue; }
+          if (line.startsWith('metadata-discard ')) {
+            const previous = metadata.list().find(d => d.id === line.split(' ')[1]);
+            if (!previous) throw Error('Unknown metadata draft');
+            if (await ui.question('Discard local metadata draft only (publications remain)? [yes/no]: ') === 'yes') metadata.discard(previous);
+            continue;
+          }
+          if (line === 'metadata-new' || line.startsWith('metadata-edit ')) {
+            const previous = metadata.list().find(d => d.id === line.split(' ')[1]);
+            if (line !== 'metadata-new' && !previous) throw Error('Unknown metadata draft');
+            const saved = await editMetadataDraft(metadata, prompt => ui.question(prompt), previous);
+            console.log(`Saved public metadata draft ${saved.id}; publication is separate: metadata-publish ${saved.id}`); continue;
+          }
           if (line === 'drafts') { for (const d of drafts.list()) console.log(`${d.id} | saved draft | ${d.value.name} | ${d.value.instructions}`); continue; }
           const previous = drafts.list().find(d => d.id === line.split(' ')[1]);
           if (line.startsWith('profile-discard ')) {
@@ -413,6 +429,7 @@ async function main() {
     const offers = new Map<string,Message>();
     const hostFresh = (host: string) => !catalog || (offers.has(host) && Date.now() - Number(offers.get(host)!.body.observedAt) <= 6000) || catalog.registrations.some(r => r.request.host === host && Date.now() < r.expires * 1000);
     const drafts = profileDrafts(dirname(setupPath(text(args[0]))));
+    const metadata = metadataDrafts(dirname(setupPath(text(args[0]))));
     const profiles = new Profiles();
     const client = managementClient(join(dirname(setupPath(text(args[0]))), 'management-intents'),text(args[1]),secret,m => {
       profiles.receive(m);
@@ -432,7 +449,7 @@ async function main() {
     }, catalog ? { catalog } : undefined);
     try { await client.ready; } catch (error) { client.close(); throw error; }
     const ui = createInterface({ input: stdin, output: stdout });
-    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, drafts, profile-new, profile-edit <number>, profile-resume <id>, profile-discard <id>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
+    console.log('Beehive | Hosts → assigned agent → selected-next / actual run\nCommands: metadata-drafts, metadata-new, metadata-edit <id>, metadata-discard <id>, metadata-publish <id>, binding <local-id>, configurations, config-new, config-select <name>, config-rename, config-remove <name>, profiles, drafts, profile-new, profile-edit <number>, profile-resume <id>, profile-discard <id>, apply <number|default>, operations, reconcile, retry <number>, hosts, agents, select <number or unique host>, show, save, start, restart, stop, move, quit. Closing this UI does not stop hosts.');
     let selected = '';
     let profileRows: Profile[] = [];
     try {
@@ -482,6 +499,39 @@ async function main() {
           for (const p of profiles.incomplete()) console.log(`INCOMPLETE ${p.name} @ ${p.revision.slice(0, 12)}: missing/conflicting lineage; cannot apply`);
           console.log('Immutable versions; concurrent edits remain branches. Publishing never applies to agents. No destructive deletion; apply default explicitly to clear.'); continue;
         }
+        try {
+          if (line === 'metadata-drafts') {
+            for (const d of metadata.list()) {
+              const operations = client.status().filter(s => s.request.type === 'metadata' && s.request.agent === d.agent && s.request.body.relay === d.relay && s.request.body.revision === metadataRevision(d.value));
+              console.log(`${d.id} | draft | ${d.relay} | ${d.agent} | ${JSON.stringify(d.value)}`);
+              for (const op of operations) console.log(`  ${op.request.id} | ${op.state} | ${op.result ?? 'pending/unknown; no signed readback yet'}`);
+            }
+            continue;
+          }
+          if (line.startsWith('metadata-discard ')) {
+            const previous = metadata.list().find(d => d.id === line.split(' ')[1]);
+            if (!previous) throw Error('Unknown metadata draft');
+            if (await ui.question('Discard local metadata draft only (publications remain)? [yes/no]: ') === 'yes') metadata.discard(previous);
+            continue;
+          }
+          if (line === 'metadata-new' || line.startsWith('metadata-edit ')) {
+            const previous = metadata.list().find(d => d.id === line.split(' ')[1]);
+            if (line !== 'metadata-new' && !previous) throw Error('Unknown metadata draft');
+            const saved = await editMetadataDraft(metadata, prompt => ui.question(prompt), previous);
+            console.log(`Saved public metadata draft ${saved.id}; publication is separate: metadata-publish ${saved.id}`); continue;
+          }
+          if (line.startsWith('metadata-publish ')) {
+            if (!catalog) throw Error('Metadata publication requires private owner management');
+            const d = metadata.list().find(d => d.id === line.split(' ')[1]);
+            const current = inventory.get(selected);
+            if (!d || !current || current.agent !== d.agent || d.relay !== text(args[1])) throw Error('Select the exact agent on an eligible host for this draft relay');
+            if (current.body.assignedHost !== current.host || Date.now() - Number(current.body.observedAt) > 6000 || !hostFresh(current.host)) throw Error('Host stale/not assigned; draft retained; no publication sent');
+            console.log(`PUBLIC kind0: ${JSON.stringify(d.value)}. Agent ${d.agent} signs; private instructions and runtime remain unchanged.`);
+            if (await ui.question('Deliberately publish this public metadata? [yes/no]: ') !== 'yes') continue;
+            client.submit(message('metadata', current.host, d.agent, current.revision, { relay: d.relay, value: d.value, revision: metadataRevision(d.value) }));
+            console.log('Metadata pending/unknown until signed latest readback receipt. Use operations/reconcile; draft is retained.'); continue;
+          }
+        } catch (error) { console.log(error instanceof Error ? error.message : 'Metadata action failed'); continue; }
         if (line === 'drafts') {
           for (const d of drafts.list()) {
             const op = client.status().find(o => o.request.type === 'profile' && o.request.body.revision === d.value.revision);
