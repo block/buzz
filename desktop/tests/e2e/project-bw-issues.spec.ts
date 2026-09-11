@@ -291,16 +291,21 @@ test("creating a BW issue signs a 1621 root plus a deliberate enroll transition;
   );
   const enrollCalls = bwCalls.filter(
     (entry) =>
-      (entry.payload as { record?: string } | null)?.record === "issue-state",
+      (entry.payload as { input?: { record?: string } } | null)?.input
+        ?.record === "issue-state",
   );
   expect(enrollCalls).toHaveLength(1);
   expect(
-    (enrollCalls[0]?.payload as { content?: { state?: string } })?.content
-      ?.state,
+    (
+      enrollCalls[0]?.payload as {
+        input?: { content?: { state?: string } };
+      }
+    )?.input?.content?.state,
   ).toBe("triage");
   const updateCalls = bwCalls.filter(
     (entry) =>
-      (entry.payload as { record?: string } | null)?.record === "issue-update",
+      (entry.payload as { input?: { record?: string } } | null)?.input
+        ?.record === "issue-update",
   );
   expect(updateCalls).toHaveLength(1);
 });

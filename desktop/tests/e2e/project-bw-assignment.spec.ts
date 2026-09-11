@@ -95,7 +95,13 @@ async function lastBwCall(
       ),
     command,
   );
-  return calls.at(-1);
+  // Every BW Tauri command takes a single `input` struct parameter
+  // (`desktop/src-tauri/src/commands/{project_bw_write,project_bw_assignment}.rs`),
+  // so real invoke args are always `{ input: {...} }`. Unwrap here so
+  // callers can assert against the record fields directly.
+  const call = calls.at(-1);
+  if (!call) return call;
+  return { ...call, payload: (call.payload as { input?: unknown })?.input };
 }
 
 test("a backlog issue with no current writer offers assign; assigning submits the existing kind:1 wire with no prior", async ({

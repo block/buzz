@@ -55,11 +55,13 @@ export async function submitBwIssueTextUpdate({
   const tags: string[][] = [["issue", issueId]];
   if (headId) tags.push(["previous", headId]);
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "issue-update",
-    tags,
-    content: { patch },
-    delegate: false,
+    input: {
+      repo,
+      record: "issue-update",
+      tags,
+      content: { patch },
+      delegate: false,
+    },
   });
 }
 
@@ -100,11 +102,13 @@ export async function submitBwTriageAction({
   // by Core regardless, but there is no reason to submit that doomed chain.
   if (headId && !delegate) tags.push(["previous", headId]);
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "triage-action",
-    tags,
-    content: fields,
-    delegate,
+    input: {
+      repo,
+      record: "triage-action",
+      tags,
+      content: fields,
+      delegate,
+    },
   });
 }
 
@@ -141,11 +145,13 @@ export async function submitBwAssignment({
     throw new BwConflictError();
   }
   return invokeTauri("submit_project_bw_assignment", {
-    repo,
-    issueId,
-    delegate,
-    operation,
-    prior: headId,
+    input: {
+      repo,
+      issueId,
+      delegate,
+      operation,
+      prior: headId,
+    },
   });
 }
 
@@ -196,11 +202,13 @@ export async function submitBwReadyTransition({
   };
   if (terminalSetId) content.terminal_set = terminalSetId;
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "issue-state",
-    tags,
-    content,
-    delegate: false,
+    input: {
+      repo,
+      record: "issue-state",
+      tags,
+      content,
+      delegate: false,
+    },
   });
 }
 
@@ -231,15 +239,17 @@ export async function submitBwInDevelopmentTransition({
     ["previous", previousId],
   ];
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "issue-state",
-    tags,
-    content: {
-      state: "in-development",
-      stream: current.stream,
-      assignment: current.assignment,
+    input: {
+      repo,
+      record: "issue-state",
+      tags,
+      content: {
+        state: "in-development",
+        stream: current.stream,
+        assignment: current.assignment,
+      },
+      delegate: false,
     },
-    delegate: false,
   });
 }
 
@@ -275,16 +285,18 @@ export async function submitBwImplementedTransition({
     ["previous", previousId],
   ];
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "issue-state",
-    tags,
-    content: {
-      state: "implemented",
-      stream: current.stream,
-      assignment: current.assignment,
-      tests: normalizedTests,
+    input: {
+      repo,
+      record: "issue-state",
+      tags,
+      content: {
+        state: "implemented",
+        stream: current.stream,
+        assignment: current.assignment,
+        tests: normalizedTests,
+      },
+      delegate: false,
     },
-    delegate: false,
   });
 }
 
@@ -338,10 +350,12 @@ export async function submitBwRelation({
   const tags: string[][] = [["issue", issueId]];
   if (heads.length === 1) tags.push(["previous", heads[0].id]);
   return invokeTauri("submit_project_bw_record", {
-    repo,
-    record: "issue-relation",
-    tags,
-    content: { relation, target, operation },
-    delegate: false,
+    input: {
+      repo,
+      record: "issue-relation",
+      tags,
+      content: { relation, target, operation },
+      delegate: false,
+    },
   });
 }

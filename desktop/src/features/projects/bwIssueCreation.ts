@@ -93,11 +93,13 @@ export async function createProjectBwIssue(
 
   try {
     await invokeTauri("submit_project_bw_record", {
-      repo: input.repoAddress,
-      record: "issue-state",
-      tags: [["issue", issueId]],
-      content: { state: "triage" },
-      delegate: false,
+      input: {
+        repo: input.repoAddress,
+        record: "issue-state",
+        tags: [["issue", issueId]],
+        content: { state: "triage" },
+        delegate: false,
+      },
     });
 
     const acceptanceCriteria = normalizeTemplateLines(input.acceptanceCriteria);
@@ -111,11 +113,13 @@ export async function createProjectBwIssue(
         patch.non_goals = nonGoals;
       }
       await invokeTauri("submit_project_bw_record", {
-        repo: input.repoAddress,
-        record: "issue-update",
-        tags: [["issue", issueId]],
-        content: { patch },
-        delegate: false,
+        input: {
+          repo: input.repoAddress,
+          record: "issue-update",
+          tags: [["issue", issueId]],
+          content: { patch },
+          delegate: false,
+        },
       });
     }
     return { issueId, bwEnrolled: true, bwError: null };

@@ -63,11 +63,13 @@ function EnrollIntoBw({
     setPending(true);
     try {
       await invokeTauri("submit_project_bw_record", {
-        repo: project.repoAddress,
-        record: "issue-state",
-        tags: [["issue", issue.id]],
-        content: { state: "triage" },
-        delegate: false,
+        input: {
+          repo: project.repoAddress,
+          record: "issue-state",
+          tags: [["issue", issue.id]],
+          content: { state: "triage" },
+          delegate: false,
+        },
       });
       toast.success("Issue enrolled into BW.");
       await invalidate();
