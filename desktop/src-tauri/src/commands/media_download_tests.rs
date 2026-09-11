@@ -99,6 +99,7 @@ fn fetch_boundary_png_filename_with_json_bytes_rejected() {
             respond_to_allowlist: vec![],
             name_pool: vec![],
             idle_timeout_seconds: None,
+            session_policy: Default::default(),
             max_turn_duration_seconds: None,
         },
         profile: AgentSnapshotProfile {
@@ -149,6 +150,7 @@ fn fetch_boundary_png_filename_with_memory_bearing_json_bytes_rejected() {
             respond_to_allowlist: vec![],
             name_pool: vec![],
             idle_timeout_seconds: None,
+            session_policy: Default::default(),
             max_turn_duration_seconds: None,
         },
         profile: AgentSnapshotProfile {
@@ -195,6 +197,7 @@ fn fetch_boundary_json_filename_with_png_bytes_rejected() {
             respond_to_allowlist: vec![],
             name_pool: vec![],
             idle_timeout_seconds: None,
+            session_policy: Default::default(),
             max_turn_duration_seconds: None,
         },
         profile: AgentSnapshotProfile {
