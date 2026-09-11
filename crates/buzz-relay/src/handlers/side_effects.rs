@@ -2165,6 +2165,55 @@ async fn handle_a_tag_deletion(
                     }
                 }
             }
+
+            // Also soft-delete the kind:30620 `events` row matching
+            // `(kind, pubkey, d_tag)` (pubkey from the a-tag coordinate, the
+            // real event author) so `workflows list` (which queries the event
+            // store directly) stops returning the deleted workflow. Previously
+            // the workflow branch intentionally skipped this — see the
+            // comment on the generic NIP-33 arm below — but
+            // `cmd_list_workflows` reads the event store, so an undeleted
+            // 30620 event makes a successfully deleted workflow look like a
+            // zombie entry. Reporter: #5077.
+            let kind_i32 = buzz_core::kind::KIND_WORKFLOW_DEF as i32;
+            match hex::decode(pubkey_hex) {
+                Ok(pubkey_bytes) => {
+                    match state
+                        .db
+                        .soft_delete_by_coordinate(
+                            tenant.community(),
+                            kind_i32,
+                            &pubkey_bytes,
+                            d_tag,
+                            event.created_at.as_secs() as i64,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(
+                                d_tag,
+                                "kind:30620 events row soft-deleted alongside workflow delete"
+                            );
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                d_tag,
+                                "no live kind:30620 events row matched workflow coordinate"
+                            );
+                        }
+                        Err(e) => {
+                            // Do not fail the deletion — the operational
+                            // `workflows` row is already gone, so the scheduler
+                            // cannot fire the workflow. Log so operators can
+                            // investigate if `list` keeps showing it.
+                            tracing::warn!(d_tag, error = %e, "failed to soft-delete kind:30620 events row");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(d_tag, pubkey_hex, error = %e, "invalid pubkey hex in a-tag, skipping kind:30620 events-row soft-delete");
+                }
+            }
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
