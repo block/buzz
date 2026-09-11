@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
         slug: Some(slug.to_string()),
@@ -80,6 +81,7 @@ fn make_snapshot(
         format: FORMAT_DISCRIMINATOR.to_string(),
         version: FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            session_policy: Default::default(),
             name: "Test Agent".to_string(),
             source_is_builtin: false,
             system_prompt: Some("You are helpful.".to_string()),

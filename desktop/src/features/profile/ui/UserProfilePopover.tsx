@@ -30,7 +30,7 @@ import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWith
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { useProfileInteractionActions } from "@/features/profile/ui/useProfileInteractionActions";
 
 import {
@@ -49,6 +49,14 @@ type UserProfilePopoverProps = {
   children: React.ReactNode;
   pubkey: string;
   triggerElement?: "div" | "span";
+  /**
+   * Extra classes for the focusable trigger wrapper, which defaults to
+   * inline-flex. Use `min-w-0 max-w-full` when truncating flex content must
+   * shrink, or `inline` when prose content must fragment across lines.
+   */
+  triggerClassName?: string;
+  /** Test id applied to the focusable profile trigger shell. */
+  triggerTestId?: string;
   /** Accessible name for interactive trigger content that is visually hidden. */
   triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
@@ -108,7 +116,7 @@ function HoverPubkeyName({
       <span
         className={`${TEXT_SWAP_BASE_CLASS} ${TEXT_SWAP_HIDDEN_CLASS} ${TEXT_SWAP_HOVER_VISIBLE_CLASS}`}
       >
-        {truncatePubkey(pubkey)}
+        {truncateNpub(pubkey)}
       </span>
     </span>
   );
@@ -130,6 +138,8 @@ export function UserProfilePopover({
   pubkey,
   triggerElement = "div",
   triggerAriaLabel,
+  triggerClassName,
+  triggerTestId,
   enableProfilePanel = true,
   enableHoverPopover = true,
   role,
@@ -193,6 +203,7 @@ export function UserProfilePopover({
       <PopoverAnchor asChild>
         <TriggerElement
           aria-label={triggerAriaLabel}
+          data-testid={triggerTestId}
           role={canOpenProfilePanel ? "button" : undefined}
           tabIndex={canOpenProfilePanel ? 0 : undefined}
           onClick={handleTriggerClick}
@@ -213,6 +224,7 @@ export function UserProfilePopover({
           onMouseLeave={handleMouseLeave}
           className={cn(
             "inline-flex",
+            triggerClassName,
             canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
           )}
         >
@@ -297,7 +309,7 @@ function UserProfilePopoverBody({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const displayName = profile?.displayName ?? truncateNpub(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows

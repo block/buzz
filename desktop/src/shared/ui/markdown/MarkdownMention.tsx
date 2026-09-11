@@ -77,6 +77,7 @@ export function createMarkdownMention(interactive: boolean) {
         pubkey={pubkey}
         role={isAgentMention ? "bot" : undefined}
         triggerElement="span"
+        triggerClassName="inline"
       >
         {mentionNode}
       </UserProfilePopover>

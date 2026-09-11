@@ -1480,7 +1480,6 @@ mod tests {
     }
 
     // ── resolve_effective_agent_env ─────────────────────────────────────────
-
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
         // User env_vars must win over baked defaults; in OSS builds baked map is empty,
@@ -1493,6 +1492,7 @@ mod tests {
         );
         // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
+            session_policy: Default::default(),
             description: None,
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),

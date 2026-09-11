@@ -223,7 +223,7 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
         effective.system_prompt.value.as_deref(),
         effective.model.value.as_deref(),
         &owner_pubkey,
-        crate::managed_agents::acp_session_policy(state),
+        crate::managed_agents::effective_acp_session_policy(record, &personas),
     );
 
     let effective_parallelism =

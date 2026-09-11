@@ -16,6 +16,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/features/channels/voice_note_play_pause_icon.dart';
@@ -25,10 +26,16 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+part 'compose_bar_test/exact_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -641,6 +648,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  exactMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -1643,6 +1651,12 @@ void main() {
       addTearDown(() {
         if (!pendingMembers.isCompleted) pendingMembers.complete(const []);
       });
+      // Valid fixture keys whose npub encodings were verified against the
+      // NIP-19 codec independently of the code under test.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const b0b =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
@@ -1653,6 +1667,17 @@ void main() {
               role: 'member',
               joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
               displayName: 'Alice',
+            ),
+            ChannelMember(
+              pubkey: a11ce,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+            ),
+            ChannelMember(
+              pubkey: b0b,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(3000),
+              displayName: 'Carol',
             ),
           ],
           channels: [_makeCurrentChannel()],
@@ -1675,6 +1700,13 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Alice'), findsOneWidget);
+      // The unnamed member renders its compact npub label, but its avatar
+      // initial stays keyed to the hex public key — never the `N` the npub
+      // label starts with. A named member keeps its authored initial even
+      // though its key would render `B`.
+      expect(find.text(shortPubkey(a11ce)), findsOneWidget);
+      expect(_suggestionAvatarInitial(tester, shortPubkey(a11ce)), 'A');
+      expect(_suggestionAvatarInitial(tester, 'Carol'), 'C');
     });
 
     testWidgets('dismisses mention suggestions in the selection frame', (
@@ -5553,6 +5585,20 @@ List<({String text, TextStyle style})> _flattenStyledTextSpans(
 
   visit(root, const TextStyle());
   return result;
+}
+
+/// Avatar fallback initial rendered for the mention suggestion row titled
+/// [labelText] — asserts at the production seam, not the model getter.
+String _suggestionAvatarInitial(WidgetTester tester, String labelText) {
+  final row = find.ancestor(
+    of: find.text(labelText),
+    matching: find.byType(ListTile),
+  );
+  final avatar = find.descendant(of: row, matching: find.byType(AvatarImage));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
 }
 
 Channel _makeCurrentChannel({
