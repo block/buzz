@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 
 import type { UserStatusInput } from "@/features/user-status/types";
+import { collectWithConcurrency } from "@/shared/api/concurrency";
 import { relayClient } from "@/shared/api/relayClient";
 import type {
   RelayEvent,
@@ -48,6 +49,20 @@ function newerUserStatus(
   })
     ? (current ?? candidate)
     : candidate;
+}
+
+function sameUserStatus(
+  left: UserStatusCacheEntry | undefined,
+  right: UserStatusCacheEntry | undefined,
+): boolean {
+  if (!left || !right) return left == null && right == null;
+  return (
+    left.text === right.text &&
+    left.emoji === right.emoji &&
+    left.updatedAt === right.updatedAt &&
+    left.eventId === right.eventId &&
+    left.expiresAt === right.expiresAt
+  );
 }
 
 function hiddenUserStatus(version: UserStatusVersion): UserStatus {
@@ -196,6 +211,7 @@ export const USER_STATUS_REFETCH_INTERVAL_MS = 120_000;
  * The live subscription (setQueriesData) is the primary freshness path. */
 export const USER_STATUS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 export const USER_STATUS_AUTHOR_CHUNK_SIZE = 1_000;
+export const USER_STATUS_FETCH_CONCURRENCY = 4;
 
 /** Focus-refetch policy for the user-status query; consumed by focusRefetchPolicy.test.mjs. */
 export const userStatusFocusRefetchPolicy = {
@@ -223,21 +239,27 @@ export async function fetchUserStatusLookup(
       normalizedAuthors.slice(index, index + USER_STATUS_AUTHOR_CHUNK_SIZE),
     );
   }
-  const pages = await Promise.all(
-    chunks.map((authors) =>
+  const cachedBeforeFetch = readCurrentLookup();
+  const pages = await collectWithConcurrency(
+    chunks,
+    USER_STATUS_FETCH_CONCURRENCY,
+    (authors) =>
       fetchEvents({
         kinds: [KIND_USER_STATUS],
         authors,
         "#d": ["general"],
         limit: authors.length,
       }),
-    ),
   );
 
   const currentLookup = readCurrentLookup();
   const lookup: UserStatusLookup = {};
   for (const pubkey of normalizedAuthors) {
-    lookup[pubkey] = currentLookup[pubkey] ?? null;
+    const current = currentLookup[pubkey];
+    const cached = cachedBeforeFetch[pubkey];
+    lookup[pubkey] = !sameUserStatus(current, cached)
+      ? (current ?? null)
+      : null;
   }
   const latestEvents = new Map<string, RelayEvent>();
   for (const event of pages.flat()) {
