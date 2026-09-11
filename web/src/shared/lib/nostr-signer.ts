@@ -3,6 +3,10 @@ import {
   generateSecretKey,
   getPublicKey,
 } from "nostr-tools/pure";
+import {
+  isEnterpriseSignerEnabled,
+  signWithEnterpriseSigner,
+} from "./enterprise-signer";
 
 export type UnsignedNostrEvent = {
   kind: number;
@@ -78,6 +82,17 @@ export async function signNostrEvent(
     created_at: template.created_at ?? Math.floor(Date.now() / 1000),
   };
   const provider = typeof window === "undefined" ? undefined : window.nostr;
+
+  if (isEnterpriseSignerEnabled()) {
+    return signWithEnterpriseSigner(
+      unsigned,
+      unsigned.kind === 22242
+        ? "nip42-auth"
+        : unsigned.kind === 27235
+          ? "http-auth"
+          : "publish",
+    );
+  }
 
   if (provider) {
     const expectedPubkey = await provider.getPublicKey();
