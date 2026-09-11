@@ -140,6 +140,105 @@ fn openai_compat_model_normalization_preserves_provider_specific_ids() {
         ]
     );
 }
+/// Regression for #3934: harnesses that report models via the unstable
+/// `models.availableModels` field (no `configOptions` at all — Hermes shape)
+/// must populate the dropdown exactly like stable `configOptions` harnesses.
+///
+/// The fixture mirrors the JSON that `buzz-acp models --json` emits for a
+/// Hermes Agent session: `stable.configOptions` is null, while
+/// `unstable.availableModels` carries the catalog. Before the merge, a change
+/// here would silently leave the desktop with zero live models and show
+/// "Using built-in model options. Could not load live models for this
+/// provider."
+#[test]
+fn agent_models_populates_unstable_available_models_only_hermes_shape() {
+    let raw = serde_json::json!({
+        "agent": { "name": "hermes-acp", "version": "0.19.0" },
+        "stable": { "configOptions": null },
+        "unstable": {
+            "currentModelId": "anthropic/claude-opus-4-7-thinking",
+            "availableModels": [
+                {
+                    "modelId": "anthropic/claude-opus-4-7-thinking",
+                    "name": "Claude Opus 4.7 Thinking",
+                    "description": "reasoning"
+                },
+                {
+                    "modelId": "anthropic/claude-opus-4-7",
+                    "name": "Claude Opus 4.7",
+                    "description": "balanced"
+                },
+                {
+                    "modelId": "gpt-5.6",
+                    "name": "GPT-5.6",
+                    "description": "general"
+                }
+            ]
+        }
+    });
+
+    let resp = normalize_agent_models(&raw, None);
+
+    assert!(resp.supports_switching, "must support switching when only unstable availableModels is present");
+    assert_eq!(resp.models.len(), 3, "must surface all unstable models");
+    assert_eq!(resp.models[0].id, "anthropic/claude-opus-4-7-thinking");
+    assert_eq!(
+        resp.models[0].name.as_deref(),
+        Some("Claude Opus 4.7 Thinking"),
+        "must preserve the UI-friendly name"
+    );
+    assert_eq!(resp.models[1].id, "anthropic/claude-opus-4-7");
+    assert_eq!(resp.models[2].id, "gpt-5.6");
+    assert_eq!(
+        resp.agent_default_model.as_deref(),
+        Some("anthropic/claude-opus-4-7-thinking"),
+        "default must come from unstable.currentModelId"
+    );
+}
+
+/// Companion to the Hermes-shape test above: when one model id appears in
+/// both stable `configOptions` and unstable `availableModels`, the stable
+/// entry wins (first-seen behaves like an import merge with stable priority).
+/// This prevents silent override by the unstable branch and pins the
+/// deduplication order.
+#[test]
+fn agent_models_stable_config_options_take_precedence_over_unstable_duplicates() {
+    let raw = serde_json::json!({
+        "agent": { "name": "dual-harness", "version": "1.0.0" },
+        "stable": {
+            "configOptions": [{
+                "category": "model",
+                "id": "model",
+                "displayName": "Model",
+                "options": [
+                    { "value": "shared-model", "displayName": "Stable Display Name" }
+                ]
+            }]
+        },
+        "unstable": {
+            "currentModelId": "shared-model",
+            "availableModels": [
+                { "modelId": "shared-model", "name": "Unstable Display Name", "description": "dup" }
+            ]
+        }
+    });
+
+    let resp = normalize_agent_models(&raw, None);
+
+    assert!(resp.supports_switching);
+    assert_eq!(resp.models.len(), 1, "dedup must leave exactly one entry");
+    assert_eq!(
+        resp.models[0].name.as_deref(),
+        Some("Stable Display Name"),
+        "stable configOptions must take precedence over unstable availableModels"
+    );
+    assert_eq!(
+        resp.agent_default_model.as_deref(),
+        Some("shared-model"),
+        "default still comes from unstable.currentModelId"
+    );
+}
+
 
 #[test]
 fn openai_models_url_uses_openai_default_base_url() {
