@@ -24,14 +24,16 @@ export function useImplicitAgentMentionProvenance(
     (insertedFragments: readonly GeneratedMention[]) => {
       if (!effectiveDraftKey) return;
       const fragments = byDraftRef.current.get(effectiveDraftKey) ?? [];
-      const knownPubkeys = new Set(
-        fragments.map((fragment) => fragment.pubkey),
+      const insertedPubkeys = new Set(
+        insertedFragments.map((fragment) => fragment.pubkey),
       );
+      // Identity survives label resets, but generated text and prepend order do
+      // not. The latest insertion owns that key's exact fragment for stripping.
       byDraftRef.current.set(effectiveDraftKey, [
-        ...insertedFragments.filter(
-          (fragment) => !knownPubkeys.has(fragment.pubkey),
+        ...insertedFragments,
+        ...fragments.filter(
+          (fragment) => !insertedPubkeys.has(fragment.pubkey),
         ),
-        ...fragments,
       ]);
       trimMapToSize(byDraftRef.current, 200);
     },

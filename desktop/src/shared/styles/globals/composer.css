@@ -97,6 +97,9 @@
   outline: none;
   min-height: 1lh;
   padding-block: 0.0625rem;
+  /* Keep literal separators even when TipTap's injected style is absent.
+     Collapsed trailing spaces let native input replace a restored boundary. */
+  white-space: break-spaces;
 }
 
 .rich-text-composer .tiptap p {

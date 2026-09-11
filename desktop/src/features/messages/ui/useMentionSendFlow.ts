@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import {
   type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
-  useAvailableAcpRuntimes,
   useCreateChannelManagedAgentMutation,
   useManagedAgentsQuery,
   usePersonasQuery,
@@ -15,6 +14,7 @@ import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents"
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
+import { useMentionAvailableRuntimes } from "./useMentionAvailableRuntimes";
 import { useNonMemberInvite } from "./useNonMemberInvite";
 import { dmThreadAgentMentionError } from "@/features/messages/lib/dmThreadAgentMentionError";
 import {
@@ -27,7 +27,7 @@ import {
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { invokeTauri } from "@/shared/api/tauri";
-import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
+import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
@@ -111,7 +111,6 @@ export function useMentionSendFlow({
     useCreateChannelManagedAgentMutation(channelId);
   const provisionPersonaAgentMutation =
     useProvisionChannelManagedAgentMutation(channelId);
-  const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const personasQuery = usePersonasQuery();
   const startAgentMutation = useStartManagedAgentMutation();
@@ -127,25 +126,7 @@ export function useMentionSendFlow({
   const getPersonas = React.useCallback(async () => {
     return personasQuery.data ?? (await personasQuery.refetch()).data ?? [];
   }, [personasQuery.data, personasQuery.refetch]);
-  const getAvailableRuntimes = React.useCallback(async (): Promise<
-    AcpRuntime[]
-  > => {
-    const cached = availableRuntimesQuery.data ?? [];
-    if (cached.length > 0 || !availableRuntimesQuery.isLoading) {
-      return cached;
-    }
-    const refetched = await availableRuntimesQuery.refetch();
-    return (refetched.data ?? []).filter(
-      (runtime): runtime is AcpRuntime =>
-        runtime.availability === "available" &&
-        runtime.command !== null &&
-        runtime.binaryPath !== null,
-    );
-  }, [
-    availableRuntimesQuery.data,
-    availableRuntimesQuery.isLoading,
-    availableRuntimesQuery.refetch,
-  ]);
+  const getAvailableRuntimes = useMentionAvailableRuntimes();
   const ensureManagedAgentMentionsReady = React.useCallback(
     async (
       mentionPubkeys: string[],
@@ -669,7 +650,11 @@ export function useMentionSendFlow({
                 await finishSend(uploaded, signal);
               } catch (error) {
                 restoreComposerAfterFailure();
-                toast.error(error instanceof AgentMentionAuthorizationError ? error.message : formatMessageSendError(error));
+                toast.error(
+                  error instanceof AgentMentionAuthorizationError
+                    ? error.message
+                    : formatMessageSendError(error),
+                );
               } finally {
                 settleUpload();
               }
@@ -697,7 +682,11 @@ export function useMentionSendFlow({
             await finishSend([]);
           } catch (error) {
             restoreComposerAfterFailure();
-            toast.error(error instanceof AgentMentionAuthorizationError ? error.message : formatMessageSendError(error));
+            toast.error(
+              error instanceof AgentMentionAuthorizationError
+                ? error.message
+                : formatMessageSendError(error),
+            );
           }
         }
       } catch (error) {
@@ -762,20 +751,22 @@ export function useMentionSendFlow({
       }
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
-      // Capture exact selections before any async preparation can navigate the
-      // reused editor to another draft (possibly with identical display text).
-      claimDraftSend(effectiveDraftKey);
-      const composerRevision = getComposerRevision();
-      const savedMentionRefs = mentions.getDraftMentionRefs(trimmed).slice();
-      const selectedMentionPubkeys = mentions.extractMentionPubkeys(trimmed);
-      const selectedPersonas = mentions.extractMentionPersonas(trimmed);
-      const isSendCancelled = () =>
-        preparedLinkPreviews?.signal.aborted === true;
       let sendPromoted = false;
-      if (preparedLinkPreviews) {
-        activePreparedLinkPreviews.add(preparedLinkPreviews);
-      }
       try {
+        // Capture exact selections before any async preparation can navigate the
+        // reused editor to another draft (possibly with identical display text).
+        // Ambiguous-name extraction can throw; it owns the same visible failure
+        // and pending-state cleanup as the asynchronous preparation below.
+        claimDraftSend(effectiveDraftKey);
+        const composerRevision = getComposerRevision();
+        const savedMentionRefs = mentions.getDraftMentionRefs(trimmed).slice();
+        const selectedMentionPubkeys = mentions.extractMentionPubkeys(trimmed);
+        const selectedPersonas = mentions.extractMentionPersonas(trimmed);
+        const isSendCancelled = () =>
+          preparedLinkPreviews?.signal.aborted === true;
+        if (preparedLinkPreviews) {
+          activePreparedLinkPreviews.add(preparedLinkPreviews);
+        }
         if (isSendCancelled()) return;
         const dmThreadAgentMentionErrorMessage = dmThreadAgentMentionError({
           trimmed,

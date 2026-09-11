@@ -549,7 +549,7 @@ test("relay-only shared agents emit an outbound mention tag when selected", asyn
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, content))
-    .toContain(TEST_IDENTITIES.alice.pubkey);
+    .toEqual([TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("typing an exact agent name and Space commits its chip and mention tag", async ({
@@ -580,7 +580,7 @@ test("typing an exact agent name and Space commits its chip and mention tag", as
   await page.getByTestId("send-message").click();
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, content))
-    .toContain(TEST_IDENTITIES.alice.pubkey);
+    .toEqual([TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("Shift+Space leaves an exact agent name plain and emits no mention tag", async ({

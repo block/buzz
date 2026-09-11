@@ -216,3 +216,35 @@ test("automatic addressed prefix is programmatic optimistic empty, not new autho
   assert.equal(s.store.get("thread:a").content, TEXT);
   assert.deepEqual(s.store.get("thread:a").mentionRefs, s.refs);
 });
+
+for (const extractor of [
+  "getDraftMentionRefs",
+  "extractMentionPubkeys",
+  "extractMentionPersonas",
+]) {
+  test(`synchronous ${extractor} failure is visible and releases the send latch`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    s.options.mentions[extractor] = () => {
+      throw new Error("Choose an exact recipient");
+    };
+    s.rerender();
+    const input = {
+      capturedChannelId: "general",
+      pendingImeta: [],
+      trimmed: TEXT,
+      recoveryDraftKey: "thread:a",
+      sentDraftKey: "thread:a",
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await s.act(async () =>
+        s.result.current.sendMessageWithMentionFlow(input),
+      );
+      assert.equal(s.result.current.isPreparingMentionSend, false);
+      assert.equal(s.options.contentRef.current, TEXT);
+      assert.equal(s.events("error").length, attempt + 1);
+      assert.equal(s.events("error").at(-1)[1], "Choose an exact recipient");
+      assert.equal(s.events("SEND").length, 0);
+    }
+  });
+}

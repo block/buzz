@@ -14,7 +14,6 @@ import {
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { renderAudioMessageAttachment } from "@/features/messages/ui/AudioMessageAttachment";
-import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { parseEntityLink } from "@/shared/lib/entityLink";
