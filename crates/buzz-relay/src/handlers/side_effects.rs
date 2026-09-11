@@ -2121,7 +2121,7 @@ async fn handle_a_tag_deletion(
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
-            if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
+            let workflow_deleted: Option<uuid::Uuid> = if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
                 let channel_id = state
                     .db
                     .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
@@ -2133,6 +2133,7 @@ async fn handle_a_tag_deletion(
                         .invalidate_channel_workflows(tenant.community(), channel_id);
                 }
                 tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                Some(wf_id)
             } else {
                 // Name-based lookup
                 match state
@@ -2154,14 +2155,66 @@ async fn handle_a_tag_deletion(
                                 .invalidate_channel_workflows(tenant.community(), channel_id);
                         }
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
+                        Some(wf.id)
                     }
                     Ok(None) => {
                         tracing::warn!(
                             "NIP-09 a-tag deletion: no workflow '{d_tag}' found for owner"
                         );
+                        None
                     }
                     Err(e) => {
                         tracing::warn!("NIP-09 a-tag deletion: DB lookup failed: {e}");
+                        None
+                    }
+                }
+            };
+
+            // Soft-delete the kind:30620 definition event so REQs (CLI
+            // `workflows list` / `workflows get`) stop returning it. Without
+            // this the workflow row is gone but the definition event stayed
+            // live and every read path disagreed with triggers — see #2879.
+            // Only do this when the row delete actually succeeded above, so
+            // a failed delete (e.g. owner mismatch) can't tombstone a live
+            // workflow's event out from under it.
+            if workflow_deleted.is_some() {
+                let pubkey_bytes = match hex::decode(pubkey_hex) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("NIP-09 a-tag deletion: invalid pubkey hex {pubkey_hex}: {e}");
+                        Vec::new()
+                    }
+                };
+                if !pubkey_bytes.is_empty() {
+                    match state
+                        .db
+                        .soft_delete_by_coordinate(
+                            tenant.community(),
+                            buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                            &pubkey_bytes,
+                            d_tag,
+                            event.created_at.as_secs() as i64,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(
+                                d_tag = d_tag,
+                                "kind:30620 workflow definition event soft-deleted"
+                            )
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                d_tag = d_tag,
+                                "no live kind:30620 event row matched coordinate"
+                            )
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                d_tag = d_tag,
+                                "soft-delete of kind:30620 event failed: {e}"
+                            )
+                        }
                     }
                 }
             }
