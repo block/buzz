@@ -48,6 +48,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Web lint and format
         run: just web-check
+      - name: Web unit tests
+        run: just web-test
       - name: Web build
         run: just web-build
       - name: Save pnpm store cache
