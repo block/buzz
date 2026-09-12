@@ -2018,8 +2018,8 @@ fn random_state() -> Result<String, AgentError> {
 /// the *static* HTML shown in the browser. The page never embeds any request
 /// parameter — the `error` query value is attacker-influenceable, so
 /// reflecting it would be an XSS sink on the localhost callback. Failure
-/// detail travels only through `result`, which surfaces in the process error
-/// and logs, never in the served markup.
+/// detail travels only through `result`; the waiting flow discards it and
+/// reports a typed error and fixed diagnostic. The page stays static.
 fn callback_outcome(
     params: &std::collections::HashMap<String, String>,
     expected_state: &str,
@@ -2040,10 +2040,9 @@ fn callback_outcome(
     (result, page)
 }
 
-/// Neutralize an attacker-controllable OAuth `error` value before it enters
-/// an error string that later reaches the logs. Control characters (CR/LF in
-/// particular) enable log-line injection, and an unbounded value could flood
-/// the logs — replace control chars with spaces and cap the length.
+/// Bound and normalize an attacker-controllable OAuth `error` value carried
+/// internally through the callback result. The waiting flow discards this detail;
+/// it must not be reflected in browser markup, outward errors or logs.
 fn sanitize_callback_detail(raw: &str) -> String {
     const MAX: usize = 200;
     raw.chars()
