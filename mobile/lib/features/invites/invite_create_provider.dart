@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 
 /// The default lifetime of a newly minted community invite link.
@@ -301,17 +302,8 @@ final communityInviteActionsProvider = Provider<CommunityInviteActions>((ref) {
 List<CommunityInviteDirectoryUser> _directoryUsersFromEvents(
   List<NostrEvent> events,
 ) {
-  final latestByPubkey = <String, NostrEvent>{};
-  for (final event in events) {
-    if (event.kind != 0) continue;
-    final pubkey = event.pubkey.toLowerCase();
-    final current = latestByPubkey[pubkey];
-    if (current == null || event.createdAt > current.createdAt) {
-      latestByPubkey[pubkey] = event;
-    }
-  }
   final users = [
-    for (final event in latestByPubkey.values)
+    for (final event in latestProfileEvents(events).values)
       if (ProfileData.fromEvent(event) case final profile)
         CommunityInviteDirectoryUser(
           pubkey: profile.pubkey.toLowerCase(),

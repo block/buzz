@@ -1,9 +1,15 @@
+import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/invites/invite_create_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import '../../shared/crypto/nip_oa_test.dart' show authTag, profile;
 
 /// Tests for [channelDetailsFromEvent].
 ///
@@ -13,6 +19,91 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test('profile consumers select signed replacements in either order', () async {
+    final owner = nostr.Keys.generate();
+    final agent = nostr.Keys.generate();
+    final owned = profile(agent, [
+      authTag(owner, agent.public),
+    ], content: '{"name":"Owned"}');
+    final revoked = profile(
+      agent,
+      [],
+      createdAt: 101,
+      content: '{"name":"Revoked"}',
+    );
+    final tie = profile(agent, [], content: '{"name":"Tie"}');
+    final advanced = profile(agent, owned.tags, createdAt: 103);
+    final tampered = [
+      for (final timestamp in [owned.createdAt, 102])
+        NostrEvent.fromJson({
+          ...owned.toJson(),
+          'created_at': timestamp,
+          'id': '0' * 64,
+          'content':
+              '{"name":"Forged","picture":"https://forged.example/a","nip05":"fake@forged.example"}',
+        }),
+    ];
+    final invalidOa = profile(agent, [
+      authTag(owner, owner.public),
+    ], createdAt: 102);
+    for (final (events, winner) in [
+      ([owned], owned),
+      ([owned, revoked], revoked),
+      ([revoked, advanced], advanced),
+      for (final forged in tampered) ([owned, forged], owned),
+      ([owned, invalidOa], invalidOa),
+      ([owned, tie], owned.id.compareTo(tie.id) < 0 ? owned : tie),
+    ]) {
+      for (final ordered in [events, events.reversed.toList()]) {
+        final data = ProfileData.fromEvent(winner);
+        final expected = winner == owned || winner == advanced
+            ? owner.public
+            : null;
+        final session = _DirectoryFakeRelaySession(profileEvents: ordered);
+        final container = ProviderContainer.test(
+          overrides: [
+            relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+            myPubkeyProvider.overrideWithValue(agent.public),
+            relaySessionProvider.overrideWith(() => session),
+            agentDirectoryProvider.overrideWith(
+              (ref) async => [AgentDirectoryEntry(pubkey: agent.public)],
+            ),
+          ],
+        );
+        expect(
+          await container.read(agentOwnersProvider.future),
+          expected == null ? isEmpty : {agent.public: expected},
+        );
+        container.listen(mentionUserSearchProvider('agent'), (_, _) {});
+        final found = await container.read(
+          mentionUserSearchProvider('agent').future,
+        );
+        expect(found.single.ownerPubkey, expected);
+        expect(found.single.displayName, data.displayName);
+        final directory = directoryUsersFromProfileEvents(ordered).single;
+        expect(directory.isAgent, expected != null);
+        expect(directory.displayName, data.displayName);
+        final ownProfile = await container.read(profileProvider.future);
+        expect(ownProfile?.displayName, data.displayName);
+        expect(ownProfile?.ownerPubkey, expected);
+        final invitee = await container.read(
+          communityInviteProfileProvider(agent.public).future,
+        );
+        expect(invitee?.displayName, data.displayName);
+        final cache = container.read(userCacheProvider.notifier);
+        for (final event in ordered) {
+          cache.captureAdmission().add(event);
+        }
+        final cached = cache.state[agent.public]!;
+        expect(cached.displayName, data.displayName);
+        expect(cached.avatarUrl, data.avatarUrl);
+        expect(cached.nip05Handle, data.nip05);
+        expect(cached.ownerPubkey, expected);
+        container.dispose();
+      }
+    }
+  });
+
   test('extracts unique relay members from current and legacy tags', () {
     final pubkeys = relayMemberPubkeysFromEvents([
       NostrEvent(
@@ -36,34 +127,17 @@ void main() {
   });
 
   test('builds an alphabetized directory from the latest profile events', () {
+    final alice = nostr.Keys.generate();
+    final bob = nostr.Keys.generate();
     final users = directoryUsersFromProfileEvents([
-      NostrEvent(
-        id: 'alice-old',
-        pubkey: 'alice',
-        createdAt: 10,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Zoe"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'bob',
-        pubkey: 'bob',
-        createdAt: 20,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Bob"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'alice-new',
-        pubkey: 'ALICE',
+      profile(alice, [], createdAt: 10, content: '{"display_name":"Zoe"}'),
+      profile(bob, [], createdAt: 20, content: '{"display_name":"Bob"}'),
+      profile(
+        alice,
+        [],
         createdAt: 30,
-        kind: 0,
-        tags: const [],
         content:
             '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
-        sig: 'sig',
       ),
       NostrEvent(
         id: 'not-a-profile',
@@ -77,7 +151,7 @@ void main() {
     ]);
 
     expect(users.map((user) => user.label), ['Alice', 'Bob']);
-    expect(users.first.pubkey, 'alice');
+    expect(users.first.pubkey, alice.public);
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
 
@@ -634,14 +708,14 @@ void main() {
   });
 
   group('directory providers relay-config invalidation', () {
-    NostrEvent profile(String pubkey, String name) => NostrEvent(
-      id: '$pubkey-profile',
-      pubkey: pubkey,
-      createdAt: 1700000000,
-      kind: 0,
-      tags: const [],
-      content: '{"display_name":"$name"}',
-      sig: 'sig',
+    NostrEvent label(nostr.Keys keys, String name) => NostrEvent.fromJson(
+      nostr.Event.from(
+        secretKey: keys.secret,
+        createdAt: 1700000000,
+        kind: 0,
+        tags: const [],
+        content: '{"display_name":"$name"}',
+      ).toMap(),
     );
 
     ProviderContainer buildContainer(_DirectoryFakeRelaySession session) {
@@ -656,7 +730,7 @@ void main() {
 
     test('browse directory refetches when the relay config changes', () async {
       final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
+        profileEvents: [label(nostr.Keys.generate(), 'Alice')],
       );
       final container = buildContainer(session);
       addTearDown(container.dispose);
@@ -678,7 +752,7 @@ void main() {
       // Simulate switching to a community that shares the same signing key:
       // session notifier instance and pubkey both survive; only the relay
       // config changes.
-      session.profileEvents = [profile('bob', 'Bob')];
+      session.profileEvents = [label(nostr.Keys.generate(), 'Bob')];
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'http://other-community.example', nsec: null);
@@ -693,7 +767,7 @@ void main() {
 
     test('search results refetch when the relay config changes', () async {
       final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
+        profileEvents: [label(nostr.Keys.generate(), 'Alice')],
       );
       final container = buildContainer(session);
       addTearDown(container.dispose);
@@ -710,7 +784,7 @@ void main() {
       expect(firstResults.map((user) => user.label), ['Alice']);
       expect(session.searchQueryCount, 1);
 
-      session.profileEvents = [profile('alina', 'Alina')];
+      session.profileEvents = [label(nostr.Keys.generate(), 'Alina')];
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'http://other-community.example', nsec: null);
@@ -725,7 +799,7 @@ void main() {
 
     test('cached search families are released once unlistened', () async {
       final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
+        profileEvents: [label(nostr.Keys.generate(), 'Alice')],
       );
       final container = buildContainer(session);
       addTearDown(container.dispose);
@@ -862,6 +936,6 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    return const [];
+    return profileEvents;
   }
 }

@@ -212,8 +212,7 @@ Future<Map<String, String>> _resolveDmDisplayNames(
     session.fetchHistory(NostrFilters.profilesBatch(dmParticipants.toList())),
   );
   final displayNames = <String, String>{};
-  for (final event in profileEvents) {
-    if (event.kind != 0) continue;
+  for (final event in latestProfileEvents(profileEvents).values) {
     final profile = ProfileData.fromEvent(event);
     final label = profile.displayName?.trim().isNotEmpty == true
         ? profile.displayName!.trim()

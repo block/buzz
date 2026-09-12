@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
@@ -51,27 +52,40 @@ class UserProfileSheet extends HookConsumerWidget {
 
     // Watch cached profile, presence, and user status.
     final profile =
-        ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
+        ref.watch(userCacheProvider)[pk] ??
         ref.read(userCacheProvider.notifier).get(pk);
     final presenceMap = ref.watch(presenceCacheProvider);
     final presence = presenceMap[pk] ?? 'offline';
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
-    // Fetch about from the user's kind:0 profile event.
+    final config = ref.watch(relayConfigProvider);
+    final cache = ref.watch(userCacheProvider.notifier);
+    final admission = useMemoized(cache.captureAdmission, [
+      pk,
+      config,
+      cache,
+      cache.generation,
+    ]);
+    // Keep the independent opening snapshot, fenced by the cache's scope.
     final aboutFuture = useMemoized(
       () => ref
           .read(relaySessionProvider.notifier)
           .fetchHistory(NostrFilters.profile(pk))
           .then((events) {
-            if (events.isEmpty) return '';
-            return ProfileData.fromEvent(events.first).about ?? '';
+            if (!admission.isCurrent) return '';
+            final latest = latestProfileEvents(events)[pk];
+            if (latest == null) return '';
+            return ProfileData.fromEvent(latest).about ?? '';
           })
           .catchError((_) => ''),
-      [pk],
+      [pk, admission],
     );
-    final aboutSnapshot = useFuture(aboutFuture);
-    final about = aboutSnapshot.data ?? profile?.about ?? '';
+    final aboutSnapshot = useFuture(aboutFuture, preserveState: false);
+    final about =
+        (admission.isCurrent ? aboutSnapshot.data : null) ??
+        profile?.about ??
+        '';
 
     // Ensure presence and status are tracked.
     useEffect(() {

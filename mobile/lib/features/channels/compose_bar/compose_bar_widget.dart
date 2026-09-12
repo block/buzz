@@ -244,7 +244,9 @@ class ComposeBar extends HookConsumerWidget {
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
-    final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    final owners = ref.watch(agentOwnersProvider);
+    final agentOwners = owners.asData?.value;
+    final profilePubkeys = ref.read(userCacheProvider.notifier).profilePubkeys;
     final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
@@ -492,6 +494,8 @@ class ComposeBar extends HookConsumerWidget {
             sharedChannelIds: const {},
             userCache: userCache,
             ownerByAgentPubkey: agentOwners ?? const {},
+            authoritativeProfilePubkeys: profilePubkeys,
+            ownerSourceAvailable: !owners.isLoading && !owners.hasError,
           ),
           buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
@@ -502,6 +506,8 @@ class ComposeBar extends HookConsumerWidget {
             },
             userCache: userCache,
             ownerByAgentPubkey: agentOwners ?? const {},
+            authoritativeProfilePubkeys: profilePubkeys,
+            ownerSourceAvailable: !owners.isLoading && !owners.hasError,
             currentPubkey: currentPubkey,
             // Reuse ordinary search-result classification, not membership as
             // permission. Persisted keys/flags themselves prove no role.
