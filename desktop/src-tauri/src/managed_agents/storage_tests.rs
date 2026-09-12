@@ -388,6 +388,23 @@ fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
 }
 
 #[test]
+fn meaningful_agent_error_from_log_promotes_empty_tenant_idle() {
+    // Dual-seeded loopback communities make the wrong dial succeed but leave
+    // the agent subscribed to nothing (#4888 silent-idle variant).
+    let file = write_log(
+        "INFO buzz_acp: discovered 0 channel(s)\n\
+         WARN buzz_acp: no channel subscriptions resolved — agent will sit idle\n",
+    );
+    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
+    assert!(
+        result.message.contains("discovered no channels"),
+        "got: {}",
+        result.message
+    );
+    assert!(result.message.contains("localhost vs 127.0.0.1"));
+}
+
+#[test]
 fn strips_ansi_from_typical_tracing_line() {
     let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m starting";
     assert_eq!(

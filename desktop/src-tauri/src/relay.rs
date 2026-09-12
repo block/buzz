@@ -83,6 +83,18 @@ pub fn effective_agent_relay_url(_record_relay: &str, workspace_relay: &str) -> 
     workspace_relay.to_string()
 }
 
+/// Desktop wrapper around [`buzz_core_pkg::relay::resolve_agent_dial_relay_url`].
+///
+/// Keeps spawn call sites on `Result<String, String>` while the typed error and
+/// regression tests live in `buzz-core` next to `normalize_relay_url` (#4888).
+pub fn resolve_agent_dial_relay_url(
+    workspace_url: &str,
+    identity_url: &str,
+) -> Result<String, String> {
+    buzz_core_pkg::relay::resolve_agent_dial_relay_url(workspace_url, identity_url)
+        .map_err(|error| error.to_string())
+}
+
 pub fn relay_http_base_url(relay_url: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
 

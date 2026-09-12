@@ -3,7 +3,8 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, parse_command_response, relay_http_base_url,
+    resolve_agent_dial_relay_url, MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -134,6 +135,17 @@ fn whitespace_only_relay_resolves_to_workspace() {
     assert_eq!(
         effective_agent_relay_url("   ", "wss://staging.example.com"),
         "wss://staging.example.com"
+    );
+}
+
+#[test]
+fn dial_wrapper_preserves_localhost_for_spawn_path() {
+    // Thin desktop wrapper must keep the buzz-core #4888 contract so
+    // `spawn_agent_child` cannot regress independently of core tests.
+    let identity = buzz_core_pkg::relay::normalize_relay_url("ws://localhost:3000").unwrap();
+    assert_eq!(
+        resolve_agent_dial_relay_url("ws://localhost:3000", &identity).unwrap(),
+        "ws://localhost:3000"
     );
 }
 
