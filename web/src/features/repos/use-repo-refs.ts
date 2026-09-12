@@ -1,5 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { queryEvents, type NostrEvent } from "@/shared/lib/nostr-client";
+import {
+  fetchRelaySelfPubkey,
+  trustedRepoRefAuthors,
+} from "@/shared/lib/relay-self";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { dedup } from "./use-repos";
 
@@ -48,18 +52,35 @@ function parseRefs(events: NostrEvent[]): RepoRefs {
   return { branches, tags, head };
 }
 
-async function fetchRepoRefs(repoId: string): Promise<RepoRefs> {
-  // TODO: Filter by `authors: [relayPubkey]` once the relay's own pubkey is
-  // exposed to the client. Without this, a user with ReposWrite permission
-  // could publish fake kind:30618 events with spoofed refs.
+async function fetchRepoRefs(
+  repoId: string,
+  ownerPubkey?: string | null,
+): Promise<RepoRefs> {
+  // Buzz signs authoritative kind:30618 events with the relay keypair
+  // (see crates/buzz-relay/.../manifest_event.rs). Scope the query to that
+  // pubkey — matching desktop fetchRepoState — so ReposWrite holders cannot
+  // spoof refs. Include the repo owner when known for NIP-34 interop.
+  const relayPubkey = await fetchRelaySelfPubkey();
+  if (!relayPubkey) {
+    throw new Error(
+      "Relay NIP-11 `self` pubkey unavailable; refusing unscoped kind:30618 query",
+    );
+  }
   const events = await queryEvents(relayWsUrl(), {
     kinds: [30618],
+    authors: trustedRepoRefAuthors(relayPubkey, ownerPubkey),
     "#d": [repoId],
   });
   return parseRefs(events);
 }
 
-export function useRepoRefs(repoId: string, { preview = false } = {}) {
+export function useRepoRefs(
+  repoId: string,
+  {
+    preview = false,
+    ownerPubkey,
+  }: { preview?: boolean; ownerPubkey?: string | null } = {},
+) {
   const mockRefs: RepoRefs = {
     branches: ["main"],
     tags: ["v0.1.0"],
@@ -67,8 +88,12 @@ export function useRepoRefs(repoId: string, { preview = false } = {}) {
   };
 
   return useQuery({
-    queryKey: preview ? ["repo-refs", "mock", repoId] : ["repo-refs", repoId],
-    queryFn: preview ? async () => mockRefs : () => fetchRepoRefs(repoId),
+    queryKey: preview
+      ? ["repo-refs", "mock", repoId]
+      : ["repo-refs", repoId, ownerPubkey ?? null],
+    queryFn: preview
+      ? async () => mockRefs
+      : () => fetchRepoRefs(repoId, ownerPubkey),
     initialData: preview ? mockRefs : undefined,
     staleTime: 60_000,
   });
