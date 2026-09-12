@@ -9,6 +9,53 @@ use buzz_core_pkg::kind::KIND_TEAM;
 use nostr::JsonUtil;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn builtin_delete_is_local_only_and_durable_while_custom_delete_retains_tombstone() {
+    use tauri::Manager;
+    let dir = tempfile::tempdir().unwrap();
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = dir.path().join("app").to_string_lossy().into_owned();
+    let app = tauri::test::mock_builder().build(context).unwrap();
+    assert_eq!(app.path().app_data_dir().unwrap(), dir.path().join("app"));
+    let keys = nostr::Keys::generate();
+    let db = dir.path().join("retention.db");
+    let conn = open_retention_db(&db).unwrap();
+    let mut welcome = team();
+    welcome.id = "builtin-team:welcome".into();
+    welcome.name = "Welcome Team".into();
+    welcome.source_dir = None;
+    welcome.is_builtin = true;
+    let mut custom = welcome.clone();
+    custom.id = "custom:lookalike".into();
+    custom.is_builtin = false;
+    save_teams(app.handle(), &[welcome.clone(), custom.clone()]).unwrap();
+    delete_team_and_retain(
+        &welcome,
+        || delete_team_with_cascade(app.handle(), &welcome.id),
+        |id| tombstone_team_at(&db, &keys, id).unwrap(),
+    )
+    .unwrap();
+    let reloaded = load_teams(app.handle()).unwrap();
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].id, custom.id);
+    assert!(
+        get_pending_sync(&conn).unwrap().is_empty(),
+        "local built-in opt-out must never publish an owner deletion"
+    );
+    delete_team_and_retain(
+        &custom,
+        || delete_team_with_cascade(app.handle(), &custom.id),
+        |id| tombstone_team_at(&db, &keys, id).unwrap(),
+    )
+    .unwrap();
+    assert!(load_teams(app.handle()).unwrap().is_empty());
+    assert_eq!(
+        get_pending_sync(&conn).unwrap().len(),
+        1,
+        "custom owner deletion still syncs"
+    );
+}
+
 fn team() -> TeamRecord {
     TeamRecord {
         id: "team-abc".to_string(),

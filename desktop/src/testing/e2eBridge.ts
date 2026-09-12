@@ -169,6 +169,7 @@ type MockPersonaSeed = {
 
 type MockTeamSeed = {
   id?: string;
+  isBuiltin?: boolean;
   name: string;
   description?: string | null;
   personaIds: string[];
@@ -2742,7 +2743,7 @@ function resetMockTeams(config?: E2eConfig) {
       name: team.name,
       description: team.description ?? null,
       persona_ids: [...team.personaIds],
-      is_builtin: false,
+      is_builtin: team.isBuiltin ?? false,
       source_dir: null,
       is_symlink: false,
       symlink_target: null,
@@ -2751,6 +2752,10 @@ function resetMockTeams(config?: E2eConfig) {
       updated_at: now,
     });
   }
+  const deleted: string[] = JSON.parse(
+    localStorage.getItem("buzz-e2e-deleted-teams") ?? "[]",
+  );
+  mockTeams = mockTeams.filter((team) => !deleted.includes(team.id));
 }
 
 function seedMockSearchProfiles(config?: E2eConfig) {
@@ -9226,11 +9231,14 @@ async function handleUpdateTeam(args: {
 }
 
 async function handleDeleteTeam(args: { id: string }): Promise<void> {
-  const team = mockTeams.find((candidate) => candidate.id === args.id);
-  if (team?.is_builtin) {
-    throw new Error("Built-in teams cannot be deleted.");
-  }
   mockTeams = mockTeams.filter((candidate) => candidate.id !== args.id);
+  const deleted: string[] = JSON.parse(
+    localStorage.getItem("buzz-e2e-deleted-teams") ?? "[]",
+  );
+  localStorage.setItem(
+    "buzz-e2e-deleted-teams",
+    JSON.stringify([...deleted, args.id]),
+  );
 }
 
 // ── Team catalog (kind:30178) ───────────────────────────────────────────────

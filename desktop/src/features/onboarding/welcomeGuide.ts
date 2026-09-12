@@ -12,7 +12,8 @@ import {
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import { getAgentAccessOwnerOnly } from "@/shared/api/tauriAgentAccess";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
-import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
+import { listPersonas } from "@/shared/api/tauriPersonas";
+import { listTeams } from "@/shared/api/tauriTeams";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -49,7 +50,10 @@ export const WELCOME_TEAM_STARTERS = [
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
-const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
+const welcomeTeamPromises = new Map<
+  string,
+  Promise<WelcomeTeamAgents | null>
+>();
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
@@ -155,29 +159,6 @@ export async function activateWelcomeTeamPersonasSequentially(
   for (const personaId of inactivePersonaIds) {
     await activate(personaId);
   }
-}
-
-async function ensureWelcomeTeamPersonasActive() {
-  const personas = await listPersonas();
-  const personasById = new Map(
-    personas.map((persona) => [persona.id, persona]),
-  );
-
-  for (const starter of WELCOME_TEAM_STARTERS) {
-    if (!personasById.has(starter.personaId)) {
-      throw new Error(`${starter.name} agent not found.`);
-    }
-  }
-
-  // Persona activation is a read-modify-write operation over one shared file.
-  // Run these sequentially so concurrent writes cannot lose a teammate's
-  // activation and leave Welcome provisioning permanently partial.
-  await activateWelcomeTeamPersonasSequentially(
-    WELCOME_TEAM_STARTERS.filter(
-      ({ personaId }) => !personasById.get(personaId)?.isActive,
-    ).map(({ personaId }) => personaId),
-    (personaId) => setPersonaActive(personaId, true),
-  );
 }
 
 async function ensureWelcomeTeamMembership(
@@ -322,12 +303,20 @@ export function welcomeTeammateAccessUpdate(
 async function provisionWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
-): Promise<WelcomeTeamAgents> {
+): Promise<WelcomeTeamAgents | null> {
+  // Absence is an intentional opt-out, not missing bootstrap data.
+  const teams = await listTeams();
+  if (!teams.some((team) => team.id === WELCOME_TEAM_ID)) return null;
+  const personas = await listPersonas();
+  if (
+    !WELCOME_TEAM_STARTERS.every(({ personaId }) =>
+      personas.some((persona) => persona.id === personaId && persona.isActive),
+    )
+  )
+    return null;
   const existingAgents = await listManagedAgents();
-  await ensureWelcomeTeamPersonasActive();
-  const [personas, runtimeCatalog, globalConfig, agentAccessOwnerOnly] =
+  const [runtimeCatalog, globalConfig, agentAccessOwnerOnly] =
     await Promise.all([
-      listPersonas(),
       discoverAcpRuntimes(),
       getGlobalAgentConfig(),
       getAgentAccessOwnerOnly(),
@@ -395,7 +384,7 @@ async function provisionWelcomeTeam(
 export function ensureWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
-): Promise<WelcomeTeamAgents> {
+): Promise<WelcomeTeamAgents | null> {
   const key = `${normalizeRelayUrl(relayUrl) ?? ""}:${channelId}`;
   const current = welcomeTeamPromises.get(key);
   if (current) return current;

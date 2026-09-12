@@ -76,7 +76,7 @@ fn built_in_team_order(built_ins: &[BuiltInTeam], id: &str) -> Option<usize> {
     built_ins.iter().position(|team| team.id == id)
 }
 
-/// Add missing built-in teams, purge pristine retired teams, demote stale
+/// Purge pristine retired teams, demote stale
 /// built-ins, and preserve any user customizations to existing built-in teams
 /// (name, description, persona membership). Returns the merged list and whether
 /// the store changed.
@@ -92,7 +92,7 @@ fn merge_teams_impl(
 ) -> (Vec<TeamRecord>, bool) {
     let mut changed = false;
 
-    // Seed missing built-ins / re-promote existing ones that were downgraded.
+    // Preserve existing built-ins, but never recreate a deleted or unselected team.
     for built_in in built_in_team_records(built_ins, now) {
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
             if !existing.is_builtin {
@@ -100,9 +100,6 @@ fn merge_teams_impl(
                 existing.updated_at = now.to_string();
                 changed = true;
             }
-        } else {
-            stored.push(built_in);
-            changed = true;
         }
     }
 
@@ -143,13 +140,20 @@ fn merge_teams_impl(
     (stored, changed)
 }
 
-/// Reject deletion of built-in teams. Mirrors `validate_persona_deletion`
-/// for personas — built-ins always come back via `merge_teams` on the
-/// next load, so blocking the delete avoids a confusing "keeps coming
-/// back" UX.
-pub fn validate_team_deletion(team: &TeamRecord) -> Result<(), String> {
-    if team.is_builtin {
-        return Err("Built-in teams cannot be deleted.".to_string());
+/// Reject deletion while managed instances still depend on the team.
+/// Built-in status is provenance, not a deletion restriction.
+pub fn validate_team_deletion(
+    team: &TeamRecord,
+    agents: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let referencing = agents_referencing_team(agents, team);
+    if !referencing.is_empty() {
+        return Err(format!(
+            "Cannot delete team \"{}\": {} agent(s) still reference it ({}). Delete or reconfigure them first.",
+            team.name,
+            referencing.len(),
+            referencing.join(", ")
+        ));
     }
     Ok(())
 }
@@ -244,25 +248,18 @@ fn agents_referencing_team<'a>(
 /// vec is empty. For catalog-adopted teams (`catalog_source` present), member
 /// copies matching this publication's provenance are deactivated (re-activatable
 /// on re-add), not deleted.
-pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<String>, String> {
+pub fn delete_team_with_cascade<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    team_id: &str,
+) -> Result<Vec<String>, String> {
     let mut teams = load_teams(app)?;
     let team = teams
         .iter()
         .find(|record| record.id == team_id)
         .ok_or_else(|| format!("team {team_id} not found"))?;
 
-    validate_team_deletion(team)?;
-
     let agents = crate::managed_agents::load_managed_agents(app)?;
-    let referencing = agents_referencing_team(&agents, team);
-    if !referencing.is_empty() {
-        return Err(format!(
-            "Cannot delete team \"{team_id}\": {} agent(s) still reference it ({}). \
-             Delete or reconfigure them first.",
-            referencing.len(),
-            referencing.join(", ")
-        ));
-    }
+    validate_team_deletion(team, &agents)?;
 
     let mut cascaded_persona_d_tags = Vec::new();
 
