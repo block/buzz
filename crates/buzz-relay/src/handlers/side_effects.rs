@@ -974,7 +974,9 @@ async fn emit_addressable_discovery_event(
 fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
     let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
     tags.push(Tag::parse(["d", group_id])?);
-    for member in members {
+    let mut canonical_members = members.iter().collect::<Vec<_>>();
+    canonical_members.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+    for member in canonical_members {
         let pubkey_hex = hex::encode(&member.pubkey);
         // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
         // because the canonical relay is implicit (this event is signed by it).
@@ -3654,6 +3656,7 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::Keys;
 
     #[test]
     fn nip43_reconciliation_compatibility_alias_is_preserved() {
@@ -3689,6 +3692,122 @@ mod tests {
                 && fields[0] == "p"
                 && fields[1] == late_pubkey
                 && fields[3] == "owner"
+        }));
+    }
+
+    #[test]
+    fn group_members_snapshot_uses_canonical_pubkey_order() {
+        let channel_id = Uuid::new_v4();
+        let members = vec![
+            MemberRecord {
+                channel_id,
+                pubkey: vec![0xff; 32],
+                role: "member".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            },
+            MemberRecord {
+                channel_id,
+                pubkey: vec![0x01; 32],
+                role: "owner".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            },
+            MemberRecord {
+                channel_id,
+                pubkey: vec![0x80; 32],
+                role: "bot".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            },
+        ];
+
+        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
+        let p_tags = tags
+            .iter()
+            .filter_map(|tag| {
+                let fields = tag.as_slice();
+                (fields.first().map(String::as_str) == Some("p")).then(|| {
+                    (
+                        fields.get(1).cloned(),
+                        fields.get(2).cloned(),
+                        fields.get(3).cloned(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            p_tags,
+            vec![
+                (
+                    Some(hex::encode(vec![0x01; 32])),
+                    Some(String::new()),
+                    Some("owner".to_string())
+                ),
+                (
+                    Some(hex::encode(vec![0x80; 32])),
+                    Some(String::new()),
+                    Some("bot".to_string())
+                ),
+                (
+                    Some(hex::encode(vec![0xff; 32])),
+                    Some(String::new()),
+                    Some("member".to_string())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_members_snapshot_preserves_relay_self_tag() {
+        let relay_keys = Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let relay_pubkey_hex = hex::encode(relay_pubkey);
+        let channel_id = Uuid::new_v4();
+        let members = vec![
+            MemberRecord {
+                channel_id,
+                pubkey: relay_pubkey.to_vec(),
+                role: "owner".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            },
+            MemberRecord {
+                channel_id,
+                pubkey: vec![0x80; 32],
+                role: "bot".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            },
+        ];
+
+        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
+        let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+            .tags(tags)
+            .allow_self_tagging()
+            .sign_with_keys(&relay_keys)
+            .expect("sign member snapshot");
+        let p_tags = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(p_tags.len(), 2);
+        assert!(p_tags.iter().any(|tag| {
+            tag.as_slice()
+                == [
+                    "p".to_string(),
+                    relay_pubkey_hex.clone(),
+                    String::new(),
+                    "owner".to_string(),
+                ]
         }));
     }
 
