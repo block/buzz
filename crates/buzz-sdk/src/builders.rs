@@ -591,6 +591,12 @@ pub fn build_profile(
 }
 
 /// Build a NIP-29 add-member event (kind 9000).
+///
+/// `.allow_self_tagging()` is required: PUT_USER's self path has
+/// `actor == target` (e.g. an owner adjusting their own role), so the
+/// request's `["p", target]` matches the signer. nostr 0.44 strips matching
+/// `p` tags by default — without this the event goes on the wire without its
+/// `p` tag and the relay rejects it with "missing p tag".
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -604,7 +610,9 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -3052,6 +3060,25 @@ mod tests {
         let ev = sign(build_add_member(cid, pubkey, None::<MemberRole>).unwrap());
         assert_eq!(ev.kind.as_u16(), 9000);
         assert!(tag_values(&ev, "role").is_empty());
+    }
+
+    #[test]
+    fn add_member_self_target_keeps_p_tag() {
+        // Self-add: actor == target (e.g. an owner adjusting their own role,
+        // or an admin agent adding itself with an explicit role). Pins that
+        // `.allow_self_tagging()` survives nostr 0.44's default same-pubkey
+        // `p`-tag scrub — without it the event reaches the relay without its
+        // `p` tag and is rejected with "missing p tag".
+        let keys = keys();
+        let self_pk = keys.public_key().to_hex();
+        let cid = uuid();
+        let ev = build_add_member(cid, &self_pk, Some(MemberRole::Bot))
+            .unwrap()
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(has_tag(&ev, "p", &self_pk));
+        assert!(has_tag(&ev, "role", "bot"));
     }
 
     #[test]
