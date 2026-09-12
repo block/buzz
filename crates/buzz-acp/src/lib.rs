@@ -5278,7 +5278,8 @@ mod agent_draft_prompt_tests {
     fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("pass real newline bytes through stdin"));
-        assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
+        assert!(prompt.contains("--content-file <path>"));
+        assert!(prompt.contains("validates the file as UTF-8"));
         assert!(prompt.contains("buzz messages send ... --content -"));
     }
 
