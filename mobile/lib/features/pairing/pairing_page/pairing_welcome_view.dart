@@ -57,7 +57,7 @@ class _PairingWelcomeView extends StatelessWidget {
                 ),
                 const SizedBox(height: Grid.sm),
                 Text(
-                  'Welcome to Buzz',
+                  'Welcome to Orbit',
                   textAlign: TextAlign.center,
                   style: context.textTheme.headlineSmall?.copyWith(
                     color: _onboardingInk,

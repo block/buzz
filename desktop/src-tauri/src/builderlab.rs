@@ -20,18 +20,18 @@ const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
 // or challenge/verify fail with `invalid_origin`. It also seeds the challenge
 // body's `origin` field so both agree.
 const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
-const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
+const AUTH_COMPLETE_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Buzz authentication complete</title>
+  <title>Orbit authentication complete</title>
   <style>
     :root {
       color-scheme: light;
       font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #231e1e;
-      background: #d7d72e;
+      background: #99b1ef;
     }
 
     * {
@@ -45,7 +45,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
       display: grid;
       place-items: center;
       padding: 24px;
-      background-color: #d7d72e;
+      background-color: #99b1ef;
       background-image: radial-gradient(circle, rgba(35, 30, 30, 0.16) 1.2px, transparent 1.3px);
       background-size: 37px 37px;
     }
@@ -74,7 +74,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
       margin: 0 0 20px;
       padding: 6px 14px;
       border-radius: 999px;
-      background: #d7d72e;
+      background: #99b1ef;
       font-size: 14px;
       font-weight: 600;
       letter-spacing: 0.01em;
@@ -117,27 +117,62 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 </head>
 <body>
   <main>
-    <svg class="bee" viewBox="0 0 466 309" role="img" aria-label="Buzz">
+    <svg class="bee" viewBox="0 0 306 300" fill="none" role="img" aria-label="Orbit" xmlns="http://www.w3.org/2000/svg">
+      <g filter="url(#filter0_n_2469_12)">
+        <path d="M218.969 140.798C226.756 162.191 227.01 185.601 219.688 207.158C212.367 228.715 197.91 247.129 178.705 259.355C159.501 271.582 136.699 276.889 114.069 274.401C91.4394 271.912 70.3361 261.776 54.2475 245.669C38.1589 229.561 28.0482 208.446 25.5865 185.813C23.1248 163.18 28.4595 140.385 40.7089 121.195C52.9583 102.005 71.389 87.5692 92.9546 80.2737C114.52 72.9781 137.93 73.2595 159.314 81.0714" stroke="url(#paint0_linear_2469_12)" stroke-width="50"/>
+      </g>
+      <g filter="url(#filter1_n_2469_12)">
+        <path d="M222 114.5C212.5 117.5 165.931 140.588 118 184C162.763 134.13 182.672 109.441 188.5 80C192.844 52.1103 192.943 33.4859 188.5 0C205.886 46.4008 212.5 54.5 225 52.5C235 49 250.545 45.778 305.5 0C257.259 53.7062 248.5 72.5 249.5 77.5C250.5 82.5 259.315 100.442 302 114.5C269.479 107.603 231.5 111.5 222 114.5Z" fill="url(#paint1_linear_2469_12)"/>
+      </g>
       <defs>
-        <mask id="bee-mask">
-          <rect width="466" height="309" fill="black"/>
-          <circle cx="91.7" cy="154.5" r="91.7" fill="white"/>
-          <circle cx="374.3" cy="154.5" r="91.7" fill="white"/>
-          <rect x="128" width="210" height="309" rx="34" fill="white"/>
-          <ellipse cx="193.3" cy="84.4" rx="27" ry="27" fill="black"/>
-          <ellipse cx="276" cy="84.4" rx="27" ry="27" fill="black"/>
-          <rect x="166.3" y="157.2" width="136.9" height="38.3" rx="5" fill="black"/>
-          <rect x="166.9" y="235.1" width="136.2" height="37.6" rx="5" fill="black"/>
-        </mask>
+        <filter id="filter0_n_2469_12" x="0" y="50" width="250" height="250" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="2 2" stitchTiles="stitch" numOctaves="3" result="noise" seed="8811" />
+          <feColorMatrix in="noise" type="luminanceToAlpha" result="alphaNoise" />
+          <feComponentTransfer in="alphaNoise" result="coloredNoise1">
+            <feFuncA type="discrete" tableValues="1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "/>
+          </feComponentTransfer>
+          <feComposite operator="in" in2="shape" in="coloredNoise1" result="noise1Clipped" />
+          <feFlood flood-color="rgba(0, 0, 0, 0.25)" result="color1Flood" />
+          <feComposite operator="in" in2="noise1Clipped" in="color1Flood" result="color1" />
+          <feMerge result="effect1_noise_2469_12">
+            <feMergeNode in="shape" />
+            <feMergeNode in="color1" />
+          </feMerge>
+        </filter>
+        <filter id="filter1_n_2469_12" x="118" y="0" width="187.5" height="184" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="2 2" stitchTiles="stitch" numOctaves="3" result="noise" seed="9203" />
+          <feColorMatrix in="noise" type="luminanceToAlpha" result="alphaNoise" />
+          <feComponentTransfer in="alphaNoise" result="coloredNoise1">
+            <feFuncA type="discrete" tableValues="1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "/>
+          </feComponentTransfer>
+          <feComposite operator="in" in2="shape" in="coloredNoise1" result="noise1Clipped" />
+          <feFlood flood-color="rgba(0, 0, 0, 0.25)" result="color1Flood" />
+          <feComposite operator="in" in2="noise1Clipped" in="color1Flood" result="color1" />
+          <feMerge result="effect1_noise_2469_12">
+            <feMergeNode in="shape" />
+            <feMergeNode in="color1" />
+          </feMerge>
+        </filter>
+        <linearGradient id="paint0_linear_2469_12" x1="125" y1="50" x2="-22.4998" y2="222" gradientUnits="userSpaceOnUse">
+          <stop offset="0.0432692" stop-color="white"/>
+          <stop offset="0.807692" stop-color="#B9B9BE"/>
+        </linearGradient>
+        <linearGradient id="paint1_linear_2469_12" x1="211.75" y1="0" x2="211.75" y2="184" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#F109ED"/>
+          <stop offset="0.831731" stop-color="#3D42D9"/>
+        </linearGradient>
       </defs>
-      <rect width="466" height="309" fill="currentColor" mask="url(#bee-mask)"/>
     </svg>
     <div class="eyebrow">Authentication complete</div>
     <h1>You&rsquo;re signed in.</h1>
-    <p>You can close this window and return to Buzz.</p>
+    <p>You can close this window and return to Orbit.</p>
   </main>
 </body>
-</html>"#;
+</html>"##;
 
 #[derive(Default)]
 pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
@@ -645,14 +680,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_complete_page_uses_buzz_brand() {
+    fn auth_complete_page_uses_orbit_brand() {
         for expected in [
-            "<title>Buzz authentication complete</title>",
-            "#d7d72e",
+            "<title>Orbit authentication complete</title>",
+            "#99b1ef",
             "#231e1e",
             "#d7e7f6",
-            "aria-label=\"Buzz\"",
-            "return to Buzz",
+            "aria-label=\"Orbit\"",
+            "return to Orbit",
         ] {
             assert!(
                 AUTH_COMPLETE_HTML.contains(expected),

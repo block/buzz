@@ -111,7 +111,7 @@ fail_if_local_redis_blocks_compose
 # ---- Start services ---------------------------------------------------------
 
 log "Starting services and waiting for health..."
-"${REPO_ROOT}/bin/just" _ensure-services
+just _ensure-services
 
 # ---- Run migrations ---------------------------------------------------------
 
@@ -128,7 +128,7 @@ until postgres_accepting_connections; do
   sleep 2
 done
 
-"${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+cargo run -p buzz-admin -- migrate
 "${REPO_ROOT}/scripts/seed-local-community.sh"
 success "Database migrations complete"
 
@@ -175,7 +175,17 @@ log "Installing git hooks..."
 # linked-worktree dispatch (same failure mode as the old worktree-relative .hooks).
 HOOKS_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/hooks"
 git -C "${REPO_ROOT}" config --local core.hooksPath "$HOOKS_DIR"
-lefthook install --force
+if command -v lefthook &>/dev/null; then
+  lefthook install --force
+elif command -v pnpm &>/dev/null; then
+  pnpm dlx lefthook install --force
+elif command -v npx &>/dev/null; then
+  npx -y lefthook install --force
+else
+  # On Windows without core.symlinks, bin/lefthook is a text file.
+  # Use bash 'exec -a' to invoke hermit pretending to be lefthook.
+  (exec -a lefthook "${REPO_ROOT}/bin/hermit" install --force)
+fi
 success "Git hooks installed"
 
 # ---- Print connection info --------------------------------------------------

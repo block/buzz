@@ -312,13 +312,13 @@ export function MachineOnboardingFlow({
               transitionKey={`machine-identity-${transitionDirection}`}
             >
               <img
-                alt="Buzz"
+                alt="Orbit"
                 className="w-full max-w-[600px]"
-                src="/landing/buzz-wordmark.png"
+                src="/landing/orbit-wordmark.png"
               />
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-                Your people, your agents, your projects —<br />
-                all in one place.
+                Your Context, Knowledge, and Memory. Everything.<br />
+                At Orbit
               </p>
               {error ? (
                 <p className="mt-4 text-sm text-destructive">{error}</p>
