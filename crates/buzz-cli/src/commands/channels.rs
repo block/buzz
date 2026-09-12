@@ -15,7 +15,7 @@ use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{parse_uuid, read_or_stdin, validate_hex64};
 
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -230,7 +230,14 @@ fn name_matches(name: &str, needle_lower: &str, exact: bool) -> bool {
 }
 
 pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    // Canonicalize before filtering. `validate_uuid` only checks that the input
+    // parses and throws the result away, but `Uuid::parse_str` accepts
+    // uppercase, the unhyphenated 32-character form, braces, and a `urn:uuid:`
+    // prefix. Every `d`/`h` tag in the tree is written in the canonical
+    // lowercase hyphenated form and a NIP-01 generic tag filter compares tag
+    // values byte for byte, so any other spelling matches nothing and the
+    // command prints an empty result instead of an error.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [39000],
         "#d": [channel_id],
@@ -253,7 +260,8 @@ pub async fn cmd_list_channel_members(
     client: &BuzzClient,
     channel_id: &str,
 ) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    // Same canonicalization as `cmd_get_channel`; see the note there.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [39002],
         "#d": [channel_id],
@@ -268,7 +276,8 @@ pub async fn cmd_list_channel_members(
 }
 
 pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    // Same canonicalization as `cmd_get_channel`; see the note there.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let filter = serde_json::json!({
         "kinds": [40100],
         "#h": [channel_id]
