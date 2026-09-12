@@ -219,7 +219,36 @@ export async function submitBwReadyTransition({
   reworkVerdictId?: string | null;
   terminalSetId?: string | null;
 }): Promise<{ eventId: string; projection: unknown }> {
-  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  let previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  // Core's display projection reports "backlog" as soon as the triage-action
+  // head is "accept" (a convenience label, `bw/projection.rs`), which is
+  // what gates this action into view in the first place — but the
+  // issue-state chain itself only actually reaches "backlog" once that
+  // dedicated record lands (NIP-BW.md). An issue accepted before that record
+  // was chained (or whose accept predates this auto-chain existing at all)
+  // is stuck on a real chain head of "triage" forever otherwise, refused
+  // with `bw:reject:causality:state-transition` on every ready attempt. Heal
+  // it inline here rather than requiring a separate repair step.
+  if (snapshot.projection.issue_state[issueId]?.state === "triage") {
+    const { headId: triageId, conflict: triageConflict } = bwChainHead(
+      snapshot,
+      issueId,
+      "triage-action",
+    );
+    if (triageConflict) {
+      throw new BwConflictError();
+    }
+    if (!triageId) {
+      throw new Error("This issue has not been accepted into backlog yet.");
+    }
+    const backlog = await submitBwAcceptToBacklog({
+      issueId,
+      repo,
+      snapshot,
+      triageId,
+    });
+    previousId = backlog.eventId;
+  }
   const { headId: updateId, conflict: updateConflict } = bwChainHead(
     snapshot,
     issueId,

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BwConflictError,
   submitBwIssueTextUpdate,
+  submitBwReadyTransition,
   submitBwTriageAction,
 } from "./bwWrite.ts";
 
@@ -120,5 +121,43 @@ test("no delegation keeps delegate:false and the ordinary previous chain (P4F)",
   assert.deepEqual(
     captured.input.tags.find((tag) => tag[0] === "previous"),
     ["previous", existingHead.id],
+  );
+});
+
+test("a ready transition whose real chain head is still triage auto-chains the missing backlog record first, then readies off it", async () => {
+  const triageStateId = "3".repeat(64);
+  const acceptAction = record("4".repeat(64), { record: "triage-action" });
+  acceptAction.content = '{"action":"accept"}';
+  const snap = snapshot([acceptAction]);
+  snap.projection.issue_state = { [issueId]: { state: "triage" } };
+  snap.projection.issue_state_id = { [issueId]: triageStateId };
+
+  const calls = [];
+  withMockInvoke(async (_cmd, args) => {
+    calls.push(args);
+    return { eventId: `${calls.length}`.repeat(64), projection: {} };
+  });
+
+  await submitBwReadyTransition({
+    issueId,
+    repo,
+    snapshot: snap,
+    stream: "windows",
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].input.record, "issue-state");
+  assert.deepEqual(calls[0].input.content, {
+    state: "backlog",
+    triage: acceptAction.id,
+  });
+  assert.deepEqual(
+    calls[0].input.tags.find((tag) => tag[0] === "previous"),
+    ["previous", triageStateId],
+  );
+  assert.equal(calls[1].input.content.state, "ready");
+  assert.deepEqual(
+    calls[1].input.tags.find((tag) => tag[0] === "previous"),
+    ["previous", "1".repeat(64)],
   );
 });
