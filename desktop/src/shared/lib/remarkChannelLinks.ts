@@ -8,7 +8,7 @@
  */
 
 import { createRemarkPrefixPlugin } from "./createRemarkPrefixPlugin";
-import { buildPrefixPattern } from "./mentionPattern";
+import { buildPrefixPattern, PREFIX_LEAD_GROUP } from "./mentionPattern";
 
 type RemarkChannelLinksOptions = {
   channelNames?: string[];
@@ -21,16 +21,20 @@ export default function remarkChannelLinks(
     fallbackToGeneric: true,
   });
 
-  return createRemarkPrefixPlugin(channelPattern, (matchText) => {
-    const channelName = matchText.slice(1);
-    return {
-      type: "channel-link",
-      value: matchText,
-      data: {
-        hName: "channel-link",
-        hChildren: [{ type: "text", value: matchText }],
-        channelName,
-      },
-    };
-  });
+  return createRemarkPrefixPlugin(
+    channelPattern,
+    (matchText) => {
+      const channelName = matchText.slice(1);
+      return {
+        type: "channel-link",
+        value: matchText,
+        data: {
+          hName: "channel-link",
+          hChildren: [{ type: "text", value: matchText }],
+          channelName,
+        },
+      };
+    },
+    { leadGroup: PREFIX_LEAD_GROUP },
+  );
 }
