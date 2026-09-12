@@ -1,7 +1,8 @@
 //! Tests for `propagate_persona_name_rename` — the helper that propagates a
 //! persona definition's display_name change to linked agent instances.
 
-use super::*;
+use super::propagate::propagate_persona_name_rename;
+use crate::managed_agents::ManagedAgentRecord;
 
 fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
