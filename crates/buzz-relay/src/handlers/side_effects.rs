@@ -1164,6 +1164,18 @@ pub async fn emit_group_discovery_events(
     Ok(())
 }
 
+/// Extract the policy a kind:10100 event asks us to store, if any.
+///
+/// `channel_add_policy` is ONE optional field of the agent profile, not the
+/// whole event: agents also publish kind:10100 purely to advertise themselves
+/// in the mention directory (`respond_to` / `channel_ids`) and carry no policy
+/// at all. Requiring it logged an `error!` on every agent startup claiming a
+/// side effect had failed, when nothing was ever asked for. Absent field means
+/// leave the stored policy untouched — not "reset it", and not an error.
+fn agent_profile_channel_add_policy(content: &serde_json::Value) -> Option<&str> {
+    content.get("channel_add_policy").and_then(|v| v.as_str())
+}
+
 async fn handle_agent_profile(
     tenant: &TenantContext,
     event: &Event,
@@ -1172,10 +1184,9 @@ async fn handle_agent_profile(
     let content: serde_json::Value = serde_json::from_str(&event.content)
         .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
 
-    let policy = content
-        .get("channel_add_policy")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
+    let Some(policy) = agent_profile_channel_add_policy(&content) else {
+        return Ok(());
+    };
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
     if state
@@ -3768,5 +3779,33 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+    #[test]
+    fn agent_profile_without_a_policy_asks_for_no_policy_change() {
+        // The mention-directory shape buzz-acp publishes on every start.
+        let content = serde_json::json!({
+            "respond_to": "anyone",
+            "respond_to_allowlist": [],
+            "channel_ids": ["53d663bd-383d-4719-a3ff-ddc44d8d1917"],
+        });
+
+        assert_eq!(agent_profile_channel_add_policy(&content), None);
+    }
+
+    #[test]
+    fn agent_profile_with_a_policy_still_yields_it() {
+        let content = serde_json::json!({ "channel_add_policy": "owner_only" });
+
+        assert_eq!(
+            agent_profile_channel_add_policy(&content),
+            Some("owner_only")
+        );
+    }
+
+    #[test]
+    fn agent_profile_ignores_a_non_string_policy() {
+        let content = serde_json::json!({ "channel_add_policy": 1 });
+
+        assert_eq!(agent_profile_channel_add_policy(&content), None);
     }
 }
