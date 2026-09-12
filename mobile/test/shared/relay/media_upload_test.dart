@@ -239,6 +239,32 @@ final _animatedWebpBytes = Uint8List.fromList([
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
 
+class _CancellableTestClient extends http.BaseClient {
+  http.BaseRequest? _activeRequest;
+  Completer<void>? _wait;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    _activeRequest = request;
+    _wait = Completer<void>();
+    try {
+      await _wait!.future;
+      throw StateError('upload should have been cancelled');
+    } on http.ClientException {
+      rethrow;
+    }
+  }
+
+  @override
+  void close() {
+    final request = _activeRequest;
+    if (request != null && _wait != null && !_wait!.isCompleted) {
+      _wait!.completeError(http.ClientException('closed', request.url));
+    }
+    super.close();
+  }
+}
+
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
 ) {
