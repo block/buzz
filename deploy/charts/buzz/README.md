@@ -253,7 +253,7 @@ pairingRelay:
 `pairingRelay.url` is advertised in the main relay's NIP-11 document so Buzz
 clients connect directly to the dedicated endpoint. The chart does not create
 an Ingress or HTTPRoute for the pairing Service; route the public hostname to
-`<release>-buzz-pairing:5000` with your platform's ingress configuration.
+`<release>-buzz-pairing:18765` with your platform's ingress configuration.
 
 ## HA (production)
 
