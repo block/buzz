@@ -76,7 +76,11 @@ export function buildMentionCandidates({
   relayAgents,
   userSearchResults,
 }: BuildMentionCandidatesInput): MentionCandidate[] {
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
   const candidatesByPubkey = new Map<string, MentionCandidate>();
+  const ownedRelayPersonaIds = new Set<string>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
     if (isArchived(pubkey)) {
@@ -166,6 +170,12 @@ export function buildMentionCandidates({
   }
   for (const agent of relayAgents ?? []) {
     const pubkey = normalizePubkey(agent.pubkey);
+    const ownedRelayPersonaId =
+      normalizedCurrentPubkey &&
+      agent.ownerPubkey &&
+      normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
+        ? (agent.personaId ?? undefined)
+        : undefined;
     addCandidate({
       kind: "identity",
       pubkey,
@@ -179,11 +189,20 @@ export function buildMentionCandidates({
           agent.channelIds.includes(mentionChannelId)),
       personaId:
         managedAgentPersonaIdsByPubkey.get(pubkey) ??
+        ownedRelayPersonaId ??
         (activePersonaById.has(pubkey) ? pubkey : undefined),
       ownerPubkey: agent.ownerPubkey,
       isAgent: true,
       isActiveAgent: agent.status === "online" || agent.status === "away",
     });
+    const relayCandidate = candidatesByPubkey.get(pubkey);
+    if (
+      ownedRelayPersonaId &&
+      relayCandidate?.isAgent === true &&
+      relayCandidate.personaId === ownedRelayPersonaId
+    ) {
+      ownedRelayPersonaIds.add(ownedRelayPersonaId);
+    }
   }
   for (const agent of managedAgents ?? []) {
     const pubkey = normalizePubkey(agent.pubkey);
@@ -226,7 +245,11 @@ export function buildMentionCandidates({
     }
   }
   const personaCandidates: MentionCandidate[] = activePersonas
-    .filter((persona) => !managedAgentPersonaIds.has(persona.id))
+    .filter(
+      (persona) =>
+        !managedAgentPersonaIds.has(persona.id) &&
+        !ownedRelayPersonaIds.has(persona.id),
+    )
     .map((persona) => ({
       kind: "persona" as const,
       personaId: persona.id,

@@ -97,6 +97,7 @@ type RawSearchResponse = {
 type RawRelayAgent = {
   pubkey: string;
   owner_pubkey?: string | null;
+  persona_id?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -597,6 +598,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,
     ownerPubkey: agent.owner_pubkey ?? null,
+    personaId: agent.persona_id ?? null,
     name: agent.name,
     agentType: agent.agent_type,
     channels: agent.channels,
