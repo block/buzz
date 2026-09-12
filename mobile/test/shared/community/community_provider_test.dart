@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
@@ -43,12 +44,24 @@ void main() {
   tearDown(() => container.dispose());
 
   ProviderContainer createContainer() {
+    Future<void> writeSnapshot(List<Community> communities) async {
+      snapshots.add(List.of(communities));
+    }
+
+    Future<void> writeAgeGateSnapshot(
+      List<Community> communities, {
+      required bool settleFence,
+    }) async {
+      snapshots.add(List.of(communities));
+    }
+
     return ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(communityStorage),
-        communitySnapshotWriterProvider.overrideWithValue((communities) async {
-          snapshots.add(List.of(communities));
-        }),
+        communitySnapshotWriterProvider.overrideWithValue(writeSnapshot),
+        ageGateCommunitySnapshotWriterProvider.overrideWithValue(
+          writeAgeGateSnapshot,
+        ),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
         communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
           community,
@@ -70,6 +83,74 @@ void main() {
       expect(communities, isEmpty);
       expect(snapshots, [isEmpty]);
     });
+
+    test(
+      'age gate strict clear is not deduplicated against an ordinary clear',
+      () async {
+        final ordinarySnapshots = <List<Community>>[];
+        final ageGateSnapshots = <List<Community>>[];
+        final settleFenceValues = <bool>[];
+        container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(communityStorage),
+            communitySnapshotWriterProvider.overrideWithValue((
+              communities,
+            ) async {
+              ordinarySnapshots.add(List.of(communities));
+            }),
+            ageGateCommunitySnapshotWriterProvider.overrideWithValue((
+              communities, {
+              required settleFence,
+            }) async {
+              ageGateSnapshots.add(List.of(communities));
+              settleFenceValues.add(settleFence);
+            }),
+          ],
+        );
+
+        await container.read(communityListProvider.future);
+        await container.read(suspendCommunitySnapshotForAgeCheckProvider)();
+
+        expect(ordinarySnapshots, [isEmpty]);
+        expect(ageGateSnapshots, [isEmpty]);
+        expect(settleFenceValues, [isFalse]);
+      },
+    );
+
+    test(
+      'age gate strict clear keeps retrying after restriction becomes final',
+      () async {
+        var strictAttempts = 0;
+        container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(communityStorage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+            ageGateCommunitySnapshotWriterProvider.overrideWithValue((
+              communities, {
+              required settleFence,
+            }) async {
+              strictAttempts += 1;
+              expect(communities, isEmpty);
+              expect(settleFence, isFalse);
+              if (strictAttempts < 3) {
+                throw StateError('strict snapshot unavailable');
+              }
+            }),
+          ],
+        );
+
+        await expectLater(
+          container.read(suspendCommunitySnapshotForAgeCheckProvider)(),
+          throwsStateError,
+        );
+        await container
+            .read(communityListProvider.notifier)
+            .enforceAgeRestrictionOnPush();
+        await container.read(suspendCommunitySnapshotForAgeCheckProvider)();
+
+        expect(strictAttempts, 3);
+      },
+    );
 
     test('exports migrated communities on startup', () async {
       final community = Community.create(
@@ -352,6 +433,223 @@ void main() {
         expect(stored.pushSubscriptionState.generationCursor, 9);
         expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
         expect(deactivationGenerations, [8, 9]);
+      },
+    );
+
+    test(
+      'age restriction clears push state and retries pending leases',
+      () async {
+        var failPendingOnce = true;
+        deactivator = (community, {generation}) async {
+          deactivatedCommunityIds.add(community.id);
+          deactivationGenerations.add(generation);
+          if (community.name == 'Pending' && failPendingOnce) {
+            failPendingOnce = false;
+            throw StateError('injected pending failure');
+          }
+        };
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final active =
+            Community.create(
+              name: 'Active',
+              relayUrl: 'https://active.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+              ).withAccepted(subscriptions: [subscription], generation: 4),
+            );
+        final pending =
+            Community.create(
+              name: 'Pending',
+              relayUrl: 'https://pending.example.com',
+            ).copyWith(
+              pushSubscriptionState:
+                  BuzzPushLeaseSubscriptionState.desired(
+                        desired: [subscription],
+                      )
+                      .withAccepted(
+                        subscriptions: [subscription],
+                        generation: 6,
+                      )
+                      .withPendingTombstone(7),
+            );
+        final notifier = container.read(communityListProvider.notifier);
+        await notifier.addCommunity(active);
+        await notifier.addCommunity(pending);
+
+        await notifier.enforceAgeRestrictionOnPush();
+        await notifier.enforceAgeRestrictionOnPush();
+
+        final stored = await communityStorage.loadAll();
+        expect(
+          stored.every((community) => !community.pushNotificationsEnabled),
+          isTrue,
+        );
+        expect(
+          stored.every(
+            (community) =>
+                community.pushSubscriptionState.pendingTombstoneGeneration ==
+                null,
+          ),
+          isTrue,
+        );
+        expect(
+          snapshots.last.every(
+            (community) => !community.pushNotificationsEnabled,
+          ),
+          isTrue,
+        );
+        expect(deactivatedCommunityIds, [active.id, pending.id, pending.id]);
+        expect(deactivationGenerations, [5, 8, 9]);
+      },
+    );
+
+    test(
+      'age restriction persists all disabled communities in one write',
+      () async {
+        container = createContainer();
+        final first = Community.create(
+          name: 'First',
+          relayUrl: 'https://first.example.com',
+        ).copyWith(pushNotificationsEnabled: true);
+        final second = Community.create(
+          name: 'Second',
+          relayUrl: 'https://second.example.com',
+        ).copyWith(pushNotificationsEnabled: true);
+        await communityStorage.save(first);
+        await communityStorage.save(second);
+        await container.read(communityListProvider.future);
+        final writesBefore = fakeSecure.writeCount('buzz_communities');
+
+        await container
+            .read(communityListProvider.notifier)
+            .enforceAgeRestrictionOnPush();
+
+        final stored = await communityStorage.loadAll();
+        expect(stored, hasLength(2));
+        expect(
+          stored.every((community) => !community.pushNotificationsEnabled),
+          isTrue,
+        );
+        expect(fakeSecure.writeCount('buzz_communities') - writesBefore, 1);
+      },
+    );
+
+    test(
+      'age restriction fences a stale authenticated snapshot export',
+      () async {
+        final staleWriteStarted = Completer<void>();
+        final releaseStaleWrite = Completer<void>();
+        final completedSnapshots = <List<Community>>[];
+        final community = Community.create(
+          name: 'Restricted',
+          relayUrl: 'https://restricted.example.com',
+          nsec: nostr.Keys.generate().nsec,
+        ).copyWith(pushNotificationsEnabled: true);
+        await communityStorage.save(community);
+        await communityStorage.saveActiveId(community.id);
+
+        container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(communityStorage),
+            communitySnapshotWriterProvider.overrideWithValue((
+              communities,
+            ) async {
+              final captured = List.of(communities);
+              if (captured.isNotEmpty && !staleWriteStarted.isCompleted) {
+                staleWriteStarted.complete();
+                await releaseStaleWrite.future;
+              }
+              completedSnapshots.add(captured);
+            }),
+            ageGateCommunitySnapshotWriterProvider.overrideWithValue((
+              communities, {
+              required settleFence,
+            }) async {
+              completedSnapshots.add(List.of(communities));
+              expect(settleFence, isFalse);
+            }),
+          ],
+        );
+
+        final staleAuthBuild = container.read(authProvider.future);
+        await staleWriteStarted.future;
+        final restriction = container
+            .read(communityListProvider.notifier)
+            .enforceAgeRestrictionOnPush();
+
+        releaseStaleWrite.complete();
+        await staleAuthBuild;
+        await restriction;
+
+        expect(
+          completedSnapshots.any((snapshot) => snapshot.isNotEmpty),
+          isTrue,
+        );
+        expect(completedSnapshots.last, isEmpty);
+      },
+    );
+
+    test(
+      'age check suspension clears a stale snapshot and allowed restores it',
+      () async {
+        final staleWriteStarted = Completer<void>();
+        final releaseStaleWrite = Completer<void>();
+        final completedSnapshots = <List<Community>>[];
+        final settleFenceValues = <bool>[];
+        final community = Community.create(
+          name: 'Age gated',
+          relayUrl: 'https://age-gated.example.com',
+          nsec: nostr.Keys.generate().nsec,
+        ).copyWith(pushNotificationsEnabled: true);
+        await communityStorage.save(community);
+
+        container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(communityStorage),
+            communitySnapshotWriterProvider.overrideWithValue((
+              communities,
+            ) async {
+              final captured = List.of(communities);
+              if (captured.isNotEmpty && !staleWriteStarted.isCompleted) {
+                staleWriteStarted.complete();
+                await releaseStaleWrite.future;
+              }
+              completedSnapshots.add(captured);
+            }),
+            ageGateCommunitySnapshotWriterProvider.overrideWithValue((
+              communities, {
+              required settleFence,
+            }) async {
+              completedSnapshots.add(List.of(communities));
+              settleFenceValues.add(settleFence);
+            }),
+          ],
+        );
+
+        final staleExport = container.read(communityListProvider.future);
+        await staleWriteStarted.future;
+        final suspension = container.read(
+          suspendCommunitySnapshotForAgeCheckProvider,
+        )();
+
+        releaseStaleWrite.complete();
+        await staleExport;
+        await suspension;
+
+        expect(completedSnapshots.last, isEmpty);
+        expect(settleFenceValues, [isFalse]);
+
+        await container.read(resumeCommunitySnapshotAfterAgeCheckProvider)();
+
+        expect(completedSnapshots.last.single.id, community.id);
+        expect(settleFenceValues, [isFalse, isTrue]);
       },
     );
 

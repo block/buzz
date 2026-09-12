@@ -80,6 +80,9 @@ class CommunityStorage {
     await _saveList(all);
   }
 
+  /// Replaces the complete stored community list in one secure-storage write.
+  Future<void> saveAll(List<Community> communities) => _saveList(communities);
+
   Future<void> remove(String id) async {
     final all = await loadAll();
     all.removeWhere((w) => w.id == id);

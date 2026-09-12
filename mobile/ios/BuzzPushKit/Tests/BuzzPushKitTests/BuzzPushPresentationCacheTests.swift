@@ -11,6 +11,253 @@ struct BuzzPushPresentationCacheTests {
   private let relayKey = String(repeating: "0", count: 63) + "2"
   private let otherRelayKey = String(repeating: "0", count: 63) + "3"
 
+  @Test("Age restriction fence persists a new token for other processes")
+  func ageRestrictionFencePersistsGeneration() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let writer = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let reader = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    #expect(reader.current() == .unavailable)
+    let first = try writer.begin()
+    #expect(first.isFencing)
+    #expect(reader.current() == first)
+    let second = try writer.settleIfFencing()
+    #expect(!second.isFencing)
+    #expect(second.token != first.token)
+    #expect(reader.current() == second)
+  }
+
+  @Test("Legacy notification state without a fence fails closed until restored")
+  func legacyNotificationStateWithoutFenceFailsClosed() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let legacySnapshot = directory.appendingPathComponent(
+      BuzzPushPresentationCacheStore.fileName
+    )
+    try Data("legacy notification snapshot".utf8).write(to: legacySnapshot)
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    let beforeAgeCheck = store.current()
+    #expect(beforeAgeCheck == .unavailable)
+    #expect(beforeAgeCheck.requiresDiscard(since: beforeAgeCheck))
+
+    let restored = try store.settleIfFencing()
+    #expect(!restored.isFencing)
+    #expect(store.current() == restored)
+    #expect(!restored.requiresDiscard(since: restored))
+  }
+
+  @Test("Fenced cleanup rotates before work and settles only after success")
+  func fencedCleanupOrdersTransitions() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let writer = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let reader = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let initial = reader.current()
+    var observedDuringCleanup: BuzzAgeRestrictionFence?
+
+    try writer.performFencedCleanup {
+      observedDuringCleanup = reader.current()
+    }
+
+    let active = try #require(observedDuringCleanup)
+    let settled = reader.current()
+    #expect(active.isFencing)
+    #expect(active.token != initial.token)
+    #expect(!settled.isFencing)
+    #expect(settled.token != active.token)
+  }
+
+  @Test("Failed fenced cleanup remains active")
+  func failedFencedCleanupRemainsActive() throws {
+    struct CleanupFailure: Error {}
+
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    #expect(throws: CleanupFailure.self) {
+      try store.performFencedCleanup {
+        throw CleanupFailure()
+      }
+    }
+    #expect(store.current().isFencing)
+  }
+
+  @Test("Asynchronous fenced cleanup waits for acknowledged success")
+  func asynchronousFencedCleanupWaitsForSuccess() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var acknowledge: ((Error?) -> Void)?
+    var didComplete = false
+
+    try store.performFencedAsyncCleanup(
+      { acknowledge = $0 },
+      completion: { error in
+        #expect(error == nil)
+        didComplete = true
+      }
+    )
+
+    #expect(store.current().isFencing)
+    #expect(!didComplete)
+    let acknowledgeCleanup = try #require(acknowledge)
+    acknowledgeCleanup(nil)
+    #expect(!store.current().isFencing)
+    #expect(didComplete)
+  }
+
+  @Test("Failed asynchronous cleanup remains fenced")
+  func failedAsynchronousCleanupRemainsFenced() throws {
+    struct CleanupFailure: Error {}
+
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var reportedFailure = false
+
+    try store.performFencedAsyncCleanup(
+      { $0(CleanupFailure()) },
+      completion: { error in
+        reportedFailure = error is CleanupFailure
+      }
+    )
+
+    #expect(reportedFailure)
+    #expect(store.current().isFencing)
+  }
+
+  @Test("Older asynchronous cleanup cannot settle a newer fence")
+  func olderAsynchronousCleanupCannotSettleNewerFence() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var acknowledgeOlder: ((Error?) -> Void)?
+    var acknowledgeNewer: ((Error?) -> Void)?
+
+    try store.performFencedAsyncCleanup(
+      { acknowledgeOlder = $0 },
+      completion: { _ in }
+    )
+    try store.performFencedAsyncCleanup(
+      { acknowledgeNewer = $0 },
+      completion: { _ in }
+    )
+    let newerFence = store.current()
+
+    let completeOlder = try #require(acknowledgeOlder)
+    completeOlder(nil)
+    #expect(store.current() == newerFence)
+    #expect(store.current().isFencing)
+
+    let completeNewer = try #require(acknowledgeNewer)
+    completeNewer(nil)
+    #expect(!store.current().isFencing)
+  }
+
+  @Test("Cross-process lock prevents an older settle from overwriting a newer fence")
+  func crossProcessLockSerializesSettleAndBegin() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let settleReachedWrite = DispatchSemaphore(value: 0)
+    let releaseSettle = DispatchSemaphore(value: 0)
+    let settleFinished = DispatchSemaphore(value: 0)
+    let beginFinished = DispatchSemaphore(value: 0)
+    let settlingStore = BuzzAgeRestrictionFenceStore(
+      containerURL: directory,
+      beforeSettledWrite: {
+        settleReachedWrite.signal()
+        releaseSettle.wait()
+      }
+    )
+    let beginningStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let active = try settlingStore.begin()
+
+    DispatchQueue.global().async {
+      _ = try? settlingStore.settleIfFencing(expectedToken: active.token)
+      settleFinished.signal()
+    }
+    #expect(settleReachedWrite.wait(timeout: .now() + 1) == .success)
+
+    DispatchQueue.global().async {
+      _ = try? beginningStore.begin()
+      beginFinished.signal()
+    }
+    #expect(beginFinished.wait(timeout: .now() + 0.05) == .timedOut)
+
+    releaseSettle.signal()
+    #expect(settleFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginFinished.wait(timeout: .now() + 1) == .success)
+    let newest = beginningStore.current()
+    #expect(newest.isFencing)
+    #expect(newest.token != active.token)
+  }
+
+  @Test("Cross-process lock orders a final handoff before cleanup begins")
+  func crossProcessLockSerializesHandoffAndBegin() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let handoffEntered = DispatchSemaphore(value: 0)
+    let releaseHandoff = DispatchSemaphore(value: 0)
+    let handoffFinished = DispatchSemaphore(value: 0)
+    let beginFinished = DispatchSemaphore(value: 0)
+    let handingOffStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let beginningStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let settled = try handingOffStore.settleIfFencing()
+
+    DispatchQueue.global().async {
+      _ = try? handingOffStore.performIfUnchanged(since: settled) {
+        handoffEntered.signal()
+        releaseHandoff.wait()
+      }
+      handoffFinished.signal()
+    }
+    #expect(handoffEntered.wait(timeout: .now() + 1) == .success)
+
+    DispatchQueue.global().async {
+      _ = try? beginningStore.begin()
+      beginFinished.signal()
+    }
+    #expect(beginFinished.wait(timeout: .now() + 0.05) == .timedOut)
+
+    releaseHandoff.signal()
+    #expect(handoffFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginningStore.current().isFencing)
+  }
+
+  @Test("A changed fence refuses the final handoff")
+  func changedFenceRefusesHandoff() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let settled = try store.settleIfFencing()
+    _ = try store.begin()
+    var handedOff = false
+
+    let accepted = try store.performIfUnchanged(since: settled) {
+      handedOff = true
+    }
+
+    #expect(!accepted)
+    #expect(!handedOff)
+  }
+
+  @Test("Age restriction fence discards active and superseded resolutions")
+  func ageRestrictionFenceDiscardPolicy() {
+    let initial = BuzzAgeRestrictionFence.initial
+    let active = BuzzAgeRestrictionFence(token: "active", isFencing: true)
+    let settled = BuzzAgeRestrictionFence(token: "settled", isFencing: false)
+
+    #expect(!initial.requiresDiscard(since: initial))
+    #expect(active.requiresDiscard(since: initial))
+    #expect(BuzzAgeRestrictionFence.unavailable.requiresDiscard(since: initial))
+    #expect(settled.requiresDiscard(since: initial))
+    #expect(!settled.requiresDiscard(since: settled))
+  }
+
   @Test("Verified profile uses display_name, then name, and attaches a bounded local avatar")
   func verifiedProfilePrecedenceAndAvatar() throws {
     let directory = try temporaryDirectory()

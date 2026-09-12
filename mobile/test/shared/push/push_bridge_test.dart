@@ -60,6 +60,52 @@ void main() {
     },
   );
 
+  test('strict age-gate snapshot requires a native handler', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, null);
+
+    await expectLater(
+      registerBuzzPushCommunitySnapshotStrict(const [], settleFence: false),
+      throwsA(isA<MissingPluginException>()),
+    );
+  });
+
+  test(
+    'strict age-gate snapshot uses the acknowledged native method',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'syncAgeGatePushSnapshot');
+            expect(call.arguments, {
+              'section': 'communities',
+              'communities': <Object?>[],
+              'signingKeys': <String, String>{},
+              'settleFence': true,
+            });
+            return null;
+          });
+
+      await registerBuzzPushCommunitySnapshotStrict(
+        const [],
+        settleFence: true,
+      );
+    },
+  );
+
+  test('purges notifications delivered before age restriction', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'purgeAgeRestrictedNotifications');
+          expect(call.arguments, isNull);
+          return null;
+        });
+
+    await purgeAgeRestrictedBuzzNotifications();
+  });
+
   test('reads native notification authorization status', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
