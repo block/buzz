@@ -203,6 +203,13 @@ spec:
                   name: {{ include "buzz.envSecretName" . }}
                   key: REDIS_URL
                   optional: {{ and (eq (include "buzz.minimumReplicas" . | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
+            {{- if eq .Values.s3.credentialSource "chain" }}
+            # credentialSource: chain — emit literal empty strings so the relay
+            # resolves S3 credentials from the pod IAM role (EKS Pod Identity / IRSA)
+            # instead of substituting the buzz_dev placeholders for absent vars (#5211).
+            - { name: BUZZ_S3_ACCESS_KEY, value: "" }
+            - { name: BUZZ_S3_SECRET_KEY, value: "" }
+            {{- else }}
             - name: BUZZ_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -221,6 +228,7 @@ spec:
                   name: {{ include "buzz.envSecretName" . }}
                   key: BUZZ_KLIPY_API_KEY
                   optional: true
+            {{- end }}
 
             - name: BUZZ_HUDDLE_AUDIO_AVAILABLE
               value: {{ include "buzz.huddleAudioAvailable" . | quote }}

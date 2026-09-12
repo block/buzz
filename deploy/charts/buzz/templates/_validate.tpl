@@ -83,4 +83,11 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "S3/object-storage source missing: enable minio.enabled=true (quickstart in-cluster), set s3.endpoint + s3.bucket + credentials, or provide secrets.existingSecret with keys BUZZ_S3_ACCESS_KEY + BUZZ_S3_SECRET_KEY. By default the relay runs a startup S3 conformance probe and exits if storage is unreachable; disabling BUZZ_GIT_CONFORMANCE_PROBE also removes that startup storage check." -}}
 {{- end -}}
 
+{{/* credentialSource: chain resolves S3 keys from the pod IAM role, so
+     static keys must not be supplied alongside it (they would contradict
+     the chain and the relay would still take the static branch). */}}
+{{- if and (eq .Values.s3.credentialSource "chain") (or .Values.s3.accessKey .Values.s3.secretKey) -}}
+  {{- fail "s3.credentialSource: chain cannot be combined with s3.accessKey / s3.secretKey — the chain resolves credentials from the pod IAM role (EKS Pod Identity / IRSA); remove the static keys or set s3.credentialSource: static (#5211)." -}}
+{{- end -}}
+
 {{- end -}}
