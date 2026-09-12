@@ -7,6 +7,11 @@ const _huddleSpeakingRingSize = 112.0;
 const _huddleParticipantLabelSpace = 28.0;
 const _huddleDenseParticipantThreshold = 6;
 
+/// Exposes the actual participant profile producer without starting native audio.
+@visibleForTesting
+ProviderListenable<int> debugHuddleProfileUpdates(String channelId) =>
+    _huddleParticipantProfileUpdatesProvider(channelId);
+
 final _huddleParticipantProfileUpdatesProvider = NotifierProvider.autoDispose
     .family<_HuddleParticipantProfileUpdates, int, String>(
       _HuddleParticipantProfileUpdates.new,

@@ -9,8 +9,8 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
-import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -22,7 +22,7 @@ import '../community/community_storage_test.dart' show FakeSecureStorage;
 import '../crypto/nip_oa_test.dart' show authTag, profile;
 
 void main() {
-  for (final boundary in ['search', 'refresh', 'preload']) {
+  for (final boundary in ['search', 'refresh', 'preload', 'live']) {
     for (final transition
         in boundary == 'search'
             ? ['unchanged', 'community', 'account', 'ABA']
@@ -79,6 +79,23 @@ void main() {
         if (boundary == 'search') {
           container.listen(search, (_, _) {});
           await entered.future;
+        } else if (boundary == 'live') {
+          container.read(relaySessionProvider);
+          await session.debugHandleConnected();
+          container.listen(agentOwnersProvider, (_, _) {});
+          await drainAdmission();
+          session.debugHandleMessage([
+            'EVENT',
+            'h-1',
+            {...owned.toJson(), 'kind': 10100, 'content': '{}'},
+          ]);
+          session.debugHandleMessage(['EOSE', 'h-1']);
+          await drainAdmission();
+          session.debugHandleMessage(['EOSE', 'l-2']);
+          await container.pump();
+          expect(await container.read(agentOwnersProvider.future), isEmpty);
+          // Queue in the real session buffer, not an obsolete callback handle.
+          session.debugHandleMessage(['EVENT', 'l-2', owned.toJson()]);
         } else {
           pending = boundary == 'refresh'
               ? cache.refresh([agent.public])
@@ -99,6 +116,8 @@ void main() {
         }
         if (boundary == 'search') {
           response.complete(http.Response(jsonEncode([owned.toJson()]), 200));
+        } else if (boundary == 'live') {
+          session.debugFlushEventBuffer();
         } else {
           session.debugHandleMessage(['EVENT', 'h-1', owned.toJson()]);
           session.debugHandleMessage(['EOSE', 'h-1']);
@@ -137,6 +156,15 @@ void main() {
           expect(oldAdmission.isCurrent, isFalse);
           expect(current.profilePubkeys, isEmpty);
           expect(await container.read(agentOwnersProvider.future), isEmpty);
+          for (final (tags, time, allowed) in [
+            (<List<String>>[], 101, false),
+            (owned.tags, 102, true),
+          ]) {
+            current.captureAdmission().add(
+              profile(agent, tags, createdAt: time),
+            );
+            await accepts(allowed);
+          }
           expect(container.read(search).value, same(found));
         }
         if (boundary != 'search' && transition == 'community') {
@@ -144,7 +172,7 @@ void main() {
           final recovery = container.read(userCacheProvider.notifier).refresh([
             agent.public,
           ]);
-          const id = 'h-2';
+          final id = boundary == 'live' ? 'h-3' : 'h-2';
           session.debugHandleMessage(['EVENT', id, owned.toJson()]);
           session.debugHandleMessage(['EOSE', id]);
           expect(await recovery, isTrue);

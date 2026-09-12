@@ -70,6 +70,7 @@ void main() {
             ),
           ],
         );
+        container.listen(agentOwnersProvider, (_, _) {});
         expect(
           await container.read(agentOwnersProvider.future),
           expected == null ? isEmpty : {agent.public: expected},
@@ -937,5 +938,19 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     return profileEvents;
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    void Function(RelaySubscriptionStatus status)? onStatusChanged,
+  }) async {
+    for (final event in profileEvents) {
+      onEvent(event);
+    }
+    onStatusChanged?.call(RelaySubscriptionStatus.ready);
+    return () {};
   }
 }

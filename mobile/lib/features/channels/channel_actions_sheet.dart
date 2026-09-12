@@ -98,6 +98,8 @@ class ChannelActionsSheet extends HookConsumerWidget {
       orElse: () => null,
     );
     final ownsOwnerAgent =
+        !agentOwnersAsync.isLoading &&
+        !agentOwnersAsync.hasError &&
         currentPubkey != null &&
         membersAsync.value?.any(
               (member) =>

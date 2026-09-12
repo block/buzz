@@ -1,10 +1,11 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/crypto/nip_oa.dart';
+import '../profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 
@@ -74,18 +75,61 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
 /// profiles. An entry exists only when the `auth` tag verifies — mirrors
 /// desktop's `profile_valid_oa_owner_pubkey`.
 final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
-  final agents = await ref.watch(agentDirectoryProvider.future);
-  if (agents.isEmpty) return const {};
-  final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.profilesBatch([for (final agent in agents) agent.pubkey]),
-  );
-  final owners = <String, String>{};
-  for (final event in latestProfileEvents(events).values) {
-    final owner = verifiedOaOwnerPubkey(event);
-    if (owner != null) owners[event.pubkey.toLowerCase()] = owner;
+  ref.watch(userCacheProvider);
+  final cache = ref.read(userCacheProvider.notifier);
+  final source = ref.watch(_agentOwnerProfilesProvider);
+  final ready =
+      source.asData?.value ??
+      await ref.watch(_agentOwnerProfilesProvider.future);
+  if (ready != true) throw StateError('Owner profile feed unavailable');
+  return cache.profileOwners;
+});
+
+// The live REQ carries history too; only EOSE (not acquisition timeout) is ready.
+final _agentOwnerProfilesProvider = StreamProvider<bool>((ref) async* {
+  ref.watch(relayConfigProvider);
+  final admission = ref.read(userCacheProvider.notifier).captureAdmission();
+  if (ref.watch(relaySessionProvider).status != SessionStatus.connected) {
+    yield false;
+    return;
   }
-  return owners;
+  final availability = StreamController<bool>()..add(false);
+  var disposed = false;
+  void Function()? unsubscribe;
+  ref.onDispose(() {
+    disposed = true;
+    unsubscribe?.call();
+    availability.close();
+  });
+  final agents = await ref.watch(agentDirectoryProvider.future);
+  if (disposed) return;
+  if (agents.isEmpty) {
+    yield true;
+    return;
+  }
+  final session = ref.read(relaySessionProvider.notifier);
+  final filter = NostrFilters.profilesBatch([
+    for (final agent in agents) agent.pubkey,
+  ]);
+  unsubscribe = await session.subscribeWithStatus(
+    filter,
+    (event) {
+      if (!disposed) admission.add(event);
+    },
+    onClosed: (_) {
+      if (!disposed) availability.add(false);
+    },
+    onStatusChanged: (status) {
+      if (!disposed) {
+        availability.add(status == RelaySubscriptionStatus.ready);
+      }
+    },
+  );
+  if (disposed) {
+    unsubscribe();
+    return;
+  }
+  yield* availability.stream;
 });
 
 /// Pubkeys currently known to represent agents across the active relay.

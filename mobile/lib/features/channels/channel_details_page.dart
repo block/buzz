@@ -74,6 +74,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
       orElse: () => null,
     );
     final ownsOwnerAgent =
+        !agentOwnersAsync.isLoading &&
+        !agentOwnersAsync.hasError &&
         resolvedCurrentPubkey != null &&
         members.any(
           (member) =>

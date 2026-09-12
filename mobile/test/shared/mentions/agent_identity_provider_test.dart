@@ -1,4 +1,14 @@
 import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_actions_sheet.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/widgets/buzz_action_tile.dart';
+import '../../helpers/widget_helpers.dart';
+
+import 'package:nostr/nostr.dart' as nostr;
+import '../crypto/nip_oa_test.dart' show authTag, profile;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -8,6 +18,144 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  final owner = nostr.Keys.generate();
+  final agent = nostr.Keys.generate();
+  final owned = profile(agent, [authTag(owner, agent.public)]);
+  final revoked = profile(agent, [], createdAt: 101);
+  // Canonical positive/revocation/tie projection is exercised through both
+  // owner and search providers in channel_management_provider_test.dart.
+  for (final details in [false, true]) {
+    testWidgets(
+      '${details ? 'Details' : 'Actions'} follows live owner authority',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(900, 2400));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final restored = profile(agent, [
+          authTag(owner, agent.public),
+        ], createdAt: 103);
+        final invalid = profile(agent, [
+          authTag(owner, owner.public),
+        ], createdAt: 104);
+        final session = _MembershipRelaySessionNotifier(
+          [owned, profile(agent, [], kind: 10100)],
+          profiles: true,
+          autoReady: false,
+        );
+        final channel = Channel(
+          id: _channelId,
+          name: 'proof',
+          channelType: 'stream',
+          visibility: 'open',
+          description: '',
+          createdBy: agent.public,
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              relaySessionProvider.overrideWith(() => session),
+              relayConfigProvider.overrideWith(_FixedRelayConfig.new),
+              currentPubkeyProvider.overrideWithValue(owner.public),
+              channelMembersProvider(_channelId).overrideWith(
+                (ref) async => [
+                  ChannelMember(
+                    pubkey: agent.public,
+                    role: 'owner',
+                    joinedAt: DateTime(2025),
+                  ),
+                ],
+              ),
+            ],
+            child: details
+                ? ChannelDetailsPage(
+                    channel: channel,
+                    currentPubkey: owner.public,
+                    onMemberTap: (_, _) {},
+                  )
+                : ChannelActionsSheet(channel: channel, isUnread: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(
+            find.byType(details ? ChannelDetailsPage : ChannelActionsSheet),
+          ),
+        );
+        final candidates = mentionCandidatesProvider((
+          channelId: _channelId,
+          query: '',
+        ));
+        final listener = container.listen(candidates, (_, _) {});
+        addTearDown(listener.close);
+        await tester.pumpAndSettle();
+        Future<void> controls(bool allowed) async {
+          await tester.pumpAndSettle();
+          if (details) {
+            final edit = find.byKey(
+              const ValueKey('channel-details-edit-action'),
+            );
+            expect(tester.widget<BuzzActionTile>(edit).isEnabled, allowed);
+          } else {
+            expect(
+              find.text('Archive channel'),
+              allowed ? findsOneWidget : findsNothing,
+            );
+            expect(
+              find.text('Delete channel'),
+              allowed ? findsOneWidget : findsNothing,
+            );
+          }
+          expect(
+            container.read(candidates).single.ownerPubkey,
+            allowed ? owner.public : isNull,
+          );
+        }
+
+        // Acquisition alone is not EOSE, even with a positive cached profile.
+        await controls(false);
+        session.autoReady = true;
+        session.setSubscriptionStatus(RelaySubscriptionStatus.ready);
+        await controls(true);
+        session.closeProfiles();
+        await controls(false);
+        expect(container.read(userCacheProvider.notifier).profileOwners, {
+          agent.public: owner.public,
+        });
+        session._memberships[0] = revoked;
+        session.connection(SessionStatus.disconnected);
+        await tester.pumpAndSettle();
+        session.connection(SessionStatus.connected);
+        await controls(false);
+        for (final event in [revoked, restored, invalid, owned]) {
+          session.emit(event);
+          await controls(event.id == restored.id);
+          if (event.id == restored.id) {
+            session.setSubscriptionStatus(RelaySubscriptionStatus.retrying);
+            await controls(false);
+            session.setSubscriptionStatus(RelaySubscriptionStatus.ready);
+            await controls(true);
+            session.connection(SessionStatus.disconnected);
+            await controls(false);
+            session.connection(SessionStatus.connected);
+            await controls(true);
+          }
+        }
+        final cache = container.read(userCacheProvider.notifier);
+        await cache.refresh([agent.public]);
+        // A new connection rebuilds the profile producer against stale history.
+        session.connection(SessionStatus.disconnected);
+        await tester.pumpAndSettle();
+        session.connection(SessionStatus.connected);
+        await tester.pumpAndSettle();
+        session.emit(owned);
+        await controls(false);
+        expect(cache.profileOwners, isEmpty);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
   test('refreshes channel bot roles from live membership updates', () async {
     final relaySession = _MembershipRelaySessionNotifier([
       _membershipEvent(role: 'bot'),
@@ -253,13 +401,22 @@ Future<void> _pumpEventQueue() async {
 class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrEvent> _memberships;
   final Object? subscribeError;
+  final bool profiles;
+  bool autoReady;
   final List<NostrFilter> liveFilters = [];
   final List<_LiveSubscription> _subscriptions = [];
   final Completer<void> _subscribed = Completer<void>();
   var unsubscribeCount = 0;
   var _membershipIndex = 0;
 
-  _MembershipRelaySessionNotifier(this._memberships, {this.subscribeError});
+  _MembershipRelaySessionNotifier(
+    this._memberships, {
+    this.subscribeError,
+    this.profiles = false,
+    this.autoReady = true,
+  });
+
+  void connection(SessionStatus status) => state = SessionState(status: status);
 
   Future<void> get subscribed => _subscribed.future;
 
@@ -271,7 +428,11 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    return [_memberships[_membershipIndex++]];
+    return profiles
+        ? _memberships
+              .where((event) => filter.kinds.contains(event.kind))
+              .toList()
+        : [_memberships[_membershipIndex++]];
   }
 
   @override
@@ -290,7 +451,14 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
       onStatusChanged,
     );
     _subscriptions.add(subscription);
-    onStatusChanged(RelaySubscriptionStatus.ready);
+    if (profiles) {
+      for (final event in _memberships.where(
+        (event) => _matches(filter, event),
+      )) {
+        onEvent(event);
+      }
+    }
+    if (autoReady) onStatusChanged(RelaySubscriptionStatus.ready);
     if (!_subscribed.isCompleted) _subscribed.complete();
     return () {
       unsubscribeCount++;
@@ -303,6 +471,14 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
       if (_matches(subscription.filter, event)) {
         subscription.onEvent(event);
       }
+    }
+  }
+
+  void closeProfiles() {
+    for (final sub in List.of(_subscriptions)) {
+      if (!sub.filter.kinds.contains(0)) continue;
+      sub.onClosed?.call('restricted: no longer valid');
+      _subscriptions.remove(sub);
     }
   }
 
@@ -344,4 +520,9 @@ bool _matches(NostrFilter filter, NostrEvent event) {
           tag.skip(1).any(entry.value.contains),
     );
   });
+}
+
+class _FixedRelayConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.invalid');
 }
