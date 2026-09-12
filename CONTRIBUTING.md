@@ -161,6 +161,26 @@ Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
 `:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
 pending database migrations.
 
+#### Disk space for local checks
+
+Rust test, clippy, and Tauri builds can add roughly 15 GiB to a cold Cargo
+target. Before build-heavy pre-push jobs start, Buzz reserves that headroom and
+requires at least 10 GiB to remain afterward. With the defaults, the guard
+therefore blocks below 25 GiB free. Documentation-only pushes skip the check.
+If the preflight blocks, free space or run `just clean` before retrying.
+
+Developers with a warm shared target can tune the estimate for one push without
+skipping the remaining hooks:
+
+```bash
+BUZZ_DISK_BUILD_RESERVE_GIB=8 git push       # default: 15
+BUZZ_DISK_MIN_FREE_GIB=5 git push            # default: 10
+BUZZ_SKIP_DISK_PREFLIGHT=1 git push          # bypass this guard only
+```
+
+Use the escape hatch only after checking available disk space yourself. CI is
+unaffected by this local pre-push guard.
+
 ### Running the Relay and Desktop App
 
 ```bash
