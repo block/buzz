@@ -259,6 +259,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     final hidesLatestForComposerTailCorrection = useState(false);
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
+    final initialSettleRevealGeneration = useRef(0);
+    final idleTailRecheck = useRef<(ScrollPosition, VoidCallback)?>(null);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
     final composerHasFocus = useListenable(composerFocusNode).hasFocus;
     final viewportHeight = useListenable(listViewport.height).value;
@@ -280,6 +282,18 @@ class ThreadDetailPage extends HookConsumerWidget {
     // the hydrated target, then reveal the settled viewport.
     final threadViewportVisible =
         !relayRepliesAvailable || initialViewportReady.value;
+    // A deep link renders its route snapshot while the relay query is still
+    // in flight, then closes the viewport gate to place the hydrated target.
+    // Latest measured against that provisional snapshot would mount, unmount
+    // for the placement frames, and mount again; wait for the placement.
+    // Only the first attempt counts: a failed query's retry window carries
+    // its error while loading, and a reader browsing the snapshot through
+    // that window keeps their way back to the tail.
+    final hidesLatestForDeepLinkSnapshot =
+        initialMessageId != null &&
+        !relayRepliesAvailable &&
+        relayReplyState.isLoading &&
+        !relayReplyState.hasError;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
@@ -410,10 +424,76 @@ class ThreadDetailPage extends HookConsumerWidget {
       WidgetsBinding.instance.scheduleFrame();
     }
 
+    void cancelIdleTailRecheck() {
+      final pending = idleTailRecheck.value;
+      if (pending == null) return;
+      pending.$1.isScrollingNotifier.removeListener(pending.$2);
+      idleTailRecheck.value = null;
+    }
+
+    // Re-decide the tail once a programmatic scroll on [position] goes idle.
+    // The final tick can land without a further position report, so the
+    // hysteresis in onPositionsChanged needs this to release its hold.
+    void scheduleIdleTailRecheck(ScrollPosition position) {
+      if (identical(idleTailRecheck.value?.$1, position)) return;
+      cancelIdleTailRecheck();
+      void onScrollingChanged() {
+        if (position.isScrollingNotifier.value) return;
+        cancelIdleTailRecheck();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted || tailCorrectionInProgress.value) return;
+          // Back-to-back programmatic activities (a correction chained onto
+          // a spring) pass through idle for a microtask; keep holding.
+          if (_threadScrollIsProgrammaticallyMoving(
+            position,
+            isDragging: tailIntent.isDragging,
+          )) {
+            scheduleIdleTailRecheck(position);
+            return;
+          }
+          final tailIsVisible = threadTailIsVisible();
+          if (isAtThreadTail.value != tailIsVisible) {
+            isAtThreadTail.value = tailIsVisible;
+          }
+        });
+        WidgetsBinding.instance.scheduleFrame();
+      }
+
+      idleTailRecheck.value = (position, onScrollingChanged);
+      position.isScrollingNotifier.addListener(onScrollingChanged);
+    }
+
+    // Ordinary entry keeps Latest hidden until the initial settle has placed
+    // the tail. Positions refresh one frame after that placement, so decide
+    // from a fenced post-frame callback; a drag that begins first owns the
+    // flag instead (onUserScrollStart bumps the generation). Without this
+    // release a tail that ends below the composer had no way back.
+    void revealLatestAfterInitialSettle() {
+      final generation = ++initialSettleRevealGeneration.value;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted ||
+            generation != initialSettleRevealGeneration.value) {
+          return;
+        }
+        if (!tailCorrectionInProgress.value) {
+          isAtThreadTail.value = threadTailIsVisible();
+        }
+        hidesLatestForInitialTailSettle.value = false;
+      });
+      WidgetsBinding.instance.scheduleFrame();
+    }
+
+    useEffect(() => cancelIdleTailRecheck, const []);
+
     void followThreadTailFromComposer() {
       if (userDragDetachedTailFollow.value) return;
       hidesLatestForComposerTailCorrection.value = true;
+      // Abandoning the settle here means its reveal never runs; release the
+      // entry gate now so a tail left below the fold still offers Latest
+      // once the composer blurs.
       initialTailSettle.abandon();
+      initialSettleRevealGeneration.value++;
+      hidesLatestForInitialTailSettle.value = false;
       initialViewportReady.value = true;
       tailIntent.endDrag();
       tailIntent.detach();
@@ -444,9 +524,24 @@ class ThreadDetailPage extends HookConsumerWidget {
             followsThreadTail.value = true;
           }
           if (tailCorrectionInProgress.value) return;
-          if (isAtThreadTail.value != tailIsVisible) {
-            isAtThreadTail.value = tailIsVisible;
+          if (isAtThreadTail.value == tailIsVisible) return;
+          // A driven or ballistic scroll that no finger started (a placement,
+          // an iOS rubber-band, a correction) reports intermediate positions
+          // every frame. Those may hide Latest early but must not reveal it:
+          // the motion is heading for the tail, and mounting the native
+          // control per report is the visible strobe. The user's own drags
+          // and the idle position after the motion ends decide freely.
+          final position = activeThreadScrollPosition.value;
+          if (!tailIsVisible &&
+              position != null &&
+              _threadScrollIsProgrammaticallyMoving(
+                position,
+                isDragging: tailIntent.isDragging,
+              )) {
+            scheduleIdleTailRecheck(position);
+            return;
           }
+          isAtThreadTail.value = tailIsVisible;
         }
 
         itemPositionsListener.itemPositions.addListener(onPositionsChanged);
@@ -459,6 +554,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         replies.length,
         liveHead.createdAt,
         viewportHeight,
+        timelineBottomInset,
       ],
     );
 
@@ -577,6 +673,10 @@ class ThreadDetailPage extends HookConsumerWidget {
             initialTargetReadyForHighlight.value = true;
             initialViewportReady.value = true;
           });
+          // A post-frame callback does not request its own frame; a slow
+          // relay can otherwise park the hydrated viewport until an
+          // unrelated redraw.
+          WidgetsBinding.instance.scheduleFrame();
         }
 
         itemPositionsListener.itemPositions.addListener(
@@ -620,6 +720,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           context: context,
           controller: itemScrollController,
           positionsListener: itemPositionsListener,
+          activePosition: () => activeThreadScrollPosition.value,
           targetIndex: replies.isEmpty
               ? null
               : indexForReply(replies.length - 1),
@@ -627,7 +728,9 @@ class ThreadDetailPage extends HookConsumerWidget {
           hiddenBottomFraction:
               (composerDockHeight.value + settledImeLift) / viewportHeight,
           onSettled: () {
-            if (context.mounted) initialViewportReady.value = true;
+            if (!context.mounted) return;
+            initialViewportReady.value = true;
+            revealLatestAfterInitialSettle();
           },
         );
         return null;
@@ -855,6 +958,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 child: _ThreadMessageList(
                   viewport: listViewport,
                   onUserScrollStart: () {
+                    initialSettleRevealGeneration.value++;
                     hidesLatestForInitialTailSettle.value = false;
                     hidesLatestForComposerTailCorrection.value = false;
                     initialTailSettle.abandon();
@@ -974,6 +1078,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 visible:
                     threadViewportVisible &&
                     hasFetchedReplies &&
+                    !hidesLatestForDeepLinkSnapshot &&
                     !isNavigatingToThreadTail.value &&
                     !hidesLatestForInitialTailSettle.value &&
                     !hidesLatestForComposerTailCorrection.value &&
