@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
-    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
+    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info,buzz_pubsub=info"))
 }
 use uuid::Uuid;
 
@@ -1241,16 +1241,18 @@ mod env_filter_tests {
     use tracing_subscriber::prelude::*;
 
     #[test]
-    fn unset_enables_datastore_only_for_otel_filter() {
+    fn unset_enables_relay_and_pubsub_logs_plus_datastore_traces() {
         let logs = tracing_subscriber::registry().with(log_env_filter(None));
         tracing::subscriber::with_default(logs, || {
             assert!(!tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
             assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_pubsub", tracing::Level::INFO));
         });
 
         let otel = tracing_subscriber::registry().with(otel_env_filter(None));
         tracing::subscriber::with_default(otel, || {
             assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_pubsub", tracing::Level::INFO));
         });
     }
 
