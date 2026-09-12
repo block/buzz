@@ -604,7 +604,9 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -617,7 +619,9 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -1261,7 +1265,15 @@ fn build_git_issue_assignee_operation(
         tags.push(tag(&["prior", &prior])?);
     }
 
-    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+    // `.allow_self_tagging()`, for the same reason as the kind:9000/9001
+    // builders above: an assignment note's `p` tags ARE the assignees, so a
+    // self-assignment has target == signer and nostr 0.44 strips the tag by
+    // default. Without it, Desktop's "Assign to me" and "Unassign" report
+    // success and write the history comment while the Assignees row never
+    // changes (@sumit-m, #4326).
+    Ok(EventBuilder::new(Kind::Custom(1), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
@@ -3061,6 +3073,66 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn self_assignment_preserves_p_tag() {
+        // #4326 again, third builder: Desktop's "Assign to me" is a kind:1
+        // note whose `p` tags are the assignees, so a self-assignment has
+        // target == signer. Without allow_self_tagging the tag is stripped,
+        // the write "succeeds", and the Assignees row never changes.
+        let signer = keys();
+        let me = signer.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: me.clone(),
+            id: "buzz".to_string(),
+        };
+        let ev = build_git_issue_assignment(&repo, &"a".repeat(64), &[me.clone()], "Assigned")
+            .unwrap()
+            .sign_with_keys(&signer)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert!(
+            has_tag(&ev, "p", &me),
+            "self-assignment must keep its own p tag"
+        );
+    }
+
+    #[test]
+    fn remove_member_self_referential_preserves_p_tag() {
+        // Regression test for #4326: nostr 0.44 strips p-tags whose value
+        // equals the signer's pubkey unless `.allow_self_tagging()` is set.
+        let cid = uuid();
+        let signer = keys();
+        let signer_pubkey_hex = signer.public_key().to_hex();
+        let ev = build_remove_member(cid, &signer_pubkey_hex)
+            .unwrap()
+            .sign_with_keys(&signer)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9001);
+        assert!(
+            has_tag(&ev, "p", &signer_pubkey_hex),
+            "p tag targeting the signer must survive signing"
+        );
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn add_member_self_referential_preserves_p_tag() {
+        // Same self-referential guarantee as remove_member (#4326).
+        let cid = uuid();
+        let signer = keys();
+        let signer_pubkey_hex = signer.public_key().to_hex();
+        let ev = build_add_member(cid, &signer_pubkey_hex, Some(MemberRole::Member))
+            .unwrap()
+            .sign_with_keys(&signer)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(
+            has_tag(&ev, "p", &signer_pubkey_hex),
+            "p tag targeting the signer must survive signing"
+        );
+        assert!(has_tag(&ev, "role", "member"));
     }
 
     #[test]
