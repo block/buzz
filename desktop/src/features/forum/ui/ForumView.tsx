@@ -1,4 +1,4 @@
-import { MessageSquareText } from "lucide-react";
+import { AlertCircle, MessageSquareText } from "lucide-react";
 import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
@@ -162,6 +162,8 @@ export function ForumView({
         currentPubkey={effectiveCurrentPubkey}
         isDeletingPost={deletePostMutation.isPending}
         isLoading={threadQuery.isLoading}
+        loadError={threadQuery.isError ? threadQuery.error : null}
+        onRetry={() => void threadQuery.refetch()}
         isSendingReply={createReplyMutation.isPending}
         onBack={onClosePost}
         onDeletePost={(eventId) => {
@@ -238,6 +240,28 @@ export function ForumView({
             <Skeleton className="h-24 w-full rounded-xl" />
             <Skeleton className="h-24 w-full rounded-xl" />
             <Skeleton className="h-24 w-full rounded-xl" />
+          </div>
+        ) : postsQuery.isError ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+            <AlertCircle className="h-10 w-10 text-muted-foreground/40" />
+            <div>
+              <p className="text-sm font-medium text-foreground/70">
+                Could not load posts
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {postsQuery.error instanceof Error
+                  ? postsQuery.error.message
+                  : "The forum did not respond."}
+              </p>
+            </div>
+            <Button
+              disabled={postsQuery.isFetching}
+              onClick={() => void postsQuery.refetch()}
+              size="sm"
+              variant="outline"
+            >
+              {postsQuery.isFetching ? "Retrying..." : "Try again"}
+            </Button>
           </div>
         ) : posts.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 px-4 py-16 text-center">
