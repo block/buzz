@@ -5,6 +5,7 @@ import {
   commandsMatch,
   parseTimestamp,
   pickPreferredManagedAgent,
+  findPersonaAgentInChannel,
   findReusablePersonaAgent,
   findReusableGenericAgent,
   findReusableAgent,
@@ -175,6 +176,26 @@ test("findReusablePersonaAgent: excludes agent already in channel", () => {
   const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
   const channelMembers = new Set([PUB_A]);
   const result = findReusablePersonaAgent([agent], "persona-1", channelMembers);
+  assert.equal(result, undefined);
+});
+
+test("findPersonaAgentInChannel: finds the matching persona already attached", () => {
+  const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
+  const result = findPersonaAgentInChannel(
+    [agent],
+    "persona-1",
+    new Set([PUB_A]),
+  );
+  assert.equal(result, agent);
+});
+
+test("findPersonaAgentInChannel: ignores another persona in the channel", () => {
+  const agent = makeAgent({ personaId: "persona-2", pubkey: PUB_A });
+  const result = findPersonaAgentInChannel(
+    [agent],
+    "persona-1",
+    new Set([PUB_A]),
+  );
   assert.equal(result, undefined);
 });
 
