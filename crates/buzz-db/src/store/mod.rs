@@ -24,6 +24,8 @@ pub mod event;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Blob upload ownership and event-derived read authorization.
+pub mod media;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
 /// Monthly table partition management.
