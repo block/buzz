@@ -167,9 +167,14 @@ relay:
     requests:
       cpu: "500m"
       memory: "512Mi"
+      # Account for the two sizeLimit-ed emptyDirs (git.size + git.packCacheVolumeSize,
+      # 10Gi + 7Gi = 17Gi by default) so kube-scheduler sees the per-pod disk footprint
+      # and does not co-pack pods beyond a node's allocatable ephemeral storage (#5215).
+      ephemeral-storage: "17Gi"
     limits:
       cpu: "2"
       memory: "2Gi"
+      ephemeral-storage: "17Gi"
 
   podAnnotations: {}
   podLabels: {}
