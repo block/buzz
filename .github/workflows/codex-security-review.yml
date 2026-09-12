@@ -49,6 +49,7 @@ jobs:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -85,6 +86,7 @@ jobs:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -118,6 +120,7 @@ jobs:
         if: matrix.pr_number != 0
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -156,6 +159,7 @@ jobs:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -197,6 +201,7 @@ jobs:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -233,6 +238,7 @@ jobs:
       - name: Checkout exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: refs/pull/${{ needs.prepare-review.outputs.pr_number }}/head
           path: ${{ env.REVIEW_REPOSITORY }}
           fetch-depth: 0
@@ -520,6 +526,7 @@ jobs:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          allow-unsafe-pr-checkout: true
           ref: ${{ github.sha }}
           persist-credentials: false
 
