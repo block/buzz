@@ -271,7 +271,6 @@ fn ensure_nest_migrates_old_skill_dir() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn ensure_skill_symlinks_are_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
@@ -279,15 +278,24 @@ fn ensure_skill_symlinks_are_idempotent() {
     ensure_nest_at(&root).unwrap();
     // Second call should succeed without errors.
     ensure_nest_at(&root).unwrap();
-    // All symlinks still valid and point to relative targets.
     for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
         let link = root.join(dir).join("buzz-cli");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(
             link.join("SKILL.md").exists(),
-            "symlink at {dir}/buzz-cli should resolve to dir with SKILL.md"
+            "link at {dir}/buzz-cli should resolve to dir with SKILL.md"
         );
-        let target = fs::read_link(&link).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_skill_symlinks_use_relative_targets_on_unix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+        let target = fs::read_link(root.join(dir).join("buzz-cli")).unwrap();
         assert_eq!(
             target.to_str().unwrap(),
             format!("../../{CANONICAL_SKILL_DIR}"),
@@ -296,7 +304,27 @@ fn ensure_skill_symlinks_are_idempotent() {
     }
 }
 
-#[cfg(unix)]
+/// Windows junctions — the fallback when symlink creation is denied — store
+/// only absolute targets, so the nest is not relocatable there.
+#[cfg(windows)]
+#[test]
+fn ensure_skill_symlinks_use_absolute_targets_on_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    // Windows stores link targets in verbatim (`\\?\C:\…`) form, which never
+    // compares equal to the path passed in — canonicalize both sides.
+    let canonical = root.join(CANONICAL_SKILL_DIR).canonicalize().unwrap();
+    for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+        let link = root.join(dir).join("buzz-cli");
+        let stored = fs::read_link(&link).unwrap().canonicalize().unwrap();
+        assert_eq!(
+            stored, canonical,
+            "link at {dir}/buzz-cli should resolve to the canonical skill dir"
+        );
+    }
+}
+
 #[test]
 fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
     // ensure_skill_symlinks skips any path where symlink_metadata succeeds.
@@ -331,28 +359,32 @@ fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn ensure_skill_symlinks_skip_dangling_symlink() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
-    // Pre-create a dangling symlink where the .codex link would go.
+    // Pre-create a dangling link where the .codex link would go.
     let codex_skills = root.join(".codex/skills");
     fs::create_dir_all(&codex_skills).unwrap();
     let dangling = codex_skills.join("buzz-cli");
-    std::os::unix::fs::symlink("/nonexistent/target", &dangling).unwrap();
+    let missing = tmp.path().join("nonexistent-target");
+    // A junction cannot be created against a missing target, so make the
+    // target vanish after linking rather than before.
+    fs::create_dir_all(&missing).unwrap();
+    crate::util::create_dir_link(&missing, &dangling).unwrap();
+    fs::remove_dir(&missing).unwrap();
 
     ensure_nest_at(&root).unwrap();
 
-    // Dangling symlink should be left alone (not clobbered).
+    // Dangling link should be left alone (not clobbered).
     assert!(dangling
         .symlink_metadata()
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(
-        fs::read_link(&dangling).unwrap().to_str().unwrap(),
-        "/nonexistent/target"
+    assert!(
+        !dangling.join("SKILL.md").exists(),
+        "dangling link should not have been repointed at the canonical skill dir"
     );
 }
 
