@@ -3,7 +3,7 @@ use nostr::PublicKey;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{fold_name, validate_hex64};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
 
@@ -113,7 +113,9 @@ fn owned_agent_pubkeys_from_events(events: &[serde_json::Value], query: &str) ->
             let content: serde_json::Value =
                 serde_json::from_str(event.get("content")?.as_str()?).ok()?;
             let name = content.get("name")?.as_str()?;
-            if !name.eq_ignore_ascii_case(query) {
+            // `eq_ignore_ascii_case` compares only ASCII letters case-blind, so
+            // an agent named `Équipe` was unreachable as `équipe`.
+            if fold_name(name) != fold_name(query) {
                 return None;
             }
             let pubkey = extract_d_tag(event);
@@ -148,7 +150,7 @@ fn profile_content(event: &serde_json::Value) -> serde_json::Map<String, serde_j
 }
 
 fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_json::Value> {
-    let lower_query = query.to_ascii_lowercase();
+    let lower_query = fold_name(query);
     events
         .iter()
         .filter_map(|event| {
@@ -161,8 +163,8 @@ fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_
                 .get("name")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            if !display_name.to_ascii_lowercase().contains(&lower_query)
-                && !name.to_ascii_lowercase().contains(&lower_query)
+            if !fold_name(display_name).contains(&lower_query)
+                && !fold_name(name).contains(&lower_query)
             {
                 return None;
             }
@@ -591,6 +593,22 @@ mod tests {
             owned_agent_pubkeys_from_events(&events, "Honey"),
             vec!["a", "b"]
         );
+    }
+
+    /// The lookup used `eq_ignore_ascii_case`, which is case-blind for ASCII
+    /// letters only, so a non-ASCII agent name could only be reached by
+    /// reproducing its exact case.
+    #[test]
+    fn owned_agent_lookup_matches_non_ascii_names_across_case() {
+        let events = vec![
+            json!({"content": r#"{"name":"ÉQUIPE"}"#, "tags": [["d", "a"]]}),
+            json!({"content": r#"{"name":"Общий"}"#, "tags": [["d", "b"]]}),
+        ];
+        assert_eq!(
+            owned_agent_pubkeys_from_events(&events, "équipe"),
+            vec!["a"]
+        );
+        assert_eq!(owned_agent_pubkeys_from_events(&events, "ОБЩИЙ"), vec!["b"]);
     }
 
     #[test]
