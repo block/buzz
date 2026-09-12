@@ -137,10 +137,7 @@ pub async fn resolve_oa_owner(
         return Ok(None);
     };
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
 
     Ok(Some(OwnerOfAgent {
         is_me: my_pubkey.eq_ignore_ascii_case(&owner_hex),
@@ -294,10 +291,7 @@ async fn maybe_owner_auth_tag(
     state: &AppState,
     target_pubkey: &str,
 ) -> Result<Option<[String; 4]>, String> {
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
 
     // Self path: never attach auth (spec §Self Requests: if actor==target and
     // an `auth` tag is also present, relay MUST treat it as self).

@@ -10,6 +10,7 @@ import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
+import { EnterpriseLoginGate } from "@/features/communities/EnterpriseLoginGate";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
@@ -95,7 +96,9 @@ function renderApp() {
                 <EmojiBurstProvider>
                   <PoofBurstProvider>
                     <UpdaterProvider>
-                      <App />
+                      <EnterpriseLoginGate>
+                        <App />
+                      </EnterpriseLoginGate>
                       <NostrBindConsentDialog />
                     </UpdaterProvider>
                     <Toaster />

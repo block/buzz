@@ -672,9 +672,11 @@ pub async fn mint_agent_card(
             // so the token never leaves the relay (same contract as
             // `media_download.rs`).
             let relay_base = crate::relay::relay_api_base_url_with_override(&state);
-            let auth = is_same_origin(url, &relay_base)
-                .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))
-                .flatten();
+            let auth = if is_same_origin(url, &relay_base) {
+                crate::commands::media::mint_media_get_auth(&state, &relay_base).await
+            } else {
+                None
+            };
             fetch_avatar(url, auth.as_deref()).await?
         }
         _ => {

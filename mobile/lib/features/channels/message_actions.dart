@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:http/http.dart' as http;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -336,12 +337,14 @@ class _DownloadedImage {
 }
 
 Future<_DownloadedImage> _downloadImage(WidgetRef ref, String imageUrl) async {
-  final response = await ref
-      .read(mediaHttpClientProvider)
-      .get(
-        Uri.parse(imageUrl),
-        headers: ref.read(mediaGetAuthServiceProvider).headersFor(imageUrl),
-      );
+  final request = http.Request('GET', Uri.parse(imageUrl))
+    ..followRedirects = false;
+  request.headers.addAll(
+    await ref.read(mediaGetAuthServiceProvider).headersForAsync(imageUrl),
+  );
+  final response = await http.Response.fromStream(
+    await ref.read(mediaHttpClientProvider).send(request),
+  );
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw HttpException(
       'Image download failed (${response.statusCode})',

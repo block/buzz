@@ -248,6 +248,10 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local managed agents are unavailable in enterprise mode".into());
+    }
+
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition

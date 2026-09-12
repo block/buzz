@@ -36,32 +36,27 @@ pub struct EnterpriseTemplate {
 
 /// Ephemeral explicit credentials. Deliberately has no Debug/Serialize implementation.
 pub struct EnterpriseCredentials {
-    session: Zeroizing<String>,
     corporate: Zeroizing<String>,
 }
 
 impl EnterpriseCredentials {
     /// Own credentials for a request; the login owner is responsible for refresh and secure persistence.
-    pub fn new(session: String, corporate: String) -> Self {
+    pub fn new(corporate: String) -> Self {
         Self {
-            session: Zeroizing::new(session),
             corporate: Zeroizing::new(corporate),
         }
     }
 
     fn headers(&self) -> Result<HeaderMap, WsClientError> {
         let mut headers = HeaderMap::new();
-        for (name, value) in [
-            ("x-bb-session-credential", self.session.as_str()),
-            ("x-buzz-corporate-authorization", self.corporate.as_str()),
-        ] {
-            if value.is_empty() || value.len() > 16 * 1024 {
-                return Err(failure());
-            }
-            let mut header = HeaderValue::from_str(value).map_err(|_| failure())?;
-            header.set_sensitive(true);
-            headers.insert(name, header);
+        let value = self.corporate.as_str();
+        if value.is_empty() || value.len() > 16 * 1024 {
+            return Err(failure());
         }
+        let mut header =
+            HeaderValue::from_str(&format!("Bearer {value}")).map_err(|_| failure())?;
+        header.set_sensitive(true);
+        headers.insert("authorization", header);
         Ok(headers)
     }
 }
@@ -109,6 +104,27 @@ impl EnterpriseSigner {
             base: base_url.as_str().trim_end_matches('/').to_owned(),
             expected,
         })
+    }
+
+    /// Discover the server-selected identity from a trusted signer and pin it for this login.
+    pub async fn login(
+        base: &str,
+        credentials: &EnterpriseCredentials,
+    ) -> Result<Self, WsClientError> {
+        // The provisional value is never exposed and cannot sign: discovery only calls /session.
+        let mut signer = Self::new(
+            base,
+            EnterpriseSession {
+                pubkey: "0".repeat(64),
+                relay_ws_url: "wss://invalid.example".into(),
+                relay_http_url: "https://invalid.example".into(),
+            },
+        )?;
+        let session = signer
+            .post("session", serde_json::json!({}), credentials)
+            .await?;
+        signer = Self::new(base, session)?;
+        Ok(signer)
     }
 
     /// Return the pinned identity; fresh corporate authorization is still checked on every signing request.

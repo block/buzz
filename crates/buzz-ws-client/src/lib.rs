@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod enterprise;
+pub mod enterprise_oauth;
 pub mod error;
 pub mod message;
 

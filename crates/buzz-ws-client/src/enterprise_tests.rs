@@ -24,21 +24,15 @@ fn configuration_and_credentials_fail_closed() {
     let mut wrong = identity(&keys);
     wrong.relay_ws_url = "wss://other.example".to_owned();
     assert!(EnterpriseSigner::new("https://signer.example", wrong).is_err());
-    assert!(
-        EnterpriseCredentials::new("".to_owned(), "token".to_owned())
-            .headers()
-            .is_err()
-    );
-    assert!(
-        EnterpriseCredentials::new("session".to_owned(), "bad\r\nheader".to_owned())
-            .headers()
-            .is_err()
-    );
-    let headers = EnterpriseCredentials::new("session".to_owned(), "token".to_owned())
+    assert!(EnterpriseCredentials::new("".to_owned()).headers().is_err());
+    assert!(EnterpriseCredentials::new("bad\r\nheader".to_owned())
+        .headers()
+        .is_err());
+    let headers = EnterpriseCredentials::new("token".to_owned())
         .headers()
         .unwrap();
-    assert!(headers["x-bb-session-credential"].is_sensitive());
-    assert!(headers["x-buzz-corporate-authorization"].is_sensitive());
+    assert!(headers["authorization"].is_sensitive());
+    assert!(headers["authorization"].is_sensitive());
 }
 
 async fn server_reply(
@@ -113,14 +107,20 @@ async fn verifies_real_signatures_template_and_account_and_sends_explicit_creden
         identity(&keys),
     )
     .await;
-    let credentials = EnterpriseCredentials::new("session".to_owned(), "corporate".to_owned());
+    let credentials = EnterpriseCredentials::new("test-token-do-not-use".to_owned());
     assert_eq!(
         signer.sign(&template(), &credentials).await.unwrap().id,
         event.id
     );
     let request = request.await.unwrap();
-    assert!(request.contains("x-bb-session-credential: session"));
-    assert!(request.contains("x-buzz-corporate-authorization: corporate"));
+    assert!(!request.contains("x-bb-session-credential:"));
+    let authorization = request
+        .lines()
+        .find_map(|line| line.strip_prefix("authorization: "))
+        .unwrap();
+    let (scheme, token) = authorization.split_once(' ').unwrap();
+    assert_eq!(scheme, "Bearer");
+    assert_eq!(token, "test-token-do-not-use");
     assert!(!request.to_lowercase().contains("cookie:"));
     let body: serde_json::Value =
         serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
@@ -151,7 +151,7 @@ async fn verifies_real_signatures_template_and_account_and_sends_explicit_creden
 #[tokio::test]
 async fn rejects_denial_large_response_and_session_switch() {
     let keys = Keys::generate();
-    let credentials = EnterpriseCredentials::new("session".to_owned(), "corporate".to_owned());
+    let credentials = EnterpriseCredentials::new("test-token-do-not-use".to_owned());
     for (status, body) in [
         ("403 Forbidden", "{}".to_owned()),
         ("200 OK", "x".repeat(256 * 1024 + 1)),

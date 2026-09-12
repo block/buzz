@@ -638,8 +638,8 @@ pub(crate) fn spawn_transcription_task(
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
     let http_client = state.http_client.clone();
-    let keys = match state.keys.lock() {
-        Ok(k) => k.clone(),
+    let keys = match state.signing_identity() {
+        Ok(k) => k,
         Err(_) => return,
     };
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
@@ -688,7 +688,17 @@ pub(crate) fn spawn_transcription_task(
             // the kind event and build NIP-98 auth after the wait so both
             // timestamps are fresh — single clean order: wait → sign → auth → send.
             crate::relay_admission::wait_for_rate_limit().await;
-            let body_bytes = match sign_and_guard_stt_body(builder, &keys) {
+            let signed_body = match &keys {
+                crate::enterprise_identity::SigningIdentity::Local(keys) => {
+                    sign_and_guard_stt_body(builder, keys)
+                }
+                _ => keys.sign(builder).await.and_then(|event| {
+                    let body = event.as_json().into_bytes();
+                    crate::egress_guard::assert_no_key_backup_bytes(&body, "huddle STT publish")?;
+                    Ok(body)
+                }),
+            };
+            let body_bytes = match signed_body {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("buzz-desktop: STT publish: {e}");
@@ -696,12 +706,7 @@ pub(crate) fn spawn_transcription_task(
                 }
             };
             let url = format!("{relay_base_url}/events");
-            let auth_header = match crate::relay::build_nip98_auth_header_for_keys(
-                &keys,
-                &reqwest::Method::POST,
-                &url,
-                &body_bytes,
-            ) {
+            let auth_header = match keys.nip98(&reqwest::Method::POST, &url, &body_bytes).await {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("buzz-desktop: STT NIP-98 auth: {e}");

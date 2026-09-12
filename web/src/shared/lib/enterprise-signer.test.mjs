@@ -32,7 +32,6 @@ const session = {
 function signer() {
   return new EnterpriseSigner({
     baseUrl: "https://signer.example/api",
-    credential: async () => "test-session",
     corporateAuthorization: async () => "test-corporate-token",
     expectedSession: session,
   });
@@ -42,11 +41,7 @@ function serve(sign = (e) => finalizeEvent(e, key)) {
     assert.equal(init.redirect, "error");
     assert.equal(init.cache, "no-store");
     assert.equal(init.credentials, "omit");
-    assert.equal(init.headers["X-BB-Session-Credential"], "test-session");
-    assert.equal(
-      init.headers["X-Buzz-Corporate-Authorization"],
-      "test-corporate-token",
-    );
+    assert.equal(init.headers.Authorization, "Bearer test-corporate-token");
     return Response.json(
       String(url).endsWith("/session")
         ? session
@@ -92,7 +87,6 @@ test("forbids HTTP, embedded credentials and identity selectors before transmitt
       () =>
         new EnterpriseSigner({
           baseUrl,
-          credential: async () => "token",
           corporateAuthorization: async () => "corporate-token",
           expectedSession: session,
         }),
@@ -126,8 +120,7 @@ test("missing corporate credential does not make a network request", async () =>
   await assert.rejects(
     new EnterpriseSigner({
       baseUrl: "https://signer.example",
-      credential: async () => "",
-      corporateAuthorization: async () => "corporate-token",
+      corporateAuthorization: async () => "",
       expectedSession: session,
     }).session(),
     /login/,
@@ -168,7 +161,6 @@ test("missing corporate token cannot use an otherwise valid app session", async 
   };
   const client = new EnterpriseSigner({
     baseUrl: "https://signer.example",
-    credential: async () => "session",
     corporateAuthorization: async () => "",
     expectedSession: session,
   });

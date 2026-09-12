@@ -3,6 +3,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community_provider.dart';
 import 'relay_client.dart';
+import '../auth/enterprise_identity.dart';
 
 /// Relay connection configuration.
 ///
@@ -80,6 +81,14 @@ class Env {
 class RelayConfigNotifier extends Notifier<RelayConfig> {
   @override
   RelayConfig build() {
+    if (enterpriseEnabled) {
+      ref.watch(activeCommunityProvider);
+      return RelayConfig(
+        baseUrl:
+            EnterpriseIdentity.instance.relayUrl ?? 'https://invalid.example',
+      );
+    }
+
     // Watch the active community so that when it changes (community switch),
     // the config rebuilds, triggering the full provider cascade.
     final activeAsync = ref.watch(activeCommunityProvider);
@@ -93,6 +102,9 @@ class RelayConfigNotifier extends Notifier<RelayConfig> {
   }
 
   void update({required String baseUrl, String? nsec}) {
+    if (enterpriseEnabled) {
+      throw StateError('Corporate community is release-managed');
+    }
     state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
   }
 }
@@ -103,6 +115,7 @@ final relayConfigProvider = NotifierProvider<RelayConfigNotifier, RelayConfig>(
 
 /// Derive the hex pubkey from a bech32 nsec, or null on any failure.
 String? pubkeyFromNsec(String? nsec) {
+  if (enterpriseEnabled) return EnterpriseIdentity.instance.pubkey;
   if (nsec == null || nsec.isEmpty) return null;
   try {
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;

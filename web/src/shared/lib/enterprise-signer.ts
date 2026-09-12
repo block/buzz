@@ -10,7 +10,6 @@ export type EnterpriseSignerSession = {
 /** A bearer credential is obtained by the platform login flow, never persisted by this adapter. */
 export type EnterpriseSignerOptions = {
   baseUrl: string;
-  credential: () => Promise<string>;
   /** Dedicated short-lived corporate API token, not the long-lived app session. */
   corporateAuthorization: () => Promise<string>;
   /** Pin the identity and community established by login; token refresh must not switch either. */
@@ -20,7 +19,6 @@ export type EnterpriseSignerOptions = {
 /** Explicit, HTTPS-only corporate signer. Errors never fall back to another identity. */
 export class EnterpriseSigner {
   private readonly baseUrl: string;
-  private readonly credential: () => Promise<string>;
   private readonly corporateAuthorization: () => Promise<string>;
   private readonly expectedSession: EnterpriseSignerSession;
 
@@ -38,20 +36,16 @@ export class EnterpriseSigner {
       );
     }
     this.baseUrl = url.toString().replace(/\/+$/, "");
-    this.credential = options.credential;
     this.corporateAuthorization = options.corporateAuthorization;
     this.expectedSession = { ...options.expectedSession };
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {
-    const [credential, corporateAuthorization] = await Promise.all([
-      this.credential(),
-      this.corporateAuthorization(),
-    ]);
+    const corporateAuthorization = await this.corporateAuthorization();
     if (
-      [credential, corporateAuthorization].some(
-        (value) => !value || value.length > 16 * 1024 || /[\r\n]/.test(value),
-      )
+      !corporateAuthorization ||
+      corporateAuthorization.length > 16 * 1024 ||
+      /[\r\n]/.test(corporateAuthorization)
     )
       throw new Error("Corporate login is required.");
     const response = await fetch(
@@ -63,8 +57,7 @@ export class EnterpriseSigner {
         cache: "no-store",
         headers: {
           "Content-Type": "application/json",
-          "X-BB-Session-Credential": credential,
-          "X-Buzz-Corporate-Authorization": corporateAuthorization,
+          Authorization: `Bearer ${corporateAuthorization}`,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),

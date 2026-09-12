@@ -1,41 +1,78 @@
-# Enterprise HTTPS signer — implementation status and contract
+# Enterprise HTTPS signer — integration and release contract
 
-**Status: draft implementation, not an enterprise-ready build.** The backend now
-has a production authorization/provisioning implementation behind opt-in config.
-Buzz has browser and shared native Rust signer transports, a native WebSocket auth
-entry point, and a browser media-credential cache. Desktop/mobile login, settings,
-complete signing-path conversion, durable client outboxes and release defaults
-remain unfinished. Do not enable employee rollout yet.
+**Status: draft native integration.** Desktop and mobile now have release-selected
+corporate login, refresh and remote signing. The real Auth0/Okta applications,
+Kgoose deployment and end-to-end acceptance in that environment are separate
+rollout work. Do not infer production readiness from mock/transport tests.
 
 Enterprise custody intentionally differs from `VISION_SOVEREIGN.md`: the
-organization owns and can revoke its employee identity. OSS users retain local
-or NIP-07 keys. Hosting, Nostr events, and community/channel permissions do not
-move into the signer.
+organization controls its employee identity. OSS builds retain local/NIP-07 keys.
+Nostr events, external relay hosting and community/channel permissions remain.
 
-## Two endpoints
+## Release selection — no user configuration
 
-The base URL includes the deployment prefix. Both routes are HTTPS POST, JSON,
-no redirects, no caches. Require both explicit headers:
+Desktop packaging sets `BUZZ_BUILD_ENTERPRISE` to non-secret JSON before compiling
+Tauri. Mobile passes the same JSON using `--dart-define=BUZZ_BUILD_ENTERPRISE=...`
+(or a define file). Absence selects existing OSS self-custody; malformed enterprise
+configuration fails closed, never falls back to local credentials.
 
-- `X-BB-Session-Credential`: authenticated platform CLI/app credential; cookies
-  alone are not accepted.
-- `X-Buzz-Corporate-Authorization`: a dedicated short-lived Auth0 API access token
-  bound to the same subject and organization, not an ordinary app ID token.
+```json
+{
+  "signerUrl": "https://signer.example/api",
+  "issuer": "https://corporate-login.example/",
+  "clientId": "registered-native-public-client",
+  "audience": "buzz-enterprise-signer",
+  "organization": "org_corporate",
+  "connection": "okta-employees"
+}
+```
 
-The server verifies issuer, RS256 signature, audience, subject, organization,
-enterprise connection, `buzz:sign` permission, and signed corporate entitlement.
-Authorization expires at most five minutes after the issuer's corporate check,
-not five minutes after an arbitrary refresh. An issuer-side entitlement check on
-login **and refresh** is an external prerequisite; the signer cannot turn a
-long-lived application session into proof of current employment.
+Mobile additionally requires `"redirectUri":"buzz://enterprise-login"`. Desktop
+uses `http://127.0.0.1:<ephemeral-port>/enterprise-callback`. Register the native
+client's appropriate redirect policy in Auth0; confirm support for desktop's
+loopback ephemeral port. Never bake a client secret, access token or refresh token.
+The internal release pipeline lives outside this repository; its real values and
+packaging changes must be supplied there. The OSS release process is unchanged.
 
-Browser deployment must explicitly allow trusted origins and both headers through
-CORS. Never allow ambient cookie signing or wildcard credential forwarding.
-Never log these headers, private keys, request bodies, or signed bearer proofs.
+## Login and token lifecycle
 
-### `/v1/buzz/enterprise-signer/session`
+Both native clients open the system browser for authorization-code/PKCE S256.
+Random state and callback validation bind the browser response to the attempt.
+The client exchanges the code with Auth0, then calls the trusted signer's session
+endpoint to discover and pin its identity/community. Employees do not choose a
+signer, import an nsec, or configure a relay in enterprise mode.
 
-Request: `{}`. Response:
+Tokens stay in native secure storage (desktop OS keyring, mobile secure storage),
+not renderer/localStorage. Refresh is single-flight. Rotating refresh credentials
+are removed from durable storage before exchange so a lost response cannot cause
+a restart to replay a consumed credential. Failure requires browser login; a
+successful replacement is saved before further signing. This intentionally favors
+safe reauthentication over uninterrupted access after a crash during rotation.
+Stored credentials are bound to the release-selected login configuration.
+
+Desktop reports expiry via its login gate; mobile invalidates authentication when
+refresh fails. Account/community changes are rejected on refresh. In-flight signing
+is bound to the captured identity; logging out or replacing it cannot silently
+retarget an event. Reads after successful NIP-42 auth go directly to Buzz.
+
+## Two signer endpoints
+
+All requests use HTTPS POST and JSON, no redirects or caches, and exactly one
+`Authorization: Bearer <dedicated-corporate-access-token>` header. No second
+bbidentity app-session credential is required. Cookie-only and ordinary app-token
+requests cannot authorize signing. The backend resolves the existing stable
+bbidentity account from the verified Auth0 organization and subject.
+
+The token contract checks issuer, RS256 signature, audience, subject, organization,
+enterprise connection, `buzz:sign`, and signed corporate entitlement. Authorization
+expires at most five minutes after the issuer's corporate check, not five minutes
+after an arbitrary refresh. Auth0-side entitlement verification on login **and
+refresh** remains an external prerequisite; a stale app session is not employment
+proof. See the companion Kgoose design for the precise namespaced claims.
+
+### POST `/v1/buzz/enterprise-signer/session`
+
+Request `{}`; response:
 
 ```json
 {
@@ -45,16 +82,13 @@ Request: `{}`. Response:
 }
 ```
 
-The service atomically creates or reads the account's encrypted Nostr key.
-First admission and a directory-derived kind:0 profile are journaled as exact
-signed events before relay publication. The journal is retained on failure;
-retries replay its event IDs, including after an ambiguous acknowledgement.
-Membership and key creation cannot be a single database transaction across an
-external relay, so session success waits for both relay acknowledgements.
-Completed accounts are checked as members, never automatically re-added after
-removal. The configured enterprise relay **must be membership-gated**.
+Creates or reads the atomic encrypted account key. First membership admission and
+corporate-derived kind:0 profile are journaled as signed events before publication.
+Retries retain event IDs after ambiguous acknowledgements. Completed accounts
+check current membership rather than silently re-adding a removed employee.
+The enterprise relay must be membership-gated.
 
-### `/v1/buzz/enterprise-signer/events/sign`
+### POST `/v1/buzz/enterprise-signer/events/sign`
 
 ```json
 {
@@ -68,97 +102,63 @@ removal. The configured enterprise relay **must be membership-gated**.
 }
 ```
 
-Response: `{ "event": <seven-field signed Nostr event> }`.
-No `pubkey`, `id`, `sig`, account selector, or unknown template fields are accepted.
-The service selects the key from the authenticated account, rechecks corporate
-entitlement and relay membership, then validates the event's purpose. Clients
-verify the signature, public key and exact unsigned template.
+Returns `{ "event": <seven-field signed Nostr event> }`. No identity selector,
+`pubkey`, `id`, `sig` or unknown template field is accepted. Clients verify the
+signature, public key and exact template. The service rechecks corporate authority
+and membership before signing.
 
-- `nip42-auth`: kind 22242, empty content, exact relay/challenge. Subscriptions
-  connect directly to Buzz; incoming messages never visit the signer.
-- `http-auth`: kind 27235, authorized HTTPS origin/method; body-bearing requests
-  require the SHA-256 `payload`. Relay proof expiry/replay checks still apply.
-- `media-read`: kind 24242, `t=get`, exact `server`, expiry within five minutes.
-- `media-upload`: kind 24242, `t=upload`, exact `server`, short expiry and SHA-256
-  `x` tag. File bytes travel directly to Buzz, not the signer.
-- `publish`: explicit user-kind allowlist covering chat, forums, channel actions,
-  read state, social lists, git, workflow controls and huddles. Generic kind:0
-  profiles, identity/delegation, pairing, agent custody, relay-admin commands and
-  relay-only sidecars remain denied. The relay still enforces channel ACLs.
+Purposes: `nip42-auth`, `http-auth`, `media-read`, `media-upload`, `publish`.
+NIP-98 proofs bind exact origin/method/body hash. Media proofs bind server authority,
+short expiry and upload hash; file bytes travel directly to Buzz. Generic profile,
+delegation, pairing, agent custody and relay-admin signing remain denied.
 
-Bearer templates accept timestamps from 60 seconds ago to 30 seconds ahead.
-Durable publish templates permit older timestamps so offline retries retain their
-identity. Content and tag strings each have a 64 KiB limit, with at most 256 tags
-and 16 strings/tag. Application requests are capped at 128 KiB and signer replies
-at 256 KiB. A **pre-buffer ingress limit** is still required. Backend work admission
-is bounded per pod (32 concurrent operations, 120/account/minute, 10,000 buckets);
-fleet-wide quotas remain a rollout prerequisite.
+Bearer timestamps are within -60/+30 seconds; durable publish templates may be
+older. Content and tag strings are each capped at 64 KiB, 256 tags, 16 strings/tag.
+Application request limit is 128 KiB; signer response limit is 256 KiB. Deployment
+must impose a pre-buffer ingress limit, redact bearer headers/bodies, and configure
+fleet quotas. Backend admission adds per-pod concurrency/account bounds.
 
-## Client seams
+## Native signing coverage and deliberate exclusions
 
-Browser:
+Desktop's `SigningIdentity` snapshots route generic event IPC, message/channel/DM
+submission, query HTTP auth, native relay sessions, media and human huddle auth/STT
+through either local keys or the corporate signer. `signing_keys()` explicitly
+rejects enterprise mode. The renderer never receives corporate tokens.
 
-```ts
-configureEnterpriseSigner(new EnterpriseSigner({
-  baseUrl: managedSignerUrl,
-  credential: () => corporateLogin.currentCredential(),
-  corporateAuthorization: () => corporateLogin.currentSignerAccessToken(),
-  expectedSession: corporateLogin.pinnedSignerSession(),
-}));
-```
+Mobile's `signClientEvent` routes normal submissions, NIP-42, HTTP query auth,
+media uploads, typing/status and human huddle auth through the corporate signer.
+Media image/file/audio/video callers await host-scoped read credentials. Read
+proofs cache for two minutes with an expiry margin; file bytes bypass Kgoose.
 
-Install before relay connections. Expiry must leave this signer installed and
-fail closed. `configureEnterpriseSigner(null)` explicitly selects self-custody,
-not enterprise logout. Reconfiguration fences in-flight signatures. Identity and
-community are pinned across credential refresh; changed values require login.
-First-login discovery/pinning is still owned by the unimplemented login flow.
+First-build exclusions are explicit, not alternate local identities:
+- Key export/import/backup/pairing and local managed-agent creation/start.
+- Directory-controlled profile edits.
+- Secret-dependent observer decryption, git private-key helper operations, mesh
+  identity and encrypted preference synchronization.
+- Cross-device encrypted read-state sync; local read markers continue to work.
+- Existing private-key-based mobile push lease/NSE paths are not enabled for the
+  keyless corporate community. Native corporate push support is a later feature.
 
-`EnterpriseMediaCredentials` caches one host/account's read proof for two minutes,
-refreshes before expiry, deduplicates concurrent requests, and fences in-flight
-results when cleared. Uploads send only the hash for signing. Callers must clear
-on logout/account/community changes and auth rejection, disable redirects, and
-send the exact hashed upload bytes. This helper is not yet wired into app UI.
+Authorized independently operated relay agents remain usable in conversations.
+The signing abstraction is not a promise that every existing secret-dependent
+feature has a remote equivalent.
 
-Native Rust: `buzz-ws-client::enterprise::EnterpriseSigner` uses the same protocol,
-pins identity/community, bounds transport time/size and treats credential headers
-as sensitive. `NostrWsConnection::authenticate_enterprise` signs the challenge
-through it, then uses the direct relay connection. Credentials are request-owned,
-not persisted by the adapter. Desktop and CLI do not yet select this path.
+## Minimal sends, no new durable outbox
 
-## Retry identity
+Build a template, sign, publish and await the relay ACK using existing flows.
+Preserve the template/signed event for retries inside the operation; never change
+`created_at` to recreate a potentially delivered event. A crash or lost ACK can
+still leave delivery uncertain. No new durable client outbox is implemented in
+this milestone; the backend provisioning journal is separate.
 
-Persist the full unsigned template **before** signing, including `created_at`.
-Schnorr auxiliary randomness can change a signature but not the event ID. Persist
-the signed result before publishing, then resend that exact event after an
-ambiguous acknowledgement. Refresh HTTP bearer proofs independently, with a new
-nonce, without reconstructing the durable event. Native client outbox integration
-is not implemented by these adapters.
+## Remaining rollout/security gates
 
-## Remaining implementation and rollout gates
-
-1. Auth0 API/audience and corporate entitlement claim issuance, login/refresh UI,
-   secure credential lifecycle and trusted first-login identity discovery.
-2. Desktop: replace `AppState`'s raw-key dependency across submission, native relay
-   auth, media, huddles and deferred work. Disable or replace backups, pairing,
-   mesh/agent authorization and other secret-dependent operations in enterprise
-   mode. A single IPC replacement is insufficient.
-3. Mobile: introduce an async signer in message, socket, media and secondary-relay
-   paths. Synchronous media headers need prefetch/cache and expiry recovery.
-4. Durable client outboxes, settings, enterprise signed-build defaults, profile
-   refresh and existing self-custody identity migration.
-5. Offboarding-driven signer denial and durable membership removal/reconciliation.
-   Live WebSocket termination is intentionally left to the existing separate
-   branch. Pending provisioning vs revocation needs explicit generation fencing
-   before rollout; a short token lease is not instantaneous revocation.
-6. Pre-buffer ingress limits, header/log redaction, fleet-wide rate limits,
-   custody audit/retention/restore policy and security review.
-
-## Validation
-
-Browser tests exercise the production signing seam, real Nostr signatures,
-credential denial, pinned identity, response bounds and media cache/hash behavior.
-Rust tests exercise the actual transport with a loopback fake and real signatures,
-including wrong-account/template/signature rejection. Kgoose tests cover custody,
-corporate claims, provisioning crash/retry behavior and TLS relay transport.
-These are not a deployed Auth0-to-native-app-to-relay acceptance test. No live
-corporate identity or relay membership was changed.
+- Deploy Kgoose/schema/admin/encryption config; configure Auth0 native apps,
+  audience/claims/refresh and Okta federation; set internal release build values.
+- Exercise real login, refresh, second device, chat/media/huddles, denial and OSS
+  regression in deployed native apps. Current evidence is unit/transport/mocked UI.
+- Complete offboarding-driven signer denial and durable membership removal with
+  pending-provisioning generation fencing. Active WebSocket termination remains
+  on the separate branch. A short lease is not instantaneous revocation.
+- Profile refresh/migration, custody retention/deletion/audit/restore, header
+  redaction, ingress size limits and fleet-wide quotas/security approval.

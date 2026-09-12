@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../auth/enterprise_identity.dart';
 import 'nostr_models.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
@@ -10,15 +11,20 @@ import 'relay_socket.dart';
 class SignedEventRelay {
   final RelaySessionNotifier _session;
   final String? _nsec;
+  final String? _corporatePubkey;
 
   SignedEventRelay({
     required RelaySessionNotifier session,
     required String? nsec,
-  }) : _session = session,
+  }) : _corporatePubkey = enterpriseEnabled
+           ? EnterpriseIdentity.instance.pubkey
+           : null,
+       _session = session,
        _nsec = nsec;
 
   /// The hex pubkey derived from the signing key, or null if no key.
   String? get pubkey {
+    if (enterpriseEnabled) return _corporatePubkey;
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return null;
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
@@ -36,25 +42,23 @@ class SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
   }) async {
-    final nsec = _nsec;
-    if (nsec == null || nsec.isEmpty) {
-      throw Exception('Cannot submit event: no signing key available');
+    if (enterpriseEnabled &&
+        (_corporatePubkey == null ||
+            _corporatePubkey != EnterpriseIdentity.instance.pubkey)) {
+      throw StateError('Corporate identity changed before signing');
     }
-
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) {
-      throw Exception('Invalid nsec');
-    }
-
-    final event = nostr.Event.from(
+    final event = await signClientEvent(
+      nsec: _nsec,
       kind: kind,
       content: content,
       tags: tags,
-      secretKey: privkeyHex,
       createdAt: createdAt,
-      verify: false,
     );
 
+    if (enterpriseEnabled &&
+        _corporatePubkey != EnterpriseIdentity.instance.pubkey) {
+      throw StateError('Corporate identity changed before publication');
+    }
     final nostrEvent = NostrEvent.fromJson(event.toMap());
     onSigned?.call(nostrEvent);
     return _session.publish(nostrEvent);
@@ -74,15 +78,19 @@ Future<NostrEvent> submitSignedEventOnce({
   int? createdAt,
   Duration timeout = const Duration(seconds: 12),
 }) async {
-  final privateKey = nostr.Nip19.decode(payload: nsec).data;
-  if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
-  final signed = nostr.Event.from(
+  if (enterpriseEnabled &&
+      wsUrl !=
+          Uri.parse(
+            EnterpriseIdentity.instance.relayUrl!,
+          ).replace(scheme: 'wss').toString()) {
+    throw StateError('Corporate community mismatch');
+  }
+  final signed = await signClientEvent(
+    nsec: nsec,
     kind: kind,
     content: content,
     tags: tags,
-    secretKey: privateKey,
     createdAt: createdAt,
-    verify: false,
   );
   final event = NostrEvent.fromJson(signed.toMap());
   final result = Completer<NostrEvent>();

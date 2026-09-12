@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:io';
 

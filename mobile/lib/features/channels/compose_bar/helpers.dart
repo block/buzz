@@ -376,14 +376,11 @@ void _sendTypingIndicator(
   required String channelId,
   String? threadHeadId,
   String? rootId,
-}) {
+}) async {
   try {
     final config = ref.read(relayConfigProvider);
     final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) return;
-
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return;
+    if (!enterpriseEnabled && (nsec == null || nsec.isEmpty)) return;
 
     final tags = <List<String>>[
       ['h', channelId],
@@ -394,12 +391,11 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = await signClientEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
-      secretKey: privkeyHex,
-      verify: false,
+      nsec: nsec,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.

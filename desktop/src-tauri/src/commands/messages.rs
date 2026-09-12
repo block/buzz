@@ -66,10 +66,7 @@ pub async fn get_feed(
         .map(|t| t.split(',').any(|s| s.trim() == "needs_action"))
         .unwrap_or(true);
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
@@ -442,7 +439,7 @@ pub async fn send_channel_message(
     // exact snapshot signs the event and its NIP-98 auth below.
     let relay_base = crate::relay::relay_api_base_url_with_override(&state);
     assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
-    let signing_keys = state.signing_keys()?;
+    let signing_keys = state.signing_identity()?;
     assert_expected_signer(
         expected_signer_pubkey.as_deref(),
         &signing_keys.public_key().to_hex(),
@@ -666,7 +663,7 @@ fn managed_agent_submission_auth_tag(
         return Ok(Some(auth_tag));
     }
 
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let owner_keys = state.signing_keys()?;
     legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
 }
 
@@ -839,10 +836,7 @@ pub async fn remove_reaction(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Find our own kind:7 reaction event referencing the target.
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
     let target = event_id.trim();
     let trimmed_emoji = emoji.trim();
 

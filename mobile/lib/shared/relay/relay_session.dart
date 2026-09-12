@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
+import '../auth/enterprise_identity.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
@@ -141,7 +142,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
     final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
-    if (isAuthenticated && config.nsec != null) {
+    if (isAuthenticated && (config.nsec != null || enterpriseEnabled)) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
     }
@@ -164,12 +165,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final response = await _httpQueryClient.post(
       Uri.parse(url),
       headers: {
-        'Authorization': buildNip98AuthHeader(
-          method: 'POST',
-          url: url,
-          bodyBytes: bodyBytes,
-          nsec: config.nsec,
-        ),
+        'Authorization': enterpriseEnabled
+            ? await buildClientNip98AuthHeader(
+                method: 'POST',
+                url: url,
+                bodyBytes: bodyBytes,
+                nsec: null,
+              )
+            : buildNip98AuthHeader(
+                method: 'POST',
+                url: url,
+                bodyBytes: bodyBytes,
+                nsec: config.nsec,
+              ),
         'Content-Type': 'application/json',
       },
       body: bodyBytes,
