@@ -134,11 +134,8 @@ test("notification activation starts routing before a hung reveal", async () => 
       kind: 9,
     },
     {
-      goChannel: async () => calls.push("channel"),
-      goHome: async () => calls.push("home"),
-      revealWindow: () => new Promise(() => {}),
-      openSearchHit: (_hit, behavior) => {
-        calls.push(`message:${String(behavior?.force)}`);
+      goChannel: (_channelId, behavior) => {
+        calls.push({ kind: "channel", behavior });
         return new Promise((resolve) => {
           resolveNavigation = () => {
             navigationSettled = true;
@@ -146,13 +143,46 @@ test("notification activation starts routing before a hung reveal", async () => 
           };
         });
       },
+      goHome: async () => calls.push("home"),
+      revealWindow: () => new Promise(() => {}),
+      openSearchHit: async () => calls.push("thread"),
     },
   );
 
-  assert.deepEqual(calls, ["message:true"]);
+  assert.deepEqual(calls, [
+    {
+      kind: "channel",
+      behavior: {
+        force: true,
+        messageId: "event",
+        messageView: "timeline",
+      },
+    },
+  ]);
   resolveNavigation();
   await activation;
   assert.equal(navigationSettled, true);
+});
+
+test("notification activation retains thread routing for branch replies", async () => {
+  const calls = [];
+  await activateDesktopNotificationTarget(
+    {
+      channelId: "channel",
+      eventId: "reply",
+      kind: 9,
+      openInThread: true,
+      threadRootId: "root",
+    },
+    {
+      goChannel: async () => calls.push("channel"),
+      goHome: async () => calls.push("home"),
+      openSearchHit: async (hit) => calls.push(hit.threadRootId),
+      revealWindow: async () => {},
+    },
+  );
+
+  assert.deepEqual(calls, ["root"]);
 });
 
 test("notification activation falls back to forced channel navigation", async () => {

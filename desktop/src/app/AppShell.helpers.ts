@@ -183,7 +183,11 @@ export async function activateDesktopNotificationTarget(
   actions: {
     goChannel: (
       channelId: string,
-      options?: { force?: boolean },
+      options?: {
+        force?: boolean;
+        messageId?: string;
+        messageView?: "timeline";
+      },
     ) => Promise<unknown>;
     goHome: () => Promise<unknown>;
     openSearchHit: (
@@ -201,6 +205,12 @@ export async function activateDesktopNotificationTarget(
   let navigation: Promise<unknown>;
   if (!target.channelId) {
     navigation = actions.goHome();
+  } else if (target.eventId && !target.openInThread) {
+    navigation = actions.goChannel(target.channelId, {
+      force: true,
+      messageId: target.eventId,
+      messageView: "timeline",
+    });
   } else {
     const anchor = toSearchHit(target);
     navigation = anchor

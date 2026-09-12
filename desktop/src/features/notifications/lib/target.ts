@@ -14,6 +14,7 @@ export function buildEventNotificationTarget(
     "content" | "created_at" | "id" | "kind" | "pubkey" | "tags"
   >,
   channel: { id: string; name?: string | null },
+  options: { openInThread?: boolean } = {},
 ): DesktopNotificationTarget {
   return {
     channelId: channel.id,
@@ -23,7 +24,10 @@ export function buildEventNotificationTarget(
     eventId: event.id,
     kind: event.kind,
     pubkey: event.pubkey,
-    threadRootId: getThreadReference(event.tags).rootId ?? null,
+    openInThread: options.openInThread === true,
+    threadRootId: options.openInThread
+      ? (getThreadReference(event.tags).rootId ?? null)
+      : null,
   };
 }
 
@@ -39,6 +43,7 @@ export function buildFeedItemNotificationTarget(
     eventId: item.id,
     kind: item.kind,
     pubkey: item.pubkey,
+    openInThread: getThreadReference(item.tags).rootId !== null,
     threadRootId: getThreadReference(item.tags).rootId ?? null,
   };
 }

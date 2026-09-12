@@ -23,7 +23,44 @@ class ThrowingNotification {
 
 globalThis.window = { Notification: ThrowingNotification };
 
-const { sendDesktopNotification } = await import("./desktop.ts");
+const { ensureDesktopNotificationPermissionGranted, sendDesktopNotification } =
+  await import("./desktop.ts");
+
+test("permission gate awaits a default-state request before allowing delivery", async () => {
+  let releaseRequest;
+  const request = new Promise((resolve) => {
+    releaseRequest = resolve;
+  });
+  let settled = false;
+
+  const permission = ensureDesktopNotificationPermissionGranted(
+    async () => "default",
+    async () => request,
+  ).then((granted) => {
+    settled = true;
+    return granted;
+  });
+
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  releaseRequest("granted");
+  assert.equal(await permission, true);
+});
+
+test("permission gate rejects denied state without requesting access", async () => {
+  let requested = false;
+  const granted = await ensureDesktopNotificationPermissionGranted(
+    async () => "denied",
+    async () => {
+      requested = true;
+      return "granted";
+    },
+  );
+
+  assert.equal(granted, false);
+  assert.equal(requested, false);
+});
 
 test("constructor failure is a delivery miss and does not prevent a later notification", async (t) => {
   const warnings = [];

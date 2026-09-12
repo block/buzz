@@ -68,6 +68,17 @@ export function writeStoredSeenFeedIds(pubkey: string, ids: string[]) {
   );
 }
 
+export async function deliverFeedNotificationBatch(
+  items: readonly FeedItem[],
+  ensurePermissionGranted: () => Promise<boolean>,
+  deliver: (item: FeedItem) => Promise<void>,
+): Promise<void> {
+  if (!(await ensurePermissionGranted())) {
+    return;
+  }
+  await Promise.all(items.map((item) => deliver(item)));
+}
+
 export function useFeedDesktopNotifications(
   feed: HomeFeedResponse | undefined,
   pubkey: string | undefined,
@@ -94,19 +105,21 @@ export function useFeedDesktopNotifications(
 
   const autoRequestPermissionIfNeeded = React.useEffectEvent(async () => {
     if (hasAutoRequestedRef.current) {
-      return;
+      return (await getDesktopNotificationPermissionState()) === "granted";
     }
 
     const currentPermission = await getDesktopNotificationPermissionState();
     if (currentPermission !== "default") {
-      return;
+      return currentPermission === "granted";
     }
 
     hasAutoRequestedRef.current = true;
     const result = await requestDesktopNotificationAccess();
     if (result !== "granted") {
       void setDesktopEnabled(false);
+      return false;
     }
+    return true;
   });
 
   const deliverFeedNotification = React.useEffectEvent(
@@ -191,23 +204,25 @@ export function useFeedDesktopNotifications(
     writeStoredSeenFeedIds(normalizedPubkey, [...nextSeenItemIds]);
 
     if (newItems.length > 0) {
-      void autoRequestPermissionIfNeeded();
-    }
-
-    for (const item of newItems) {
-      const resolvedLabel = profiles
-        ? resolveUserLabel({
-            pubkey: item.pubkey,
-            profiles,
-            preferResolvedSelfLabel: true,
-          })
-        : undefined;
-      // Only use real display names, not truncated pubkey fallbacks.
-      const senderName =
-        resolvedLabel && resolvedLabel !== truncateNpub(item.pubkey)
-          ? resolvedLabel
-          : undefined;
-      void deliverFeedNotification(item, senderName);
+      void deliverFeedNotificationBatch(
+        newItems,
+        autoRequestPermissionIfNeeded,
+        async (item) => {
+          const resolvedLabel = profiles
+            ? resolveUserLabel({
+                pubkey: item.pubkey,
+                profiles,
+                preferResolvedSelfLabel: true,
+              })
+            : undefined;
+          // Only use real display names, not truncated pubkey fallbacks.
+          const senderName =
+            resolvedLabel && resolvedLabel !== truncateNpub(item.pubkey)
+              ? resolvedLabel
+              : undefined;
+          await deliverFeedNotification(item, senderName);
+        },
+      );
     }
   }, [
     enabled,
