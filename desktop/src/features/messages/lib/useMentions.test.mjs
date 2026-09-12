@@ -225,8 +225,10 @@ test("ignores mentions in fenced code blocks", () => {
 });
 
 test("ignores mentions in indented code blocks", () => {
-  assert.equal(hasMention("before\n    @Alice\nafter", "Alice"), false);
-  assert.equal(hasMention("before\n\t@Alice\nafter", "Alice"), false);
+  // Indented code cannot interrupt a paragraph, so these need a blank line
+  // (or another non-paragraph block) before the indent.
+  assert.equal(hasMention("before\n\n    @Alice\nafter", "Alice"), false);
+  assert.equal(hasMention("# heading\n    @Alice", "Alice"), false);
 });
 
 test("still matches prose mentions around code", () => {
