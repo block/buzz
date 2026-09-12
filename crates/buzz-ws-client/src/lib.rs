@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod connection;
+pub mod enterprise;
 pub mod error;
 pub mod message;
 

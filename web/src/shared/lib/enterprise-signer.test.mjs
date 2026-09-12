@@ -33,6 +33,8 @@ function signer() {
   return new EnterpriseSigner({
     baseUrl: "https://signer.example/api",
     credential: async () => "test-session",
+    corporateAuthorization: async () => "test-corporate-token",
+    expectedSession: session,
   });
 }
 function serve(sign = (e) => finalizeEvent(e, key)) {
@@ -41,6 +43,10 @@ function serve(sign = (e) => finalizeEvent(e, key)) {
     assert.equal(init.cache, "no-store");
     assert.equal(init.credentials, "omit");
     assert.equal(init.headers["X-BB-Session-Credential"], "test-session");
+    assert.equal(
+      init.headers["X-Buzz-Corporate-Authorization"],
+      "test-corporate-token",
+    );
     return Response.json(
       String(url).endsWith("/session")
         ? session
@@ -83,7 +89,13 @@ test("forbids HTTP, embedded credentials and identity selectors before transmitt
     "https://signer.example?token=x",
   ]) {
     assert.throws(
-      () => new EnterpriseSigner({ baseUrl, credential: async () => "token" }),
+      () =>
+        new EnterpriseSigner({
+          baseUrl,
+          credential: async () => "token",
+          corporateAuthorization: async () => "corporate-token",
+          expectedSession: session,
+        }),
     );
   }
   await assert.rejects(
@@ -104,7 +116,7 @@ test("logout fences an in-flight signature", async () => {
   configureEnterpriseSigner({ signEvent: () => pending });
   const result = signNostrEvent(template);
   configureEnterpriseSigner(null);
-  finish(finalizeEvent(template, key));
+  finish(finalizeEvent(structuredClone(template), key));
   await assert.rejects(result, /identity changed/);
 });
 test("missing corporate credential does not make a network request", async () => {
@@ -115,6 +127,8 @@ test("missing corporate credential does not make a network request", async () =>
     new EnterpriseSigner({
       baseUrl: "https://signer.example",
       credential: async () => "",
+      corporateAuthorization: async () => "corporate-token",
+      expectedSession: session,
     }).session(),
     /login/,
   );
@@ -122,4 +136,42 @@ test("missing corporate credential does not make a network request", async () =>
 test("self custody remains available when enterprise mode is unset", async () => {
   assert.equal(hasDurableSigner(), false);
   assert.ok((await signNostrEvent(template)).sig);
+});
+
+test("token refresh cannot silently change pinned identity or community", async () => {
+  let signCalls = 0;
+  for (const changed of [
+    { ...session, pubkey: getPublicKey(generateSecretKey()) },
+    {
+      ...session,
+      relayWsUrl: "wss://other.example",
+      relayHttpUrl: "https://other.example",
+    },
+  ]) {
+    globalThis.fetch = async (url) => {
+      if (!String(url).endsWith("/session")) signCalls++;
+      return Response.json(changed);
+    };
+    await assert.rejects(
+      signer().signEvent(template),
+      /identity or community changed/,
+    );
+  }
+  assert.equal(signCalls, 0);
+});
+
+test("missing corporate token cannot use an otherwise valid app session", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    throw Error("unexpected network request");
+  };
+  const client = new EnterpriseSigner({
+    baseUrl: "https://signer.example",
+    credential: async () => "session",
+    corporateAuthorization: async () => "",
+    expectedSession: session,
+  });
+  await assert.rejects(client.signEvent(template), /login/);
+  assert.equal(calls, 0);
 });

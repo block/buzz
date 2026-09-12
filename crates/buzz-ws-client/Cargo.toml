@@ -15,3 +15,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+zeroize = { workspace = true }

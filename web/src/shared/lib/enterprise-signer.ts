@@ -11,12 +11,18 @@ export type EnterpriseSignerSession = {
 export type EnterpriseSignerOptions = {
   baseUrl: string;
   credential: () => Promise<string>;
+  /** Dedicated short-lived corporate API token, not the long-lived app session. */
+  corporateAuthorization: () => Promise<string>;
+  /** Pin the identity and community established by login; token refresh must not switch either. */
+  expectedSession: EnterpriseSignerSession;
 };
 
 /** Explicit, HTTPS-only corporate signer. Errors never fall back to another identity. */
 export class EnterpriseSigner {
   private readonly baseUrl: string;
   private readonly credential: () => Promise<string>;
+  private readonly corporateAuthorization: () => Promise<string>;
+  private readonly expectedSession: EnterpriseSignerSession;
 
   constructor(options: EnterpriseSignerOptions) {
     const url = new URL(options.baseUrl);
@@ -33,11 +39,20 @@ export class EnterpriseSigner {
     }
     this.baseUrl = url.toString().replace(/\/+$/, "");
     this.credential = options.credential;
+    this.corporateAuthorization = options.corporateAuthorization;
+    this.expectedSession = { ...options.expectedSession };
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {
-    const credential = await this.credential();
-    if (!credential || /[\r\n]/.test(credential))
+    const [credential, corporateAuthorization] = await Promise.all([
+      this.credential(),
+      this.corporateAuthorization(),
+    ]);
+    if (
+      [credential, corporateAuthorization].some(
+        (value) => !value || value.length > 16 * 1024 || /[\r\n]/.test(value),
+      )
+    )
       throw new Error("Corporate login is required.");
     const response = await fetch(
       `${this.baseUrl}/v1/buzz/enterprise-signer/${path}`,
@@ -49,6 +64,7 @@ export class EnterpriseSigner {
         headers: {
           "Content-Type": "application/json",
           "X-BB-Session-Credential": credential,
+          "X-Buzz-Corporate-Authorization": corporateAuthorization,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
@@ -97,6 +113,14 @@ export class EnterpriseSigner {
       session.relayWsUrl !== `wss://${relay.host}`
     )
       throw new Error("Invalid enterprise relay scope.");
+    if (
+      session.pubkey !== this.expectedSession.pubkey ||
+      session.relayWsUrl !== this.expectedSession.relayWsUrl ||
+      session.relayHttpUrl !== this.expectedSession.relayHttpUrl
+    )
+      throw new Error(
+        "Enterprise identity or community changed; login is required.",
+      );
     return session;
   }
 
