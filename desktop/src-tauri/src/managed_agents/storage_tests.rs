@@ -830,3 +830,111 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+// ── #7184 community sharding ────────────────────────────────────────────────
+
+#[test]
+fn relay_host_parses_wss_urls() {
+    assert_eq!(
+        super::relay_host_of("wss://bookd.communities.buzz.xyz"),
+        Some("bookd.communities.buzz.xyz".to_string())
+    );
+    assert_eq!(
+        super::relay_host_of("ws://localhost:3000"),
+        Some("localhost".to_string())
+    );
+    assert_eq!(
+        super::relay_host_of("wss://brightops.communities.buzz.xyz/"),
+        Some("brightops.communities.buzz.xyz".to_string())
+    );
+    assert_eq!(
+        super::relay_host_of("https://relay.example.com/path"),
+        Some("relay.example.com".to_string())
+    );
+}
+
+#[test]
+fn relay_host_rejects_unsafe_or_empty() {
+    assert_eq!(super::relay_host_of(""), None);
+    assert_eq!(super::relay_host_of("   "), None);
+    assert_eq!(super::relay_host_of("wss://"), None);
+    // Path traversal or odd characters never become filename components.
+    assert_eq!(super::relay_host_of("wss://../evil"), None);
+    assert_eq!(super::relay_host_of("wss://host with space"), None);
+    // A path is not part of the host — "host/slash" is host "host" with a
+    // path; the host itself is still a safe filename component.
+    assert_eq!(
+        super::relay_host_of("wss://host/slash"),
+        Some("host".to_string())
+    );
+}
+
+#[test]
+fn partition_routes_by_relay_and_fails_open() {
+    fn record(pubkey: &str, relay: &str) -> ManagedAgentRecord {
+        serde_json::from_str(&format!(
+            r#"{{
+                "pubkey": "{pubkey}",
+                "name": "agent-{pubkey}",
+                "relay_url": "{relay}",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    let instances = vec![
+        record("aa", "wss://bookd.communities.buzz.xyz"),
+        record("bb", "wss://av0.communities.buzz.xyz"),
+        record("cc", ""), // legacy unpinned
+    ];
+    let (legacy, shards) = super::partition_by_community(instances);
+    assert_eq!(legacy.len(), 1, "unpinned stays in the legacy store");
+    assert_eq!(legacy[0].pubkey, "cc");
+    assert_eq!(shards.len(), 2, "one shard per community host");
+    assert_eq!(shards["bookd.communities.buzz.xyz"][0].pubkey, "aa");
+    assert_eq!(shards["av0.communities.buzz.xyz"][0].pubkey, "bb");
+}
+
+#[test]
+fn community_shard_paths_ignores_non_shard_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "managed-agents.json",
+        "managed-agents.json.backup-20260901",
+        "managed-agents.brightops.json", // hand-made Copilot-style copy
+        "managed-agents.json.invalid",
+    ] {
+        std::fs::write(dir.path().join(name), "[]").unwrap();
+    }
+    std::fs::write(
+        dir.path().join(super::community_shard_file_name(
+            "bookd.communities.buzz.xyz",
+        )),
+        "[]",
+    )
+    .unwrap();
+
+    let shards = super::community_shard_paths(dir.path());
+    assert_eq!(shards.len(), 1, "only real shards are enumerated");
+    assert!(shards[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with(super::COMMUNITY_SHARD_PREFIX));
+}
+
+#[test]
+fn shard_filename_is_host_scoped() {
+    assert_eq!(
+        super::community_shard_file_name("bookd.communities.buzz.xyz"),
+        "managed-agents-community.bookd.communities.buzz.xyz.json"
+    );
+}
