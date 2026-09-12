@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { resetMessageLinkRequests } from "@/app/navigation/messageLinkRequests";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -61,6 +62,7 @@ async function resetCommunityState({
 }: {
   resetAvatarState: boolean;
 }): Promise<void> {
+  resetMessageLinkRequests();
   relayClient.disconnect();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
