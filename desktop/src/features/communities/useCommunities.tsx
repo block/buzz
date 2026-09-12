@@ -16,6 +16,7 @@ import {
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
@@ -35,6 +36,42 @@ export type UpdateCommunityResult =
   | { kind: "not-found" };
 
 /**
+ * Whether two relay URLs identify the same community.
+ *
+ * Deliberately the *storage* notion of sameness, not string equality: every
+ * per-relay slot — self profile, read state, channel sections, sort
+ * preference, sidebar watermark, thread activity, observed unread — is keyed
+ * through `normalizeRelayUrl`, so two URLs that normalize alike already share
+ * all of that data. Letting them exist as two communities does not separate
+ * them; it just hides that they are one.
+ *
+ * `wss://relay.example`, `wss://relay.example/`, `WSS://Relay.Example` and
+ * `wss://relay.example//` are all one relay by that measure.
+ */
+export function isSameRelay(left: string, right: string): boolean {
+  return normalizeRelayUrl(left) === normalizeRelayUrl(right);
+}
+
+/**
+ * Whether the community list already holds the relay `relayUrl` names.
+ *
+ * Callers that decide *whether an add created a community* must ask this, not
+ * compare raw strings: `addCommunity` folds a storage-equivalent spelling into
+ * the existing community and hands back its id, so a raw comparison marks a
+ * pre-existing community as freshly added. Onboarding's rollback then treats
+ * it as temporary and can remove it — or `clearCommunities()` when it is the
+ * only one. Keep this predicate and `addCommunity`'s match in lockstep.
+ */
+export function hasCommunityForRelay(
+  communities: readonly Pick<Community, "relayUrl">[],
+  relayUrl: string,
+): boolean {
+  return communities.some((community) =>
+    isSameRelay(community.relayUrl, relayUrl),
+  );
+}
+
+/**
  * Pure decision logic for updateCommunity — determines the outcome from a
  * synchronous snapshot of communities without side effects.  Extracted so the
  * 5-case result matrix is unit-testable outside React.
@@ -50,10 +87,14 @@ export function resolveCommunityUpdateResult(
   const current = communities.find((w) => w.id === id);
   if (!current) return { kind: "not-found" };
 
+  // Hoisted so the narrowing survives into the callback below.
+  const nextRelayUrl = updates.relayUrl;
   if (
-    updates.relayUrl !== undefined &&
-    updates.relayUrl !== current.relayUrl &&
-    communities.some((w) => w.id !== id && w.relayUrl === updates.relayUrl)
+    nextRelayUrl !== undefined &&
+    nextRelayUrl !== current.relayUrl &&
+    communities.some(
+      (w) => w.id !== id && isSameRelay(w.relayUrl, nextRelayUrl),
+    )
   ) {
     return { kind: "duplicate-relay" };
   }
@@ -189,12 +230,12 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   );
 
   const addCommunity = useCallback((community: Community): string => {
-    const existing = communitiesRef.current.find(
-      (w) => w.relayUrl === community.relayUrl,
+    const existing = communitiesRef.current.find((w) =>
+      isSameRelay(w.relayUrl, community.relayUrl),
     );
     const resolvedId = existing?.id ?? community.id;
     setCommunitiesState((prev) => {
-      const dup = prev.find((w) => w.relayUrl === community.relayUrl);
+      const dup = prev.find((w) => isSameRelay(w.relayUrl, community.relayUrl));
       let next: Community[];
       if (dup) {
         next = prev.map((w) =>

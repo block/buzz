@@ -47,7 +47,10 @@ import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
 import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
-import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  hasCommunityForRelay,
+  useCommunities,
+} from "@/features/communities/useCommunities";
 import {
   loadCommunityDestination,
   markPendingCommunityRestore,
@@ -460,8 +463,13 @@ function CommunityApp({
       return;
     }
     const previousCommunityId = activeCommunity?.id;
-    const relayAlreadyExists = communities.some(
-      (community) => community.relayUrl === transaction.relayUrl,
+    // Must match how `addCommunity` decides the relay is already here: it
+    // folds a storage-equivalent spelling into the existing community, so a
+    // raw string compare would record `addedCommunity: true` for a community
+    // the connect did not create, and cancelling would then delete it.
+    const relayAlreadyExists = hasCommunityForRelay(
+      communities,
+      transaction.relayUrl,
     );
     const id = addCommunity({
       id: crypto.randomUUID(),
