@@ -4463,8 +4463,50 @@ fn dispatch_pending(
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
-                tracing::debug!(pending_channels = pending, "pool_exhausted");
-                queue.requeue_preserve_timestamps(batch);
+                // No idle worker for this batch. Previously this used
+                // `requeue_preserve_timestamps` (unconditional, unbounded —
+                // no retry accounting, no cap, no notice) instead of the
+                // `requeue()` machinery every other failure path in this
+                // file uses. That left a fully exhausted pool (e.g. from
+                // repeated circuit-breaker trips degrading live worker
+                // count) with no terminal state at all: the batch simply
+                // requeued forever, every dispatch cycle, and the sender
+                // saw nothing past the earlier 👀 receipt — no reply, no
+                // error, ever. Switched to `requeue()` so this shares the
+                // same exponential-backoff/MAX_RETRIES/dead-letter contract
+                // (and the same visible-failure-notice path via
+                // `spawn_failure_notice`) as every other requeue site below
+                // in `handle_prompt_result` — bounded retries with a clear
+                // terminal notice instead of an unbounded silent wait.
+                tracing::warn!(
+                    channel = %channel_id,
+                    scope = %scope.telemetry_label(),
+                    pending_channels = pending,
+                    "pool_exhausted — no idle worker; requeueing with backoff"
+                );
+                if let Some(observer) = observer {
+                    observer.emit(
+                        "pool_exhausted",
+                        None,
+                        &observer::context_for(Some(channel_id), None, None),
+                        serde_json::json!({
+                            "scope": scope.telemetry_label(),
+                            "pendingChannels": pending,
+                        }),
+                    );
+                }
+                // requeue() BEFORE mark_complete(): requeue() sets
+                // `retry_after` with a future deadline, and mark_complete()
+                // reads that to decide whether to preserve `retry_counts`
+                // (see its doc comment) — same ordering requirement
+                // `handle_prompt_result` follows for every other requeue.
+                if let Some(dead_letter) = queue.requeue(batch) {
+                    let content = "⚠️ I couldn't process the last request after multiple \
+                         retries (the agent pool stayed fully busy the whole time). \
+                         Please re-send if it's still needed."
+                        .to_string();
+                    spawn_failure_notice(Some(&ctx.rest_client), &dead_letter, content);
+                }
                 queue.mark_complete(&scope);
                 break;
             }
@@ -5363,6 +5405,24 @@ fn spawn_respawn_task(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
+            // Even when we're not respawning, `old_agent`'s child process
+            // still needs a *guaranteed* reap. `AcpClient::Drop` (acp.rs)
+            // already sends the same `killpg` this does, so a bare `drop`
+            // here isn't a total no-op — but it only follows up with a
+            // single non-blocking `try_wait()`. That poll runs immediately
+            // after the SIGKILL, before the kernel has necessarily finished
+            // tearing the process down, so in practice it rarely reaps
+            // anything: the process (and any same-group children, e.g. MCP
+            // servers) is left as a zombie until something else happens to
+            // wait() on it. `shutdown()` closes that gap with a real bounded
+            // (5s) blocking wait/reap after the same killpg — route this
+            // branch through it too, off the main loop so this synchronous
+            // function stays non-blocking, matching what the other branches
+            // below already do before dropping their old agent.
+            respawn_tasks.spawn(async move {
+                let mut agent = old_agent;
+                agent.acp.shutdown().await;
+            });
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -10636,6 +10696,95 @@ mod error_outcome_emission_tests {
             1,
             "exactly one turn_error event must be emitted"
         );
+    }
+
+    /// Regression for the `CircuitOpen` cleanup gap: when a slot's circuit
+    /// breaker is already open (three-plus crashes within the window), the
+    /// slot's `spawn_respawn_task` call correctly declines to spawn a
+    /// replacement — but the dead agent it was handed must still be routed
+    /// through a real, awaited `shutdown()` rather than a bare `drop`. Before
+    /// the fix, the `CircuitOpen` branch returned early without touching
+    /// `respawn_tasks` at all, so nothing here would ever join; `AcpClient`'s
+    /// `Drop` only fires a `killpg` + a single non-blocking `try_wait()`
+    /// (immediately after the signal, before the kernel has necessarily
+    /// finished tearing the process down), so in practice the child was left
+    /// as a zombie rather than reaped.
+    #[tokio::test]
+    async fn circuit_open_still_reaps_dead_agent_via_shutdown_not_bare_drop() {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        // Circuit already open (cooldown far in the future) — record_crash()
+        // inside spawn_respawn_task deterministically returns CircuitOpen.
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(300)),
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::AgentExited,
+            batch: None,
+        };
+
+        // Driven through the real production seam (handle_prompt_result),
+        // not spawn_respawn_task called in isolation — this is the exact
+        // path a crashed agent takes in the running harness.
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            respawn_tasks.len(),
+            1,
+            "circuit-open must still spawn a cleanup task for the dead agent \
+             instead of silently dropping it"
+        );
+
+        // The spawned task must actually run `shutdown()` to completion
+        // (not hang, not panic) — proves this is the real guaranteed-reap
+        // path and not a no-op.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            respawn_tasks.join_next(),
+        )
+        .await
+        .expect("circuit-open cleanup task did not complete within 10s")
+        .expect("JoinSet unexpectedly had no pending task")
+        .expect("circuit-open cleanup task panicked");
     }
 
     /// Explicit Stop (`ControlSignal::Cancel`) on cancel-drain expiry drops

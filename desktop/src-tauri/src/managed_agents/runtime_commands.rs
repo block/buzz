@@ -498,9 +498,10 @@ pub async fn reconcile_managed_agent_runtimes(
         .await;
 
     // start_pair does blocking work (std mutexes, process spawn, receipt
-    // writes, and up-to-2s exit polling in terminate_untracked_pair_runtime),
-    // so run the post-probe start loop off the async workers, matching the
-    // restart flows.
+    // writes, and up-to-7s exit polling in terminate_untracked_pair_runtime —
+    // terminate_process's own up-to-5s SIGTERM grace plus this function's
+    // up-to-2s post-signal poll), so run the post-probe start loop off the
+    // async workers, matching the restart flows.
     tokio::task::spawn_blocking(move || {
         let personas = load_personas(&app).unwrap_or_default();
         let global = load_global_agent_config(&app).unwrap_or_default();
