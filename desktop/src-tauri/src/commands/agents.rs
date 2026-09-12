@@ -291,6 +291,15 @@ pub(crate) use provider_deploy::deploy_to_provider;
 // and `std::sync::MutexGuard` is not `Send`.
 #[tauri::command]
 pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSummary>, String> {
+    current_managed_agent_summaries(app).await
+}
+
+/// Authoritative managed-agent snapshot shared by the UI command and the
+/// operations worker. This preserves the process synchronization and terminal
+/// state classification used everywhere else.
+pub(crate) async fn current_managed_agent_summaries(
+    app: AppHandle,
+) -> Result<Vec<ManagedAgentSummary>, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();

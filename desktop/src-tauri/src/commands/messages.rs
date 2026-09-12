@@ -18,8 +18,8 @@ use crate::{
     },
     nostr_convert,
     relay::{
-        assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
-        submit_event_at_created_at, submit_event_with_keys_created_at,
+        assert_expected_relay_scope, assert_expected_signer, query_relay, query_relay_at_with_keys,
+        submit_event, submit_event_at_created_at, submit_event_with_keys_created_at,
     },
 };
 
@@ -542,18 +542,46 @@ pub async fn send_channel_message(
     })
 }
 
-fn event_has_client_marker(event: &Event, marker: &str) -> bool {
+pub(crate) fn event_has_client_marker(event: &Event, marker: &str) -> bool {
     event.tags.iter().any(|tag| {
         let parts = tag.as_slice();
         parts.len() >= 2 && parts[0] == "client" && parts[1] == marker
     })
 }
 
-async fn find_managed_agent_channel_message_by_marker(
+pub(crate) async fn find_managed_agent_channel_message_by_marker(
     state: &AppState,
     agent_pubkey: Option<&str>,
     channel_id: &str,
     marker: &str,
+) -> Result<Option<Event>, String> {
+    find_channel_message_by_marker_with_scope(state, agent_pubkey, channel_id, marker, None).await
+}
+
+pub(crate) async fn find_channel_message_by_marker_in_scope(
+    state: &AppState,
+    agent_pubkey: Option<&str>,
+    channel_id: &str,
+    marker: &str,
+    api_base_url: &str,
+    owner_keys: &Keys,
+) -> Result<Option<Event>, String> {
+    find_channel_message_by_marker_with_scope(
+        state,
+        agent_pubkey,
+        channel_id,
+        marker,
+        Some((api_base_url, owner_keys)),
+    )
+    .await
+}
+
+async fn find_channel_message_by_marker_with_scope(
+    state: &AppState,
+    agent_pubkey: Option<&str>,
+    channel_id: &str,
+    marker: &str,
+    scope: Option<(&str, &Keys)>,
 ) -> Result<Option<Event>, String> {
     let author = agent_pubkey
         .map(str::trim)
@@ -575,7 +603,12 @@ async fn find_managed_agent_channel_message_by_marker(
             filter["until"] = serde_json::json!(until);
         }
 
-        let events = query_relay(state, &[filter]).await?;
+        let events = match scope {
+            Some((api_base_url, owner_keys)) => {
+                query_relay_at_with_keys(state, api_base_url, &[filter], owner_keys, None).await?
+            }
+            None => query_relay(state, &[filter]).await?,
+        };
         if let Some(existing) = events
             .iter()
             .find(|event| event_has_client_marker(event, marker))
@@ -597,6 +630,97 @@ async fn find_managed_agent_channel_message_by_marker(
     }
 
     Ok(None)
+}
+
+pub(crate) async fn find_channel_message_by_content_key_in_scope(
+    state: &AppState,
+    author_pubkey: &str,
+    channel_id: &str,
+    content_key: &str,
+    api_base_url: &str,
+    owner_keys: &Keys,
+) -> Result<Option<Event>, String> {
+    find_channel_message_by_content_key_with_scope(
+        state,
+        author_pubkey,
+        channel_id,
+        content_key,
+        Some((api_base_url, owner_keys)),
+    )
+    .await
+}
+
+async fn find_channel_message_by_content_key_with_scope(
+    state: &AppState,
+    author_pubkey: &str,
+    channel_id: &str,
+    content_key: &str,
+    scope: Option<(&str, &Keys)>,
+) -> Result<Option<Event>, String> {
+    let mut until: Option<u64> = None;
+    for _ in 0..10 {
+        let mut filter = serde_json::json!({
+            "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE],
+            "authors": [author_pubkey.trim().to_ascii_lowercase()],
+            "#h": [channel_id],
+            "limit": 500,
+        });
+        if let Some(until) = until {
+            filter["until"] = serde_json::json!(until);
+        }
+        let events = match scope {
+            Some((api_base_url, owner_keys)) => {
+                query_relay_at_with_keys(state, api_base_url, &[filter], owner_keys, None).await?
+            }
+            None => query_relay(state, &[filter]).await?,
+        };
+        if let Some(event) = events
+            .iter()
+            .find(|event| event.content.contains(content_key))
+        {
+            return Ok(Some(event.clone()));
+        }
+        if events.len() < 500 {
+            break;
+        }
+        until = events
+            .iter()
+            .map(|event| event.created_at.as_secs())
+            .min()
+            .map(|timestamp| timestamp.saturating_sub(1));
+    }
+    Ok(None)
+}
+
+pub(crate) async fn send_owner_marked_channel_message(
+    state: &AppState,
+    channel_id: &str,
+    content: &str,
+    assistant_pubkey: &str,
+    marker: &str,
+    relay_base: &str,
+    signing_keys: &Keys,
+) -> Result<SendChannelMessageResponse, String> {
+    let channel_uuid = uuid::Uuid::parse_str(channel_id)
+        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+    let client_tags = vec![vec!["client".to_string(), marker.to_string()]];
+    let mentions = vec![assistant_pubkey.to_string()];
+    let builder = build_managed_agent_channel_message(
+        channel_uuid,
+        content.trim(),
+        None,
+        &mentions,
+        &client_tags,
+    )?;
+    let (result, created_at) =
+        submit_event_at_created_at(builder, state, relay_base, signing_keys).await?;
+    Ok(SendChannelMessageResponse {
+        event_id: result.event_id,
+        root_event_id: None,
+        parent_event_id: None,
+        depth: 0,
+        created_at,
+    })
 }
 
 fn marker_author_for_scope<'a>(
@@ -659,15 +783,14 @@ fn legacy_managed_agent_auth_tag(
 
 fn managed_agent_submission_auth_tag(
     record: &ManagedAgentRecord,
-    state: &AppState,
+    owner_keys: &Keys,
     agent_pubkey: &PublicKey,
 ) -> Result<Option<String>, String> {
     if let Some(auth_tag) = stored_managed_agent_auth_tag(record.auth_tag.as_deref()) {
         return Ok(Some(auth_tag));
     }
 
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
-    legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
+    legacy_managed_agent_auth_tag(owner_keys, agent_pubkey)
 }
 
 fn build_managed_agent_channel_message(
@@ -707,14 +830,43 @@ pub async fn send_managed_agent_channel_message(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
-    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
+    send_managed_agent_channel_message_internal(
+        &agent_pubkey,
+        &channel_id,
+        &content,
+        marker.as_deref(),
+        marker_scope.as_deref(),
+        mention_pubkeys.unwrap_or_default(),
+        parent_event_id.as_deref(),
+        additional_markers.unwrap_or_default(),
+        None,
+        &app,
+        &state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_managed_agent_channel_message_internal(
+    agent_pubkey: &str,
+    channel_id: &str,
+    content: &str,
+    marker: Option<&str>,
+    marker_scope: Option<&str>,
+    mention_pubkeys: Vec<String>,
+    parent_event_id: Option<&str>,
+    additional_markers: Vec<String>,
+    scope: Option<(&str, &Keys)>,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<SendChannelMessageResponse, String> {
+    let channel_uuid = uuid::Uuid::parse_str(channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err("message content is required".into());
     }
     let marker = marker
-        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
@@ -725,7 +877,7 @@ pub async fn send_managed_agent_channel_message(
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        let mut records = load_managed_agents(&app)?;
+        let mut records = load_managed_agents(app)?;
         find_managed_agent_mut(&mut records, &requested_pubkey)?.clone()
     };
 
@@ -738,17 +890,25 @@ pub async fn send_managed_agent_channel_message(
             record.pubkey
         ));
     }
+    let fallback_owner_keys;
+    let owner_keys = match scope {
+        Some((_, owner_keys)) => owner_keys,
+        None => {
+            fallback_owner_keys = state.signing_keys()?;
+            &fallback_owner_keys
+        }
+    };
     let submission_auth_tag =
-        managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
-    let thread_ref = match parent_event_id.as_deref() {
+        managed_agent_submission_auth_tag(&record, owner_keys, &keys.public_key())?;
+    let thread_ref = match parent_event_id {
         Some(parent_id) => Some(
             // Same active-relay resolution as before — this path has no
             // caller-captured tenant scope (yet), so resolve the override
             // here and read through it with the active identity.
             resolve_thread_ref(
                 parent_id,
-                &state,
-                &crate::relay::relay_api_base_url_with_override(&state),
+                state,
+                &crate::relay::relay_api_base_url_with_override(state),
                 None,
             )
             .await?,
@@ -757,14 +917,29 @@ pub async fn send_managed_agent_channel_message(
     };
 
     if let Some(marker) = marker.as_deref() {
-        if let Some(existing) = find_managed_agent_channel_message_by_marker(
-            &state,
-            marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
-            &channel_id,
-            marker,
-        )
-        .await?
-        {
+        let existing = match scope {
+            Some((api_base_url, owner_keys)) => {
+                find_channel_message_by_marker_in_scope(
+                    state,
+                    marker_author_for_scope(marker_scope, Some(&record.pubkey))?,
+                    channel_id,
+                    marker,
+                    api_base_url,
+                    owner_keys,
+                )
+                .await?
+            }
+            None => {
+                find_managed_agent_channel_message_by_marker(
+                    state,
+                    marker_author_for_scope(marker_scope, Some(&record.pubkey))?,
+                    channel_id,
+                    marker,
+                )
+                .await?
+            }
+        };
+        if let Some(existing) = existing {
             return Ok(SendChannelMessageResponse {
                 event_id: existing.id.to_hex(),
                 parent_event_id: thread_ref
@@ -783,13 +958,13 @@ pub async fn send_managed_agent_channel_message(
         .as_deref()
         .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
         .unwrap_or_default();
-    for marker in additional_markers.unwrap_or_default() {
+    for marker in additional_markers {
         let marker = marker.trim();
         if !marker.is_empty() {
             client_tags.push(vec!["client".to_string(), marker.to_string()]);
         }
     }
-    let mentions = mention_pubkeys.unwrap_or_default();
+    let mentions = mention_pubkeys;
     let builder = build_managed_agent_channel_message(
         channel_uuid,
         trimmed,
@@ -800,12 +975,12 @@ pub async fn send_managed_agent_channel_message(
     // Same contract as `send_channel_message`: `created_at` is the signed
     // event's, not a post-publication clock read.
     let (result, created_at) =
-        submit_event_with_keys_created_at(builder, &state, &keys, submission_auth_tag.as_deref())
+        submit_event_with_keys_created_at(builder, state, &keys, submission_auth_tag.as_deref())
             .await?;
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
-        parent_event_id: parent_event_id.clone(),
+        parent_event_id: parent_event_id.map(str::to_string),
         root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
         depth: if parent_event_id.is_some() { 1 } else { 0 },
         created_at,
