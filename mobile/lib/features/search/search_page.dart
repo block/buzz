@@ -725,6 +725,7 @@ class _PeopleSection extends ConsumerWidget {
             key: ValueKey('search-person-row-${user.pubkey}'),
             contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
             leading: AvatarImage(
+              pubkey: user.pubkey,
               key: ValueKey('search-person-leading-${user.pubkey}'),
               imageUrl: user.avatarUrl,
               radius: 20,

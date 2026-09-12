@@ -735,6 +735,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           horizontal: Grid.half,
                         ),
                         leading: AvatarImage(
+                          pubkey: user.pubkey,
                           imageUrl: user.avatarUrl,
                           radius: 20,
                           backgroundColor: context.colors.primaryContainer,
@@ -838,6 +839,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     AvatarImage(
+                      pubkey: user.pubkey,
                       imageUrl: user.avatarUrl,
                       radius: 16,
                       backgroundColor: context.colors.primaryContainer,

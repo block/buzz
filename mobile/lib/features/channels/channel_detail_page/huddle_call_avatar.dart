@@ -235,6 +235,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 ),
                               )
                             : AvatarImage(
+                                pubkey: pubkey,
                                 key: ValueKey('huddle-avatar-image-$pubkey'),
                                 imageUrl: profile?.avatarUrl,
                                 radius: avatarRadius,
