@@ -534,7 +534,7 @@ test("primary+Shift+M favors the most recently mentioned eligible agent", async 
   await expect(input).toHaveText("@Vogue draft text");
 });
 
-test("the mention button opens settings and can undo an address", async ({
+test("the mention button preserves manual rementions after undo until explicitly readdressed", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -601,25 +601,39 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
+  const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
+  // Observe the old address exit before testing the manual selection.
+  await expect(avatar).toHaveCount(0);
   await input.fill("");
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })
     .click();
   await expect(input).toHaveText("@Morgarita ");
-  await expect(
-    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  await expect(avatar).toHaveCount(0);
 
   await input.type("later");
   await input.press("Enter");
   await expect(input).toHaveText("");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita later"))
-    .toContain(AGENT_A);
+    .toEqual([AGENT_A]);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
+
+  // Only the explicit automatic action reinstates the excluded address.
+  await automaticallyMention(composer, "Morgarita");
+  await expect(avatar).toBeVisible();
+  await input.type("explicit recovery");
+  await input.press("Enter");
+  await expect
+    .poll(() =>
+      readOutgoingMentionPubkeys(page, "@Morgarita explicit recovery"),
+    )
+    .toEqual([AGENT_A]);
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(avatar).toBeVisible();
 });
 
 test("always-mentioned agents remain selected without replaying their animation while Enter-send resolves", async ({
