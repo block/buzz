@@ -31,6 +31,9 @@ pub struct RelayInfo {
     /// admins/owners via the kind:9033 command. Omitted when no icon is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_state_snapshot: Option<serde_json::Value>,
     /// Relay operator's public key (hex), if published.
     pub pubkey: Option<String>,
     /// Contact address for the relay operator.
@@ -203,6 +206,7 @@ impl RelayInfo {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            read_state_snapshot: None,
             pubkey: None,
             contact: None,
             supported_nips,
@@ -293,6 +297,14 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        info.read_state_snapshot = Some(serde_json::json!({
+            "version": 1,
+            "community_id": tenant.community().as_uuid(),
+            "max_events": buzz_db::read_state::MAX_SNAPSHOT_EVENTS,
+            "max_bytes": buzz_db::read_state::MAX_SNAPSHOT_BYTES,
+        }));
+    }
     let tenant_host = if state.config.push_enabled {
         crate::tenant::bind_community(&state.db, raw_host)
             .await
