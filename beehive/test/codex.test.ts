@@ -68,3 +68,18 @@ for (const mode of ['ok', 'wrong-model', 'missing-native', 'wrong-protocol', 'mi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('Codex OS provider binding requires the resolved exact-reference key and forbids file fallback', () => {
+  const { dir, launch } = fixture();
+  try {
+    const codex = { cli: launch.codex!.cli, models: [launch.model], credential: { service: 'beehive' as const, account: 'provider:00000000-0000-0000-0000-000000000000' } };
+    assert.throws(() => prepareAgent({...launch,codex}),/OS provider credential unavailable/);
+    assert.throws(() => prepareAgent({...launch,codex,resolvedProviderKey:'bad key'}),/OS provider credential unavailable/);
+    assert.throws(() => prepareAgent({...launch,codex:{...codex,apiKeyFile:launch.codex!.apiKeyFile},resolvedProviderKey:'synthetic'}),/Invalid local Codex/);
+    const prepared = prepareAgent({...launch,codex,resolvedProviderKey:'synthetic-os-only'});
+    assert.equal(prepared.env.OPENAI_API_KEY,'synthetic-os-only');
+    assert.deepEqual(JSON.parse(prepared.env.CODEX_CONFIG!),{model:launch.model});
+    assert.ok(!JSON.stringify(codex).includes('synthetic-os-only'));
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});

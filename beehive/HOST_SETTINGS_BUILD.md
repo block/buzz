@@ -17,7 +17,7 @@ This is an **incomplete candidate**, not the complete authorized prototype. No i
 
 1. **Databricks v2 setup, native PKCE, OS custody and model catalog implemented.** Explicit provider open still prefills the URL; browser sign-in now calls the shared Rust owner through a built macOS arm64 helper. Verified OS storage precedes public CAS; cancellation cannot publish. Headless catalog/launch-preflight refresh uses Beehive-only entries. See `native/README.md` for the export recipe and the remaining static-token lifetime limit of an already-running stock harness. No Desktop credentials or JS OAuth engine.
 2. **Desktop-equivalent harness discovery/capability rules and effort are NOT implemented.** Only Buzz Agent PATH resolution is offered. No Codex version probe, adapter/CLI discovery contract, current Pi `buzz-pi-acp`, Goose/Claude/Codex provider combinations or model-specific effort propagation is claimed. Effort is explicitly unavailable, never guessed.
-3. Optional relay display name is not captured yet; URL-only footer is truthful. There is no fabricated relay name.
+3. Optional relay display name is now captured by bounded NIP-11 metadata (relay integration dfa54c7b8). Exact URL and actual state remain authoritative; failure/stale/cancel yields URL-only.
 4. Catalogs are deliberately append-only. There is no edit/delete/migration UI. Credential-attempt references are retained for explicit recovery; a public save failure can leave an OS entry. Do not delete retained attempts automatically.
 5. Local service currently requires a Unix socket path of at most 100 bytes and an owner-only host directory. Windows transport is not implemented. The intended desktop/laptop target is macOS.
 6. Large catalogs still need an explicit management-wire headroom gate before adoption. The catalog permits up to 100 rows while a management message is bounded at 32 KiB; verify/restrict the projected inventory against that limit before release. The small integrated flow does not establish large-inventory behavior.
@@ -56,7 +56,7 @@ Recovered 78f0c373 without restarting its implementation. This continuation adds
 2. **Databricks v2 continuation a7e21caa:** `PkceOAuthTokenSource::new_with_custody` bypasses all token-file reads/writes; the default Desktop/CLI cache behavior is unchanged. New `beehive-databricks` binary uses native Beehive OS entries, verified writes, exact-account cross-process locking, shared PKCE and the canonical v2 model union/filter implementation. Built release Mach-O arm64 and helper package at `/Users/loganj/.buzz/artifacts/beehive-databricks-a7e21caa/`; reproducible scoped recipe in `native/README.md`. Future exports must merge the helper into their Beehive `bin/`; no installed package was changed. Start obtains a refreshed access token, but a running stock harness does not yet have continuous OAuth refresh.
 3. **Harness discovery:** still Buzz Agent PATH-only; Desktop-equivalent adapter/CLI/version rules remain required. Prior-art plan has exact source owners and current Pi correction. No discovery rewrite made.
 4. **Models/effort:** existing OpenAI listing/custom model retained; Databricks now uses the shared native authenticated catalog and custom-model path. Supported harness-specific effort selection/launch propagation remains required. Synthetic Databricks native auth/store/refresh/catalog and host Save/Start/ACP evidence is recorded in the a7e21caa artifact; no live-provider or effort evidence is claimed.
-5. **Relay:** URL/actual connection state retained; optional metadata name capture still missing. No network fetch added.
+5. **Relay:** integrated bounded optional NIP-11 name; exact URL/actual state retained. Fetch is unauthenticated, size/deadline bounded, cancellation/stale fenced; failures remain nameless.
 6. **Wire:** pre-adoption actual representation gate and shared producer/consumer ceiling added and tested. Residual: 8 KiB reserve is conservative headroom, NOT proof that arbitrarily growing assignment/run history fits forever. It also applies to legacy startup inventories; unusually large existing inventories can now refuse startup even if below 32 KiB. Assess this compatibility boundary before release. Existing send failure handling does not constitute a future-lifecycle fit proof.
 7. **Lifecycle/failures:** new service teardown/unauthorized-stop coverage passes. Broader credential helper late-completion/cancellation/failure matrix remains incomplete. Existing active-run immutability fixture still passes.
 
@@ -139,3 +139,26 @@ never enter the new proxy. Shared launch/ownership remains touched; Larry must
 assess the final combined suite after relay integration, not waive older failures.
 No push/install/publication. Capability-specific non-Buzz provider integration and
 live-account readiness are not claimed by this component.
+
+
+## Adapter continuation 9b0f8958 (incomplete assignment)
+
+Relay-name commit is integrated (dfa54c7b8). Codex × saved OpenAI now uses the
+existing Codex launch schema: detected >=1.10.0 adapter and separate CLI, saved
+exact custom model, OS-only immutable credential reference, host admission read,
+OPENAI_API_KEY and JSON CODEX_CONFIG model override, separate HOME/CODEX_HOME,
+ACP protocol 2 exact-model evidence, existing owned Stop. No generic effort is
+offered (Desktop agentConfigCore owns it via model ID). No new native code or
+proxy routes. Legacy explicit Codex key-file bindings remain separate; an OS
+binding cannot fall back to a file.
+
+This does NOT complete the requested non-Buzz matrix. Pi execution/provider
+integration and non-Buzz Databricks integration are still absent. Claude remains
+provider-locked in the cited Desktop catalog; Claude × OpenAI is not offered.
+Do not publish this as BUILD IT ALL complete. Current source inspection did not
+establish a Desktop-owned Pi/Codex/Claude Databricks launch adapter; implementing
+such transport still requires the actual adapter protocol/config contract, not
+merely sending BUZZ_AGENT_PROVIDER to an unrelated process.
+
+Evidence for this continuation, final suite and remaining work:
+`/Users/loganj/.buzz/artifacts/beehive-adapter-integration-9b0f8958/INTEGRATION_RESULT.md`.

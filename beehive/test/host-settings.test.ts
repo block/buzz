@@ -1,8 +1,10 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { addDatabricks } from '../src/databricks.ts';
 import { wrapManagement, unwrapManagement } from '../src/nostr-codec.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -72,26 +74,48 @@ test('OpenAI verifies store before public commit; listing is bounded and custom 
   assert.throws(() => saveSettings(root,catalog,catalog.revision),/changed/);
 });
 
-for (const providerType of ['openai','databricks_v2'] as const) test(`${providerType} saved runtime reaches host Save/new Start while the prior active run remains immutable`, async t => {
+for (const providerType of ['openai','databricks_v2','codex-openai'] as const) test(`${providerType} saved runtime reaches host Save/new Start while the prior active run remains immutable`, async t => {
   const root = fixture(t), owner = newKey(), agent = newKey(), hostKey = publicKey(newKey());
-  const setup: Setup = { host: hostKey, ownerSecret: owner, agentSecret: agent, runner: realpathSync(process.execPath), args: ['-e','setInterval(()=>{},1000)'], workspace: root, serviceHome: root, configDirectory: root, mode: 'fixture' };
+  const codex = providerType === 'codex-openai';
+  const home = codex ? join(root,'service-home') : root, config = codex ? join(root,'agent-config') : root;
+  if (codex) { mkdirSync(home); mkdirSync(config); }
+  const setup: Setup = { host: hostKey, ownerSecret: owner, agentSecret: agent, runner: realpathSync(process.execPath), args: ['-e','setInterval(()=>{},1000)'], workspace: root, serviceHome: home, configDirectory: config, mode: 'fixture' };
   provision(root,setup,createGenesis(publicKey(owner),publicKey(agent),hostKey));
   let receive: (m: Message) => void = () => {}; const reports: Message[] = [];
   const transport = { binding: { host: hostKey, owner: publicKey(owner) }, validate() {}, connect(_url: string,_secret: string,handle: (m: Message) => void) { receive = handle; return { ready: Promise.resolve(), send(m: Message) { reports.push(m); }, close() {} }; } };
   let providerReads = 0;
-  const running = await host(root,'ws://127.0.0.1',undefined,transport,undefined,async (input,signal) => { signal.throwIfAborted(); assert.equal((input as any).provider,providerType === 'openai' ? 'openai-compat' : 'databricks_v2'); if (providerType === 'databricks_v2') assert.equal((input as any).host,'https://fixture.example'); providerReads++; return {ok:true,secret:'synthetic-provider-key'}; });
+  const running = await host(root,'ws://127.0.0.1',undefined,transport,undefined,async (input,signal) => { signal.throwIfAborted(); assert.equal((input as any).provider,providerType !== 'databricks_v2' ? 'openai-compat' : 'databricks_v2'); if (providerType === 'databricks_v2') assert.equal((input as any).host,'https://fixture.example'); providerReads++; return {ok:true,secret:codex ? 'fixture-codex-private-key' : 'synthetic-provider-key'}; });
   t.after(() => running.close());
   const start = message('start',hostKey,publicKey(agent),0); receive(start);
   await wait(() => reports.some(m => m.type === 'inventory' && m.body.phase === 'running'));
   const active = reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun;
   let stored: string | null = null;
-  if (providerType === 'openai') addOpenAI(root,'Fixture','synthetic',{ read: () => stored, create(_r,v) { stored = v; } });
+  if (providerType !== 'databricks_v2') addOpenAI(root,'Fixture','synthetic',{ read: () => stored, create(_r,v) { stored = v; } });
   else await addDatabricks(root,'Fixture','https://fixture.example',new AbortController().signal,async () => ({ok:true}));
   const prior = readSettings(root), id = settingsId();
-  const model = providerType === 'openai' ? 'gpt-5' : 'databricks-gpt-5-4';
+  const model = codex ? 'custom-codex-model' : providerType === 'openai' ? 'gpt-5' : 'databricks-gpt-5-4';
   const executable = join(root,'fixture-buzz-agent');
   writeFileSync(executable,`#!/bin/sh\n[ \"$BUZZ_AGENT_THINKING_EFFORT\" = high ] || exit 9\nexec '${process.execPath}' '${fileURLToPath(new URL('./acp-fixture.ts',import.meta.url))}' ${providerType === 'openai' ? 'openai' : 'databricks-os'}\n`,{mode:0o700});
-  saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: 'buzz-agent', executable, providerId: prior.providers[0]!.id, model, effort: 'high' }] },prior.revision);
+  let requests = 0;
+  if (codex) {
+    const server = createServer(async (req,res) => {
+      assert.equal(req.method,'POST'); assert.equal(req.url,'/v1/responses');
+      assert.equal(req.headers.authorization,'Bearer fixture-codex-private-key');
+      let body = ''; for await (const chunk of req) body += chunk;
+      assert.equal(JSON.parse(body).model,model); requests++;
+      res.end('{"output":[]}');
+    });
+    server.listen(0,'127.0.0.1'); await once(server,'listening');
+    t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const endpoint = `http://127.0.0.1:${(server.address() as any).port}/v1/responses`;
+    writeFileSync(join(root,'mode'),'ok');
+    writeFileSync(executable,`#!${process.execPath}
+const response = await fetch(${JSON.stringify(endpoint)}, {method:'POST',headers:{authorization:'Bearer '+process.env.OPENAI_API_KEY},body:JSON.stringify({model:JSON.parse(process.env.CODEX_CONFIG).model})});
+if (!response.ok) throw Error('Synthetic provider rejected');
+await import(${JSON.stringify(new URL('./conversation-harness-fixture.ts',import.meta.url).href)});
+`,{mode:0o700});
+  }
+  saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: codex ? 'codex' : 'buzz-agent', executable, providerId: prior.providers[0]!.id, model, ...(codex ? {cli:realpathSync(process.execPath)} : {effort:'high'}) }] },prior.revision);
   await wait(() => running.settingsRevision === 2);
   await wait(() => reports.some(m => m.type === 'inventory' && (m.body.harnessSetups as any[]).some(r => r.id === `runtime:${id}`)));
   const inventory = reports.filter(m => m.type === 'inventory').at(-1)!;
@@ -109,6 +133,7 @@ for (const providerType of ['openai','databricks_v2'] as const) test(`${provider
   assert.equal(reports.find(m => m.body.operation === nextStart.id)?.body.result,'accepted');
   assert.equal((reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun as any).selection.model,model);
   assert.equal(providerReads,1);
+  if (codex) { assert.equal(requests,1); assert.ok(!readFileSync(join(root,'journal.json'),'utf8').includes('fixture-codex-private-key')); }
   assert.ok(!JSON.stringify(reports).includes('synthetic-provider-key'));
   assert.ok(!readFileSync(join(root,'journal.json'),'utf8').includes('synthetic-provider-key'));
   const invalid = { ...readSettings(root), revision: 3, runtimes: [] }; writePrivate(join(root,'settings.json'),invalid);

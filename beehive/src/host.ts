@@ -241,10 +241,11 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
     let resolvedProviderKey: string | undefined;
-    if (setup.buzzProvider?.credential) {
+    const providerCredential = setup.buzzProvider?.credential ?? (setup.mode === 'codex' ? setup.codex?.credential : undefined);
+    if (providerCredential) {
       const controller = new AbortController(); credentialRead = controller;
       try {
-        const result = await providerRead({ action: 'provider-read', provider:setup.buzzProvider.provider, host:setup.buzzProvider.baseUrl, key: setup.buzzProvider.credential }, controller.signal);
+        const result = await providerRead({ action: 'provider-read', provider:setup.buzzProvider?.provider ?? 'openai-compat', host:setup.buzzProvider?.baseUrl ?? 'https://api.openai.com/v1', key: providerCredential }, controller.signal);
         controller.signal.throwIfAborted();
         if (closing || retracting(revision) || state.revision !== revision || hash(state.assignment) !== assignment || hash(state.selected) !== selectionBefore) throw Error('Provider admission invalidated');
         resolvedProviderKey = result.secret; result.secret = undefined;

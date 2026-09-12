@@ -104,7 +104,7 @@ test('Desktop contract detects fake adapter/CLI independently, strict Codex vers
   assert.equal(rows.find(r => r.id === 'codex')?.state,'available');
   assert.equal(rows.find(r => r.id === 'claude')?.state,'cli-missing');
   assert.equal(rows.find(r => r.id === 'goose')?.state,'not-installed');
-  assert.deepEqual(rows.filter(r => r.providers.length).map(r => r.id),['buzz-agent']);
+  assert.deepEqual(rows.filter(r => r.providers.length).map(r => r.id),['codex','buzz-agent']);
   for (const value of ['1.9.99','1.10','1.10.0-rc1','not-version']) assert.equal(compatibleCodex(value),false);
   for (const value of ['1.10.0','pkg 2.0.0']) assert.equal(compatibleCodex(value),true);
   const slow = join(root,'slow'); writeFileSync(slow,'#!/bin/sh\nexec /bin/sleep 60\n',{mode:0o700});
@@ -177,4 +177,13 @@ test('relay runtime never receives the OS-backed Databricks bearer', t => {
   const plan=prepareConversation({executable:realpathSync(process.execPath),relay:'ws://127.0.0.1:1'}, {executable:realpathSync(process.execPath),args:[],workspace:root,home:root,configDirectory:root,databricksHost:'',model:input.model,resolvedProviderKey:'synthetic-provider-token',buzzProvider:{provider:'databricks_v2',auth:'token',baseUrl:input.host,credential:key,models:[input.model]}}, '1'.repeat(64), '2'.repeat(64));
   assert.equal(plan.env.DATABRICKS_TOKEN,undefined);
   assert.ok(!JSON.stringify(plan.env).includes('synthetic-provider-token'));
+});
+
+
+test('Codex saved-provider matrix rejects Databricks, missing CLI and invented generic effort', () => {
+  const settings: Settings = {version:1,revision:0,agents:[],providers:[{id:'p',name:'OpenAI',type:'openai',endpoint:'https://api.openai.com/v1',key}],runtimes:[{id:'r',name:'Custom Codex',harness:'codex',cli:process.execPath,executable:process.execPath,providerId:'p',model:'custom-codex-model'}]};
+  assert.equal(validateSettings(settings).runtimes[0]!.model,'custom-codex-model');
+  assert.throws(() => validateSettings({...settings,runtimes:[{...settings.runtimes[0]!,cli:undefined}]}),/combination/);
+  assert.throws(() => validateSettings({...settings,runtimes:[{...settings.runtimes[0]!,effort:'high'}]}),/combination/);
+  assert.throws(() => validateSettings({...settings,providers:[{...settings.providers[0]!,type:'databricks_v2',endpoint:'https://fixture.example'}]}),/combination/);
 });

@@ -39,7 +39,7 @@ export function prepareAgent(input: AgentLaunch) {
   if (plan.harness === 'codex') {
     identifier(plan.model);
     if (plan.args.length || !plan.codex || !plan.codex.models.includes(plan.model) || plan.home === plan.configDirectory) throw Error('Codex requires zero-argument adapter, approved model and distinct HOME/CODEX_HOME');
-    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(codexEnvironment(plan.codex, plan.home, plan.configDirectory, plan.model)), cliExecutableHash: hash(readFileSync(plan.codex.cli)) });
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(codexEnvironment(plan.codex, plan.home, plan.configDirectory, plan.model, plan.resolvedProviderKey)), cliExecutableHash: hash(readFileSync(plan.codex.cli)) });
   }
   if (plan.harness === 'claude') {
     identifier(plan.model);
