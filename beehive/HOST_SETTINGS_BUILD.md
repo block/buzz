@@ -1,6 +1,31 @@
 # Host settings implementation checkpoint
 
-This is an **incomplete candidate**, not the complete authorized prototype. No install or publication was performed. Runtime integration now includes in-run Databricks refresh, Desktop-backed detection and model-specific Buzz Agent effort. Final combined validation, relay integration and delivery remain required. Earlier chronological limitations below are superseded by the runtime integration section at the end.
+## Current delivery scope (owner instruction supersedes historical matrix)
+
+The owner explicitly accepts **Buzz Agent only** (event
+`0325af42bb296431de66174e4103fd4a2dd472e20c5b95c3424feb2f452b37bb`).
+Buzz Agent × saved OpenAI / Databricks v2, model-specific supported effort,
+identity-only registration, five-action host UI, owned detached service and live
+catalog adoption are implemented. Existing Pi/Codex work stays intact; missing
+Codex/Claude Databricks is **not** required for this delivery and no full adapter
+parity is claimed. Incompatible combinations remain unavailable.
+
+Fresh review at semantic head `747d011a70c53b1b9d6d913eed91464a5a4bdcc5` found no
+new demonstrated production authority defect in the scoped source paths. Delivery
+is nevertheless **not cleared**: the single final concurrent suite is 201 passed,
+3 failed, 19 skipped (223 tests). The legacy broker `ok` response timeout remains
+unclassified, not waived. Admission control exceeded its 2500ms fixture bound by
+13ms with correct receipts; disconnect failed before its IPC-loss stimulus because
+fixture readiness was absent. Typecheck, renderer 3/3 and actual isolated Buzz-only
+settings PTY pass. See
+`/Users/loganj/.buzz/artifacts/beehive-readiness-6e9d7779/RELEASE_READINESS.md` for
+exact evidence, failure assessment and export/install requirements. No publication,
+install, native rebuild or real credential/provider operation occurred.
+
+Everything below is **chronological implementation evidence**, not a current
+requirements list or additional owner-approval gate. Later sections supersede
+earlier missing-functionality statements; only the current scope above governs
+delivery.
 
 ## Implemented
 
@@ -38,7 +63,7 @@ External evidence: `/Users/loganj/.buzz/artifacts/beehive-host-settings-build-fb
 
 ## Publication/package boundary
 
-Do not claim installed/delivered/live credentials verified. Only task files should be committed on `feat/beehive-opentui-57f9c8fa`; no push/PR/merge/default branch or process mutation. Continue missing functionality and narrow credential/process review before delivery. Export exact accepted commit including all new `beehive/src/*.ts`; use the existing package-local lock/runtime recipe. Each eventual occupied `opentui-current` is replaced with one current export, preserving settings/evidence/processes and no retained rollback copy. Installed synthetic smoke must use the extended loader, not fresh HOME alone.
+Do not claim installed/delivered/live credentials verified. Only task files should be committed on `feat/beehive-opentui-57f9c8fa`; no push/PR/merge/default branch or process mutation. Use the current narrowed-scope readiness verdict above before delivery; do not expand adapter scope. Export exact accepted commit including all new `beehive/src/*.ts`; use the existing package-local lock/runtime recipe. Each eventual occupied `opentui-current` is replaced with one current export, preserving settings/evidence/processes and no retained rollback copy. Installed synthetic smoke must use the extended loader, not fresh HOME alone.
 
 ## Continuation 0394e318 (still incomplete; do not publish)
 
@@ -54,7 +79,7 @@ Recovered 78f0c373 without restarting its implementation. This continuation adds
 
 1. **Registration/UI:** preserved prior implementation and evidence; unchanged here.
 2. **Databricks v2 continuation a7e21caa:** `PkceOAuthTokenSource::new_with_custody` bypasses all token-file reads/writes; the default Desktop/CLI cache behavior is unchanged. New `beehive-databricks` binary uses native Beehive OS entries, verified writes, exact-account cross-process locking, shared PKCE and the canonical v2 model union/filter implementation. Built release Mach-O arm64 and helper package at `/Users/loganj/.buzz/artifacts/beehive-databricks-a7e21caa/`; reproducible scoped recipe in `native/README.md`. Future exports must merge the helper into their Beehive `bin/`; no installed package was changed. Start obtains a refreshed access token, but a running stock harness does not yet have continuous OAuth refresh.
-3. **Harness discovery:** still Buzz Agent PATH-only; Desktop-equivalent adapter/CLI/version rules remain required. Prior-art plan has exact source owners and current Pi correction. No discovery rewrite made.
+3. **Harness discovery:** still Buzz Agent PATH-only; Adapter/CLI/version rules were added in the runtime integration below; non-Buzz parity is not a current delivery requirement. Prior-art plan has exact source owners and current Pi correction. No discovery rewrite made.
 4. **Models/effort:** existing OpenAI listing/custom model retained; Databricks now uses the shared native authenticated catalog and custom-model path. Supported harness-specific effort selection/launch propagation remains required. Synthetic Databricks native auth/store/refresh/catalog and host Save/Start/ACP evidence is recorded in the a7e21caa artifact; no live-provider or effort evidence is claimed.
 5. **Relay:** integrated bounded optional NIP-11 name; exact URL/actual state retained. Fetch is unauthenticated, size/deadline bounded, cancellation/stale fenced; failures remain nameless.
 6. **Wire:** pre-adoption actual representation gate and shared producer/consumer ceiling added and tested. Residual: 8 KiB reserve is conservative headroom, NOT proof that arbitrarily growing assignment/run history fits forever. It also applies to legacy startup inventories; unusually large existing inventories can now refuse startup even if below 32 KiB. Assess this compatibility boundary before release. Existing send failure handling does not constitute a future-lifecycle fit proof.
@@ -155,9 +180,8 @@ binding cannot fall back to a file.
 This historical slice did not complete the requested non-Buzz matrix. Pi was
 subsequently completed below; Codex/Claude Databricks remain absent. Claude remains
 provider-locked in the cited Desktop catalog; Claude × OpenAI is not offered.
-Do not publish this as BUILD IT ALL complete. The remaining Codex/Claude
-Databricks transport must use the actual adapter protocol/config contract, not
-merely send BUZZ_AGENT_PROVIDER to an unrelated process.
+Do not claim full adapter parity. Codex/Claude Databricks is outside the current
+Buzz-only delivery scope; no implementation is required for publication.
 
 Evidence for this continuation, final suite and remaining work:
 `/Users/loganj/.buzz/artifacts/beehive-adapter-integration-9b0f8958/INTEGRATION_RESULT.md`.
@@ -215,8 +239,7 @@ Codex protocol/model/auth/descendant negatives remain unchanged.
 
 Targeted validation: host-settings 8/8; codex-home + codex + manager-controller
 17/17; direct pinned Node 24.15.0 typecheck PASS. No global suite or integrated UI
-rerun: Codex/Databricks and Claude/Databricks are still unimplemented, not proven
-incompatible. Claude/OpenAI remains provider-locked/unsupported. Native/helper
-unchanged; reuse existing artifact/hash and package instructions. This is not the
-final BUILD IT ALL candidate. Full result and surviving logs:
+rerun was performed in that historical continuation. Codex/Databricks and
+Claude/Databricks remain outside the current delivery scope, not proven incompatible. Claude/OpenAI remains provider-locked/unsupported. Native/helper
+unchanged; reuse existing artifact/hash and package instructions. This historical continuation predates the current Buzz-only readiness assessment. Full result and surviving logs:
 `/Users/loganj/.buzz/artifacts/beehive-provider-final-7156d988/FINAL_HOST_SETTINGS_RESULT.md`.
