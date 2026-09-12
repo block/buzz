@@ -303,6 +303,9 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+/** ACP conversation boundary configured on an agent definition. */
+export type AcpSessionPolicy = "channel" | "thread";
+
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
@@ -332,6 +335,7 @@ export type ManagedAgent = {
   idleTimeoutSeconds: number | null;
   maxTurnDurationSeconds: number | null;
   parallelism: number;
+  sessionPolicy: AcpSessionPolicy;
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;

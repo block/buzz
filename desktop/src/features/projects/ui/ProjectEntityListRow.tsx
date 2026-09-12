@@ -34,20 +34,27 @@ export function ProjectEntityFacepile({
     <span className="flex shrink-0 items-center">
       {shown.map((pubkey, index) => {
         const label = resolveUserLabel({ profiles, pubkey });
+        const isAgent = profiles?.[pubkey]?.isAgent === true;
+        const separatorClassName = cn(
+          "isolate relative inline-flex before:pointer-events-none before:absolute before:-inset-0.5 before:bg-background before:content-['']",
+          isAgent ? "before:rounded-squircle" : "before:rounded-full",
+        );
+        const avatar = (
+          <UserAvatar
+            avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
+            displayName={label}
+            shape={isAgent ? "squircle" : "circle"}
+            size="xs"
+          />
+        );
         if (!interactive) {
           return (
             <span
-              className={cn(index > 0 && "-ml-1.5")}
+              className={cn(separatorClassName, index > 0 && "-ml-1.5")}
               key={pubkey}
               title={label}
             >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="ring-2 ring-background"
-                displayName={label}
-                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
-                size="xs"
-              />
+              <span className="relative z-10">{avatar}</span>
             </span>
           );
         }
@@ -55,24 +62,17 @@ export function ProjectEntityFacepile({
           <UserProfilePopover
             key={pubkey}
             pubkey={pubkey}
+            triggerClassName={cn(
+              separatorClassName,
+              "rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:before:opacity-0",
+              index > 0 && "-ml-1.5",
+            )}
             triggerElement="span"
+            triggerAriaLabel={`View ${label}'s profile`}
           >
-            <button
-              className={cn(
-                profiles?.[pubkey]?.isAgent ? "rounded-[30%]" : "rounded-full",
-                index > 0 && "-ml-1.5",
-              )}
-              title={label}
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="ring-2 ring-background"
-                displayName={label}
-                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
-                size="xs"
-              />
-            </button>
+            <span className="relative z-10" title={label}>
+              {avatar}
+            </span>
           </UserProfilePopover>
         );
       })}

@@ -31,6 +31,7 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  session_policy?: "channel" | "thread";
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -62,6 +63,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    sessionPolicy: persona.session_policy ?? "channel",
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };

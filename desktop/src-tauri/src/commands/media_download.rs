@@ -609,6 +609,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "test".to_string(),
                 source_is_builtin: false,
                 system_prompt: None,
@@ -659,6 +660,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "test".to_string(),
                 source_is_builtin: false,
                 system_prompt: None,
@@ -705,6 +707,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "test".to_string(),
                 source_is_builtin: false,
                 system_prompt: None,

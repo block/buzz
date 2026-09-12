@@ -1,11 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
+import { waitForAnimations } from "../helpers/animations";
 import {
   installMockBridge,
   openNewMessagePage,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
-import { waitForAnimations } from "../helpers/animations";
 
 const SHOTS = "test-results/pubkey-display";
 
@@ -120,7 +122,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
     )
     .toBe(true);
   await expect(settledAgentNpub).not.toHaveCSS("opacity", "0");
-  await expect(settledAgentNpub).toHaveText("cafef00d…f00d");
+  await expect(settledAgentNpub).toHaveText(truncateNpub(AGENT_PUBKEY));
   await expect(
     settledAgentName.getByText("Pinky", { exact: true }),
   ).not.toHaveCSS("opacity", "1");
@@ -158,7 +160,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    truncateNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await page.mouse.move(1_100, 500);
   await expect(charlieNpub).toHaveCSS("opacity", "0");
@@ -189,13 +191,67 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieNameTrigger.click();
   await expect(charlieKeyPopover).toBeVisible();
   await expect(charliePubkey).toContainText("npub1");
-  await expect(charlieKeyPopover).toContainText(TEST_IDENTITIES.charlie.pubkey);
+  // The verify popover is npub-only — the raw hex line is gone.
+  await expect(charlieKeyPopover).not.toContainText(
+    TEST_IDENTITIES.charlie.pubkey,
+  );
   await waitForAnimations(page);
   await page.getByTestId("new-message-page").screenshot({
     path: `${SHOTS}/new-dm-selected-recipient-key.png`,
   });
+
+  // Full-variant clipboard regression (D1a): the nested copy affordances
+  // must write the recipient's complete canonical npub through the real
+  // bridge — never the legacy raw hex the popover also shows, and never a
+  // truncation. The evidence screenshot above is captured first, so this
+  // interaction leaves it untouched.
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  const copyPublicKeyTrigger = charliePubkey.getByRole("button", {
+    name: "Copy public key",
+  });
+  await copyPublicKeyTrigger.click();
+  const copyNpubButton = page.getByRole("button", { name: "Copy npub" });
+  await copyNpubButton.click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(npubEncode(TEST_IDENTITIES.charlie.pubkey));
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "npub copied" }),
+  ).toBeVisible();
+  // Copying is not a dismissal: the nested affordance and the inspection
+  // popover it lives in both survive the copy.
+  await expect(copyNpubButton).toBeVisible();
+  await expect(charlieKeyPopover).toBeVisible();
+
+  // The inner Escape closes only the nested key popover — the inspection
+  // stays open.
+  await page.keyboard.press("Escape");
+  await expect(copyNpubButton).toHaveCount(0);
+  await expect(charlieKeyPopover).toBeVisible();
+
+  // Keyboard path: after the inner Escape focus returns naturally to the
+  // full-key trigger; Space reopens the popover, whose auto-focus lands on
+  // Copy npub, and Enter activates it. The sentinel proves this keyboard
+  // copy rewrites the clipboard rather than inheriting the value above.
+  await expect(copyPublicKeyTrigger).toBeFocused();
+  await page.evaluate(() =>
+    navigator.clipboard.writeText("keyboard-copy-sentinel"),
+  );
+  await page.keyboard.press("Space");
+  await expect(copyNpubButton).toBeVisible();
+  await expect(copyNpubButton).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(npubEncode(TEST_IDENTITIES.charlie.pubkey));
+
+  // Close the reopened nested popover so the inspection popover owns the
+  // final Escape; the recipient itself survives both dismissals.
+  await page.keyboard.press("Escape");
+  await expect(copyNpubButton).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(charlieKeyPopover).toHaveCount(0);
+  await expect(charlieChip).toBeVisible();
 
   await search.fill("charlie");
   await expect(charlieResult).toBeVisible();
@@ -206,7 +262,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    truncateNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await expect(charlieName.getByText("charlie", { exact: true })).toHaveCSS(
     "opacity",
@@ -226,6 +282,16 @@ test("selected new-DM recipient can be verified again through search", async ({
   await page.getByTestId("new-message-page").screenshot({
     path: `${SHOTS}/new-dm-selected-recipient.png`,
   });
+
+  // The To-field guard ignores popover clicks that bubble into the field;
+  // a click on the label itself — a physical descendant of the field — must
+  // still focus the input and open the recipient picker.
+  await page
+    .getByTestId("new-message-to-field")
+    .getByText("To:", { exact: true })
+    .click();
+  await expect(search).toBeFocused();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
 });
 
 test("member removal confirm shows the full npub inline", async ({ page }) => {

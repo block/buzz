@@ -211,8 +211,13 @@ _ensure-migrations: _ensure-services
     ./scripts/seed-local-community.sh
 
 # Run clippy on the desktop Tauri Rust crate
+# Features are additive, so a single invocation lints only one cfg graph.
+# Both graphs ship (release-windows builds without mesh-llm), so lint both:
+# the default graph covers the `#[cfg(not(feature = "mesh-llm"))]` arms and
+# the feature-enabled graph covers the mesh code.
 desktop-tauri-clippy: _ensure-sidecar-stubs
     cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets -- -D warnings
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets --features mesh-llm -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
@@ -682,7 +687,11 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
-    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+    fi
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs

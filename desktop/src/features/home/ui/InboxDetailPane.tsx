@@ -567,7 +567,7 @@ function InboxMessageDetailPane({
                   {canOpenChannel && contextChannelId ? (
                     <h2 className="min-w-0">
                       <button
-                        className="block min-w-0 text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        className="block min-w-0 max-w-full text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                         data-testid="home-inbox-context-title"
                         onClick={() =>
                           onOpenContext(
