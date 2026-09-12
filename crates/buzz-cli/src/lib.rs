@@ -1723,6 +1723,25 @@ pub enum IssuesCmd {
         #[arg(long)]
         repo_id: String,
     },
+    /// Mark an in-development BW issue implemented as its selected writer
+    #[command(name = "mark-implemented")]
+    MarkImplemented {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pushed Git commit (40-char SHA-1)
+        #[arg(long)]
+        commit: String,
+        /// Honest test and limitation summary. Use '-' to read from stdin.
+        #[arg(long)]
+        tests: String,
+    },
     /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
     Status {
         /// Issue event id
@@ -2396,6 +2415,7 @@ mod tests {
                 "create",
                 "get",
                 "list",
+                "mark-implemented",
                 "start-development",
                 "status",
                 "unassign",
@@ -2428,7 +2448,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 8),
+            ("issues", 9),
             ("media", 1),
             ("messages", 9),
             ("pack", 2),

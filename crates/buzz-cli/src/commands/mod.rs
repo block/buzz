@@ -141,3 +141,4 @@ mod tests {
 }
 
 pub(crate) mod bw;
+mod bw_git_readback;

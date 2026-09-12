@@ -17,7 +17,6 @@ import {
 import {
   BwConflictError,
   submitBwAcceptToBacklog,
-  submitBwImplementedTransition,
   submitBwIssueTextUpdate,
   submitBwReadyTransition,
   submitBwRelation,
@@ -694,38 +693,39 @@ function BwInDevelopmentAction({
   );
 }
 
-/** `in-development` -> `implemented`. `commit`/`remote_readback` are never
- * collected here — the Tauri command resolves both from an externally
- * observed Git read at submit time (NIP-BW.md: "The signed claim alone
- * proves no remote fact"). Only a human-authored tests summary is taken. */
-function BwImplementedAction({
+/** Owner/coordinator recovery for an interrupted writer session. Returning to
+ * Ready preserves the current stream and assignment; the existing Ready
+ * assignment picker can then select another writer before work starts again.
+ * Desktop never claims the writer-owned completion. */
+function BwWriterRecoveryAction({
   issue,
   project,
 }: {
   issue: ProjectIssue;
   project: Project;
 }) {
-  const [tests, setTests] = React.useState("");
   const [pending, setPending] = React.useState(false);
   const invalidate = useInvalidateProjectIssues(project);
 
-  const handleSubmit = async () => {
-    if (pending || !issue.bw || !tests.trim()) return;
+  const handleReset = async () => {
+    const stream =
+      issue.bw?.snapshot.projection.issue_state[issue.id]?.stream ?? "";
+    if (pending || !issue.bw || !stream) return;
     setPending(true);
     try {
-      await submitBwImplementedTransition({
+      await submitBwReadyTransition({
         issueId: issue.id,
         repo: project.repoAddress,
         snapshot: issue.bw.snapshot,
-        tests: tests.trim(),
+        stream,
       });
-      toast.success("Issue marked implemented.");
+      toast.success("Issue returned to ready.");
       await invalidate();
     } catch (error) {
       toast.error(
         error instanceof BwConflictError
           ? error.message
-          : errorMessage(error, "Implemented transition was refused."),
+          : errorMessage(error, "Ready recovery was refused."),
       );
     } finally {
       setPending(false);
@@ -733,22 +733,22 @@ function BwImplementedAction({
   };
 
   return (
-    <div className="space-y-1.5" data-testid="bw-implemented-action">
-      <textarea
-        className="min-h-16 w-full rounded-md border border-border/60 bg-background p-2 text-xs text-foreground"
-        data-testid="bw-implemented-tests"
-        onChange={(event) => setTests(event.target.value)}
-        placeholder="Tests summary"
-        value={tests}
-      />
+    <div className="space-y-1.5">
+      <p
+        className="text-xs text-muted-foreground"
+        data-testid="bw-writer-completion-pending"
+      >
+        The selected writer will mark this issue implemented after its pushed
+        commit and test summary are verified.
+      </p>
       <button
-        className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
-        data-testid="bw-implemented-submit"
-        disabled={pending || !tests.trim()}
-        onClick={() => void handleSubmit()}
+        className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
+        data-testid="bw-reset-ready-submit"
+        disabled={pending}
+        onClick={() => void handleReset()}
         type="button"
       >
-        {pending ? "Submitting…" : "Mark implemented"}
+        {pending ? "Returning…" : "Return to ready"}
       </button>
     </div>
   );
@@ -974,7 +974,7 @@ export function BwIssueActions({
         />
       ) : null}
       {issue.bw.state === "in-development" ? (
-        <BwImplementedAction issue={issue} project={project} />
+        <BwWriterRecoveryAction issue={issue} project={project} />
       ) : null}
       <BwImplementedDetails issue={issue} />
       <BwRelations issues={issues} issue={issue} project={project} />

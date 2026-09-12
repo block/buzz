@@ -482,6 +482,27 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 BW writer handoff
+
+These commands must run with the selected writer's own `BUZZ_PRIVATE_KEY`.
+They rebuild the complete repository history and refuse owner/coordinator
+impersonation. Replace the IDs with an enrolled issue that is already Ready.
+
+```bash
+# The selected writer accepts the Ready assignment before editing.
+buzz issues start-development \
+  --issue "$ISSUE_ID" --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" | jq .
+# Expected state: in-development
+
+# After testing, committing and pushing the issue's bound stream, that same
+# writer proves the pushed head and records an honest test/limitations summary.
+buzz issues mark-implemented \
+  --issue "$ISSUE_ID" --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" \
+  --commit "$(git rev-parse HEAD)" \
+  --tests "cargo test -p affected-crate: passed; no device test" | jq .
+# Expected state: implemented. A different writer or an unpushed/wrong commit fails.
+```
+
 ---
 
 ## 7. Error Path Testing

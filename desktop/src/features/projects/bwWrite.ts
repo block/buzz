@@ -444,60 +444,6 @@ export async function submitBwInDevelopmentTransition({
   });
 }
 
-/** Move an issue from `in-development` to `implemented`. `commit` and
- * `remote_readback` are deliberately omitted here: the Tauri command
- * resolves both from an externally observed Git read of the repository's
- * own stream at submit time and overwrites anything sent for them —
- * NIP-BW.md: "The signed claim alone proves no remote fact." This function
- * cannot fabricate that evidence and does not try to; `tests` remains a
- * human-authored summary, exactly as the contract allows. */
-export async function submitBwImplementedTransition({
-  repo,
-  issueId,
-  snapshot,
-  tests,
-}: {
-  repo: string;
-  issueId: string;
-  snapshot: BwSnapshot;
-  tests: string;
-}): Promise<{ eventId: string; projection: unknown }> {
-  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
-  const current = snapshot.projection.issue_state[issueId];
-  if (!previousId || !current?.stream || !current.assignment) {
-    throw new Error("This issue is not in development yet.");
-  }
-  const writer = bwBoundWriter(snapshot, issueId);
-  if (!writer) {
-    throw new Error(
-      "The development state is not bound to a valid selected writer anymore.",
-    );
-  }
-  const normalizedTests = tests.trim();
-  if (!normalizedTests) {
-    throw new Error("A tests summary is required.");
-  }
-  const tags: string[][] = [
-    ["issue", issueId],
-    ["previous", previousId],
-  ];
-  return invokeTauri("submit_project_bw_record", {
-    input: {
-      repo,
-      record: "issue-state",
-      tags,
-      content: {
-        state: "implemented",
-        stream: current.stream,
-        assignment: current.assignment,
-        tests: normalizedTests,
-      },
-      delegate: false,
-      signerPubkey: writer,
-    },
-  });
-}
-
 /** Add or remove a relation edge between two enrolled issues in the same
  * repository. Cycle rejection, active-membership locking and role
  * (Owner/coordinator-only) are all Core's decision

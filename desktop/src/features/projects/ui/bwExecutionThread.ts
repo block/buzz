@@ -44,6 +44,10 @@ export function bwStartDevelopmentRequest({
     `buzz issues start-development --issue ${issue.id.toLowerCase()} --repo-owner ${owner.toLowerCase()} --repo-id ${repoId}`,
     "```",
     link ? `Issue: ${link}` : null,
+    "After implementation, tests, commit, and push, you alone finish the BW handoff. Replace the test-summary placeholder with the checks you actually ran and any honest limitations:",
+    "```sh",
+    `buzz issues mark-implemented --issue ${issue.id.toLowerCase()} --repo-owner ${owner.toLowerCase()} --repo-id ${repoId} --commit "$(git rev-parse HEAD)" --tests "<checks run and limitations>"`,
+    "```",
   ]
     .filter(Boolean)
     .join("\n\n");

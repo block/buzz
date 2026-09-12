@@ -993,6 +993,24 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             repo_owner,
             repo_id,
         } => crate::commands::bw::start_development(client, &issue, &repo_owner, &repo_id).await,
+        IssuesCmd::MarkImplemented {
+            issue,
+            repo_owner,
+            repo_id,
+            commit,
+            tests,
+        } => {
+            let tests = read_or_stdin(&tests)?;
+            crate::commands::bw::mark_implemented(
+                client,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &commit,
+                &tests,
+            )
+            .await
+        }
         IssuesCmd::Status {
             issue,
             status,

@@ -426,7 +426,7 @@ test("ready asks an external ACP writer to sign and start development itself", a
     mentionPubkeys: [WRITER],
     content: expect.stringMatching(
       new RegExp(
-        `^\\[EXECUTION-THREAD\\] Starting development[\\s\\S]*buzz issues start-development --issue ${ROOT} --repo-owner ${"a".repeat(64)} --repo-id fixture-bw`,
+        `^\\[EXECUTION-THREAD\\] Starting development[\\s\\S]*buzz issues start-development --issue ${ROOT} --repo-owner ${"a".repeat(64)} --repo-id fixture-bw[\\s\\S]*buzz issues mark-implemented --issue ${ROOT}[\\s\\S]*--commit "\\$\\(git rev-parse HEAD\\)" --tests`,
       ),
     ),
   });
@@ -529,7 +529,7 @@ test("ready allows changing the named writer and rebinds ready to the new assign
   });
 });
 
-test("in-development requires a tests summary and never sends a client-claimed commit or readback", async ({
+test("in-development waits for the selected writer without a desktop completion action", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -538,6 +538,7 @@ test("in-development requires a tests summary and never sends a client-claimed c
       records: {
         [ROOT]: rootEvent(ROOT, "Marking implemented"),
         [ASSIGN_A]: assignmentEvent(ASSIGN_A, ROOT, WRITER, "assignment"),
+        [UPDATE_A]: issueUpdateEvent(UPDATE_A, ROOT),
       },
       projection: {
         issues: { [ROOT]: "in-development" },
@@ -555,27 +556,27 @@ test("in-development requires a tests summary and never sends a client-claimed c
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  await expect(panel.getByTestId("bw-implemented-submit")).toBeDisabled();
-  await panel.getByTestId("bw-implemented-tests").fill("cargo test: 0 failed");
-  await expect(panel.getByTestId("bw-implemented-submit")).toBeEnabled();
-  await panel.getByTestId("bw-implemented-submit").click();
-
-  const call = await lastBwCall(page, "submit_project_bw_record");
-  const content = (call?.payload as { content?: Record<string, unknown> })
-    ?.content;
-  expect(content).toMatchObject({
-    state: "implemented",
-    stream: "windows-integration",
-    assignment: ASSIGN_A,
-    tests: "cargo test: 0 failed",
-  });
-  // The externally observed commit/readback are resolved by the Tauri
-  // command itself, never sent as a caller claim.
-  expect(content).not.toHaveProperty("commit");
-  expect(content).not.toHaveProperty("remote_readback");
-  expect((call?.payload as { signerPubkey?: string }).signerPubkey).toBe(
-    WRITER,
+  await expect(panel.getByTestId("bw-writer-completion-pending")).toContainText(
+    "The selected writer will mark this issue implemented",
   );
+  await expect(panel.getByTestId("bw-implemented-action")).toHaveCount(0);
+  await expect(panel.getByTestId("bw-implemented-submit")).toHaveCount(0);
+  await panel.getByTestId("bw-reset-ready-submit").click();
+  const call = await lastBwCall(page, "submit_project_bw_record");
+  expect(call?.payload).toMatchObject({
+    record: "issue-state",
+    tags: [
+      ["issue", ROOT],
+      ["previous", "6".repeat(64)],
+    ],
+    content: {
+      state: "ready",
+      stream: "windows-integration",
+      assignment: ASSIGN_A,
+      update: UPDATE_A,
+      rework: null,
+    },
+  });
 });
 
 test("an implemented issue displays the commit, tests and verified readback exactly as Core accepted them", async ({
