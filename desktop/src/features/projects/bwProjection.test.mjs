@@ -8,6 +8,7 @@ import {
   bwRelationTargetCandidates,
   filterBwRelationTargets,
   mergeBwIssues,
+  resolveBwRelationTarget,
 } from "./bwProjection.ts";
 import { eventToProjectIssue } from "./projectIssues.mjs";
 
@@ -81,25 +82,40 @@ test("bwBoundWriter follows the exact assignment event bound into ready", () => 
   assert.equal(bwBoundWriter(s, root.id), null);
 });
 
-test("relation autocomplete offers every other enrolled state and matches visible issue numbers", () => {
+test("relation autocomplete explains unenrolled board issues and resolves visible issue numbers", () => {
   const s = snapshot("backlog");
   const readyId = "1".repeat(64);
   const developmentId = "2".repeat(64);
+  const unenrolledId = "3".repeat(64);
   s.projection.issues[readyId] = "ready";
   s.projection.issues[developmentId] = "in-development";
   s.projection.issue_fields[readyId] = { title: "Windows fix" };
-  s.records[developmentId] = {
-    id: developmentId,
-    kind: 1621,
-    tags: [["subject", "Foundation refactor"]],
+  s.records[readyId] = {
+    ...root,
+    id: readyId,
+    tags: [root.tags[0], ["subject", "Windows fix"]],
   };
+  s.records[developmentId] = {
+    ...root,
+    id: developmentId,
+    tags: [root.tags[0], ["subject", "Foundation refactor"]],
+  };
+  const unenrolled = eventToProjectIssue({
+    ...root,
+    id: unenrolledId,
+    tags: [root.tags[0], ["subject", "Legacy board issue"]],
+  });
 
-  const candidates = bwRelationTargetCandidates(s, root.id);
+  const candidates = bwRelationTargetCandidates(
+    mergeBwIssues([unenrolled], s),
+    root.id,
+  );
   assert.deepEqual(
-    candidates.map(({ id, state }) => ({ id, state })),
+    candidates.map(({ eligible, id, state }) => ({ eligible, id, state })),
     [
-      { id: readyId, state: "ready" },
-      { id: developmentId, state: "in-development" },
+      { eligible: true, id: readyId, state: "ready" },
+      { eligible: true, id: developmentId, state: "in-development" },
+      { eligible: false, id: unenrolledId, state: "Triage" },
     ],
   );
   assert.equal(filterBwRelationTargets(candidates, "ISS-1111")[0].id, readyId);
@@ -107,6 +123,8 @@ test("relation autocomplete offers every other enrolled state and matches visibl
     filterBwRelationTargets(candidates, "foundation")[0].id,
     developmentId,
   );
+  assert.equal(resolveBwRelationTarget(candidates, "ISS-11111111").id, readyId);
+  assert.equal(resolveBwRelationTarget(candidates, "33333333").eligible, false);
 });
 test("Pending enrollment never adopts legacy workflow authority", () => {
   const s = snapshot();

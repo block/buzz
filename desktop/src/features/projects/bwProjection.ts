@@ -195,33 +195,30 @@ export function bwBoundWriter(
 }
 
 export type BwRelationTargetCandidate = {
+  eligible: boolean;
   id: string;
   reference: string;
   state: string;
   title: string;
 };
 
-/** Autocomplete candidates for an issue relation. NIP-BW allows any other
- * enrolled issue in the same repository; it does not restrict targets to
- * backlog/ready. `projection.issues` is Core's accepted enrollment/state
- * inventory, so pending/foreign roots never appear here. */
+/** Autocomplete candidates for an issue relation. The repository issue list
+ * is deliberate: it lets the UI distinguish an existing board issue that is
+ * not enrolled in BW from an ID that does not exist. NIP-BW permits every
+ * other enrolled issue in the same repository, regardless of its state. */
 export function bwRelationTargetCandidates(
-  snapshot: BwSnapshot,
+  issues: ProjectIssue[],
   currentIssueId: string,
 ): BwRelationTargetCandidate[] {
-  return Object.entries(snapshot.projection.issues)
-    .filter(([id]) => id !== currentIssueId)
-    .map(([id, state]) => {
-      const root = snapshot.records[id];
-      const rootTitle = root?.tags.find((tag) => tag[0] === "subject")?.[1];
-      return {
-        id,
-        reference: `ISS-${id.slice(0, 8).toUpperCase()}`,
-        state,
-        title:
-          snapshot.projection.issue_fields[id]?.title || rootTitle || "Issue",
-      };
-    })
+  return issues
+    .filter(({ id }) => id !== currentIssueId)
+    .map((issue) => ({
+      eligible: issue.bw?.enrolled === true,
+      id: issue.id,
+      reference: `ISS-${issue.id.slice(0, 8).toUpperCase()}`,
+      state: issue.bw?.state ?? issue.status,
+      title: issue.title || "Issue",
+    }))
     .sort((left, right) => left.reference.localeCompare(right.reference));
 }
 
@@ -242,6 +239,24 @@ export function filterBwRelationTargets(
       candidate.title.toLowerCase().includes(normalized) ||
       candidate.state.toLowerCase().includes(normalized),
   );
+}
+
+/** Resolve an exact visible short issue number or full event ID. Ambiguous
+ * short prefixes intentionally do not resolve; selecting a suggestion still
+ * supplies the canonical full ID. */
+export function resolveBwRelationTarget(
+  candidates: BwRelationTargetCandidate[],
+  query: string,
+): BwRelationTargetCandidate | null {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return null;
+  const matches = candidates.filter(
+    (candidate) =>
+      candidate.id.toLowerCase() === normalized ||
+      candidate.reference.toLowerCase() === normalized ||
+      candidate.id.slice(0, 8).toLowerCase() === normalized,
+  );
+  return matches.length === 1 ? matches[0] : null;
 }
 
 type BwTriageDelegation = {

@@ -1,9 +1,8 @@
 import * as React from "react";
 
 import {
-  bwRelationTargetCandidates,
+  type BwRelationTargetCandidate,
   filterBwRelationTargets,
-  type BwSnapshot,
 } from "@/features/projects/bwProjection";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
@@ -15,27 +14,24 @@ function stateLabel(state: string): string {
     .join(" ");
 }
 
-/** Search/select an enrolled issue by its visible ISS number, title, full id,
- * or current state. The selected value remains the canonical 64-char root id
- * expected by NIP-BW. */
+/** Search the repository board by visible ISS number, title, full id, or
+ * current state. Unenrolled issues stay visible with the reason they cannot
+ * be selected; valid selections use the canonical 64-char root id. */
 export function BwRelationTargetCombobox({
-  currentIssueId,
+  candidates,
   disabled,
   onChange,
-  snapshot,
   value,
 }: {
-  currentIssueId: string;
+  candidates: BwRelationTargetCandidate[];
   disabled: boolean;
   onChange: (value: string) => void;
-  snapshot: BwSnapshot;
   value: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
-  const candidates = bwRelationTargetCandidates(snapshot, currentIssueId);
   const filtered = filterBwRelationTargets(candidates, value);
-  const listId = `bw-relation-target-options-${currentIssueId.slice(0, 8)}`;
+  const listId = React.useId();
 
   const selectTarget = (id: string) => {
     onChange(id);
@@ -60,7 +56,7 @@ export function BwRelationTargetCombobox({
     }
     if (event.key === "Enter" && open) {
       const selected = filtered[highlightedIndex];
-      if (selected) {
+      if (selected?.eligible) {
         event.preventDefault();
         selectTarget(selected.id);
       }
@@ -100,18 +96,19 @@ export function BwRelationTargetCombobox({
         <div className="max-h-60 overflow-y-auto">
           {filtered.length === 0 ? (
             <p className="px-3 py-4 text-center text-xs text-muted-foreground">
-              No matching issue in this repository.
+              No issue with that number or title on this board.
             </p>
           ) : (
             filtered.map((candidate, index) => (
               <button
                 aria-selected={candidate.id === value.trim().toLowerCase()}
                 className={cn(
-                  "flex w-full items-start justify-between gap-3 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground",
+                  "flex w-full items-start justify-between gap-3 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60",
                   index === highlightedIndex &&
                     "bg-accent text-accent-foreground",
                 )}
                 data-testid="bw-relation-target-option"
+                disabled={!candidate.eligible}
                 key={candidate.id}
                 onClick={() => selectTarget(candidate.id)}
                 onMouseEnter={() => setHighlightedIndex(index)}
@@ -127,7 +124,9 @@ export function BwRelationTargetCombobox({
                   </span>
                 </span>
                 <span className="shrink-0 text-muted-foreground">
-                  {stateLabel(candidate.state)}
+                  {candidate.eligible
+                    ? stateLabel(candidate.state)
+                    : "Not enrolled in BW"}
                 </span>
               </button>
             ))

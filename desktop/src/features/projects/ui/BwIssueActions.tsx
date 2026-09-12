@@ -6,7 +6,11 @@ import type {
   Repository as Project,
 } from "@/features/projects/hooks";
 import { useRepoStateQuery } from "@/features/projects/hooks";
-import { bwMatchingTriageDelegation } from "@/features/projects/bwProjection";
+import {
+  bwMatchingTriageDelegation,
+  bwRelationTargetCandidates,
+  resolveBwRelationTarget,
+} from "@/features/projects/bwProjection";
 import {
   BwConflictError,
   submitBwAcceptToBacklog,
@@ -742,9 +746,11 @@ function BwImplementedDetails({ issue }: { issue: ProjectIssue }) {
  * `issue` side of offer a Remove button; the displayed inverse edges
  * (child-of/blocked-by/duplicates) are read-only from here. */
 function BwRelations({
+  issues,
   issue,
   project,
 }: {
+  issues: ProjectIssue[];
   issue: ProjectIssue;
   project: Project;
 }) {
@@ -759,11 +765,9 @@ function BwRelations({
     (r) => r.issue === issue.id,
   );
   const leaf = issue.bw.snapshot.projection.leaf[issue.id];
-  const normalizedTarget = target.trim().toLowerCase();
-  const targetIsKnownRoot =
-    normalizedTarget !== issue.id &&
-    issue.bw.snapshot.projection.issues[normalizedTarget] !== undefined &&
-    issue.bw.snapshot.records[normalizedTarget]?.kind === 1621;
+  const targetCandidates = bwRelationTargetCandidates(issues, issue.id);
+  const resolvedTarget = resolveBwRelationTarget(targetCandidates, target);
+  const targetIsEligible = resolvedTarget?.eligible === true;
 
   const run = async (op: "add" | "remove", rel: string, tgt: string) => {
     if (pending || !issue.bw) return;
@@ -838,17 +842,18 @@ function BwRelations({
           ))}
         </select>
         <BwRelationTargetCombobox
-          currentIssueId={issue.id}
+          candidates={targetCandidates}
           disabled={pending}
           onChange={setTarget}
-          snapshot={issue.bw.snapshot}
           value={target}
         />
         <button
           className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
           data-testid="bw-relation-add"
-          disabled={pending || !targetIsKnownRoot}
-          onClick={() => void run("add", relation, normalizedTarget)}
+          disabled={pending || !targetIsEligible}
+          onClick={() => {
+            if (resolvedTarget) void run("add", relation, resolvedTarget.id);
+          }}
           type="button"
         >
           Add
@@ -864,10 +869,12 @@ function BwRelations({
  * in-development/implemented handoff, and parent/child/blocks/duplicate-of
  * relations. */
 export function BwIssueActions({
+  issues,
   issue,
   profiles,
   project,
 }: {
+  issues: ProjectIssue[];
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
@@ -914,7 +921,7 @@ export function BwIssueActions({
         <BwImplementedAction issue={issue} project={project} />
       ) : null}
       <BwImplementedDetails issue={issue} />
-      <BwRelations issue={issue} project={project} />
+      <BwRelations issues={issues} issue={issue} project={project} />
     </div>
   );
 }

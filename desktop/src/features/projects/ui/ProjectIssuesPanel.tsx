@@ -265,6 +265,7 @@ export function ProjectIssueDetail({
   stackMetaRail?: boolean;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
+  const issuesQuery = useProjectIssuesQuery(project);
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const members = React.useMemo(
     () => issueMembers(project, issue, profiles),
@@ -367,6 +368,7 @@ export function ProjectIssueDetail({
       </div>
 
       <IssueMetaRail
+        issues={issuesQuery.data ?? [issue]}
         issue={issue}
         profiles={profiles}
         project={project}
@@ -564,11 +566,13 @@ function IssueReviewSection({
 /** Right-hand meta column for the issue detail view: status, assignees,
  * author, labels, and dates — keeps the conversation column focused. */
 function IssueMetaRail({
+  issues,
   issue,
   profiles,
   project,
   stacked = false,
 }: {
+  issues: ProjectIssue[];
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
@@ -630,6 +634,7 @@ function IssueMetaRail({
           ))}
           <div className="mt-3">
             <BwIssueActions
+              issues={issues}
               issue={issue}
               profiles={profiles}
               project={project}

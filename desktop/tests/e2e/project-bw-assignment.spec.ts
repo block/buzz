@@ -17,6 +17,7 @@ const POLICY_ID = "9".repeat(64);
 const GENESIS_ID = "8".repeat(64);
 const ROOT = "1".repeat(64);
 const ROOT_B = "2".repeat(64);
+const ROOT_C = "3".repeat(64);
 const REPORTER = "c".repeat(64);
 const WRITER = "d".repeat(64);
 const OTHER_WRITER = "e".repeat(64);
@@ -592,6 +593,7 @@ test("relations show both directions and leaf eligibility, and adding/removing a
       records: {
         [ROOT]: rootEvent(ROOT, "Parent issue"),
         [ROOT_B]: rootEvent(ROOT_B, "Child issue"),
+        [ROOT_C]: rootEvent(ROOT_C, "Unenrolled issue"),
       },
       projection: {
         issues: { [ROOT]: "backlog", [ROOT_B]: "backlog" },
@@ -618,13 +620,20 @@ test("relations show both directions and leaf eligibility, and adding/removing a
   });
 
   await panel.getByTestId("bw-relation-type").selectOption("blocks");
-  await panel.getByTestId("bw-relation-target").fill("ISS-2222");
+  await panel.getByTestId("bw-relation-target").fill("ISS-33333333");
+  const unenrolledOption = page.getByTestId("bw-relation-target-option");
+  await expect(unenrolledOption).toContainText("Unenrolled issue");
+  await expect(unenrolledOption).toContainText("Not enrolled in BW");
+  await expect(unenrolledOption).toBeDisabled();
+  await expect(panel.getByTestId("bw-relation-add")).toBeDisabled();
+
+  await panel.getByTestId("bw-relation-target").fill("ISS-22222222");
   const targetOption = page.getByTestId("bw-relation-target-option");
   await expect(targetOption).toContainText("ISS-22222222");
   await expect(targetOption).toContainText("Child issue");
   await expect(targetOption).toContainText("Backlog");
-  await panel.getByTestId("bw-relation-target").press("Enter");
-  await expect(panel.getByTestId("bw-relation-target")).toHaveValue(ROOT_B);
+  // An exact visible issue number resolves directly; choosing the suggestion
+  // is optional and the canonical root ID is still sent to Core.
   await expect(panel.getByTestId("bw-relation-add")).toBeEnabled();
   await panel.getByTestId("bw-relation-add").click();
 
