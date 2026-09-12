@@ -57,7 +57,8 @@ pub struct ResolvedPersona {
     // Hooks (parsed, not executed — reserved for future use, not yet wired)
     pub hooks: Option<ResolvedHooks>,
 
-    // Skills (bare names — reserved for future use, not yet wired)
+    // Skills as declared in frontmatter. buzz-acp scopes them with
+    // `pack::resolve_skills` and materializes them into the agent workdir.
     pub skills: Vec<String>,
 
     // Env var projection for agent subprocess
@@ -68,9 +69,27 @@ pub struct ResolvedPersona {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedMcpServer {
     pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
+    pub transport: McpTransport,
+}
+
+/// How the agent runtime reaches an MCP server.
+///
+/// Only the two transports the ACP runtime accepts. SSE is rejected outright
+/// during resolution rather than being handed to a runtime that will refuse it
+/// mid-session.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpTransport {
+    /// Local subprocess speaking MCP over stdio.
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
+    /// Remote server speaking streamable HTTP.
+    Http {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// Lifecycle hooks (pack-relative paths).
@@ -166,7 +185,7 @@ pub fn resolve_loaded_pack(loaded: &LoadedPack) -> Result<ResolvedPack, PackErro
             pack_version,
             pack_instructions,
             shared_mcp,
-        ));
+        )?);
     }
 
     Ok(ResolvedPack {
@@ -196,7 +215,7 @@ fn resolve_one_persona(
     pack_version: &str,
     pack_instructions: Option<&str>,
     shared_mcp: Option<&serde_json::Value>,
-) -> ResolvedPersona {
+) -> Result<ResolvedPersona, PackError> {
     let system_prompt = lp.prompt.clone();
     let pack_instructions = pack_instructions
         .map(str::trim)
@@ -216,7 +235,7 @@ fn resolve_one_persona(
     };
 
     let triggers = resolve_triggers(lp.triggers.as_ref());
-    let mcp_servers = merge_mcp_servers(shared_mcp, &lp.mcp_servers);
+    let mcp_servers = merge_mcp_servers(shared_mcp, &lp.mcp_servers)?;
     let hooks = resolve_hooks(lp.hooks.as_ref());
     let runtime_env_vars = runtime_env_vars(lp);
 
@@ -227,7 +246,7 @@ fn resolve_one_persona(
     //   lp.version.clone().unwrap_or_else(|| pack_version.to_owned())
     let version = pack_version.to_owned();
 
-    ResolvedPersona {
+    Ok(ResolvedPersona {
         name: lp.name.clone(),
         display_name: lp.display_name.clone(),
         description: lp.description.clone(),
@@ -248,7 +267,7 @@ fn resolve_one_persona(
         hooks,
         skills: lp.skills.clone(),
         runtime_env_vars,
-    }
+    })
 }
 
 /// Convert `TriggersData` to `ResolvedTriggers`.
@@ -274,20 +293,22 @@ fn resolve_triggers(rt: Option<&TriggersData>) -> ResolvedTriggers {
 /// Name collision: persona wins (replaces pack server with same name).
 ///
 /// Env values are passed through as literals — no `${VAR}` interpolation.
+/// An entry that declares neither a command nor a url, or declares a transport
+/// the runtime refuses, is an error rather than a skipped server: dropping it
+/// would start the agent with quietly fewer tools than its persona declares.
 fn merge_mcp_servers(
     shared_mcp: Option<&serde_json::Value>,
     persona_servers: &[serde_json::Value],
-) -> Vec<ResolvedMcpServer> {
+) -> Result<Vec<ResolvedMcpServer>, PackError> {
     let mut by_name: HashMap<String, ResolvedMcpServer> = HashMap::new();
 
     // 1. Pack-level shared servers from .mcp.json
     if let Some(shared) = shared_mcp {
         // .mcp.json format: { "mcpServers": { "name": { "command": ..., "args": [...], "env": {...} } } }
+        //                or { "mcpServers": { "name": { "type": "http", "url": ..., "headers": {...} } } }
         if let Some(servers_obj) = shared.get("mcpServers").and_then(|v| v.as_object()) {
             for (name, config) in servers_obj {
-                if let Some(server) = parse_mcp_server_config(name, config) {
-                    by_name.insert(name.clone(), server);
-                }
+                by_name.insert(name.clone(), parse_mcp_server_config(name, config)?);
             }
         }
     }
@@ -295,45 +316,79 @@ fn merge_mcp_servers(
     // 2. Per-persona servers (persona wins on name collision)
     for server_val in persona_servers {
         if let Some(name) = server_val.get("name").and_then(|v| v.as_str()) {
-            if let Some(server) = parse_mcp_server_config(name, server_val) {
-                by_name.insert(name.to_owned(), server);
-            }
+            by_name.insert(name.to_owned(), parse_mcp_server_config(name, server_val)?);
         }
     }
 
     // Return in deterministic order (sorted by name)
     let mut servers: Vec<_> = by_name.into_values().collect();
     servers.sort_by_key(|s| s.name.clone());
-    servers
+    Ok(servers)
 }
 
 /// Parse a single MCP server config from JSON.
-fn parse_mcp_server_config(name: &str, config: &serde_json::Value) -> Option<ResolvedMcpServer> {
-    let command = config.get("command").and_then(|v| v.as_str())?.to_owned();
-    let args = config
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    let env = config
-        .get("env")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default();
+///
+/// `command` selects stdio; `url` selects streamable HTTP. An explicit
+/// `type: "sse"` is rejected here rather than at session start — the ACP
+/// runtime refuses SSE with "SSE is unsupported, migrate to streamable_http",
+/// and failing during resolution names the offending pack entry.
+fn parse_mcp_server_config(
+    name: &str,
+    config: &serde_json::Value,
+) -> Result<ResolvedMcpServer, PackError> {
+    let declared_type = config.get("type").and_then(|v| v.as_str());
+    if declared_type == Some("sse") {
+        return Err(PackError::McpServerConfig {
+            name: name.to_owned(),
+            reason: "SSE transport is not supported; use streamable HTTP (\"type\": \"http\")"
+                .to_owned(),
+        });
+    }
 
-    Some(ResolvedMcpServer {
+    let string_map = |key: &str| -> Vec<(String, String)> {
+        config
+            .get(key)
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let transport = match (
+        config.get("command").and_then(|v| v.as_str()),
+        config.get("url").and_then(|v| v.as_str()),
+    ) {
+        (Some(command), _) => McpTransport::Stdio {
+            command: command.to_owned(),
+            args: config
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            env: string_map("env"),
+        },
+        (None, Some(url)) => McpTransport::Http {
+            url: url.to_owned(),
+            headers: string_map("headers"),
+        },
+        (None, None) => {
+            return Err(PackError::McpServerConfig {
+                name: name.to_owned(),
+                reason: "declares neither \"command\" (stdio) nor \"url\" (http)".to_owned(),
+            })
+        }
+    };
+
+    Ok(ResolvedMcpServer {
         name: name.to_owned(),
-        command,
-        args,
-        env,
+        transport,
     })
 }
 
@@ -436,11 +491,17 @@ mod tests {
                 }
             }
         });
-        let result = merge_mcp_servers(Some(&shared), &[]);
+        let result = merge_mcp_servers(Some(&shared), &[]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "example-mcp");
-        assert_eq!(result[0].command, "npx");
-        assert_eq!(result[0].env, vec![("TOKEN".into(), "abc".into())]);
+        assert_eq!(
+            result[0].transport,
+            McpTransport::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "example-mcp".to_string()],
+                env: vec![("TOKEN".to_string(), "abc".to_string())],
+            }
+        );
     }
 
     #[test]
@@ -460,10 +521,78 @@ mod tests {
             "args": ["--flag"],
             "env": { "KEY": "val" }
         })];
-        let result = merge_mcp_servers(Some(&shared), &persona);
+        let result = merge_mcp_servers(Some(&shared), &persona).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].command, "new-cmd");
-        assert_eq!(result[0].args, vec!["--flag"]);
+        assert_eq!(
+            result[0].transport,
+            McpTransport::Stdio {
+                command: "new-cmd".to_string(),
+                args: vec!["--flag".to_string()],
+                env: vec![("KEY".to_string(), "val".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn url_entry_resolves_to_the_http_transport() {
+        let persona = vec![serde_json::json!({
+            "name": "arcctl",
+            "type": "http",
+            "url": "http://127.0.0.1:8888/mcp",
+            "headers": { "Authorization": "Bearer t0ken" }
+        })];
+        let result = merge_mcp_servers(None, &persona).unwrap();
+        assert_eq!(result.len(), 1, "a url-only server must not be dropped");
+        assert_eq!(
+            result[0].transport,
+            McpTransport::Http {
+                url: "http://127.0.0.1:8888/mcp".to_string(),
+                headers: vec![("Authorization".to_string(), "Bearer t0ken".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn http_entry_needs_no_explicit_type() {
+        let shared = serde_json::json!({
+            "mcpServers": { "remote": { "url": "https://example.test/mcp" } }
+        });
+        let result = merge_mcp_servers(Some(&shared), &[]).unwrap();
+        assert!(matches!(result[0].transport, McpTransport::Http { .. }));
+    }
+
+    #[test]
+    fn command_wins_when_an_entry_declares_both() {
+        let persona = vec![serde_json::json!({
+            "name": "both",
+            "command": "local-mcp",
+            "url": "https://example.test/mcp"
+        })];
+        let result = merge_mcp_servers(None, &persona).unwrap();
+        assert!(matches!(result[0].transport, McpTransport::Stdio { .. }));
+    }
+
+    #[test]
+    fn sse_transport_is_rejected_by_name() {
+        let persona = vec![serde_json::json!({
+            "name": "legacy",
+            "type": "sse",
+            "url": "https://example.test/sse"
+        })];
+        let err = merge_mcp_servers(None, &persona).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy"),
+            "the offending entry must be named: {msg}"
+        );
+        assert!(msg.contains("streamable"), "{msg}");
+    }
+
+    #[test]
+    fn entry_with_neither_command_nor_url_is_an_error_not_a_silent_drop() {
+        let persona = vec![serde_json::json!({ "name": "broken", "args": ["--x"] })];
+        let err = merge_mcp_servers(None, &persona).unwrap_err();
+        assert!(err.to_string().contains("broken"), "{err}");
     }
 
     #[test]
@@ -477,7 +606,7 @@ mod tests {
             "name": "beta",
             "command": "beta-cmd"
         })];
-        let result = merge_mcp_servers(Some(&shared), &persona);
+        let result = merge_mcp_servers(Some(&shared), &persona).unwrap();
         assert_eq!(result.len(), 2);
         // Sorted by name
         assert_eq!(result[0].name, "alpha");
@@ -486,7 +615,7 @@ mod tests {
 
     #[test]
     fn mcp_merge_no_shared_no_persona() {
-        let result = merge_mcp_servers(None, &[]);
+        let result = merge_mcp_servers(None, &[]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -498,9 +627,12 @@ mod tests {
             "command": "cmd",
             "env": { "PATH": "${HOME}/bin", "SECRET": "${MY_SECRET}" }
         })];
-        let result = merge_mcp_servers(None, &persona);
+        let result = merge_mcp_servers(None, &persona).unwrap();
         assert_eq!(result.len(), 1);
-        let env: HashMap<String, String> = result[0].env.iter().cloned().collect();
+        let McpTransport::Stdio { env, .. } = &result[0].transport else {
+            panic!("a command-backed server must resolve to stdio");
+        };
+        let env: HashMap<String, String> = env.iter().cloned().collect();
         assert_eq!(env["PATH"], "${HOME}/bin");
         assert_eq!(env["SECRET"], "${MY_SECRET}");
     }
