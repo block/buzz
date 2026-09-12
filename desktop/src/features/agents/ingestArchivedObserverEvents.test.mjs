@@ -1187,3 +1187,125 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     assert.equal(archived[0].seq, 31);
   });
 });
+
+// ── Page-at-a-time archive merge ─────────────────────────────────────────────
+//
+// The archive window is deliberately uncapped (the MAX_OBSERVER_EVENTS cap
+// protects the live per-agent store only), so it grows with the age of the
+// channel. Merging a page event-by-event meant a linear dedup scan plus a full
+// re-sort per event; these pin the behaviour that must survive doing it once
+// per page instead.
+
+describe("archive page merge", () => {
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  // Decrypt by raw-event id, so one call can carry a whole page.
+  function decryptById(bySeq) {
+    return (raw) => Promise.resolve(bySeq.get(raw.id));
+  }
+
+  function page(observerEvents) {
+    const bySeq = new Map();
+    const raw = observerEvents.map((event, index) => {
+      const id = `${index}`.padStart(64, "e");
+      bySeq.set(id, event);
+      return makeRawEvent({ id });
+    });
+    return { raw, decrypt: decryptById(bySeq) };
+  }
+
+  it("orders a whole page ascending even though the archive returns it newest-first", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const newestFirst = [5, 4, 3, 2, 1].map((seq) =>
+      makeObserverEvent({
+        seq,
+        timestamp: `2026-01-01T00:00:0${seq}.000Z`,
+      }),
+    );
+    const { raw, decrypt } = page(newestFirst);
+
+    await ingestArchivedObserverEvents(raw, decrypt);
+
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").map((e) => e.seq),
+      [1, 2, 3, 4, 5],
+    );
+  });
+
+  it("drops duplicates inside one page and against an already-loaded window", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const first = page([
+      makeObserverEvent({ seq: 1, timestamp: "2026-01-01T00:00:01.000Z" }),
+      makeObserverEvent({ seq: 2, timestamp: "2026-01-01T00:00:02.000Z" }),
+    ]);
+    await ingestArchivedObserverEvents(first.raw, first.decrypt);
+
+    // seq 2 repeats the loaded window; seq 3 repeats itself within the page.
+    const second = page([
+      makeObserverEvent({ seq: 2, timestamp: "2026-01-01T00:00:02.000Z" }),
+      makeObserverEvent({ seq: 3, timestamp: "2026-01-01T00:00:03.000Z" }),
+      makeObserverEvent({ seq: 3, timestamp: "2026-01-01T00:00:03.000Z" }),
+    ]);
+    await ingestArchivedObserverEvents(second.raw, second.decrypt);
+
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").map((e) => e.seq),
+      [1, 2, 3],
+    );
+  });
+
+  it("keeps each channel's window separate when one page spans several", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const { raw, decrypt } = page([
+      makeObserverEvent({
+        seq: 2,
+        timestamp: "2026-01-01T00:00:02.000Z",
+        channelId: "chan-2",
+      }),
+      makeObserverEvent({ seq: 1, timestamp: "2026-01-01T00:00:01.000Z" }),
+      makeObserverEvent({
+        seq: 1,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        channelId: "chan-2",
+      }),
+    ]);
+
+    await ingestArchivedObserverEvents(raw, decrypt);
+
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").map((e) => e.seq),
+      [1],
+    );
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-2").map((e) => e.seq),
+      [1, 2],
+    );
+  });
+
+  it("merges a page into a large window without dropping or reordering it", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const window = Array.from({ length: 2_000 }, (_, index) =>
+      makeObserverEvent({
+        seq: index + 1,
+        timestamp: new Date(1_760_000_000_000 + index * 1_000).toISOString(),
+      }),
+    );
+    const loaded = page(window);
+    await ingestArchivedObserverEvents(loaded.raw, loaded.decrypt);
+
+    const older = page([
+      makeObserverEvent({
+        seq: 0,
+        timestamp: new Date(1_760_000_000_000 - 1_000).toISOString(),
+      }),
+    ]);
+    await ingestArchivedObserverEvents(older.raw, older.decrypt);
+
+    const merged = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(merged.length, 2_001);
+    assert.equal(merged[0].seq, 0, "the older page must sort to the front");
+    assert.equal(merged.at(-1).seq, 2_000);
+  });
+});
