@@ -186,15 +186,127 @@ export async function submitBwAssignment({
   if (conflict) {
     throw new BwConflictError();
   }
+  return submitBwAssignmentAtPrior({
+    delegate,
+    issueId,
+    operation,
+    prior: headId,
+    repo,
+  });
+}
+
+type BwWriteResult = { eventId: string; projection: unknown };
+
+function submitBwAssignmentAtPrior({
+  repo,
+  issueId,
+  delegate,
+  operation,
+  prior,
+}: {
+  repo: string;
+  issueId: string;
+  delegate: string;
+  operation: BwAssignmentOperation;
+  prior: string | null;
+}): Promise<BwWriteResult> {
   return invokeTauri("submit_project_bw_assignment", {
     input: {
       repo,
       issueId,
       delegate,
       operation,
-      prior: headId,
+      prior,
     },
   });
+}
+
+/** Select a writer from the backlog/ready dropdown. Replacing an existing
+ * writer is the exact causal `unassignment -> assignment` sequence NIP-BW
+ * requires. When the issue is already ready, finish by publishing a new ready
+ * head bound to the new assignment; otherwise Start development would still
+ * carry the old assignment ID and Core would correctly refuse it. Each step is
+ * independently readback-confirmed by its Tauri command. UI callers refetch
+ * after a partial failure, so a retry starts from the accepted head. */
+export async function submitBwWriterSelection({
+  repo,
+  issueId,
+  snapshot,
+  delegate,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  delegate: string;
+}): Promise<BwWriteResult> {
+  const head = bwAssignmentHead(snapshot, issueId);
+  if (head.conflict) {
+    throw new BwConflictError();
+  }
+
+  const issueState = snapshot.projection.issue_state[issueId];
+  const ready = issueState?.state === "ready";
+  const issueStateId = snapshot.projection.issue_state_id[issueId] ?? null;
+  if (ready && (!issueStateId || !issueState.stream || !issueState.update)) {
+    throw new Error("This issue has no complete ready state to rebind.");
+  }
+
+  let prior = head.headId;
+  let assignmentId =
+    head.writer === delegate && head.operation === "assignment"
+      ? head.headId
+      : null;
+  let result: BwWriteResult | null = null;
+
+  if (head.writer && head.writer !== delegate) {
+    result = await submitBwAssignmentAtPrior({
+      delegate: head.writer,
+      issueId,
+      operation: "unassignment",
+      prior,
+      repo,
+    });
+    prior = result.eventId;
+  }
+
+  if (!assignmentId) {
+    result = await submitBwAssignmentAtPrior({
+      delegate,
+      issueId,
+      operation: "assignment",
+      prior,
+      repo,
+    });
+    assignmentId = result.eventId;
+  }
+
+  if (ready && issueState.assignment !== assignmentId) {
+    return invokeTauri("submit_project_bw_record", {
+      input: {
+        repo,
+        record: "issue-state",
+        tags: [
+          ["issue", issueId],
+          ["previous", issueStateId],
+        ],
+        content: {
+          state: "ready",
+          stream: issueState.stream,
+          assignment: assignmentId,
+          update: issueState.update,
+          rework: null,
+        },
+        delegate: false,
+      },
+    });
+  }
+
+  return (
+    result ?? {
+      eventId: assignmentId,
+      projection: snapshot.projection,
+    }
+  );
 }
 
 /** Move an issue from `backlog` to `ready`: binds a stream, the exact

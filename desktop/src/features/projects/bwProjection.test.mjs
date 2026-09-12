@@ -50,6 +50,11 @@ test("Core acceptance replaces legacy status and survives a legacy tombstone-fil
     assert.equal(issue.bw.enrolled, true);
   }
 });
+test("Core ready projects as Ready instead of remaining in Backlog", () => {
+  const [issue] = mergeBwIssues([], snapshot("ready"));
+  assert.equal(issue.status, "Ready");
+  assert.equal(issue.bw.state, "ready");
+});
 test("Pending enrollment never adopts legacy workflow authority", () => {
   const s = snapshot();
   s.projection.issues = {};

@@ -92,6 +92,7 @@ const ISSUE_STATUS_SECTIONS = [
     terminal: false,
   },
   { status: "Backlog", label: "Backlog", terminal: false },
+  { status: "Ready", label: "Ready", terminal: false },
   { status: "In Development", label: "In Development", terminal: false },
   { status: "Implemented", label: "Implemented", terminal: false },
   { status: "Code-QS", label: "Code-QS", terminal: false },

@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  buildBwAssignmentCandidates,
-  filterBwAssignmentCandidates,
-  resolveBwAssignmentSelection,
-} from "./bwAssignmentCandidates.ts";
+import { buildBwAssignmentCandidates } from "./bwAssignmentCandidates.ts";
 
 const AGENT = "a".repeat(64);
 const MEMBER = "b".repeat(64);
@@ -57,42 +53,16 @@ test("a profile fills in the name/avatar when the source carries none", () => {
   assert.equal(candidates[0].avatarUrl, "https://example.test/a.png");
 });
 
-test("a candidate with no name anywhere falls back to its truncated pubkey, never hidden", () => {
+test("a candidate with no name is omitted instead of exposing a partial public key", () => {
   const candidates = buildBwAssignmentCandidates({
     relayAgents: [],
-    members: [{ pubkey: UNNAMED, displayName: null }],
+    members: [
+      { pubkey: UNNAMED, displayName: null },
+      { pubkey: UNNAMED, displayName: "dddddddd…dddd" },
+      { pubkey: "e".repeat(64), displayName: "npub1publickey" },
+    ],
     profiles: {},
   });
 
-  assert.equal(candidates.length, 1);
-  assert.equal(
-    candidates[0].displayName,
-    `${UNNAMED.slice(0, 8)}…${UNNAMED.slice(-4)}`,
-  );
-});
-
-test("filtering is a case-insensitive substring match on the resolved display name", () => {
-  const candidates = buildBwAssignmentCandidates({
-    relayAgents: [{ pubkey: AGENT, displayName: "Zed Agent" }],
-    members: [{ pubkey: MEMBER, displayName: "Alice" }],
-    profiles: {},
-  });
-
-  assert.deepEqual(
-    filterBwAssignmentCandidates(candidates, "ali").map((c) => c.displayName),
-    ["Alice"],
-  );
-  assert.deepEqual(
-    filterBwAssignmentCandidates(candidates, "").map((c) => c.displayName),
-    ["Alice", "Zed Agent"],
-  );
-  assert.deepEqual(filterBwAssignmentCandidates(candidates, "zzz"), []);
-});
-
-test("a picker selection resolves to the exact normalized pubkey submitBwAssignment sends as delegate", () => {
-  assert.equal(
-    resolveBwAssignmentSelection({ pubkey: AGENT.toUpperCase() }),
-    AGENT,
-  );
-  assert.equal(resolveBwAssignmentSelection({}), null);
+  assert.deepEqual(candidates, []);
 });

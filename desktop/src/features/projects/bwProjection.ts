@@ -81,7 +81,7 @@ export type BwIssueView = {
 const labels: Record<string, ProjectIssue["status"]> = {
   triage: "Triage",
   backlog: "Backlog",
-  ready: "Backlog",
+  ready: "Ready",
   "in-development": "In Development",
   implemented: "Implemented",
   resolved: "Done",

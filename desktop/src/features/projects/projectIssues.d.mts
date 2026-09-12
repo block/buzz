@@ -4,6 +4,7 @@ export type ProjectIssueStatus =
   | "Triage"
   | "Needs Clarification"
   | "Backlog"
+  | "Ready"
   | "In Development"
   | "Implemented"
   | "Code-QS"

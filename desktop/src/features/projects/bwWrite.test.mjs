@@ -5,6 +5,7 @@ import {
   submitBwIssueTextUpdate,
   submitBwReadyTransition,
   submitBwTriageAction,
+  submitBwWriterSelection,
 } from "./bwWrite.ts";
 
 const repo = `30617:${"b".repeat(64)}:repo`;
@@ -48,6 +49,24 @@ function snapshot(records) {
     records: Object.fromEntries(records.map((r) => [r.id, r])),
     decisions: {},
     notices: {},
+  };
+}
+
+function assignmentRecord(id, delegate, operation = "assignment", prior) {
+  const tags = [
+    ["e", issueId, "", "root"],
+    ["a", repo],
+    ["p", delegate],
+    ["t", operation],
+  ];
+  if (prior) tags.push(["prior", prior]);
+  return {
+    id,
+    pubkey: "b".repeat(64),
+    created_at: 2,
+    kind: 1,
+    tags,
+    content: operation === "assignment" ? "Assigned" : "Unassigned",
   };
 }
 
@@ -122,6 +141,79 @@ test("no delegation keeps delegate:false and the ordinary previous chain (P4F)",
     captured.input.tags.find((tag) => tag[0] === "previous"),
     ["previous", existingHead.id],
   );
+});
+
+test("changing a ready writer unassigns, assigns, then rebinds ready to the new assignment", async () => {
+  const oldWriter = "c".repeat(64);
+  const newWriter = "d".repeat(64);
+  const oldAssignment = "1".repeat(64);
+  const issueStateId = "2".repeat(64);
+  const updateId = "3".repeat(64);
+  const unassignmentId = "4".repeat(64);
+  const newAssignmentId = "5".repeat(64);
+  const readyId = "6".repeat(64);
+  const current = snapshot([assignmentRecord(oldAssignment, oldWriter)]);
+  current.projection.issue_state = {
+    [issueId]: {
+      state: "ready",
+      stream: "windows-integration",
+      assignment: oldAssignment,
+      update: updateId,
+    },
+  };
+  current.projection.issue_state_id = { [issueId]: issueStateId };
+  const calls = [];
+  const ids = [unassignmentId, newAssignmentId, readyId];
+  withMockInvoke(async (command, args) => {
+    calls.push({ command, args });
+    return { eventId: ids[calls.length - 1], projection: {} };
+  });
+
+  await submitBwWriterSelection({
+    delegate: newWriter,
+    issueId,
+    repo,
+    snapshot: current,
+  });
+
+  assert.deepEqual(
+    calls.map(({ command }) => command),
+    [
+      "submit_project_bw_assignment",
+      "submit_project_bw_assignment",
+      "submit_project_bw_record",
+    ],
+  );
+  assert.deepEqual(calls[0].args.input, {
+    delegate: oldWriter,
+    issueId,
+    operation: "unassignment",
+    prior: oldAssignment,
+    repo,
+  });
+  assert.deepEqual(calls[1].args.input, {
+    delegate: newWriter,
+    issueId,
+    operation: "assignment",
+    prior: unassignmentId,
+    repo,
+  });
+  assert.deepEqual(calls[2].args.input, {
+    repo,
+    record: "issue-state",
+    tags: [
+      ["issue", issueId],
+      ["previous", issueStateId],
+    ],
+    content: {
+      state: "ready",
+      stream: "windows-integration",
+      assignment: newAssignmentId,
+      update: updateId,
+      rework: null,
+    },
+    delegate: false,
+  });
 });
 
 test("a ready transition whose real chain head is still triage auto-chains the missing backlog record first, then readies off it", async () => {

@@ -3,11 +3,7 @@ import { toast } from "sonner";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
-import {
-  buildBwAssignmentCandidates,
-  filterBwAssignmentCandidates,
-  resolveBwAssignmentSelection,
-} from "@/features/projects/bwAssignmentCandidates";
+import { buildBwAssignmentCandidates } from "@/features/projects/bwAssignmentCandidates";
 import { bwAssignmentHead } from "@/features/projects/bwProjection";
 import type {
   ProjectIssue,
@@ -15,32 +11,22 @@ import type {
 } from "@/features/projects/hooks";
 import {
   BwConflictError,
-  submitBwAssignment,
+  submitBwWriterSelection,
 } from "@/features/projects/bwWrite";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { MentionAutocomplete } from "@/features/messages/ui/MentionAutocomplete";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   errorMessage,
   useInvalidateProjectIssues,
 } from "./bwIssueActionsShared";
 
-/** Select or release the sole delegate for a `backlog`/`ready` issue, over
+/** Select or replace the sole delegate for a `backlog`/`ready` issue, over
  * the *existing* kind:1 assignment wire (NIP-BW.md: "no new assignment
- * grammar"). Unassign always resubmits the exact current writer as `p` —
- * Core's own causality check refuses an unassignment whose `p` does not
- * match the head it chains from, so this never lets the UI invent a
- * mismatched release.
+ * grammar"). The visible control contains resolved names only; pubkeys remain
+ * the option values used for the signed wire identity and are never rendered.
  *
- * The writer is picked the same way the composer's `@`-mention does: type a
- * name, choose a `MentionAutocomplete` suggestion built from the relay agent
- * directory plus the repo-bound channel's members (this panel has no
- * composer `channelId` of its own). Selecting a suggestion only stages the
- * exact pubkey it carries — the wire payload (`submitBwAssignment`'s
- * `delegate`) is unchanged either way. Raw hex stays reachable via a toggle
- * for identities with no profile/agent/member entry to search by name. */
+ * A ready-state replacement also republishes ready against the newly created
+ * assignment head. This keeps the selected writer and Start development's
+ * causal binding identical instead of displaying an optimistic local swap. */
 export function BwAssignmentSection({
   issue,
   profiles,
@@ -50,10 +36,6 @@ export function BwAssignmentSection({
   profiles?: UserProfileLookup;
   project: Project;
 }) {
-  const [manualEntry, setManualEntry] = React.useState(false);
-  const [delegate, setDelegate] = React.useState("");
-  const [pickerQuery, setPickerQuery] = React.useState("");
-  const [pickerOpen, setPickerOpen] = React.useState(false);
   const [pending, setPending] = React.useState(false);
   const invalidate = useInvalidateProjectIssues(project);
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -71,52 +53,45 @@ export function BwAssignmentSection({
       }),
     [membersQuery.data, profiles, relayAgentsQuery.data],
   );
-  const suggestions = React.useMemo(
-    () =>
-      filterBwAssignmentCandidates(candidates, pickerQuery).map(
-        (candidate) => ({
-          avatarUrl: candidate.avatarUrl,
-          displayName: candidate.displayName,
-          isAgent: candidate.isAgent,
-          pubkey: candidate.pubkey,
-        }),
-      ),
-    [candidates, pickerQuery],
-  );
 
   if (!issue.bw) return null;
   const snapshot = issue.bw.snapshot;
   const head = bwAssignmentHead(snapshot, issue.id);
+  const currentCandidate = head.writer
+    ? candidates.find((candidate) => candidate.pubkey === head.writer)
+    : null;
+  const options =
+    head.writer && !currentCandidate
+      ? [
+          {
+            avatarUrl: null,
+            displayName: "Current writer",
+            isAgent: true,
+            pubkey: head.writer,
+          },
+          ...candidates,
+        ]
+      : candidates;
 
-  const reset = () => {
-    setDelegate("");
-    setPickerQuery("");
-    setPickerOpen(false);
-    setManualEntry(false);
-  };
-
-  const run = async (operation: "assignment" | "unassignment", who: string) => {
-    if (pending) return;
+  const selectWriter = async (delegate: string) => {
+    if (pending || !delegate || delegate === head.writer) return;
     setPending(true);
     try {
-      await submitBwAssignment({
-        delegate: who,
+      await submitBwWriterSelection({
+        delegate,
         issueId: issue.id,
-        operation,
         repo: project.repoAddress,
         snapshot,
       });
-      toast.success(
-        operation === "assignment" ? "Writer assigned." : "Writer unassigned.",
-      );
-      reset();
+      toast.success(head.writer ? "Writer changed." : "Writer assigned.");
       await invalidate();
     } catch (error) {
       toast.error(
         error instanceof BwConflictError
           ? error.message
-          : errorMessage(error, "Assignment was refused."),
+          : errorMessage(error, "Writer change was refused."),
       );
+      await invalidate();
     } finally {
       setPending(false);
     }
@@ -134,126 +109,27 @@ export function BwAssignmentSection({
     );
   }
 
-  if (head.writer) {
-    const writerProfile = profiles?.[normalizePubkey(head.writer)];
-    const writerLabel = resolveUserLabel({ profiles, pubkey: head.writer });
-    return (
-      <div className="space-y-1.5" data-testid="bw-assignment-section">
-        <div className="flex items-center justify-between gap-2 text-xs">
-          <span
-            className="flex min-w-0 items-center gap-1.5"
-            data-testid="bw-assignment-writer"
-            title={head.writer}
-          >
-            <UserAvatar
-              accent={writerProfile?.isAgent === true}
-              avatarUrl={writerProfile?.avatarUrl ?? null}
-              displayName={writerLabel}
-              size="xs"
-            />
-            <span className="min-w-0 truncate font-medium">{writerLabel}</span>
-            <span className="shrink-0 font-mono text-muted-foreground">
-              {truncatePubkey(head.writer)}
-            </span>
-          </span>
-          <button
-            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-            data-testid="bw-unassign"
-            disabled={pending}
-            onClick={() => void run("unassignment", head.writer as string)}
-            type="button"
-          >
-            {pending ? "Unassigning…" : "Unassign"}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const delegateValid = /^[0-9a-f]{64}$/i.test(delegate.trim());
-
   return (
     <div className="space-y-1.5" data-testid="bw-assignment-section">
-      {manualEntry ? (
-        <div className="flex items-center gap-2">
-          <input
-            className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
-            data-testid="bw-assign-delegate"
-            onChange={(event) => setDelegate(event.target.value)}
-            placeholder="Delegate pubkey"
-            value={delegate}
-          />
-          <button
-            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-            data-testid="bw-assign"
-            disabled={pending || !delegateValid}
-            onClick={() =>
-              void run("assignment", delegate.trim().toLowerCase())
-            }
-            type="button"
-          >
-            {pending ? "Assigning…" : "Assign"}
-          </button>
-        </div>
-      ) : (
-        <div className="relative flex items-center gap-2">
-          <input
-            className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
-            data-testid="bw-assign-picker-query"
-            onBlur={() => {
-              // Deferred so a suggestion's onMouseDown (which preventDefaults
-              // the blur) still lands before the dropdown closes.
-              window.setTimeout(() => setPickerOpen(false), 0);
-            }}
-            onChange={(event) => {
-              setPickerQuery(event.target.value);
-              setPickerOpen(true);
-              setDelegate("");
-            }}
-            onFocus={() => setPickerOpen(true)}
-            placeholder="Assign writer by name"
-            value={pickerQuery}
-          />
-          <button
-            className="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium disabled:opacity-60"
-            data-testid="bw-assign"
-            disabled={pending || !delegateValid}
-            onClick={() =>
-              void run("assignment", delegate.trim().toLowerCase())
-            }
-            type="button"
-          >
-            {pending ? "Assigning…" : "Assign"}
-          </button>
-          {pickerOpen ? (
-            <MentionAutocomplete
-              onSelect={(suggestion) => {
-                const pubkey = resolveBwAssignmentSelection(suggestion);
-                if (!pubkey) return;
-                setDelegate(pubkey);
-                setPickerQuery(suggestion.displayName);
-                setPickerOpen(false);
-              }}
-              position="below"
-              selectedIndex={0}
-              suggestions={suggestions}
-            />
-          ) : null}
-        </div>
-      )}
-      <button
-        className="text-2xs text-muted-foreground underline-offset-2 hover:underline"
-        data-testid="bw-assign-toggle-manual"
-        onClick={() => {
-          setManualEntry((current) => !current);
-          setDelegate("");
-          setPickerQuery("");
-          setPickerOpen(false);
-        }}
-        type="button"
+      <select
+        aria-label="Selected writer"
+        className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring disabled:opacity-60"
+        data-testid="bw-assignment-writer"
+        disabled={pending || options.length === 0}
+        onChange={(event) => void selectWriter(event.target.value)}
+        value={head.writer ?? ""}
       >
-        {manualEntry ? "Search by name instead" : "Enter pubkey manually"}
-      </button>
+        {!head.writer ? (
+          <option disabled value="">
+            {pending ? "Assigning writer…" : "Select writer"}
+          </option>
+        ) : null}
+        {options.map((candidate) => (
+          <option key={candidate.pubkey} value={candidate.pubkey}>
+            {candidate.displayName}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }

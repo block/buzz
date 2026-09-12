@@ -20,8 +20,11 @@ const ROOT_B = "2".repeat(64);
 const REPORTER = "c".repeat(64);
 const WRITER = "d".repeat(64);
 const OTHER_WRITER = "e".repeat(64);
+const WRITER_NAME = "Windows Writer Agent";
+const OTHER_WRITER_NAME = "Foundation Writer Agent";
 const ASSIGN_A = "4".repeat(64);
 const ASSIGN_B = "5".repeat(64);
+const UPDATE_A = "7".repeat(64);
 const REPO_A = `30617:${"a".repeat(64)}:fixture-bw`;
 const ACTIVATION = { policy: POLICY_ID, genesis: GENESIS_ID };
 
@@ -65,6 +68,23 @@ function assignmentEvent(
   };
 }
 
+function issueUpdateEvent(id: string, issue: string) {
+  return {
+    id,
+    pubkey: REPORTER,
+    created_at: 1_800_000_100,
+    kind: 46100,
+    tags: [
+      ["record", "issue-update"],
+      ["a", REPO_A],
+      ["policy", POLICY_ID],
+      ["issue", issue],
+    ],
+    content: JSON.stringify({ patch: { title: "Current text snapshot" } }),
+    sig: "0".repeat(128),
+  };
+}
+
 async function openIssuesPanel(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
@@ -104,7 +124,7 @@ async function lastBwCall(
   return { ...call, payload: (call.payload as { input?: unknown })?.input };
 }
 
-test("a backlog issue with no current writer offers assign; assigning submits the existing kind:1 wire with no prior", async ({
+test("a backlog issue assigns a named writer from the dropdown without displaying a public key", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -113,19 +133,28 @@ test("a backlog issue with no current writer offers assign; assigning submits th
       records: { [ROOT]: rootEvent(ROOT, "Needs a writer") },
       projection: { issues: { [ROOT]: "backlog" } },
     },
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
   });
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  // The name/agent picker is the default path; raw hex is the secondary
-  // fallback reached through this toggle (P4E follow-up: mention-style
-  // picker instead of manual hex).
-  await panel.getByTestId("bw-assign-toggle-manual").click();
-  await expect(panel.getByTestId("bw-assign-delegate")).toBeVisible();
-  await expect(panel.getByTestId("bw-assign")).toBeDisabled();
-  await panel.getByTestId("bw-assign-delegate").fill(WRITER);
-  await expect(panel.getByTestId("bw-assign")).toBeEnabled();
-  await panel.getByTestId("bw-assign").click();
+  const writerSelect = panel.getByTestId("bw-assignment-writer");
+  await expect(writerSelect).toBeVisible();
+  const labels = await writerSelect.locator("option").allTextContents();
+  expect(labels).toContain(WRITER_NAME);
+  expect(labels.some((label) => /^(?:nostr:)?npub1/i.test(label))).toBe(false);
+  expect(labels.some((label) => label.includes(WRITER.slice(0, 8)))).toBe(
+    false,
+  );
+  await writerSelect.selectOption(WRITER);
+  await expect(page.getByText("Writer assigned.")).toBeVisible();
 
   const call = await lastBwCall(page, "submit_project_bw_assignment");
   expect(
@@ -137,47 +166,7 @@ test("a backlog issue with no current writer offers assign; assigning submits th
   ).toMatchObject({ delegate: WRITER, operation: "assignment", prior: null });
 });
 
-test("assigning through the name picker submits the exact pubkey it resolved, same as the raw-hex fallback", async ({
-  page,
-}) => {
-  const AGENT_NAME = "Windows Writer Agent";
-  await installMockBridge(page, {
-    bwSnapshot: {
-      activation: ACTIVATION,
-      records: { [ROOT]: rootEvent(ROOT, "Needs a writer") },
-      projection: { issues: { [ROOT]: "backlog" } },
-    },
-    relayAgents: [
-      {
-        pubkey: WRITER,
-        name: AGENT_NAME,
-        respondTo: "anyone",
-        channelIds: [],
-      },
-    ],
-  });
-  const panel = await openIssuesPanel(page);
-  await openIssue(page, panel, ROOT);
-
-  // Default path: type a name, pick the relay-agent suggestion — no hex
-  // typed anywhere.
-  await expect(panel.getByTestId("bw-assign-picker-query")).toBeVisible();
-  await panel.getByTestId("bw-assign-picker-query").fill("Windows Writer");
-  const suggestion = page.getByTestId(`mention-suggestion-${WRITER}`);
-  await expect(suggestion).toBeVisible();
-  await suggestion.click();
-  await expect(panel.getByTestId("bw-assign")).toBeEnabled();
-  await panel.getByTestId("bw-assign").click();
-
-  const call = await lastBwCall(page, "submit_project_bw_assignment");
-  expect(call?.payload).toMatchObject({
-    delegate: WRITER,
-    operation: "assignment",
-    prior: null,
-  });
-});
-
-test("a backlog issue with a current writer offers unassign, resubmitting the exact same delegate and chaining off the real head", async ({
+test("a backlog issue shows only the current writer name and can replace that writer", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -189,24 +178,52 @@ test("a backlog issue with a current writer offers unassign, resubmitting the ex
       },
       projection: { issues: { [ROOT]: "backlog" } },
     },
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+      {
+        pubkey: OTHER_WRITER,
+        name: OTHER_WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
   });
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  // The header now shows a display-name/avatar + truncated pubkey instead of
-  // the naked 64-hex; the full pubkey is still verifiable via the `title`
-  // attribute (truncatePubkey.ts: "never an identity proof" on its own).
-  await expect(panel.getByTestId("bw-assignment-writer")).toHaveAttribute(
-    "title",
-    WRITER,
+  const writerSelect = panel.getByTestId("bw-assignment-writer");
+  await expect(writerSelect).toHaveValue(WRITER);
+  const labels = await writerSelect.locator("option").allTextContents();
+  expect(labels).toEqual(
+    expect.arrayContaining([WRITER_NAME, OTHER_WRITER_NAME]),
   );
-  await panel.getByTestId("bw-unassign").click();
+  expect(labels.some((label) => /^(?:nostr:)?npub1/i.test(label))).toBe(false);
+  expect(labels.some((label) => label.includes(WRITER.slice(0, 8)))).toBe(
+    false,
+  );
+  await writerSelect.selectOption(OTHER_WRITER);
+  await expect(page.getByText("Writer changed.")).toBeVisible();
 
-  const call = await lastBwCall(page, "submit_project_bw_assignment");
-  expect(call?.payload).toMatchObject({
+  const calls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "submit_project_bw_assignment",
+    ),
+  );
+  expect(calls).toHaveLength(2);
+  expect((calls[0].payload as { input: unknown }).input).toMatchObject({
     delegate: WRITER,
     operation: "unassignment",
     prior: ASSIGN_A,
+  });
+  expect((calls[1].payload as { input: unknown }).input).toMatchObject({
+    delegate: OTHER_WRITER,
+    operation: "assignment",
+    prior: expect.stringMatching(/^mock-bw-assignment-\d+$/),
   });
 });
 
@@ -236,8 +253,7 @@ test("two accepted assignment heads (a belt-and-suspenders case bwAssignmentHead
   await openIssue(page, panel, ROOT);
 
   await expect(panel.getByTestId("bw-assignment-conflict")).toBeVisible();
-  await expect(panel.getByTestId("bw-assign")).toHaveCount(0);
-  await expect(panel.getByTestId("bw-unassign")).toHaveCount(0);
+  await expect(panel.getByTestId("bw-assignment-writer")).toHaveCount(0);
 });
 
 // This is the signal a real forked assignment chain actually produces today:
@@ -283,13 +299,19 @@ test("an assignment refused by Core surfaces the refusal instead of a silent sta
       projection: { issues: { [ROOT]: "backlog" } },
     },
     bwAssignmentErrors: ["bw:reject:role:unauthorized"],
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
   });
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  await panel.getByTestId("bw-assign-toggle-manual").click();
-  await panel.getByTestId("bw-assign-delegate").fill(WRITER);
-  await panel.getByTestId("bw-assign").click();
+  await panel.getByTestId("bw-assignment-writer").selectOption(WRITER);
   await expect(page.getByText("bw:reject:role:unauthorized")).toBeVisible();
 });
 
@@ -299,7 +321,10 @@ test("backlog with a single-branch repo pre-fills the stream as a read-only fiel
   await installMockBridge(page, {
     bwSnapshot: {
       activation: ACTIVATION,
-      records: { [ROOT]: rootEvent(ROOT, "Ready candidate") },
+      records: {
+        [ROOT]: rootEvent(ROOT, "Ready candidate"),
+        [UPDATE_A]: issueUpdateEvent(UPDATE_A, ROOT),
+      },
       projection: { issues: { [ROOT]: "backlog" } },
     },
   });
@@ -349,7 +374,12 @@ test("ready offers starting development, reusing the ready head's own stream and
     },
   });
   const panel = await openIssuesPanel(page);
-  await openIssue(page, panel, ROOT);
+  const row = panel.locator(`[data-project-event-id="${ROOT}"]`);
+  await expect(row).toContainText("Ready");
+  await row.click();
+  await expect(panel.getByTestId("project-issue-status")).toContainText(
+    "Ready",
+  );
 
   await panel.getByTestId("bw-in-development-submit").click();
   const call = await lastBwCall(page, "submit_project_bw_record");
@@ -359,6 +389,101 @@ test("ready offers starting development, reusing the ready head's own stream and
       state: "in-development",
       stream: "windows-integration",
       assignment: ASSIGN_A,
+    },
+  });
+});
+
+test("ready allows changing the named writer and rebinds ready to the new assignment", async ({
+  page,
+}) => {
+  const issueStateId = "6".repeat(64);
+  await installMockBridge(page, {
+    bwSnapshot: {
+      activation: ACTIVATION,
+      records: {
+        [ROOT]: rootEvent(ROOT, "Ready writer replacement"),
+        [ASSIGN_A]: assignmentEvent(ASSIGN_A, ROOT, WRITER, "assignment"),
+        [UPDATE_A]: issueUpdateEvent(UPDATE_A, ROOT),
+      },
+      projection: {
+        issues: { [ROOT]: "ready" },
+        issue_state: {
+          [ROOT]: {
+            state: "ready",
+            stream: "windows-integration",
+            assignment: ASSIGN_A,
+            update: UPDATE_A,
+          },
+        },
+        issue_state_id: { [ROOT]: issueStateId },
+      },
+    },
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+      {
+        pubkey: OTHER_WRITER,
+        name: OTHER_WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
+  });
+  const panel = await openIssuesPanel(page);
+  await openIssue(page, panel, ROOT);
+
+  const writerSelect = panel.getByTestId("bw-assignment-writer");
+  await expect(writerSelect).toHaveValue(WRITER);
+  const labels = await writerSelect.locator("option").allTextContents();
+  expect(labels).toEqual(
+    expect.arrayContaining([WRITER_NAME, OTHER_WRITER_NAME]),
+  );
+  expect(labels.some((label) => /^(?:nostr:)?npub1/i.test(label))).toBe(false);
+  expect(labels.some((label) => label.includes(WRITER.slice(0, 8)))).toBe(
+    false,
+  );
+  await writerSelect.selectOption(OTHER_WRITER);
+  await expect(page.getByText("Writer changed.")).toBeVisible();
+
+  const calls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter((entry) =>
+      ["submit_project_bw_assignment", "submit_project_bw_record"].includes(
+        entry.command,
+      ),
+    ),
+  );
+  expect(calls).toHaveLength(3);
+  expect(calls.map((call) => call.command)).toEqual([
+    "submit_project_bw_assignment",
+    "submit_project_bw_assignment",
+    "submit_project_bw_record",
+  ]);
+  expect((calls[0].payload as { input: unknown }).input).toMatchObject({
+    delegate: WRITER,
+    operation: "unassignment",
+    prior: ASSIGN_A,
+  });
+  expect((calls[1].payload as { input: unknown }).input).toMatchObject({
+    delegate: OTHER_WRITER,
+    operation: "assignment",
+    prior: expect.stringMatching(/^mock-bw-assignment-\d+$/),
+  });
+  expect((calls[2].payload as { input: unknown }).input).toMatchObject({
+    record: "issue-state",
+    tags: [
+      ["issue", ROOT],
+      ["previous", issueStateId],
+    ],
+    content: {
+      state: "ready",
+      stream: "windows-integration",
+      assignment: expect.stringMatching(/^mock-bw-assignment-\d+$/),
+      update: UPDATE_A,
+      rework: null,
     },
   });
 });
