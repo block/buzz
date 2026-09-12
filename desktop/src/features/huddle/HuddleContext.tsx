@@ -6,6 +6,7 @@ import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { type AudioInputDevice, useAudioDevices } from "./lib/useAudioDevices";
 import { usePipelineHotstart } from "./lib/usePipelineHotstart";
 import { formatHuddleActionError } from "./lib/huddleError";
+import { availableMediaDevices, requireMediaDevices } from "./lib/mediaDevices";
 import {
   type VoiceInputMode,
   useHuddlePttState,
@@ -206,15 +207,12 @@ export function HuddleProvider({
       .catch(() => {
         /* best-effort */
       });
-    navigator.mediaDevices.addEventListener(
-      "devicechange",
-      refreshOutputDevices,
-    );
+    // Only the hot-plug listener needs mediaDevices; the list comes from Rust.
+    const media = availableMediaDevices();
+    if (!media) return;
+    media.addEventListener("devicechange", refreshOutputDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        refreshOutputDevices,
-      );
+      media.removeEventListener("devicechange", refreshOutputDevices);
     };
   }, []);
 
@@ -575,7 +573,7 @@ export function HuddleProvider({
       if (selectedDeviceId) {
         audioConstraints.deviceId = { exact: selectedDeviceId };
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await requireMediaDevices().getUserMedia({
         audio: audioConstraints,
       });
       const audioTrack = stream.getAudioTracks()[0];
