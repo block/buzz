@@ -247,6 +247,14 @@ pub fn build_message(
     emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    // An empty (or whitespace-only) message with no media renders as a blank
+    // bubble and, worse, lets upstream failures pass silently: a producer
+    // whose stdin pipe delivered zero bytes used to publish "" without any
+    // gate complaining, so the author believed the message was posted.
+    // Media-only messages (imeta tags, no text) remain legal.
+    if content.trim().is_empty() && media_tags.is_empty() {
+        return Err(SdkError::EmptyContent);
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
@@ -2351,6 +2359,28 @@ pub fn build_delete_addressable(
 mod tests {
     use super::*;
     use nostr::{EventId, Keys};
+
+    #[test]
+    fn build_message_rejects_empty_content_without_media() {
+        let err = build_message(Uuid::new_v4(), "", None, &[], false, &[]).unwrap_err();
+        assert!(matches!(err, SdkError::EmptyContent));
+    }
+
+    #[test]
+    fn build_message_rejects_whitespace_only_content_without_media() {
+        let err = build_message(Uuid::new_v4(), " \n\t ", None, &[], false, &[]).unwrap_err();
+        assert!(matches!(err, SdkError::EmptyContent));
+    }
+
+    #[test]
+    fn build_message_allows_media_only_message() {
+        let media = vec![vec![
+            "imeta".to_string(),
+            "url https://example.com/x.png".to_string(),
+            "m image/png".to_string(),
+        ]];
+        assert!(build_message(Uuid::new_v4(), "", None, &[], false, &media).is_ok());
+    }
 
     fn keys() -> Keys {
         Keys::generate()

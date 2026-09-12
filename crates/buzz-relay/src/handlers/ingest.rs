@@ -2990,6 +2990,17 @@ async fn ingest_event_inner(
         .filter(|t| t.kind().to_string() == "imeta")
         .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
         .collect();
+    // A stream message must carry text or media. Empty content used to be
+    // accepted here, so a client whose input pipeline lost its payload
+    // published a blank message that read as success to its author. Edits
+    // (kind 40003) are unaffected — clearing an edit to empty is the
+    // deletion gesture and flows through a different kind.
+    if kind_u32 == KIND_STREAM_MESSAGE && event.content.trim().is_empty() && imeta_tags.is_empty()
+    {
+        return Err(IngestError::Rejected(
+            "invalid: empty message content (no text and no media)".into(),
+        ));
+    }
     if !imeta_tags.is_empty() {
         crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
