@@ -258,9 +258,9 @@ previous = issue-state head. Transition sequence is triage → backlog → ready
 in-development → implemented. Owner/coordinator may reset ready from ready,
 in-development or implemented, but implemented reset requires rejected verdict
 or a terminal failed/aborted set (the latter referenced in optional `terminal_set`).
-Resolved issues cannot reset. Ready needs nonempty acceptance criteria, classified
-platform, exactly one stream, and a current text snapshot; ACP work may be ready
-and implemented but is not client-release eligible.
+Resolved issues cannot reset. Ready needs nonempty acceptance criteria, a platform
+that may be null for cross-platform work, exactly one stream, and a current text
+snapshot; ACP work may be ready and implemented but is not client-release eligible.
 
 Existing local SDK grammar (`crates/buzz-sdk/src/builders.rs`,
 `build_git_issue_assignment_with_prior` / `build_git_issue_unassignment_with_prior`):
@@ -327,7 +327,8 @@ policy selection for the complete pipeline/set lifecycle). Host current-role che
 still applies. Every downstream release event uses that pinned policy.
 Readback has the remote_readback shape with head=relay_sha and age <=300 seconds.
 Member is `{issue,implemented}`; 1..25 distinct issue IDs and implemented IDs,
-all same repo/platform/stream, exact current implemented state, executable leaves.
+all from the same repo and stream, with issue platform null or equal to the set
+platform, exact current implemented state, executable leaves.
 External Git input must show every implemented commit is an ancestor of relay_sha
 (including equality), and freeze readback must be the actual Relay stream head at
 freeze. A signed claim or a GitHub ref is insufficient.

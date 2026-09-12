@@ -285,8 +285,9 @@ impl<'a> History<'a> {
                         }
                         push(
                             update.is_some_and(|u| {
-                                self.fields_from(imp.issue(), Some(u))["platform"]
-                                    == e.body["platform"]
+                                let fields = self.fields_from(imp.issue(), Some(u));
+                                fields["platform"].is_null()
+                                    || fields["platform"] == e.body["platform"]
                             }),
                             "platform",
                         );
@@ -620,9 +621,7 @@ impl<'a> History<'a> {
                         let update = self.get(e.field("update"))?;
                         self.current_binding(e, update, "update-head")?;
                         let fields = self.fields_from(e.issue(), Some(update));
-                        if a(&fields["acceptance_criteria"]).is_empty()
-                            || fields["platform"].is_null()
-                        {
+                        if a(&fields["acceptance_criteria"]).is_empty() {
                             return Err(err("ready-fields"));
                         }
                         let verdicts = self.before(e, "member-verdict");

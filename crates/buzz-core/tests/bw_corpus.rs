@@ -19,7 +19,7 @@ fn complete_pinned_corpus() {
         hex::encode(Sha256::digest(include_bytes!(
             "../../../docs/nips/NIP-BW.md"
         ))),
-        "832f80c7a8b1a3119952441988369af1d53cdc1ae4c4e761ff853e68681159c3"
+        "86184a747dda4692c64db65c216f4cdb6dfe69e765755abd1eabba893df55d29"
     );
     let data: Value = parse_json(bytes).expect("pinned strict corpus");
     let shapes: Value =
@@ -54,7 +54,7 @@ fn complete_pinned_corpus() {
         export.push(json!({"case":case["name"],"steps":results}));
     }
     if let Ok(path) = std::env::var("BW_RESULT_EXPORT") {
-        std::fs::write(Path::new(&path),serde_json::to_vec_pretty(&json!({"format":"nip-bw-results-v1","p1_commit":"529136c39aa42db64af61f811fc33dac73d16dd1","fixture_sha256":"b489fb188b45e073e81783e8d591f24891a9c73bc56d8d2fc56a881606640e8a","document_sha256":"832f80c7a8b1a3119952441988369af1d53cdc1ae4c4e761ff853e68681159c3","cases":export})).expect("export")).expect("write export");
+        std::fs::write(Path::new(&path),serde_json::to_vec_pretty(&json!({"format":"nip-bw-results-v1","p1_commit":"529136c39aa42db64af61f811fc33dac73d16dd1","fixture_sha256":"b489fb188b45e073e81783e8d591f24891a9c73bc56d8d2fc56a881606640e8a","document_sha256":"86184a747dda4692c64db65c216f4cdb6dfe69e765755abd1eabba893df55d29","cases":export})).expect("export")).expect("write export");
     }
     assert_eq!(steps, 1804);
     assert_eq!(export.len(), 98);

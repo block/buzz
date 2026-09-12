@@ -251,6 +251,86 @@ fn partial_text_patch_preserves_classification_and_ready_criteria() {
 }
 
 #[test]
+fn cross_platform_issue_can_reach_ready_and_join_client_release() {
+    let d = corpus();
+    let mut h = consumer(&d, "release-set-positive");
+    for label in ["repo", "policy", "root_a", "enroll_a"] {
+        feed(&mut h, &d, label);
+    }
+
+    let mut update = d["events"]["update_a"]["event"].clone();
+    let mut update_body: Value =
+        serde_json::from_str(update["content"].as_str().expect("body")).expect("json");
+    update_body["patch"]
+        .as_object_mut()
+        .expect("patch")
+        .remove("platform");
+    update["content"] = json!(update_body.to_string());
+    let update = signed(update, 1);
+    let out = h.ingest(&serde_json::to_vec(&update).expect("wire"));
+    assert_eq!(out.outcome, "accept", "{out:?}");
+
+    for label in ["accept_a", "backlog_a", "assign_a"] {
+        feed(&mut h, &d, label);
+    }
+    let mut ready = d["events"]["ready_a"]["event"].clone();
+    let mut ready_body: Value =
+        serde_json::from_str(ready["content"].as_str().expect("body")).expect("json");
+    ready_body["update"] = update["id"].clone();
+    ready["content"] = json!(ready_body.to_string());
+    let ready = signed(ready, 1);
+    let out = h.ingest(&serde_json::to_vec(&ready).expect("wire"));
+    assert_eq!(out.outcome, "accept", "{out:?}");
+    let root = d["events"]["root_a"]["event"]["id"].as_str().expect("root");
+    assert!(out.projection["issue_fields"][root]["platform"].is_null());
+
+    let mut dev = d["events"]["dev_a"]["event"].clone();
+    dev["tags"]
+        .as_array_mut()
+        .expect("tags")
+        .iter_mut()
+        .find(|tag| tag[0] == "previous")
+        .expect("previous")[1] = ready["id"].clone();
+    let dev = signed(dev, 5);
+    let out = h.ingest(&serde_json::to_vec(&dev).expect("wire"));
+    assert_eq!(out.outcome, "accept", "{out:?}");
+
+    let mut implemented = d["events"]["implemented_a"]["event"].clone();
+    implemented["tags"]
+        .as_array_mut()
+        .expect("tags")
+        .iter_mut()
+        .find(|tag| tag[0] == "previous")
+        .expect("previous")[1] = dev["id"].clone();
+    let implemented = signed(implemented, 5);
+    let out = h.ingest(&serde_json::to_vec(&implemented).expect("wire"));
+    assert_eq!(out.outcome, "accept", "{out:?}");
+
+    for label in [
+        "root_b",
+        "enroll_b",
+        "update_b",
+        "accept_b",
+        "backlog_b",
+        "assign_b",
+        "ready_b",
+        "dev_b",
+        "implemented_b",
+        "pipeline",
+    ] {
+        feed(&mut h, &d, label);
+    }
+    let mut set = d["events"]["set"]["event"].clone();
+    let mut set_body: Value =
+        serde_json::from_str(set["content"].as_str().expect("body")).expect("json");
+    set_body["members"][0]["implemented"] = implemented["id"].clone();
+    set["content"] = json!(set_body.to_string());
+    let set = signed(set, 1);
+    let out = h.ingest(&serde_json::to_vec(&set).expect("wire"));
+    assert_eq!(out.outcome, "accept", "{out:?}");
+}
+
+#[test]
 fn shape_errors_use_lexical_code_order() {
     let d = corpus();
     let mut h = consumer(&d, "issue-state-positive");

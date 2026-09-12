@@ -8,9 +8,9 @@ The activation prerequisite remains complete P3C readback.
 
 ## Contract binding
 
-- P1: `529136c39aa42db64af61f811fc33dac73d16dd1`
-- Fixture SHA-256: `b489fb188b45e073e81783e8d591f24891a9c73bc56d8d2fc56a881606640e8a`
-- Document SHA-256: `832f80c7a8b1a3119952441988369af1d53cdc1ae4c4e761ff853e68681159c3`
+- P1 baseline: `529136c39aa42db64af61f811fc33dac73d16dd1`
+- Fixture SHA-256 (unchanged): `b489fb188b45e073e81783e8d591f24891a9c73bc56d8d2fc56a881606640e8a`
+- Current document SHA-256: `86184a747dda4692c64db65c216f4cdb6dfe69e765755abd1eabba893df55d29`
 - Host counterpart supplied by Jari: `b5efd8ec4368e99d8117e29d77dcd8ce05d7ebcc`.
   Its independent PASS and Relay readback are supplied evidence. Its full suite
   reportedly has 561 passes and 35 pre-existing failures. No Host code is read or
@@ -19,8 +19,9 @@ The activation prerequisite remains complete P3C readback.
 
 The compiled closed `bw/schema.json` contains only the unchanged `schemas`,
 `types` and `arrays` from P1. Tests compare those tables byte-semantically and pin
-both P1 file digests. No fixture event, test expectation or alias is compiled into
-the consumer. Test-only inputs use the existing public fictitious test keys.
+the fixture and current document digests. No fixture event, test expectation or
+alias is compiled into the consumer. Test-only inputs use the existing public
+fictitious test keys.
 
 ## Public namespace recheck: 2026-09-09 UTC
 

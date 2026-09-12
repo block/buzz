@@ -200,7 +200,7 @@ pub(crate) fn dispatch(cmd: &BwCmd) -> Result<(), CliError> {
             result["p1_commit"] = json!("529136c39aa42db64af61f811fc33dac73d16dd1");
             result["fixture_sha256"] = json!(digest);
             result["document_sha256"] =
-                json!("832f80c7a8b1a3119952441988369af1d53cdc1ae4c4e761ff853e68681159c3");
+                json!("86184a747dda4692c64db65c216f4cdb6dfe69e765755abd1eabba893df55d29");
             let bytes =
                 serde_json::to_vec_pretty(&result).map_err(|e| CliError::Other(e.to_string()))?;
             std::fs::write(output, bytes)
