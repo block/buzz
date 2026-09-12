@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 mod agent;
 pub mod auth;
+mod auth_http;
 mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod databricks;
 mod handoff;
 mod hints;
 mod llm;

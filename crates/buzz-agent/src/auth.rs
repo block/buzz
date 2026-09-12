@@ -31,7 +31,7 @@ use serde_json::Value;
 use sha2::Digest;
 use tokio::sync::{watch, Mutex};
 
-use crate::types::AgentError;
+use crate::{auth_http::read_oauth_json, databricks::StrictWorkspace, types::AgentError};
 
 /// Buffer before `expires_at` to consider a cached token "still good".
 /// Keeps us off the cliff if the clock or the server's clock drifts.
@@ -370,6 +370,7 @@ enum RefreshOutcome {
 pub struct PkceOAuthTokenSource {
     cfg: PkceOAuthConfig,
     http: Client,
+    workspace: Option<StrictWorkspace>,
     cache_path: PathBuf,
     /// Injected browser launcher, called inside [`browser_pkce_flow`] while the
     /// localhost listener is live. Production uses [`DefaultBrowserOpener`];
@@ -413,25 +414,43 @@ impl PkceOAuthTokenSource {
         opener: Arc<dyn BrowserOpener>,
         http_timeout: Duration,
     ) -> Result<Arc<Self>, AgentError> {
+        let http = Client::builder()
+            .timeout(http_timeout)
+            .build()
+            .map_err(|_| AgentError::Llm("oauth http client construction failed".into()))?;
+        Self::from_parts(cfg, opener, http, None)
+    }
+
+    pub(crate) fn for_workspace(
+        workspace: StrictWorkspace,
+        cache_root: &Path,
+        opener: Arc<dyn BrowserOpener>,
+        http: Client,
+    ) -> Result<Arc<Self>, AgentError> {
+        let mut cfg =
+            crate::llm::databricks_pkce_config(workspace.as_str(), Some(cache_root.to_path_buf()));
+        // Strict and legacy sources must not share single-flight/cache state,
+        // even if a caller accidentally supplies the same root to both APIs.
+        cfg.cache_namespace = "databricks-strict".into();
+        Self::from_parts(cfg, opener, http, Some(workspace))
+    }
+
+    fn from_parts(
+        cfg: PkceOAuthConfig,
+        opener: Arc<dyn BrowserOpener>,
+        http: Client,
+        workspace: Option<StrictWorkspace>,
+    ) -> Result<Arc<Self>, AgentError> {
         let cache_path = cache_path_for(&cfg)?;
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| AgentError::Llm(format!("oauth cache dir {parent:?}: {e}")))?;
         }
-        // Every OAuth HTTP call inherits this timeout so a hung provider can
-        // never stall the caller — nor the same-key callers waiting on the
-        // cross-process lock this holder owns. Construction is fallible, so a
-        // build failure propagates rather than silently falling back to an
-        // untimed client — an untimed client would restore exactly the
-        // unbounded-HTTP-under-lock failure the timeout exists to prevent.
-        let http = Client::builder()
-            .timeout(http_timeout)
-            .build()
-            .map_err(|e| AgentError::Llm(format!("oauth http client: {e}")))?;
         let initial = read_cache(&cache_path);
         Ok(Arc::new(Self {
             cfg,
             http,
+            workspace,
             cache_path,
             opener,
             state: Mutex::new(initial),
@@ -460,17 +479,18 @@ impl PkceOAuthTokenSource {
 
     /// Discover authorization + token endpoints from the well-known URL.
     async fn endpoints(&self) -> Result<OidcEndpoints, AgentError> {
-        let v: Value = self
+        let response = self
             .http
             .get(&self.cfg.discovery_url)
             .send()
             .await
-            .map_err(|e| AgentError::Llm(format!("oauth discovery: {e}")))?
-            .error_for_status()
-            .map_err(|e| AgentError::Llm(format!("oauth discovery status: {e}")))?
-            .json()
+            .map_err(|_| AgentError::Llm("oauth discovery request failed".into()))?;
+        if !response.status().is_success() {
+            return Err(AgentError::Llm("oauth discovery status failed".into()));
+        }
+        let v = read_oauth_json(response)
             .await
-            .map_err(|e| AgentError::Llm(format!("oauth discovery json: {e}")))?;
+            .map_err(|_| AgentError::Llm("oauth discovery response invalid or too large".into()))?;
         let auth = v
             .get("authorization_endpoint")
             .and_then(Value::as_str)
@@ -483,6 +503,10 @@ impl PkceOAuthTokenSource {
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::Llm("oauth discovery: token_endpoint missing".into()))?
             .to_string();
+        if let Some(workspace) = &self.workspace {
+            workspace.validate_endpoint(&auth)?;
+            workspace.validate_endpoint(&token)?;
+        }
         Ok(OidcEndpoints {
             authorization_endpoint: auth,
             token_endpoint: token,
@@ -664,14 +688,14 @@ impl PkceOAuthTokenSource {
             Ok(resp) => resp,
             // Transport error or the per-request timeout elapsed: no verdict
             // from the provider, so this is infrastructural, not a rejection.
-            Err(e) => {
-                tracing::warn!(error = %e, "oauth refresh transport failure");
+            Err(_) => {
+                tracing::warn!("oauth refresh transport failure");
                 return RefreshOutcome::Network;
             }
         };
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_oauth_json(resp).await.ok();
             // Per RFC 6749 §5.2 only `error == "invalid_grant"` means the
             // refresh token itself is dead (expired/revoked) — the one failure
             // a browser sign-in can repair. Every other 4xx (`invalid_request`,
@@ -681,22 +705,21 @@ impl PkceOAuthTokenSource {
             // they stay in the non-credential bucket and surface as
             // `NetworkUnavailable` without ever popping a browser.
             if status.is_client_error()
-                && serde_json::from_str::<Value>(&body)
-                    .ok()
+                && body
                     .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
                     .as_deref()
                     == Some("invalid_grant")
             {
-                tracing::warn!(status = %status, body = %body, "oauth refresh grant rejected");
+                tracing::warn!(status = %status, "oauth refresh grant rejected");
                 return RefreshOutcome::Rejected;
             }
-            tracing::warn!(status = %status, body = %body, "oauth refresh not repairable by browser");
+            tracing::warn!(status = %status, "oauth refresh not repairable by browser");
             return RefreshOutcome::Network;
         }
-        let v: Value = match resp.json().await {
+        let v: Value = match read_oauth_json(resp).await {
             Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "oauth refresh response decode failure");
+            Err(_) => {
+                tracing::warn!("oauth refresh response decode failure");
                 return RefreshOutcome::Network;
             }
         };
@@ -1952,13 +1975,18 @@ fn token_from_response(
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| fallback_refresh.map(str::to_string));
-    let expires_at = v.get("expires_in").and_then(Value::as_u64).map(|secs| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            + secs
-    });
+    let expires_at = v
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .map(|secs| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .checked_add(secs)
+                .ok_or_else(|| AgentError::Llm("oauth: token expiry overflow".into()))
+        })
+        .transpose()?;
     Ok(CachedToken {
         access_token,
         refresh_token,
@@ -2105,8 +2133,8 @@ async fn browser_pkce_flow(
 
     // Launch the browser while the listener is live. A launch failure aborts
     // before we wait on a redirect nobody can send.
-    opener.open(&auth_url).map_err(|e| {
-        tracing::warn!(error = %e, "oauth browser launch failed");
+    opener.open(&auth_url).map_err(|_| {
+        tracing::warn!("oauth browser launch failed");
         AuthError::BrowserOpenFailed
     })?;
 
@@ -2116,8 +2144,8 @@ async fn browser_pkce_flow(
         // Callback task dropped the sender without sending — treat as timeout.
         Ok(Err(_)) => return Err(AuthError::TimedOut),
         // Provider/user reported an error (denial, state mismatch, missing code).
-        Ok(Ok(Err(detail))) => {
-            tracing::warn!(detail = %detail, "oauth callback reported failure");
+        Ok(Ok(Err(_))) => {
+            tracing::warn!("oauth callback reported failure");
             return Err(AuthError::Denied);
         }
         Ok(Ok(Ok(code))) => code,
@@ -2141,7 +2169,7 @@ async fn browser_pkce_flow(
         .map_err(|_| AuthError::NetworkUnavailable)?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = read_oauth_json(resp).await.ok();
         // Only a 4xx `invalid_grant` (RFC 6749 §6.4.1) establishes the
         // authorization code itself was rejected — the terminal, cooldown-worthy
         // `ExchangeFailed`. A 429, any 5xx, and any other/unparseable 4xx are a
@@ -2150,24 +2178,22 @@ async fn browser_pkce_flow(
         // refresh classifier, which likewise keys on the body `error`, not the
         // bare status class.
         if status.is_client_error()
-            && serde_json::from_str::<Value>(&body)
-                .ok()
+            && body
                 .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
                 .as_deref()
                 == Some("invalid_grant")
         {
-            tracing::warn!(status = %status, body = %body, "oauth code exchange rejected");
+            tracing::warn!(status = %status, "oauth code exchange rejected");
             return Err(AuthError::ExchangeFailed);
         }
-        tracing::warn!(status = %status, body = %body, "oauth code exchange not a grant rejection");
+        tracing::warn!(status = %status, "oauth code exchange not a grant rejection");
         return Err(AuthError::NetworkUnavailable);
     }
     // A 2xx whose body is missing/malformed or lacks an access token is a
     // provider fault, not a rejected grant: it never establishes that the code
     // was refused, so it stays in the transient bucket rather than poisoning a
     // 5-minute cooldown.
-    let v: Value = resp
-        .json()
+    let v = read_oauth_json(resp)
         .await
         .map_err(|_| AuthError::NetworkUnavailable)?;
     token_from_response(&v, None).map_err(|_| AuthError::NetworkUnavailable)
