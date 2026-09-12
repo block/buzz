@@ -50,6 +50,13 @@ OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
   ./target/release/buzz-agent
 
+# Or Ollama Cloud (OpenAI-compatible hosted models)
+BUZZ_AGENT_PROVIDER=ollama-cloud \
+OPENAI_COMPAT_API_KEY=... \
+OPENAI_COMPAT_MODEL=kimi-k2.5 \
+  ./target/release/buzz-agent
+
+
 # Or OpenRouter
 BUZZ_AGENT_PROVIDER=openrouter \
 OPENROUTER_API_KEY=sk-or-v1-... \
