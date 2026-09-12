@@ -24,6 +24,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { BwAssignmentSection } from "./BwAssignmentSection";
 import {
   bwReadyStreamOptions,
+  bwReadyUpdateUnavailable,
   errorMessage,
   useInvalidateProjectIssues,
 } from "./bwIssueActionsShared";
@@ -426,7 +427,11 @@ function BwTriageActions({
  * branch pre-fills it as a read-only field — never an open dropdown or an
  * editable input for the single-option case (Robi, 2026-09-12 follow-up
  * correction). If the branch list can't be loaded, submit is blocked
- * outright — never a free-text escape. */
+ * outright — never a free-text escape.
+ *
+ * `update` is likewise blocked outright, not sent as a guessed/empty value,
+ * when the issue has no `issue-update` head yet — see
+ * `bwReadyUpdateUnavailable` in `bwIssueActionsShared.ts`. */
 function BwReadyAction({
   issue,
   project,
@@ -445,6 +450,9 @@ function BwReadyAction({
       repoStateQuery.data?.branches,
       repoStateQuery.isLoading,
     );
+  const updateUnavailable = issue.bw
+    ? bwReadyUpdateUnavailable(issue.bw.snapshot, issue.id)
+    : true;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-pick only when the loaded option set (or the current selection's membership in it) actually changes, not on every unrelated re-render
   React.useEffect(() => {
@@ -453,7 +461,7 @@ function BwReadyAction({
   }, [streamOptions]);
 
   const handleSubmit = async () => {
-    if (pending || !issue.bw || !stream) return;
+    if (pending || !issue.bw || !stream || updateUnavailable) return;
     setPending(true);
     try {
       await submitBwReadyTransition({
@@ -517,6 +525,16 @@ function BwReadyAction({
           Branch list unavailable — cannot move to ready without a valid stream.
         </p>
       ) : null}
+      {updateUnavailable ? (
+        <p
+          className="text-xs text-destructive"
+          data-testid="bw-ready-update-unavailable"
+          role="alert"
+        >
+          No saved text update yet — save a title/description/acceptance
+          criteria update above before moving to ready.
+        </p>
+      ) : null}
       <input
         className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
         data-testid="bw-ready-rework-verdict"
@@ -534,7 +552,7 @@ function BwReadyAction({
       <button
         className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
         data-testid="bw-ready-submit"
-        disabled={pending || !stream}
+        disabled={pending || !stream || updateUnavailable}
         onClick={() => void handleSubmit()}
         type="button"
       >
