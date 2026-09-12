@@ -60,7 +60,7 @@ function render() {
   if (selected === 'empty') selected = '';
   if (!selected || (scope === 0 && selected === 'missing' && rows.some(r => r.id === 'host'))) selected = rows[0]?.id ?? '';
   const vanished = !!selected && !rows.some(row => row.id === selected);
-  screen.setRelay(snapshot.hostRelay ?? snapshot.routing?.relay, snapshot.service?.relay ?? 'unknown');
+  screen.setRelay(snapshot.hostRelay ?? snapshot.routing?.relay, snapshot.service?.relay ?? 'unknown', snapshot.relayName);
   const configured = snapshot.local.some(r => r.id === 'host');
   const actions: ManagerAction[] = scope === 0 ? [
     { label: 'Register agent', run: async () => {

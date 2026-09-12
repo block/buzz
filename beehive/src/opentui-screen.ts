@@ -110,7 +110,7 @@ export class OpenTuiScreen {
     this.footer.content = this.relayFooter + '\n' + (this.renderer.width >= 70 ? OpenTuiScreen.hintsWide : OpenTuiScreen.hintsNarrow); this.footer.height = 2;
   }
   private relayFooter = 'Relay: Not configured · disconnected';
-  setRelay(url?: string, state = 'unknown') { this.relayFooter = url ? `Relay: ${clean(url)} · ${state}` : 'Relay: Not configured · disconnected'; this.resize(); }
+  setRelay(url?: string, state = 'unknown', name?: string) { this.relayFooter = url ? `Relay: ${name ? `${clean(name)} · ` : ''}${clean(url)} · ${state}` : 'Relay: Not configured · disconnected'; this.resize(); }
   private heading() { this.header.content = `BEEHIVE ${this.scope === 0 ? '[Local Host]' : 'Local Host'} | ${this.scope === 1 ? '[Agents]' : 'Agents'}\n${this.scope === 0 ? 'This computer · no owner sign-in needed' : 'Owner · ' + clean(this.owner)}`; }
   setOwner(publicSuffix?: string) { this.owner = publicSuffix ? `${publicSuffix} · signed in · key saved here` : 'signed out'; this.heading(); }
   private switchScope(scope: number) {

@@ -14,12 +14,13 @@ import { readHostIdentityPublic } from './host-identity.ts';
 import { createControllerConfig, readControllerConfig } from './controller-config.ts';
 import { ownerPublicInput } from './host-setup.ts';
 import { managementClient } from './intents.ts';
+import { fetchRelayName } from './relay-name.ts';
 import { message, type Message } from './protocol.ts';
 import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
 
 export type ManagerRequest = { id: number; action: string; values?: Record<string, string>; target?: string; revision?: number };
 export type ManagerItem = { id: string; label: string; detail: string; evidence?: string; disabled?: Record<string, string> };
-export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string; settings?: Settings; service?: ServiceStatus; hostRelay?: string; profilePreview?: RegisteredAgent; models?: string[]; runtimeExecutable?: string; harnesses?: DetectedHarness[]; databricksHost?: string };
+export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string; settings?: Settings; service?: ServiceStatus; hostRelay?: string; relayName?: string; profilePreview?: RegisteredAgent; models?: string[]; runtimeExecutable?: string; harnesses?: DetectedHarness[]; databricksHost?: string };
 const short = (s: string) => s.length > 22 ? `${s.slice(0,8)}…${s.slice(-6)}` : s;
 
 /** Final plain display text thrown by this boundary; never rewrapped or retranslated. */
@@ -139,14 +140,17 @@ export class ManagerController {
   private harnesses?: DetectedHarness[];
   private databricksHost?: string;
   private lastId = 0;
+  private relayName?: { relay: string; name?: string };
+  private relayNamePending?: { relay: string; abort: AbortController };
   private status = 'Local Host does not require owner sign-in. Quitting or signing out does not stop hosts or agents.';
   readonly home: string;
   readonly changed: (snapshot: ManagerSnapshot) => void;
   private credential: typeof managerCredential;
   private connect: typeof managementClient;
+  private fetchName: typeof fetchRelayName;
   constructor(home: string, changed: (snapshot: ManagerSnapshot) => void,
-    credential = managerCredential, connect = managementClient) {
-    this.home = home; this.changed = changed; this.credential = credential; this.connect = connect;
+    credential = managerCredential, connect = managementClient, fetchName = fetchRelayName) {
+    this.home = home; this.changed = changed; this.credential = credential; this.connect = connect; this.fetchName = fetchName;
   }
   private get hostDirectory() { return join(this.home, '.beehive', 'host'); }
   private get ownerDirectory() { return join(this.home, '.beehive', 'owner'); }
@@ -196,10 +200,32 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
     try { routing = readControllerConfig(this.ownerDirectory); } catch { /* Invalid retained routing is refused by sign-in; never reset here. */ }
     let settings: Settings | undefined, hostRelay: string | undefined;
     try { settings = readSettings(this.hostDirectory); if (existsSync(join(this.hostDirectory,'host-identity.json'))) hostRelay = readHostIdentityPublic(this.hostDirectory).pairing.relay; } catch { /* Existing error row remains actionable; never reset settings. */ }
-    return { settings, service: this.service, hostRelay, profilePreview: this.profilePreview, models: this.models, runtimeExecutable: this.runtimeExecutable, harnesses: this.harnesses, databricksHost: this.databricksHost, local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
+    const footerRelay = hostRelay ?? routing?.relay;
+    this.observeRelayName(footerRelay);
+    return { settings, service: this.service, hostRelay, relayName: this.relayName && this.relayName.relay === footerRelay ? this.relayName.name : undefined, profilePreview: this.profilePreview, models: this.models, runtimeExecutable: this.runtimeExecutable, harnesses: this.harnesses, databricksHost: this.databricksHost, local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
   }
 
   private fresh(m: Message) { return Boolean(this.client?.connected && Date.now() - Number(m.body.observedAt) <= 6000); }
+  /** Optional bounded footer relay name. One attempt per configured relay URL; absence,
+   * failure or cancellation only omits the name. It never changes the reported
+   * connection state, blocks the UI, resets configuration or invents a name, and a
+   * late or stale completion is never applied to a different relay. */
+  private observeRelayName(relay: string | undefined) {
+    if (this.closed) return;
+    if (this.relayName?.relay === relay || this.relayNamePending?.relay === relay) return;
+    this.relayNamePending?.abort.abort();
+    this.relayNamePending = undefined;
+    this.relayName = undefined;
+    if (!relay) return;
+    const pending = { relay, abort: new AbortController() };
+    this.relayNamePending = pending;
+    void Promise.resolve().then(() => this.fetchName(relay, pending.abort.signal)).catch(() => undefined).then(name => {
+      if (this.closed || this.relayNamePending !== pending) return;
+      this.relayNamePending = undefined;
+      this.relayName = { relay, name };
+      if (!this.closed) this.changed(this.snapshot());
+    });
+  }
   refresh() {
     if (this.closed) return;
     this.changed(this.snapshot());
@@ -209,7 +235,7 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
     }
   }
   cancel() { this.generation++; this.active?.abort(); }
-  close() { this.closed = true; this.cancel(); this.client?.close(); this.client = undefined; this.owner = undefined; }
+  close() { this.closed = true; this.cancel(); this.relayNamePending?.abort.abort(); this.client?.close(); this.client = undefined; this.owner = undefined; }
   async request(request: ManagerRequest) {
     if (this.closed || request.id <= this.lastId || this.active) return;
     this.lastId = request.id;

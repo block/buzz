@@ -38,3 +38,20 @@ test('disabled host control and pending cancellation never run an operation; mul
     ui.mockInput.pressKey('q',{ctrl:true}); await view.done; assert.equal(await quitting,undefined);
   } finally { view.close(); }
 });
+
+test('footer shows the optional sanitized relay name before the exact URL and state', async () => {
+  const ui = await createTestRenderer({ width: 100, height: 30, exitOnCtrlC: false });
+  const view = new OpenTuiScreen(ui.renderer);
+  try {
+    view.setRelay('wss://fixture.invalid','connected','Fixture Relay'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(),/Relay: Fixture Relay · wss:\/\/fixture\.invalid · connected/);
+    view.setRelay('wss://fixture.invalid','disconnected','Bad\u001b[31mName'); await ui.renderOnce();
+    const sanitized = ui.captureCharFrame();
+    assert.match(sanitized,/Relay: BadName · wss:\/\/fixture\.invalid · disconnected/);
+    assert.ok(!sanitized.includes('\u001b[31m'));
+    view.setRelay('wss://fixture.invalid','connected'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(),/Relay: wss:\/\/fixture\.invalid · connected/);
+    view.setRelay(undefined,'unknown'); await ui.renderOnce();
+    assert.match(ui.captureCharFrame(),/Relay: Not configured · disconnected/);
+  } finally { view.close(); }
+});

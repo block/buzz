@@ -29,7 +29,7 @@ function fixture() {
     }
     return { ok: true, secret: backend.read(credentialReference('owner',input.owner)) === null ? null : readCredential(credentialReference('owner',input.owner),backend) };
   };
-  const controller = new ManagerController(home, s => { snapshot = s; }, credential, ((_root: string,_url: string,_secret: string,r: typeof receive) => { receive = r; return client; }) as any);
+  const controller = new ManagerController(home, s => { snapshot = s; }, credential, ((_root: string,_url: string,_secret: string,r: typeof receive) => { receive = r; return client; }) as any, async () => undefined);
   return { controller, home, submitted, backend, get closed() { return closed; }, get snapshot() { return snapshot!; }, receive: (m: Message) => receive(m), states: (s: any[]) => { states = s; }, cleanup() { controller.close(); rmSync(home,{ recursive: true, force: true }); } };
 }
 
