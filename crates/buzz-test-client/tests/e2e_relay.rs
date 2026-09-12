@@ -1324,6 +1324,47 @@ async fn test_unarchive_emits_member_added_notification() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// An owner must be able to permanently delete an archived channel. Archived
+/// channels reject ordinary mutations, but deletion is a terminal state change
+/// and is exposed directly by every client.
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_archived_channel() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    let archive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["archived", "true"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = ws.send_event(archive).await.expect("archive channel");
+    assert!(ok.accepted, "archive rejected: {}", ok.message);
+
+    let delete = EventBuilder::new(Kind::Custom(9008), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = ws
+        .send_event(delete)
+        .await
+        .expect("delete archived channel");
+    assert!(
+        ok.accepted,
+        "archived channel deletion rejected: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
 #[tokio::test]
 #[ignore]
