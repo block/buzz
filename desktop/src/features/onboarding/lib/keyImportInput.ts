@@ -9,9 +9,9 @@
  * when the form can safely switch modes.
  */
 
-import { nsecToNpub } from "@/shared/lib/nostrUtils";
+import { HEX_64_REGEX, nsecToNpub } from "@/shared/lib/nostrUtils";
 
-export type KeyImportKind = "nsec" | "ncryptsec" | "unknown";
+export type KeyImportKind = "nsec" | "ncryptsec" | "hex" | "unknown";
 
 const NCRYPTSEC_HRP = "ncryptsec";
 const NIP49_VERSION = 2;
@@ -72,6 +72,7 @@ export function classifyKeyImportInput(input: string): KeyImportKind {
   // case routes there too and fails in Rust with the accurate error.
   if (trimmed.slice(0, 10).toLowerCase() === "ncryptsec1") return "ncryptsec";
   if (trimmed.startsWith("nsec1")) return "nsec";
+  if (HEX_64_REGEX.test(trimmed)) return "hex";
   return "unknown";
 }
 

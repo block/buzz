@@ -23,10 +23,20 @@ const VALID_NSEC = nsecEncode(generateSecretKey());
 test("classify_by_hrp_with_whitespace_tolerance", () => {
   assert.equal(classifyKeyImportInput(`  ${NCRYPTSEC}\n`), "ncryptsec");
   assert.equal(classifyKeyImportInput(VALID_NSEC), "nsec");
+  assert.equal(classifyKeyImportInput("a".repeat(64)), "hex");
   assert.equal(classifyKeyImportInput("npub1whatever"), "unknown");
   assert.equal(classifyKeyImportInput(""), "unknown");
   // nsec must not be shadowed by the longer HRP check.
   assert.equal(classifyKeyImportInput("nsec1"), "nsec");
+});
+
+test("submit_gating_hex_secret_from_buzz_admin", () => {
+  const sk = generateSecretKey();
+  const hex = Buffer.from(sk).toString("hex");
+  assert.equal(classifyKeyImportInput(hex), "hex");
+  assert.equal(keyImportSubmitEnabled(hex, ""), true);
+  assert.equal(keyImportSubmitEnabled(hex.toUpperCase(), ""), true);
+  assert.equal(keyImportSubmitEnabled("ab".repeat(31), ""), false); // 62 chars
 });
 
 test("uppercase_bech32_encoding_classifies_and_gates_like_lowercase", () => {
