@@ -189,6 +189,8 @@ Install [Git for Windows](https://git-scm.com/download/win) — it ships Git Bas
 
 If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL` to its path (e.g. `BUZZ_SHELL=C:\path\to\bash.exe`). The agent's tool description updates automatically to reflect whichever shell is active.
 
+To use a trusted Node.js 24 runtime you already have, set `BUZZ_NODE_BIN_DIR` to the absolute directory that contains `node` and `npm`.
+
 ---
 
 ## Architecture

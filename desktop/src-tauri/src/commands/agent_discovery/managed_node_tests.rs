@@ -52,6 +52,87 @@ fn test_shell_quote_escapes_single_quotes() {
     );
 }
 
+fn write_executable(path: &std::path::Path) {
+    std::fs::write(path, b"").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn valid_node_bin_dir() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    #[cfg(windows)]
+    for command in ["node.exe", "npm.cmd", "npm"] {
+        write_executable(&dir.path().join(command));
+    }
+    #[cfg(not(windows))]
+    for command in ["node", "npm"] {
+        write_executable(&dir.path().join(command));
+    }
+    dir
+}
+
+#[test]
+fn test_validate_node_bin_dir_requires_absolute_executable_node_and_npm() {
+    let valid = valid_node_bin_dir();
+    assert_eq!(
+        crate::managed_agents::validate_node_bin_dir(valid.path()).unwrap(),
+        valid.path()
+    );
+
+    let relative =
+        crate::managed_agents::validate_node_bin_dir(std::path::Path::new("node/bin")).unwrap_err();
+    assert!(relative.contains("absolute path"), "error: {relative}");
+
+    let missing = tempfile::TempDir::new().unwrap();
+    #[cfg(windows)]
+    write_executable(&missing.path().join("node.exe"));
+    #[cfg(not(windows))]
+    write_executable(&missing.path().join("node"));
+    let missing_npm = crate::managed_agents::validate_node_bin_dir(missing.path()).unwrap_err();
+    assert!(missing_npm.contains("npm"), "error: {missing_npm}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_validate_node_bin_dir_rejects_non_executable_node() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = valid_node_bin_dir();
+    let node = dir.path().join("node");
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let error = crate::managed_agents::validate_node_bin_dir(dir.path()).unwrap_err();
+    assert!(error.contains("executable node"), "error: {error}");
+}
+
+#[test]
+fn test_node_version_policies_keep_download_exact_and_allow_node_24_override() {
+    assert!(managed_node_version_supported("v24.18.0"));
+    assert!(!managed_node_version_supported("v24.19.0"));
+
+    for version in ["v24.5.0", "v24.18.0", "v24.19.0"] {
+        assert!(
+            override_node_version_supported(version),
+            "override must accept {version}"
+        );
+    }
+    for version in ["v23.19.0", "v25.0.0", "24.19.0", "v24.19", "v24.19.0-rc1"] {
+        assert!(
+            !override_node_version_supported(version),
+            "override must reject {version}"
+        );
+    }
+}
+
+#[test]
+fn test_packager_override_does_not_require_managed_artifact() {
+    assert!(node_runtime_supported(false, true, false));
+    assert!(node_runtime_supported(true, false, true));
+    assert!(!node_runtime_supported(false, false, false));
+}
+
 // ── zip validation tests ──────────────────────────────────────────────────────
 
 /// Build an in-memory zip archive with the supplied entry names and return
@@ -290,7 +371,7 @@ fn test_probe_node_descendant_holds_stdout_returns_promptly_and_kills_group() {
     // Line 2: background the sleep and record its PID.
     // Line 3: emit the expected version and exit so the direct child exits promptly.
     let script_content = format!(
-        "#!/bin/sh\necho $$ > {pgid_file_path}\n/bin/sleep 60 &\necho $! > {desc_pid_file_path}\necho v24.18.0\nexit 0\n"
+        "#!/bin/sh\necho $$ > {pgid_file_path}\nsleep 60 &\necho $! > {desc_pid_file_path}\necho v24.18.0\nexit 0\n"
     );
     std::fs::write(&script, script_content.as_bytes()).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -363,7 +444,7 @@ fn test_probe_node_times_out_on_hung_binary() {
     use std::os::unix::fs::PermissionsExt;
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let script = tmp_dir.path().join("hung.sh");
-    std::fs::write(&script, b"#!/bin/sh\n/bin/sleep 30\n").unwrap();
+    std::fs::write(&script, b"#!/bin/sh\nsleep 30\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let probe_timeout = std::time::Duration::from_secs(3);
@@ -403,6 +484,25 @@ fn test_probe_node_returns_false_on_nonzero_exit() {
         !result,
         "probe_node must return false when the process exits non-zero"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_probe_node_result_reports_exit_status_and_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let script = tmp_dir.path().join("stub-ld.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'NixOS cannot run dynamically linked executables' >&2\nexit 127\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = probe_node_result(&script, std::time::Duration::from_secs(3)).unwrap_err();
+    assert!(error.contains("127"), "error: {error}");
+    assert!(error.contains("NixOS cannot run"), "error: {error}");
 }
 
 /// Scenario 4 — wrong version output: probe_node must return false when stdout
