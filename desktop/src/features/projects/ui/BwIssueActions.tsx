@@ -9,6 +9,7 @@ import { useRepoStateQuery } from "@/features/projects/hooks";
 import { bwMatchingTriageDelegation } from "@/features/projects/bwProjection";
 import {
   BwConflictError,
+  submitBwAcceptToBacklog,
   submitBwImplementedTransition,
   submitBwInDevelopmentTransition,
   submitBwIssueTextUpdate,
@@ -267,19 +268,36 @@ function BwTriageActions({
         action,
         identityQuery.data?.pubkey,
       );
-      await submitBwTriageAction({
+      const accepted = await submitBwTriageAction({
         delegate,
         fields,
         issueId: issue.id,
         repo: project.repoAddress,
         snapshot: issue.bw.snapshot,
       });
+      if (action === "accept") {
+        // Core's own display projection already reports "backlog" once this
+        // triage-action head is "accept" (`crates/buzz-core/src/bw/projection.rs`),
+        // but the issue-state chain itself only advances once this separate,
+        // Owner/coordinator-signed record lands (NIP-BW.md: "the accepting
+        // triage action alone does not grant the triage delegate authority
+        // to sign a state record") — otherwise `ready` stays refused with
+        // `bw:reject:causality:state-transition`. Chained here so accept is
+        // one action for the common owner/coordinator case; an unauthorized
+        // delegate's attempt surfaces Core's own role refusal below exactly
+        // like any other refusal in this panel, never a second gate.
+        await submitBwAcceptToBacklog({
+          issueId: issue.id,
+          repo: project.repoAddress,
+          snapshot: issue.bw.snapshot,
+          triageId: accepted.eventId,
+        });
+      }
       toast.success("Triage action recorded.");
       setQuestion("");
       setRecipient("");
       setDuplicateTarget("");
       setDeclineReason("");
-      await invalidate();
     } catch (error) {
       toast.error(
         error instanceof BwConflictError
@@ -288,6 +306,7 @@ function BwTriageActions({
       );
     } finally {
       setPending(null);
+      await invalidate();
     }
   };
 
@@ -439,7 +458,9 @@ function BwReadyAction({
   issue: ProjectIssue;
   project: Project;
 }) {
-  const [stream, setStream] = React.useState("");
+  const committedStream =
+    issue.bw?.snapshot.projection.issue_state[issue.id]?.stream ?? "";
+  const [stream, setStream] = React.useState(committedStream);
   const [reworkVerdictId, setReworkVerdictId] = React.useState("");
   const [terminalSetId, setTerminalSetId] = React.useState("");
   const [pending, setPending] = React.useState(false);
@@ -453,6 +474,12 @@ function BwReadyAction({
   const updateUnavailable = issue.bw
     ? bwReadyUpdateUnavailable(issue.bw.snapshot, issue.id)
     : true;
+
+  React.useEffect(() => {
+    setStream(
+      issue.bw?.snapshot.projection.issue_state[issue.id]?.stream ?? "",
+    );
+  }, [issue.id, issue.bw?.snapshot]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-pick only when the loaded option set (or the current selection's membership in it) actually changes, not on every unrelated re-render
   React.useEffect(() => {

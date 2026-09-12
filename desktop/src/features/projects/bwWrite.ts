@@ -112,6 +112,48 @@ export async function submitBwTriageAction({
   });
 }
 
+/** Sign the `issue-state` `backlog` record NIP-BW.md requires after an
+ * accepted triage action. Core's own display projection already reports
+ * `backlog` once the triage-action head is `accept` (a convenience label,
+ * `crates/buzz-core/src/bw/projection.rs`), but the issue-state chain itself
+ * has not actually advanced past `triage` until this separate,
+ * Owner/coordinator-signed record — referencing that exact triage event —
+ * lands ("issue-state and the existing assignment wire": "the accepting
+ * triage action alone does not grant the triage delegate authority to sign
+ * a state record"). Without it, `ready` and everything after stays refused
+ * with `bw:reject:causality:state-transition` since the real previous state
+ * is still `triage`.
+ *
+ * `triageId` is the just-signed accept event's own id, passed explicitly by
+ * the caller (`BwIssueActions.tsx` chains this immediately after a
+ * successful accept) rather than re-derived from `snapshot` — the
+ * already-fetched snapshot predates that write and would still show no
+ * triage-action head at all. */
+export async function submitBwAcceptToBacklog({
+  repo,
+  issueId,
+  snapshot,
+  triageId,
+}: {
+  repo: string;
+  issueId: string;
+  snapshot: BwSnapshot;
+  triageId: string;
+}): Promise<{ eventId: string; projection: unknown }> {
+  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
+  const tags: string[][] = [["issue", issueId]];
+  if (previousId) tags.push(["previous", previousId]);
+  return invokeTauri("submit_project_bw_record", {
+    input: {
+      repo,
+      record: "issue-state",
+      tags,
+      content: { state: "backlog", triage: triageId },
+      delegate: false,
+    },
+  });
+}
+
 // P4E: assignment (the *existing* kind:1 wire — no new grammar), relation
 // (parent/child/blocks/duplicate-of) and the ready/in-development/implemented
 // handoff. Every function below computes only the `previous`/`prior` pointer
