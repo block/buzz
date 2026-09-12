@@ -5,6 +5,7 @@ import type {
   ProjectIssue,
   Repository as Project,
 } from "@/features/projects/hooks";
+import { useRepoStateQuery } from "@/features/projects/hooks";
 import { bwMatchingTriageDelegation } from "@/features/projects/bwProjection";
 import {
   BwConflictError,
@@ -22,6 +23,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { invokeTauri } from "@/shared/api/tauri";
 import { BwAssignmentSection } from "./BwAssignmentSection";
 import {
+  bwReadyStreamOptions,
   errorMessage,
   useInvalidateProjectIssues,
 } from "./bwIssueActionsShared";
@@ -414,7 +416,17 @@ function BwTriageActions({
 /** `backlog` -> `ready`: bind a stream and the exact current assignment
  * head. Core alone decides whether the signer is Owner/coordinator and
  * whether a prior implemented needs a rework verdict or terminal set first;
- * this only offers those two optional pointers as plain event-id inputs. */
+ * this only offers those two optional pointers as plain event-id inputs.
+ *
+ * The stream field is driven by the issue repository's actual branches
+ * (`useRepoStateQuery`, the repo's owner-signed kind:30618 state — the same
+ * remote-branch source `git ls-remote` would report), not a fixed platform-key
+ * list or free text (Jari, 2026-09-12 scope amendment to the original issue).
+ * A repo with more than one branch offers a dropdown; a repo with exactly one
+ * branch pre-fills it as a read-only field — never an open dropdown or an
+ * editable input for the single-option case (Robi, 2026-09-12 follow-up
+ * correction). If the branch list can't be loaded, submit is blocked
+ * outright — never a free-text escape. */
 function BwReadyAction({
   issue,
   project,
@@ -427,9 +439,21 @@ function BwReadyAction({
   const [terminalSetId, setTerminalSetId] = React.useState("");
   const [pending, setPending] = React.useState(false);
   const invalidate = useInvalidateProjectIssues(project);
+  const repoStateQuery = useRepoStateQuery(project);
+  const { options: streamOptions, unavailable: streamUnavailable } =
+    bwReadyStreamOptions(
+      repoStateQuery.data?.branches,
+      repoStateQuery.isLoading,
+    );
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-pick only when the loaded option set (or the current selection's membership in it) actually changes, not on every unrelated re-render
+  React.useEffect(() => {
+    if (stream && streamOptions.includes(stream)) return;
+    setStream(streamOptions[0] ?? "");
+  }, [streamOptions]);
 
   const handleSubmit = async () => {
-    if (pending || !issue.bw || !stream.trim()) return;
+    if (pending || !issue.bw || !stream) return;
     setPending(true);
     try {
       await submitBwReadyTransition({
@@ -437,7 +461,7 @@ function BwReadyAction({
         repo: project.repoAddress,
         reworkVerdictId: reworkVerdictId.trim() || null,
         snapshot: issue.bw.snapshot,
-        stream: stream.trim(),
+        stream,
         terminalSetId: terminalSetId.trim() || null,
       });
       toast.success("Issue moved to ready.");
@@ -455,13 +479,44 @@ function BwReadyAction({
 
   return (
     <div className="space-y-1.5" data-testid="bw-ready-action">
-      <input
-        className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
-        data-testid="bw-ready-stream"
-        onChange={(event) => setStream(event.target.value)}
-        placeholder="Stream (branch)"
-        value={stream}
-      />
+      {streamOptions.length === 1 ? (
+        <input
+          className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground disabled:opacity-60"
+          data-testid="bw-ready-stream"
+          readOnly
+          value={streamOptions[0]}
+        />
+      ) : (
+        <select
+          className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground disabled:opacity-60"
+          data-testid="bw-ready-stream"
+          disabled={repoStateQuery.isLoading || streamUnavailable}
+          onChange={(event) => setStream(event.target.value)}
+          value={stream}
+        >
+          {streamOptions.length === 0 ? (
+            <option value="">
+              {repoStateQuery.isLoading
+                ? "Loading branches…"
+                : "No branches available"}
+            </option>
+          ) : null}
+          {streamOptions.map((branch) => (
+            <option key={branch} value={branch}>
+              {branch}
+            </option>
+          ))}
+        </select>
+      )}
+      {streamUnavailable ? (
+        <p
+          className="text-xs text-destructive"
+          data-testid="bw-ready-stream-unavailable"
+          role="alert"
+        >
+          Branch list unavailable — cannot move to ready without a valid stream.
+        </p>
+      ) : null}
       <input
         className="h-8 w-full rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
         data-testid="bw-ready-rework-verdict"
@@ -479,7 +534,7 @@ function BwReadyAction({
       <button
         className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60"
         data-testid="bw-ready-submit"
-        disabled={pending || !stream.trim()}
+        disabled={pending || !stream}
         onClick={() => void handleSubmit()}
         type="button"
       >

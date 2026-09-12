@@ -21,3 +21,17 @@ export function useInvalidateProjectIssues(project: Project) {
 export function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
+
+/** Derives the `BwReadyAction` stream dropdown's options from the issue's
+ * repository branches (`useRepoStateQuery`, backed by the repo's owner-
+ * signed kind:30618 state — the same remote-branch source `git ls-remote`
+ * would report). The dropdown never falls back to free text or a guessed
+ * default branch: an empty/unloaded branch list blocks the ready submit
+ * outright, since NIP-BW's `stream` field must name a real branch. */
+export function bwReadyStreamOptions(
+  branches: Array<{ name: string }> | undefined,
+  isLoading: boolean,
+): { options: string[]; unavailable: boolean } {
+  const options = [...new Set((branches ?? []).map((branch) => branch.name))];
+  return { options, unavailable: !isLoading && options.length === 0 };
+}

@@ -293,7 +293,7 @@ test("an assignment refused by Core surfaces the refusal instead of a silent sta
   await expect(page.getByText("bw:reject:role:unauthorized")).toBeVisible();
 });
 
-test("backlog offers the ready transition, which binds the typed stream and no other implicit state", async ({
+test("backlog with a single-branch repo pre-fills the stream as a read-only field and submits it as-is", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -306,8 +306,15 @@ test("backlog offers the ready transition, which binds the typed stream and no o
   const panel = await openIssuesPanel(page);
   await openIssue(page, panel, ROOT);
 
-  await expect(panel.getByTestId("bw-ready-submit")).toBeDisabled();
-  await panel.getByTestId("bw-ready-stream").fill("windows-integration");
+  // The mock repository has exactly one remote branch ("main"): it is
+  // pre-filled and read-only, never an open dropdown or editable input.
+  // `fill()` on a readonly field retries actionability until its own
+  // timeout instead of failing fast, so non-editability is asserted via
+  // the `readonly` attribute rather than an attempted write.
+  const streamField = panel.getByTestId("bw-ready-stream");
+  await expect(streamField).toHaveValue("main");
+  await expect(streamField).toHaveAttribute("readonly", "");
+  expect(await streamField.evaluate((el) => el.tagName)).toBe("INPUT");
   await expect(panel.getByTestId("bw-ready-submit")).toBeEnabled();
   await panel.getByTestId("bw-ready-submit").click();
 
@@ -316,7 +323,7 @@ test("backlog offers the ready transition, which binds the typed stream and no o
     record: "issue-state",
     content: expect.objectContaining({
       state: "ready",
-      stream: "windows-integration",
+      stream: "main",
     }),
   });
 });
