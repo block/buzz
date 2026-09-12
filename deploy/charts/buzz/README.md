@@ -255,6 +255,24 @@ clients connect directly to the dedicated endpoint. The chart does not create
 an Ingress or HTTPRoute for the pairing Service; route the public hostname to
 `<release>-buzz-pairing:5000` with your platform's ingress configuration.
 
+Configure two distinct timeout classes on the public ingress/proxy:
+
+- Keep the **pre-upgrade HTTP header/request timeout short** and apply
+  connection/rate limits before traffic reaches the sidecar. The sidecar also
+  closes incomplete HTTP headers after 10 seconds, but the public proxy is the
+  first resource-exhaustion boundary.
+- Set **post-upgrade WebSocket read/send/idle timeouts greater than 140
+  seconds** (for example, 150 or 180 seconds). This lets Desktop own the
+  user-visible 130-second expiry and keeps the sidecar's 140-second timeout as
+  the orphaned-client safety net.
+
+For ingress-nginx, set `nginx.ingress.kubernetes.io/proxy-read-timeout` and
+`nginx.ingress.kubernetes.io/proxy-send-timeout` to `150` or higher on the
+pairing Ingress while keeping the controller's `client-header-timeout` short.
+For an AWS ALB, set `idle_timeout.timeout_seconds` above 140; for a Google
+Cloud BackendService, set `timeoutSec` above 140. Do not raise the ordinary
+HTTP header/request timeout to match the WebSocket lifetime.
+
 ## HA (production)
 
 `replicaCount > 1` hard-requires Redis:

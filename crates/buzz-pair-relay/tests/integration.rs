@@ -6,12 +6,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-use buzz_pair_relay::{run_server, Relay};
+use buzz_pair_relay::{run_server, Relay, CONN_TIMEOUT};
 
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -32,11 +33,28 @@ type WS = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Start a relay on a random port, return the WebSocket URL.
 async fn start_relay() -> String {
+    start_relay_with_state().await.0
+}
+
+/// Start a relay and retain its state for resource-accounting assertions.
+async fn start_relay_with_state() -> (String, Arc<Relay>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let relay = Arc::new(Relay::new());
-    tokio::spawn(run_server(listener, relay));
-    format!("ws://127.0.0.1:{}", addr.port())
+    tokio::spawn(run_server(listener, Arc::clone(&relay)));
+    (format!("ws://127.0.0.1:{}", addr.port()), relay)
+}
+
+/// Wait for connection cleanup to reach an observable state before asserting
+/// client-side EOF in virtual-time tests.
+async fn wait_for_active_connections(relay: &Relay, expected: u32) {
+    for _ in 0..50 {
+        if relay.active_connection_count() == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(relay.active_connection_count(), expected);
 }
 
 /// Connect a WebSocket client to the relay.
@@ -84,6 +102,21 @@ async fn assert_closed(ws: &mut WS) {
         Ok(Some(Err(_))) => {}                // protocol error / reset
         Ok(Some(Ok(other))) => panic!("expected close, got {:?}", other),
     }
+}
+
+/// Assert closure without a virtual-time timeout, which can elapse before the
+/// detached WebSocket writer observes cancellation.
+async fn assert_closed_after_yields(ws: &mut WS) {
+    for _ in 0..100 {
+        if let Some(result) = ws.next().now_or_never() {
+            match result {
+                None | Some(Ok(Message::Close(_))) | Some(Err(_)) => return,
+                Some(Ok(other)) => panic!("expected close, got {other:?}"),
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("connection did not close after server cleanup");
 }
 
 /// Generate a random keypair; returns `(SecretKey, pubkey_hex)`.
@@ -438,18 +471,17 @@ async fn test_second_sub_same_id() {
     assert_eq!(ev_msg[1], "s1");
 }
 
-/// 9. Connection closes after 120 s (virtual time).
+/// 9. Connection closes after CONN_TIMEOUT (virtual time).
 #[tokio::test(start_paused = true)]
-async fn test_120s_timeout() {
-    let url = start_relay().await;
+async fn test_conn_timeout() {
+    let (url, relay) = start_relay_with_state().await;
     let mut ws = connect(&url).await;
 
     // Advance virtual time past the connection timeout.
-    tokio::time::advance(Duration::from_secs(121)).await;
-    // Yield to let the relay task run its deadline branch.
-    tokio::task::yield_now().await;
+    tokio::time::advance(CONN_TIMEOUT + Duration::from_secs(1)).await;
+    wait_for_active_connections(&relay, 0).await;
 
-    assert_closed(&mut ws).await;
+    assert_closed_after_yields(&mut ws).await;
 }
 
 /// 10. Backpressure unit test: bounded mpsc channel rejects when full.
@@ -603,6 +635,37 @@ async fn test_global_conn_cap() {
 
     // Now a new connection should succeed.
     let _new = connect(&url).await;
+}
+
+/// An incomplete pre-upgrade request is bounded independently of the longer
+/// WebSocket lifetime and never consumes one of the 128 upgraded slots.
+#[tokio::test]
+async fn test_incomplete_http_header_times_out_before_ws_pool() {
+    const HEADER_CLOSE_DEADLINE: Duration = Duration::from_secs(12);
+
+    let (url, relay) = start_relay_with_state().await;
+    let addr = url.strip_prefix("ws://").unwrap();
+    let mut slow = TcpStream::connect(addr).await.unwrap();
+    slow.write_all(b"GET /pair HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    // The incomplete request has not upgraded and therefore must not consume
+    // any of the bounded WebSocket pool.
+    tokio::task::yield_now().await;
+    assert_eq!(relay.active_connection_count(), 0);
+
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(HEADER_CLOSE_DEADLINE, slow.read(&mut byte)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "incomplete HTTP header remained open after {HEADER_CLOSE_DEADLINE:?}: {read:?}"
+    );
+
+    // A valid upgrade still acquires the first pool slot after the slow
+    // request is discarded.
+    let _ws = connect(&url).await;
+    assert_eq!(relay.active_connection_count(), 1);
 }
 
 /// 18. Session event cap: 6 EVENTs are accepted; 7th is rejected with
@@ -1176,18 +1239,18 @@ async fn test_reader_backpressure_closes() {
     }
 }
 
-/// 42. Connection closes promptly after 120 s (virtual time).
+/// 42. Connection closes promptly after CONN_TIMEOUT (virtual time).
 ///     Explicit duplicate of test 9 with a slightly different assertion style.
 #[tokio::test(start_paused = true)]
 async fn test_cancellation_immediate() {
-    let url = start_relay().await;
+    let (url, relay) = start_relay_with_state().await;
     let mut ws = connect(&url).await;
 
-    tokio::time::advance(Duration::from_secs(121)).await;
-    tokio::task::yield_now().await;
+    tokio::time::advance(CONN_TIMEOUT + Duration::from_secs(1)).await;
+    wait_for_active_connections(&relay, 0).await;
 
     // The connection must be closed — not just slow.
-    assert_closed(&mut ws).await;
+    assert_closed_after_yields(&mut ws).await;
 }
 
 /// 43. Client-initiated graceful close receives a Close reply.

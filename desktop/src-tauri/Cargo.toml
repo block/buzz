@@ -157,3 +157,4 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so desktop-produced snapshots and voice notes
 # can prove their full client-sanitize → relay-accept contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+buzz_pair_relay_pkg = { package = "buzz-pair-relay", path = "../../crates/buzz-pair-relay" }
