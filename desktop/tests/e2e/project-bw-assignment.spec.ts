@@ -409,10 +409,15 @@ test("ready asks an external ACP writer to sign and start development itself", a
 
   await panel.getByTestId("bw-in-development-submit").click();
   await expect(
-    page.getByText(`Execution thread sent to ${WRITER_NAME}.`, {
+    page.getByText(`Execution thread created for ${WRITER_NAME}.`, {
       exact: false,
     }),
   ).toBeVisible();
+  await expect(page).toHaveURL(/thread=[0-9a-f]{64}/i);
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await expect(page.getByTestId("message-thread-panel")).toContainText(
+    "[EXECUTION-THREAD] Starting development",
+  );
 
   const sendCall = await lastCommandCall(page, "send_channel_message");
   expect(sendCall?.payload).toMatchObject({

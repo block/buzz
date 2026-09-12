@@ -1,6 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import type {
   ProjectIssue,
@@ -612,6 +613,7 @@ function BwInDevelopmentAction({
 }) {
   const [pending, setPending] = React.useState(false);
   const relayAgentsQuery = useRelayAgentsQuery();
+  const { goChannel } = useAppNavigation();
 
   const handleSubmit = async () => {
     if (pending || !issue.bw) return;
@@ -643,7 +645,7 @@ function BwInDevelopmentAction({
       // Start Development is an Execution Thread, not owner-side
       // impersonation. The channel message's p-tag wakes the external ACP
       // harness; the writer then signs the BW transition with its own key.
-      await sendChannelMessage(
+      const result = await sendChannelMessage(
         channelId,
         bwStartDevelopmentRequest({
           issue,
@@ -657,8 +659,16 @@ function BwInDevelopmentAction({
         [writer],
         KIND_STREAM_MESSAGE,
       );
+      // Route through the canonical message deep-link path so the freshly
+      // published root is loaded before the thread panel opens. Setting the
+      // bare `thread` search key here would race the live echo and the panel
+      // would correctly close an as-yet unknown root.
+      await goChannel(channelId, {
+        messageId: result.eventId,
+        threadRootId: result.eventId,
+      });
       toast.success(
-        `Execution thread sent to ${writerName}. The writer will sign the status transition when it starts.`,
+        `Execution thread created for ${writerName}. The writer will sign the status transition when it starts.`,
       );
     } catch (error) {
       toast.error(
