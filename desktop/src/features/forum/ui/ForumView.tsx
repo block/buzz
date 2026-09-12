@@ -1,6 +1,7 @@
 import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
@@ -57,6 +58,7 @@ export function ForumView({
   const [isComposerOpen, setIsComposerOpen] = React.useState(false);
   const postsScrollRef = React.useRef<HTMLDivElement>(null);
 
+  const { markThreadRead } = useAppShell();
   const profileQuery = useProfileQuery();
   const postsQuery = useForumPostsQuery(channel);
   const threadQuery = useForumThreadQuery(
@@ -122,6 +124,19 @@ export function ForumView({
       ),
     [profileQuery.data, profilesQuery.data?.profiles],
   );
+
+  // Reading a thread is the only thing that clears its replies. The channel
+  // marker covers posts, not replies, so without this a thread that has been
+  // replied to keeps its unread dot for good.
+  const openThread = selectedPostId ? threadQuery.data : undefined;
+  React.useEffect(() => {
+    if (!selectedPostId || !openThread) return;
+    const newestSeen = openThread.replies.reduce(
+      (latest, reply) => Math.max(latest, reply.createdAt),
+      openThread.post.createdAt,
+    );
+    markThreadRead(selectedPostId, newestSeen);
+  }, [markThreadRead, openThread, selectedPostId]);
 
   const previousChannelIdRef = React.useRef(channel.id);
   React.useEffect(() => {
