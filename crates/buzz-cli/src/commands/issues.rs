@@ -4,7 +4,9 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use crate::validate::{
+    parse_hex64, read_or_stdin, repo_coord_a_value, sdk_err, validate_hex64, validate_repo_id,
+};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -353,7 +355,9 @@ async fn publish_issue_assignment_operation(
     label: Option<&str>,
     operation: IssueAssignmentOperation,
 ) -> Result<(), CliError> {
-    validate_hex64(issue)?;
+    // `issue` reaches a `#e` generic tag filter in `issue_assignment_context`,
+    // which is matched as a raw string against a lowercase tag.
+    let issue = &parse_hex64(issue)?;
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     for assignee in assignees {
@@ -496,10 +500,7 @@ pub async fn cmd_list_issues(
     label: Option<&str>,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
-    validate_repo_id(repo_id)?;
-
-    let a_value = format!("30617:{repo_owner}:{repo_id}");
+    let a_value = repo_coord_a_value(repo_owner, repo_id)?;
     let mut filter = serde_json::json!({
         "kinds": [1621],
         "#a": [a_value]
