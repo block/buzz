@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -59,6 +60,7 @@ export class ChannelSectionSyncManager {
   }
 
   async fetchRemoteSections(): Promise<FetchResult<RemoteSections>> {
+    if (!supportsLocalIdentityFeatures()) return { status: "failed" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SECTIONS],
@@ -109,6 +111,7 @@ export class ChannelSectionSyncManager {
   }
 
   publishSections(store: ChannelSectionStore): void {
+    if (!supportsLocalIdentityFeatures()) return;
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -226,6 +229,7 @@ export class ChannelSectionSyncManager {
   async subscribeToSections(
     onUpdate: (remote: RemoteSections) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_CHANNEL_SECTIONS],

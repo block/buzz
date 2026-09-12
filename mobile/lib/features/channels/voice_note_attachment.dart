@@ -42,8 +42,10 @@ class VoiceNoteAttachment extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(mediaGetAuthServiceProvider);
     final player = useMemoized(ref.read(voiceNotePlayerFactoryProvider), [
       source,
+      auth,
     ]);
     final playback = useListenable(player);
     final playbackRate = useState(1.0);
@@ -52,8 +54,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
         unawaited(
           player.loadRemote(
             source,
-            headers: () =>
-                ref.read(mediaGetAuthServiceProvider).headersFor(source),
+            headers: () => auth.headersFor(source),
             fallbackDuration: duration,
           ),
         );

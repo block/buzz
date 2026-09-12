@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -75,6 +76,15 @@ class SettingsPage extends HookConsumerWidget {
     );
 
     Future<void> showEditProfileSheet() async {
+      if (enterpriseEnabled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Your organization manages your profile.'),
+          ),
+        );
+        return;
+      }
+
       final action = await showBuzzModalBottomSheet<_ProfileEditAction>(
         context: context,
         title: 'Edit profile',

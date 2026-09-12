@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/event_signer.dart';
 
@@ -33,17 +32,8 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
 
   Future<UserStatus?> _fetch() async {
     final config = ref.read(relayConfigProvider);
-    final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) return null;
-
-    String pubkey;
-    try {
-      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      final keyPair = nostr.Keys(privkeyHex);
-      pubkey = keyPair.public.toLowerCase();
-    } catch (_) {
-      return null;
-    }
+    final pubkey = config.publicKey;
+    if (pubkey == null) return null;
 
     final sessionState = ref.read(relaySessionProvider);
     if (sessionState.status != SessionStatus.connected) return null;
@@ -82,8 +72,8 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
   }) async {
     final trimmed = text.trim();
     final config = ref.read(relayConfigProvider);
-    final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) return;
+    final signer = config.signer;
+    if (signer == null) return;
 
     final tags = <List<String>>[
       ['d', 'general'],
@@ -95,16 +85,20 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
       tags.add(['expiration', '${expiresAt.millisecondsSinceEpoch ~/ 1000}']);
     }
 
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+    final session = ref.read(relaySessionProvider.notifier);
+    final lease = session.captureLease();
     final event = await signEvent(
       kind: EventKind.userStatus,
       content: trimmed,
       tags: tags,
-      signer: LocalEventSigner(privkeyHex),
+      signer: signer,
     );
 
-    final session = ref.read(relaySessionProvider.notifier);
-    await session.publish(NostrEvent.fromJson(event.toMap()));
+    config.remoteSigner?.checkCurrent();
+    await session.publish(NostrEvent.fromJson(event.toMap()), lease: lease);
+    lease.ensureCurrent();
+
+    config.remoteSigner?.checkCurrent();
 
     // Optimistic update: update own state immediately.
     final newStatus = (trimmed.isNotEmpty || emoji.isNotEmpty)
@@ -121,8 +115,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     _scheduleExpiration(newStatus);
 
     // Also update the shared cache so other UI reads stay consistent.
-    final keyPair = nostr.Keys(privkeyHex);
-    final pubkey = keyPair.public.toLowerCase();
+    final pubkey = signer.publicKey.toLowerCase();
     ref.read(userStatusCacheProvider.notifier).updateStatus(pubkey, newStatus);
   }
 
@@ -162,14 +155,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
   }
 
   String? _currentPubkey() {
-    final nsec = ref.read(relayConfigProvider).nsec;
-    if (nsec == null || nsec.isEmpty) return null;
-    try {
-      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      return nostr.Keys(privkeyHex).public.toLowerCase();
-    } catch (_) {
-      return null;
-    }
+    return ref.read(relayConfigProvider).publicKey?.toLowerCase();
   }
 }
 

@@ -187,7 +187,12 @@ pub(crate) async fn connect_audio_relay(
     state: &AppState,
 ) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.event_signer()?;
+    let cancel = if crate::enterprise_identity::enabled() {
+        state.enterprise.cancellation()?.child_token()
+    } else {
+        CancellationToken::new()
+    };
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
     let (
@@ -211,11 +216,11 @@ pub(crate) async fn connect_audio_relay(
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, _peer_index, initial_peers) =
-        connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
-            .await?;
-
-    let cancel = CancellationToken::new();
+    let (ws_tx, ws_rx, _peer_index, initial_peers) = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err("Corporate login changed".into()),
+        result = connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None) => result?,
+    };
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
     let output_device_name = state

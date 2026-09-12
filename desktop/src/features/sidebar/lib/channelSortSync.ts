@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -65,6 +66,7 @@ export class ChannelSortSyncManager {
   }
 
   async fetchRemoteSortPrefs(): Promise<FetchResult<RemoteSortPrefs>> {
+    if (!supportsLocalIdentityFeatures()) return { status: "failed" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SORT],
@@ -111,6 +113,7 @@ export class ChannelSortSyncManager {
   }
 
   publishSortPrefs(store: ChannelSortStore): void {
+    if (!supportsLocalIdentityFeatures()) return;
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -213,6 +216,7 @@ export class ChannelSortSyncManager {
   async subscribeToSortPrefs(
     onUpdate: (remote: RemoteSortPrefs) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_CHANNEL_SORT],

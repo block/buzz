@@ -196,7 +196,11 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
         ..remove('display_name')
         ..remove('name');
     }
-    final relay = SignedEventRelay(session: session, nsec: context.config.nsec);
+    final relay = SignedEventRelay(
+      session: session,
+      nsec: context.config.nsec,
+      signer: context.config.signer,
+    );
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final currentCreatedAt = currentHead?.createdAt ?? 0;
     final previousCreatedAt = currentCreatedAt > _lastCreatedAt
@@ -245,6 +249,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final currentPubkey = ref.read(myPubkeyProvider);
     if (currentConfig.storedOrigin != context.config.storedOrigin ||
         currentConfig.nsec != context.config.nsec ||
+        !identical(currentConfig.remoteSigner, context.config.remoteSigner) ||
         currentPubkey != context.pubkey ||
         !identical(currentSession, context.session)) {
       throw ProfileCommunityChangedException();
@@ -391,6 +396,7 @@ class PresenceNotifier extends AsyncNotifier<String> {
     final relay = SignedEventRelay(
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
+      signer: config.signer,
     );
     try {
       await relay.submit(

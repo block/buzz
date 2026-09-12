@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -40,6 +41,7 @@ export function useProjectSidebarMembership(
     setStore(readProjectSidebarMembershipStore(relayUrl, pubkey));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
+    if (!supportsLocalIdentityFeatures()) return;
     managerRef.current = new ProjectSidebarMembershipSyncManager(
       pubkey,
       relayUrl,

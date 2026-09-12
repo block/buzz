@@ -283,11 +283,7 @@ fn start_pair(
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
 
-    let owner = state
-        .keys
-        .lock()
-        .ok()
-        .map(|keys| keys.public_key().to_hex());
+    let owner = state.public_key().ok().map(|k| k.to_hex());
     let mut process =
         spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
     let now = crate::util::now_iso();

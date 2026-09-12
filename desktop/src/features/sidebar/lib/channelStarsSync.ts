@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -55,6 +56,7 @@ export class ChannelStarSyncManager {
   }
 
   async fetchRemoteStars(): Promise<FetchResult<RemoteStars>> {
+    if (!supportsLocalIdentityFeatures()) return { status: "failed" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_STARS],
@@ -101,6 +103,7 @@ export class ChannelStarSyncManager {
   }
 
   publishStars(store: ChannelStarStore): void {
+    if (!supportsLocalIdentityFeatures()) return;
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -197,6 +200,7 @@ export class ChannelStarSyncManager {
   async subscribeToStars(
     onUpdate: (remote: RemoteStars) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_CHANNEL_STARS],

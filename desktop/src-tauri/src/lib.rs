@@ -8,6 +8,10 @@ mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
+#[cfg(test)]
+mod enterprise_build_config;
+mod enterprise_identity;
+mod enterprise_media_cache;
 mod event_signing;
 mod event_sync;
 mod events;
@@ -448,7 +452,7 @@ pub fn run() {
             // has no relay override to the localhost fallback. Preserve the
             // boot-time repos and identity recovery safety gates by only marking
             // restoration pending when both allow it.
-            if restore_agents && !recovery_mode {
+            if restore_agents && !recovery_mode && !enterprise_identity::enabled() {
                 state
                     .managed_agent_restore_pending
                     .store(true, Ordering::Release);
@@ -538,6 +542,9 @@ pub fn run() {
             clear_pending_navigation_deep_links,
             take_pending_entity_deep_link,
             acknowledge_pending_entity_deep_link,
+            enterprise_identity::enterprise_status,
+            enterprise_identity::enterprise_login,
+            enterprise_identity::enterprise_logout,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

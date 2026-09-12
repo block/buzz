@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { relayClient } from "@/shared/api/relayClient";
@@ -95,6 +96,7 @@ export function CommunityThemeController() {
 
   useEffect(() => {
     if (!pubkey || !relayUrl) return;
+    if (!supportsLocalIdentityFeatures()) return;
     const scope = `${pubkey}:${relayUrl}`;
     scopeRef.current = scope;
     lastRemoteRef.current = { createdAt: 0, eventId: "" };
@@ -207,6 +209,7 @@ export function CommunityThemeController() {
     if (stored && sameCommunityThemePreference(stored, preference)) return;
     scopedPreferenceRef.current = preference;
     if (!writeCommunityThemePreference(pubkey, relayUrl, preference)) return;
+    if (!supportsLocalIdentityFeatures()) return;
     if (!writeCommunityThemeOutbox(pubkey, relayUrl, preference)) return;
     managerRef.current?.publish(preference);
   }, [

@@ -2228,7 +2228,10 @@ Photos
           expect(preview, findsOneWidget);
 
           await tester.tap(preview);
-          await tester.pumpAndSettle();
+          // Navigation works while the video is loading; do not wait for the
+          // indeterminate player animation/native networking to settle.
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
 
           // Video viewer opens as a modal overlay (no AppBar)
           final viewer = tester.widget<Scaffold>(
@@ -2295,7 +2298,8 @@ Photos
             ),
           ),
         );
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
 
         await tester.drag(
           find.byKey(const ValueKey('message-media-video-viewer-gesture')),

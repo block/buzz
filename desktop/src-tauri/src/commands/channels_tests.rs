@@ -265,14 +265,21 @@ fn pending_owner_mark_uses_signer_captured_before_identity_swap() {
     // Simulate an in-process identity swap landing during the (here,
     // implicit) submit await — e.g. `import_identity` replacing
     // `state.keys` while the create request is in flight.
-    *state.keys.lock().expect("lock keys") = Keys::generate();
+    *state.keys.lock().expect("lock keys") = Some(Keys::generate());
 
     // The mark must use the captured signer, not whatever `state.keys`
     // holds now.
     state.mark_pending_owned_channel(&creator_pubkey, "chan-1");
 
     assert!(state.is_pending_owned_channel(&creator_pubkey, "chan-1"));
-    let post_swap_pubkey = state.keys.lock().expect("lock keys").public_key().to_hex();
+    let post_swap_pubkey = state
+        .keys
+        .lock()
+        .expect("lock keys")
+        .as_ref()
+        .unwrap()
+        .public_key()
+        .to_hex();
     assert!(!state.is_pending_owned_channel(&post_swap_pubkey, "chan-1"));
 }
 

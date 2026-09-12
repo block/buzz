@@ -1,3 +1,4 @@
+import '../auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
@@ -235,6 +236,27 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   @override
   Future<List<Community>> build() async {
+    if (enterpriseEnabled) {
+      final identity = EnterpriseIdentity.instance;
+      void changed() {
+        ref.invalidateSelf();
+      }
+
+      identity.revision.addListener(changed);
+      ref.onDispose(() => identity.revision.removeListener(changed));
+      await identity.restore();
+      if (!identity.authenticated) return [];
+      return [
+        Community(
+          id: 'enterprise-${identity.pubkey}',
+          name: 'Work',
+          relayUrl: identity.relayUrl!,
+          pubkey: identity.pubkey,
+          addedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        ),
+      ];
+    }
+
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     await syncCommunitySnapshot(ref, communities);
@@ -244,6 +266,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
+    if (enterpriseEnabled) {
+      throw StateError('Corporate community is release-managed');
+    }
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? [];
 
@@ -341,6 +366,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   }
 
   Future<void> switchCommunity(String id) {
+    if (enterpriseEnabled) {
+      throw StateError('Corporate community is release-managed');
+    }
     return ref.read(communityTransitionProvider).runExclusive(() async {
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
@@ -441,6 +469,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
+    if (enterpriseEnabled) {
+      throw StateError('Push enrollment requires a local-secret identity');
+    }
     var shouldDeactivate = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
@@ -595,6 +626,7 @@ final communityListProvider =
 /// the community list.
 final activeCommunityProvider = FutureProvider<Community?>((ref) async {
   final communities = await ref.watch(communityListProvider.future);
+  if (enterpriseEnabled) return communities.firstOrNull;
   final storage = ref.read(communityStorageProvider);
   final activeId = await storage.loadActiveId();
 

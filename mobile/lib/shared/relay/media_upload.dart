@@ -13,6 +13,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import '../auth/event_signer.dart';
+import '../auth/enterprise_identity.dart';
 
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
@@ -239,6 +240,8 @@ class BlobDescriptor {
 class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
+  final EventSigner? _signer;
+  bool _disposed = false;
   final PickGalleryImage _pickGalleryImage;
   final PickCameraImage? _pickCameraImage;
   final PickGalleryImages _pickGalleryImages;
@@ -257,6 +260,7 @@ class MediaUploadService {
   MediaUploadService({
     required String baseUrl,
     required String? nsec,
+    EventSigner? signer,
     required PickGalleryImage pickGalleryImage,
     PickCameraImage? pickCameraImage,
     PickGalleryImages? pickGalleryImages,
@@ -272,6 +276,7 @@ class MediaUploadService {
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
+       _signer = signer,
        _pickGalleryImage = pickGalleryImage,
        _pickCameraImage = pickCameraImage,
        _pickGalleryImages =
@@ -295,6 +300,7 @@ class MediaUploadService {
        _ownsHttpClient = httpClient == null;
 
   void dispose() {
+    _disposed = true;
     if (_ownsHttpClient) {
       _http.close();
     }
@@ -590,11 +596,17 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
+    final headers = await _buildUploadHeaders(
+      mimeType: mimeType,
+      sha256: sha256,
+    );
+    _throwIfCancelled(cancellationToken);
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
       path: _mediaUploadPath,
+      headers: headers,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
@@ -605,6 +617,7 @@ class MediaUploadService {
         mimeType: mimeType,
         sha256: sha256,
         path: _legacyMediaUploadPath,
+        headers: headers,
         onProgress: onProgress,
         cancellationToken: cancellationToken,
       );
@@ -630,6 +643,7 @@ class MediaUploadService {
     required String mimeType,
     required String sha256,
     required String path,
+    required Map<String, String> headers,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
@@ -639,21 +653,31 @@ class MediaUploadService {
       Uri.parse(_baseUrl).resolve(path),
       abortTrigger: cancellationToken?.whenCancelled,
     );
+    request.followRedirects = false;
     request.contentLength = bytes.length;
-    request.headers.addAll(
-      await _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
-    );
+    request.headers.addAll(headers);
+    _throwIfCancelled(cancellationToken);
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
         .whenComplete(request.sink.close);
     final response = await _http.send(request);
     await writeRequest;
     _throwIfCancelled(cancellationToken);
-    return http.Response.fromStream(response);
+    final result = await http.Response.fromStream(response);
+    _throwIfCancelled(cancellationToken);
+    return result;
   }
 
   void _throwIfCancelled(UploadCancellationToken? cancellationToken) {
-    if (cancellationToken?.isCancelled ?? false) {
+    if (_signer case final RemoteEventSigner remote) {
+      remote.checkCurrent();
+      if (Uri.parse(_baseUrl) != Uri.parse(remote.relayUrl)) {
+        throw StateError(
+          'Media upload community does not match signing identity',
+        );
+      }
+    }
+    if (_disposed || (cancellationToken?.isCancelled ?? false)) {
       throw const UploadCancelledException();
     }
   }
@@ -678,15 +702,12 @@ class MediaUploadService {
   }
 
   Future<nostr.Event> _buildUploadAuthEvent(String sha256) async {
-    final nsec = _nsec;
-    if (nsec == null || nsec.isEmpty) {
-      throw Exception('Cannot upload media: no signing key available');
-    }
-
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) {
-      throw Exception('Invalid nsec');
-    }
+    final signer =
+        _signer ??
+        (_nsec == null
+            ? null
+            : LocalEventSigner(nostr.Nip19.decode(payload: _nsec).data));
+    if (signer == null) throw StateError('No media signing identity');
 
     final expiration =
         (_now().millisecondsSinceEpoch ~/ 1000) + _uploadAuthLifetimeSeconds;
@@ -702,7 +723,7 @@ class MediaUploadService {
       kind: _uploadAuthKind,
       content: 'Upload buzz-media',
       tags: tags,
-      signer: LocalEventSigner(privkeyHex),
+      signer: signer,
     );
   }
 

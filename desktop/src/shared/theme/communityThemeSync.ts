@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -99,6 +100,7 @@ export class CommunityThemeSyncManager {
   }
 
   async fetchRemote(): Promise<RemoteCommunityThemeResult> {
+    if (!supportsLocalIdentityFeatures()) return { status: "unavailable" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_COMMUNITY_THEME],
@@ -129,6 +131,7 @@ export class CommunityThemeSyncManager {
   }
 
   publish(preference: CommunityThemePreference): void {
+    if (!supportsLocalIdentityFeatures()) return;
     if (this.destroyed) return;
     this.pending = preference;
     this.publishRetryAttempt = 0;
@@ -305,6 +308,8 @@ export class CommunityThemeSyncManager {
     result: CommunityThemeHydrationResult;
     unsubscribe: () => Promise<void>;
   }> {
+    if (!supportsLocalIdentityFeatures())
+      return { result: { status: "unavailable" }, unsubscribe: async () => {} };
     // Establish live delivery before querying history. A relay can deliver a
     // replacement while an empty history query is in flight; subscribing
     // second would leave a blind spot where the controller seeds defaults over
@@ -381,6 +386,7 @@ export class CommunityThemeSyncManager {
   async subscribe(
     onUpdate: (remote: RemoteCommunityTheme) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_COMMUNITY_THEME],

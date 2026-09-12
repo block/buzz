@@ -34,7 +34,15 @@ function buildVariant({ internal, output }) {
 
   const result = spawnSync(
     process.execPath,
-    [viteEntrypoint, "build", "--outDir", output, "--emptyOutDir"],
+    [
+      viteEntrypoint,
+      "build",
+      "--configLoader",
+      "runner",
+      "--outDir",
+      output,
+      "--emptyOutDir",
+    ],
     {
       cwd: desktopRoot,
       env,

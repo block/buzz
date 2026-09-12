@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -26,7 +27,7 @@ export const countDueReminders = countDue;
  */
 export function useRemindersQuery(pubkey: string | undefined) {
   return useQuery({
-    enabled: Boolean(pubkey),
+    enabled: Boolean(pubkey) && supportsLocalIdentityFeatures(),
     queryKey: remindersQueryKey(pubkey ?? ""),
     queryFn: () => fetchReminders(pubkey ?? ""),
     staleTime: 30_000,

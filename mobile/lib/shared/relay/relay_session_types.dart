@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'relay_socket.dart';
+import '../auth/event_signer.dart';
 
 enum SessionStatus { disconnected, connecting, connected, reconnecting }
 
@@ -8,6 +9,7 @@ typedef RelaySocketFactory =
     RelaySocket Function({
       required String wsUrl,
       required String? nsec,
+      EventSigner? signer,
       required void Function(List<dynamic> message) onMessage,
       required void Function() onConnected,
       required void Function(Object? error) onDisconnected,

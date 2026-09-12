@@ -408,6 +408,7 @@ void main() {
       expect(capturedRequest!.headers['X-SHA-256'], isNotEmpty);
       expect(capturedRequest!.bodyBytes, _pngBytes);
 
+      expect(capturedRequest!.followRedirects, false);
       final authHeader = capturedRequest!.headers['Authorization'];
       expect(authHeader, isNotNull);
       expect(authHeader, startsWith('Nostr '));
@@ -472,7 +473,11 @@ void main() {
         ]);
         expect(requests[1].bodyBytes, requests[0].bodyBytes);
         expect(requests[0].headers['Authorization'], startsWith('Nostr '));
-        expect(requests[1].headers['Authorization'], startsWith('Nostr '));
+        expect(
+          requests[1].headers['Authorization'],
+          requests[0].headers['Authorization'],
+        );
+        expect(requests.every((request) => !request.followRedirects), true);
         expect(
           requests[1].headers['X-SHA-256'],
           requests[0].headers['X-SHA-256'],
@@ -730,6 +735,7 @@ void main() {
       await service.pickAndUploadImage();
 
       expect(capturedRequest, isNotNull);
+      expect(capturedRequest!.followRedirects, false);
       final authHeader = capturedRequest!.headers['Authorization'];
       expect(authHeader, isNotNull);
       final encoded = authHeader!.substring('Nostr '.length);

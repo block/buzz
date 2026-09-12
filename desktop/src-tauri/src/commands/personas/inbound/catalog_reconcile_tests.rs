@@ -80,7 +80,7 @@ fn team() -> TeamRecord {
 /// and overrides both so this handle's retention scope lands inside the tempdir.
 fn mock_app(keys: &nostr::Keys) -> tauri::App<tauri::test::MockRuntime> {
     let state = build_app_state();
-    *state.keys.lock().unwrap() = keys.clone();
+    *state.keys.lock().unwrap() = Some(keys.clone());
     *state.relay_url_override.lock().unwrap() = Some(RELAY.to_string());
 
     tauri::test::mock_builder()

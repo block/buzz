@@ -40,7 +40,13 @@ void showEmojiPicker({
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
 }) {
-  if (defaultTargetPlatform == TargetPlatform.iOS) {
+  final auth = ProviderScope.containerOf(
+    context,
+    listen: false,
+  ).read(mediaGetAuthServiceProvider);
+  // Keep corporate proof in the scoped Dart transport, not a native sheet
+  // whose queued downloads can outlive login/community disposal.
+  if (defaultTargetPlatform == TargetPlatform.iOS && !auth.isRemote) {
     unawaited(
       _presentIosEmojiPicker(
         context: context,

@@ -60,6 +60,7 @@ class _DelayedHttpClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
+    expect(request.followRedirects, false);
     sent.complete(request);
     return response.future;
   }
@@ -71,6 +72,7 @@ class _SequencedHttpClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
+    expect(request.followRedirects, false);
     requests.add(request);
     final response = Completer<http.StreamedResponse>();
     responses.add(response);

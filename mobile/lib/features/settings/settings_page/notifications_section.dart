@@ -5,7 +5,7 @@ class _NotificationsSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
+    if (enterpriseEnabled || defaultTargetPlatform != TargetPlatform.iOS) {
       return const SizedBox.shrink();
     }
     final community = ref.watch(activeCommunityProvider).value;

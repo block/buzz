@@ -78,11 +78,7 @@ fn managed_policy_filters(
 }
 
 fn current_user_pubkey(state: &AppState) -> Result<String, String> {
-    state
-        .keys
-        .lock()
-        .map(|keys| keys.public_key().to_hex())
-        .map_err(|error| error.to_string())
+    Ok(state.public_key()?.to_hex())
 }
 
 pub(super) fn advance_relay_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
@@ -457,7 +453,7 @@ mod real_relay_tests {
 
     fn state_for(keys: Keys) -> AppState {
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        *state.keys.lock().unwrap() = Some(keys);
         *state.relay_url_override.lock().unwrap() = Some(relay_ws_url());
         state
     }

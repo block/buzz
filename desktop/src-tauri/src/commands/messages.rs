@@ -66,10 +66,7 @@ pub async fn get_feed(
         .map(|t| t.split(',').any(|s| s.trim() == "needs_action"))
         .unwrap_or(true);
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
@@ -666,7 +663,7 @@ fn managed_agent_submission_auth_tag(
         return Ok(Some(auth_tag));
     }
 
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let owner_keys = state.signing_keys()?;
     legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
 }
 
@@ -839,10 +836,7 @@ pub async fn remove_reaction(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Find our own kind:7 reaction event referencing the target.
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = { state.public_key()?.to_hex() };
     let target = event_id.trim();
     let trimmed_emoji = emoji.trim();
 

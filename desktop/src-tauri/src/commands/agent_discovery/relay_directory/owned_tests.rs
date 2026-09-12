@@ -105,7 +105,7 @@ async fn remote_owned_discovery_and_membership_do_not_require_local_records() {
         axum::serve(listener, router).await.unwrap();
     });
     let state = crate::app_state::build_app_state();
-    *state.keys.lock().unwrap() = owner.clone();
+    *state.keys.lock().unwrap() = Some(owner.clone());
     *state.relay_url_override.lock().unwrap() = Some(format!("ws://{address}"));
 
     let discovered = list_relay_agents_for_state(&state).await.unwrap();

@@ -14443,6 +14443,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     publishedKinds.add(event.kind);
@@ -14621,6 +14622,7 @@ class _ProfileSubscriptionRelaySession extends RelaySessionNotifier {
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async => event;
 
@@ -14652,6 +14654,7 @@ class _HuddleReactionRelaySession extends RelaySessionNotifier {
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async => event;
 

@@ -909,3 +909,40 @@ test("rememberPublishedId_evictsOldestBeyondCap", () => {
 
   mgr.destroy();
 });
+
+test("managed read markers persist locally without encryption, subscription or relay publish", async () => {
+  const { setManagedIdentityMode } = await import(
+    "@/shared/api/identityCapabilities"
+  );
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  let calls = 0;
+  const forbidden = async () => {
+    calls++;
+    throw new Error("no encrypted relay work");
+  };
+  const relay = {
+    fetchEvents: forbidden,
+    subscribeLive: forbidden,
+    publishEvent: forbidden,
+  };
+  setManagedIdentityMode(true);
+  const manager = new ReadStateManager("1".repeat(64), relay);
+  try {
+    await manager.initialize();
+    manager.markContextRead("channel-1", 100);
+    timers.runAll();
+    manager.destroy();
+    const restored = new ReadStateManager("1".repeat(64), relay);
+    await restored.initialize();
+    assert.equal(restored.getEffectiveTimestamp("channel-1"), 100);
+    restored.destroy();
+    assert.equal(calls, 0);
+    assert.equal(timers.size, 0);
+  } finally {
+    manager.destroy();
+    setManagedIdentityMode(false);
+    restore();
+  }
+});

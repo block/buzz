@@ -894,3 +894,22 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
 
 #[path = "native_relay_client_transport_tests.rs"]
 mod transport_tests;
+
+#[tokio::test]
+async fn corporate_lifetime_cancels_native_sessions_and_replacement_never_revives_old_session() {
+    let client = NativeRelayClient::default();
+    let lifetime = CancellationToken::new();
+    client.bind_identity(lifetime.clone()).await;
+    let old = client.start("ws://127.0.0.1:1".into(), Keys::generate());
+    assert!(!old.cancel.is_cancelled());
+    lifetime.cancel();
+    assert!(old.cancel.is_cancelled());
+    let replacement = CancellationToken::new();
+    client.bind_identity(replacement.clone()).await;
+    let fresh = client.start("ws://127.0.0.1:1".into(), Keys::generate());
+    assert!(!fresh.cancel.is_cancelled());
+    assert!(old.cancel.is_cancelled());
+    client.clear_identity().await;
+    assert!(fresh.cancel.is_cancelled());
+    assert!(replacement.is_cancelled());
+}

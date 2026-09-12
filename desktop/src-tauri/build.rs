@@ -1,3 +1,5 @@
+#[path = "src/enterprise_build_config.rs"]
+mod enterprise_build_config;
 // Shared schema, included from the same source the runtime command parses with,
 // so the build-time validation below and the runtime parse cannot drift.
 include!("src/commands/reconnect_hook_config.rs");
@@ -8,6 +10,23 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_ENTERPRISE");
+    if let Some(raw) = std::env::var_os("BUZZ_BUILD_ENTERPRISE") {
+        let canonical = raw
+            .to_str()
+            .ok_or_else(|| "Invalid corporate build configuration".to_string())
+            .and_then(|raw| {
+                enterprise_build_config::compile_config(
+                    raw,
+                    std::env::var_os("CARGO_FEATURE_SYSTEM_KEYRING").is_some(),
+                )
+            })
+            .unwrap_or_else(|_| {
+                panic!("Invalid corporate build configuration or missing system-keyring")
+            });
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_ENTERPRISE={canonical}");
+    }
+
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

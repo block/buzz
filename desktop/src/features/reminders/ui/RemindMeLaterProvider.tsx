@@ -1,3 +1,5 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
+import { toast } from "sonner";
 import * as React from "react";
 
 import { useRemindersQuery } from "@/features/reminders/hooks";
@@ -30,6 +32,12 @@ export function RemindMeLaterProvider({
   const [target, setTarget] = React.useState<ReminderTarget | null>(null);
 
   const openReminder = React.useCallback((t: ReminderTarget) => {
+    if (!supportsLocalIdentityFeatures()) {
+      toast.error(
+        "Encrypted reminders are unavailable with an organization-managed identity.",
+      );
+      return;
+    }
     setTarget(t);
     setOpen(true);
   }, []);

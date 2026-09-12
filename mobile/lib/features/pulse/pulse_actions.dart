@@ -19,7 +19,11 @@ Future<void> publishNote(
 
   final config = ref.read(relayConfigProvider);
   final session = ref.read(relaySessionProvider.notifier);
-  final relay = SignedEventRelay(session: session, nsec: config.nsec);
+  final relay = SignedEventRelay(
+    session: session,
+    nsec: config.nsec,
+    signer: config.signer,
+  );
   final tags = <List<String>>[];
   final seen = <String>{};
 
@@ -63,7 +67,11 @@ Future<void> setContactList(WidgetRef ref, List<ContactEntry> contacts) async {
   if (currentPubkey == null) return;
   final config = ref.read(relayConfigProvider);
   final session = ref.read(relaySessionProvider.notifier);
-  final relay = SignedEventRelay(session: session, nsec: config.nsec);
+  final relay = SignedEventRelay(
+    session: session,
+    nsec: config.nsec,
+    signer: config.signer,
+  );
 
   await relay.submit(
     kind: EventKind.contactList,

@@ -24,17 +24,34 @@ final class _DeferredSigner implements EventSigner {
 
 final class _Session extends RelaySessionNotifier {
   NostrEvent? published;
+  bool wrongAck = false;
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     published = event;
-    return event;
+    return wrongAck
+        ? NostrEvent.fromJson({...event.toJson(), 'id': '0' * 64})
+        : event;
   }
 }
 
 void main() {
+  test('submission rejects an acknowledgement for a different event', () async {
+    final session = _Session()..wrongAck = true;
+    final relay = SignedEventRelay.withSigner(
+      session: session,
+      signer: LocalEventSigner(nostr.Keys.generate().secret),
+    );
+    await expectLater(
+      relay.submit(kind: 1, content: 'exact', tags: []),
+      throwsStateError,
+    );
+    expect(session.published, isNotNull);
+  });
+
   test('local signer preserves the legacy event id and exact fields', () async {
     final keys = nostr.Keys.generate();
     final signer = LocalEventSigner(keys.secret);
@@ -131,8 +148,9 @@ void main() {
         LocalEventSigner(nostr.Keys.generate().secret),
       );
       final session = _Session();
-      final relay = SignedEventRelay.withSigner(
+      final relay = SignedEventRelay(
         session: session,
+        nsec: nostr.Keys.generate().nsec,
         signer: signer,
       );
       final pending = relay.submit(kind: 1, content: '', tags: []);

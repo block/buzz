@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { Download, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import * as React from "react";
 
@@ -58,6 +59,19 @@ function BackupAvailabilityFill({
  * while expanded; encrypted backup state lives in the app-level provider.
  */
 export function PrivateKeyBackupRow() {
+  if (!supportsLocalIdentityFeatures())
+    return (
+      <p className="text-sm text-muted-foreground">
+        Your organization holds your signing key. Private-key export, backup,
+        and pairing are unavailable. Read markers, sidebar preferences, and
+        appearance stay on this device; encrypted sync, reminders, and local
+        agent management are unavailable.
+      </p>
+    );
+  return <LocalPrivateKeyBackupRow />;
+}
+
+function LocalPrivateKeyBackupRow() {
   const [isOpen, setIsOpen] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);

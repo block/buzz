@@ -17,7 +17,8 @@ use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
 pub struct AppState {
-    pub keys: Mutex<Keys>,
+    pub(crate) enterprise: crate::enterprise_identity::EnterpriseIdentity,
+    pub keys: Mutex<Option<Keys>>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
@@ -147,6 +148,9 @@ pub struct AppState {
 /// fall through to persisted resolution. A malformed value is logged and
 /// treated as absent rather than left on an ephemeral identity.
 fn identity_from_env() -> Option<Keys> {
+    if crate::enterprise_identity::enabled() {
+        return None;
+    }
     match std::env::var("BUZZ_PRIVATE_KEY") {
         Ok(nsec) => match Keys::parse(nsec.trim()) {
             Ok(keys) => Some(keys),
@@ -193,20 +197,25 @@ pub fn build_app_state() -> AppState {
                 "buzz-desktop: configured identity pubkey {}",
                 keys.public_key().to_hex()
             );
-            (keys, IdentityStorage::Environment)
+            (Some(keys), IdentityStorage::Environment)
         }
-        None => (Keys::generate(), IdentityStorage::Ephemeral),
+        None => (
+            (!crate::enterprise_identity::enabled()).then(Keys::generate),
+            IdentityStorage::Ephemeral,
+        ),
     };
 
     AppState {
+        enterprise: crate::enterprise_identity::EnterpriseIdentity::default(),
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
         http_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(300))
             .pool_max_idle_per_host(2)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new()),
+            .unwrap_or_else(|error| panic!("Cannot build no-redirect HTTP client: {error}")),
         media_fetch_client: build_media_fetch_client().expect(
             "media_fetch_client must build with redirect::Policy::none(); a \
              redirect-following fallback would forward the minted media auth \
@@ -264,6 +273,9 @@ mod accessors;
 /// but inaccessible this boot). Both states boot with an ephemeral key; the
 /// frontend shows different recovery screens for each.
 pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    if crate::enterprise_identity::enabled() {
+        return Ok(());
+    }
     // Only skip file-based resolution if the env var was present AND parsed
     // successfully. A malformed env var should fall through to the persisted
     // key rather than leaving the app on an ephemeral identity.
@@ -282,7 +294,7 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     // any thread that reads a flag as false with Acquire sees consistent data.
     {
         let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
-        *active_keys = resolved.keys;
+        *active_keys = Some(resolved.keys);
         state.set_identity_storage(resolved.storage);
     }
     state.identity_lost.store(

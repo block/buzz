@@ -23,8 +23,7 @@ use crate::{
 /// Read the workspace owner pubkey without holding the lock. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
+    Ok(state.public_key()?.to_hex())
 }
 
 #[path = "agents_pending.rs"]
@@ -344,6 +343,10 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local managed agents are unavailable in enterprise mode".into());
+    }
+
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id
@@ -831,6 +834,10 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local managed agents are unavailable in enterprise mode".into());
+    }
+
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;

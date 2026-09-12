@@ -239,12 +239,7 @@ pub async fn restore_managed_agents_on_launch(
     // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
     // Read outside the per-agent spawn loop so all parallel spawns see the same
     // value and we don't lock `state.keys` repeatedly.
-    let owner_hex: Option<String> = state
-        .keys
-        .lock()
-        .map_err(|e| e.to_string())
-        .ok()
-        .map(|k| k.public_key().to_hex());
+    let owner_hex: Option<String> = state.public_key().ok().map(|k| k.to_hex());
 
     #[cfg(feature = "mesh-llm")]
     let agents_to_start = {

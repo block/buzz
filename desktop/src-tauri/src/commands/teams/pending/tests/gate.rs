@@ -149,7 +149,7 @@ fn seed_team_head(db_path: &Path, keys: &nostr::Keys, created_at: i64) {
 
 fn app_state_for(keys: nostr::Keys, relay_http: &str) -> crate::app_state::AppState {
     let state = build_app_state();
-    *state.keys.lock().unwrap() = keys;
+    *state.keys.lock().unwrap() = Some(keys);
     *state.relay_url_override.lock().unwrap() = Some(relay_http.to_string());
     state
 }

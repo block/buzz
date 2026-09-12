@@ -49,6 +49,9 @@ pub async fn submit_signed_event_at_with_keys(
     if !result.accepted {
         return Err(format!("relay rejected event: {}", result.message));
     }
+    if result.event_id != event.id.to_hex() {
+        return Err("Relay acknowledgement ID mismatch".into());
+    }
 
     Ok(result)
 }
@@ -121,11 +124,17 @@ pub async fn submit_event_with_keys_created_at(
     keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<(SubmitEventResponse, i64), String> {
+    let base = relay_api_base_url_with_override(state);
     let event = builder
         .sign_with_event_signer(keys)
         .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
     let created_at = event.created_at.as_secs() as i64;
-    let result = super::submit_signed_event_with_keys(&event, state, keys, auth_tag).await?;
+    let result =
+        super::submit_signed_event_at_with_auth(&event, state, &base, keys, auth_tag).await?;
     Ok((result, created_at))
 }
+
+#[cfg(test)]
+#[path = "submit_signer_tests.rs"]
+mod tests;

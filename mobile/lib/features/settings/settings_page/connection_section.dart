@@ -16,6 +16,14 @@ class _ConnectionSection extends ConsumerWidget {
       label: 'Connection',
       verticalPadding: Grid.twelve,
       children: [
+        if (enterpriseEnabled)
+          const Padding(
+            padding: EdgeInsets.all(Grid.xs),
+            child: Text(
+              'Your organization holds your signing key. Private-key export, backup, pairing, encrypted personal preferences and reminders, and push notifications requiring a local key are unavailable in this build.',
+            ),
+          ),
+
         if (nsec != null && nsec.isNotEmpty && community != null) ...[
           _IdentityRow(nsec: nsec),
           AppListRow(
@@ -104,7 +112,7 @@ class _RemoveCommunitySection extends ConsumerWidget {
       children: [
         AppListRow(
           icon: LucideIcons.logOut,
-          title: 'Remove community',
+          title: enterpriseEnabled ? 'Sign out' : 'Remove community',
           titleColor: context.colors.error,
           onTap: () => _confirmRemoveCommunity(context, ref),
         ),
@@ -153,10 +161,12 @@ void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
   showBuzzDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Remove Community'),
-      content: const Text(
-        'This will disconnect this community. You will need '
-        'to scan a new pairing code to reconnect.',
+      title: Text(enterpriseEnabled ? 'Sign out' : 'Remove Community'),
+      content: Text(
+        enterpriseEnabled
+            ? 'Sign out of your work account? You can sign in again with your corporate account.'
+            : 'This will disconnect this community. You will need '
+                  'to scan a new pairing code to reconnect.',
       ),
       actions: [
         TextButton(
@@ -181,7 +191,7 @@ void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
             Navigator.of(context).popUntil((route) => route.isFirst);
           },
           style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
-          child: const Text('Remove'),
+          child: Text(enterpriseEnabled ? 'Sign out' : 'Remove'),
         ),
       ],
     ),

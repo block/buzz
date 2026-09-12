@@ -390,6 +390,7 @@ final channelActionsProvider = Provider<ChannelActions>((ref) {
     signedEventRelay: SignedEventRelay(
       session: session,
       nsec: relayConfig.nsec,
+      signer: relayConfig.signer,
     ),
     currentPubkey: currentPubkey,
     isCommunityValid: () {

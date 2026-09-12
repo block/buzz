@@ -64,6 +64,7 @@ class ForumEventDelivery {
   final ProviderContainer _container;
   final String _relayUrl;
   final String? _nsec;
+  final Object? _remoteSigner;
   final SignedEventRelay _relay;
   final List<CustomEmoji> _customEmoji;
 
@@ -71,11 +72,13 @@ class ForumEventDelivery {
     required ProviderContainer container,
     required String relayUrl,
     required String? nsec,
+    Object? remoteSigner,
     required SignedEventRelay relay,
     required List<CustomEmoji> customEmoji,
   }) : _container = container,
        _relayUrl = relayUrl,
        _nsec = nsec,
+       _remoteSigner = remoteSigner,
        _relay = relay,
        _customEmoji = customEmoji;
 
@@ -86,9 +89,11 @@ class ForumEventDelivery {
       container: container,
       relayUrl: config.baseUrl,
       nsec: config.nsec,
+      remoteSigner: config.remoteSigner,
       relay: SignedEventRelay(
         session: container.read(relaySessionProvider.notifier),
         nsec: config.nsec,
+        signer: config.signer,
       ),
       customEmoji: List<CustomEmoji>.unmodifiable(
         container.read(customEmojiListProvider),
@@ -144,7 +149,9 @@ class ForumEventDelivery {
     required List<List<String>> mediaTags,
   }) async {
     final currentConfig = _container.read(relayConfigProvider);
-    if (currentConfig.baseUrl != _relayUrl || currentConfig.nsec != _nsec) {
+    if (currentConfig.baseUrl != _relayUrl ||
+        currentConfig.nsec != _nsec ||
+        !identical(currentConfig.remoteSigner, _remoteSigner)) {
       throw StateError(
         'Forum delivery cancelled because the active community changed',
       );

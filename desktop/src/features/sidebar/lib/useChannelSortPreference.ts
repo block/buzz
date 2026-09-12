@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -59,6 +60,7 @@ export function useChannelSortPreference(
     setStore(readChannelSortStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
+    if (!supportsLocalIdentityFeatures()) return;
     managerRef.current = new ChannelSortSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();

@@ -491,12 +491,13 @@ final class MobileHuddleController extends Notifier<bool> {
   }) {
     final config = ref.read(relayConfigProvider);
     final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) {
+    if (config.signer == null) {
       throw StateError('A paired identity is required.');
     }
     return HuddleConnectionParameters(
       relayWebSocketUrl: config.wsUrl,
       nsec: nsec,
+      signer: config.signer,
       parentChannelId: parentChannelId,
       ephemeralChannelId: ephemeralChannelId,
     );

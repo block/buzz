@@ -48,8 +48,15 @@ typedef OpenDownloadedFile =
 
 final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
   final client = ref.watch(mediaHttpClientProvider);
+  final auth = ref.watch(mediaGetAuthServiceProvider);
   return (url, headers, filename) async {
-    final response = await client.get(Uri.parse(url), headers: headers);
+    auth.checkCurrent();
+    final response = await getMediaWithoutRedirects(
+      client,
+      Uri.parse(url),
+      headers,
+    );
+    auth.checkCurrent();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
         'Attachment download failed (${response.statusCode})',

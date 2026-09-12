@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../../shared/auth/event_signer.dart';
 import 'dart:ui' show Rect;
 
 import 'package:flutter/foundation.dart';
@@ -187,17 +188,20 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
     required http.Client httpClient,
     required String baseUrl,
     required String? nsec,
+    EventSigner? signer,
     required SignedEventRelay signedEventRelay,
     required bool Function() isCommunityActive,
   }) : _httpClient = httpClient,
        _baseUrl = baseUrl,
        _nsec = nsec,
+       _signer = signer,
        _signedEventRelay = signedEventRelay,
        _isCommunityActive = isCommunityActive;
 
   final http.Client _httpClient;
   final String _baseUrl;
   final String? _nsec;
+  final EventSigner? _signer;
   final SignedEventRelay _signedEventRelay;
   final bool Function() _isCommunityActive;
 
@@ -217,20 +221,24 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
     final body = <String, Object>{'ttl_secs': ttlSeconds};
     if (maxUses != null) body['max_uses'] = maxUses;
     final bodyBytes = utf8.encode(jsonEncode(body));
+    final proof = await buildNip98AuthHeader(
+      method: 'POST',
+      url: url,
+      bodyBytes: bodyBytes,
+      nsec: _nsec,
+      signer: _signer,
+    );
+    _ensureCommunityActive();
+    final request = http.Request('POST', Uri.parse(url))
+      ..followRedirects = false;
+    request.headers.addAll({
+      'Authorization': proof,
+      'Content-Type': 'application/json',
+    });
+    request.bodyBytes = bodyBytes;
     final response = await _httpClient
-        .post(
-          Uri.parse(url),
-          headers: {
-            'Authorization': await buildNip98AuthHeader(
-              method: 'POST',
-              url: url,
-              bodyBytes: bodyBytes,
-              nsec: _nsec,
-            ),
-            'Content-Type': 'application/json',
-          },
-          body: bodyBytes,
-        )
+        .send(request)
+        .then(http.Response.fromStream)
         .timeout(const Duration(seconds: 15));
     _ensureCommunityActive();
 
@@ -290,10 +298,17 @@ final communityInviteActionsProvider = Provider<CommunityInviteActions>((ref) {
     httpClient: ref.watch(communityInviteHttpClientProvider),
     baseUrl: config.baseUrl,
     nsec: config.nsec,
-    signedEventRelay: SignedEventRelay(session: session, nsec: config.nsec),
+    signer: config.signer,
+    signedEventRelay: SignedEventRelay(
+      session: session,
+      nsec: config.nsec,
+      signer: config.signer,
+    ),
     isCommunityActive: () {
       final current = ref.read(relayConfigProvider);
-      return current.baseUrl == config.baseUrl && current.nsec == config.nsec;
+      return current.baseUrl == config.baseUrl &&
+          current.nsec == config.nsec &&
+          identical(current.remoteSigner, config.remoteSigner);
     },
   );
 });

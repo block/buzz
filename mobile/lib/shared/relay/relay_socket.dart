@@ -41,6 +41,7 @@ class RelaySocket {
 
   final String _wsUrl;
   final String? _nsec;
+  final EventSigner? _signer;
   final void Function(List<dynamic> message) _onMessage;
   final void Function() _onConnected;
   final void Function(Object? error) _onDisconnected;
@@ -51,17 +52,20 @@ class RelaySocket {
   Completer<void>? _authCompleter;
   Timer? _authTimeout;
   String? _pendingAuthEventId;
+  int _authChallengeGeneration = 0;
 
   SocketState get state => _state;
 
   RelaySocket({
     required String wsUrl,
     required String? nsec,
+    EventSigner? signer,
     required void Function(List<dynamic> message) onMessage,
     required void Function() onConnected,
     required void Function(Object? error) onDisconnected,
   }) : _wsUrl = wsUrl,
        _nsec = nsec,
+       _signer = signer,
        _onMessage = onMessage,
        _onConnected = onConnected,
        _onDisconnected = onDisconnected;
@@ -198,19 +202,16 @@ class RelaySocket {
     if (data.length < 2) return;
     final challenge = data[1] as String;
     final channel = _channel;
+    final challengeGeneration = ++_authChallengeGeneration;
 
-    if (_nsec == null) {
+    if (_nsec == null && _signer == null) {
       _failAuth(Exception('No nsec available for NIP-42 auth'));
       return;
     }
 
     try {
-      // Decode bech32 nsec to hex private key.
-      final privkeyHex = nostr.Nip19.decode(payload: _nsec).data;
-      if (privkeyHex.isEmpty) {
-        _failAuth(Exception('Invalid nsec'));
-        return;
-      }
+      final signer =
+          _signer ?? LocalEventSigner(nostr.Nip19.decode(payload: _nsec!).data);
 
       // Build the auth tags.
       final tags = <List<String>>[
@@ -223,14 +224,20 @@ class RelaySocket {
         kind: EventKind.auth,
         content: '',
         tags: tags,
-        signer: LocalEventSigner(privkeyHex),
+        signer: signer,
       );
 
-      if (!identical(channel, _channel)) return;
+      if (!identical(channel, _channel) ||
+          challengeGeneration != _authChallengeGeneration) {
+        return;
+      }
       _pendingAuthEventId = event.id;
       send(['AUTH', event.toMap()]);
     } catch (e) {
-      if (!identical(channel, _channel)) return;
+      if (!identical(channel, _channel) ||
+          challengeGeneration != _authChallengeGeneration) {
+        return;
+      }
       _failAuth(e);
     }
   }

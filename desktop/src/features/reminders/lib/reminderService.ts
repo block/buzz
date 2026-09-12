@@ -1,3 +1,4 @@
+import { requireLocalIdentityFeature } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -142,6 +143,7 @@ async function decryptReminder(event: RelayEvent): Promise<Reminder | null> {
 }
 
 export async function fetchReminders(pubkey: string): Promise<Reminder[]> {
+  requireLocalIdentityFeature("Encrypted reminders");
   const events = await relayClient.fetchEvents({
     kinds: [KIND_EVENT_REMINDER],
     authors: [pubkey],
@@ -157,6 +159,7 @@ export async function createReminder(
   notBefore: number,
   note?: string,
 ): Promise<RelayEvent> {
+  requireLocalIdentityFeature("Encrypted reminders");
   const dTag = randomDTag();
   const content: ReminderContent = {
     target,
@@ -187,6 +190,7 @@ export async function completeReminder(
   _pubkey: string,
   reminder: Reminder,
 ): Promise<RelayEvent> {
+  requireLocalIdentityFeature("Encrypted reminders");
   const content: ReminderContent = {
     ...reminder.content,
     status: "done",
@@ -218,6 +222,7 @@ export async function snoozeReminder(
   reminder: Reminder,
   newNotBefore: number,
 ): Promise<RelayEvent> {
+  requireLocalIdentityFeature("Encrypted reminders");
   const content: ReminderContent = {
     ...reminder.content,
     status: "pending",
@@ -247,6 +252,7 @@ export async function cancelReminder(
   _pubkey: string,
   reminder: Reminder,
 ): Promise<RelayEvent> {
+  requireLocalIdentityFeature("Encrypted reminders");
   const content: ReminderContent = {
     ...reminder.content,
     status: "cancelled",

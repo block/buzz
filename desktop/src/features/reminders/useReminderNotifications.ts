@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -116,7 +117,7 @@ export function useReminderNotifications(
   });
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !supportsLocalIdentityFeatures()) return;
 
     const check = () => {
       // Defer until the query has resolved at least once — an empty array from

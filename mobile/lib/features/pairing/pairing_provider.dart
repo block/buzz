@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -121,6 +122,9 @@ class PairingNotifier extends Notifier<PairingState> {
   PairingState build() => const PairingState();
 
   Future<void> pair(String rawInput) async {
+    if (enterpriseEnabled) {
+      throw StateError('Pairing requires a local-secret identity');
+    }
     if (state.status == PairingStatus.connecting ||
         state.status == PairingStatus.confirmingSas ||
         state.status == PairingStatus.transferring) {
@@ -136,6 +140,7 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   Future<bool> authorizeIdentityExport({required Community community}) async {
+    if (enterpriseEnabled) return false;
     if (state.authorizationInProgress) return false;
 
     final biometricOnly =

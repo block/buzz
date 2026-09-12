@@ -87,6 +87,7 @@ pub(crate) struct MatchedEvent {
 #[derive(Default)]
 pub(crate) struct NativeRelayClient {
     current: Mutex<Option<ManagedSession>>,
+    lifetime: std::sync::Mutex<CancellationToken>,
 }
 
 struct ManagedSession {
@@ -135,6 +136,29 @@ impl Drop for SessionLease {
 }
 
 impl NativeRelayClient {
+    pub(crate) async fn clear_identity(&self) {
+        self.bind_identity(CancellationToken::new()).await;
+    }
+
+    pub(crate) async fn bind_identity(&self, lifetime: CancellationToken) {
+        let mut current = self.current.lock().await;
+        if let Some(old) = current.take() {
+            old.session.shutdown();
+        }
+        let mut token = self.lifetime.lock().unwrap_or_else(|e| e.into_inner());
+        token.cancel();
+        *token = lifetime;
+    }
+
+    fn start(&self, relay: String, keys: impl EventSigner + Clone + 'static) -> Arc<RelaySession> {
+        let token = self
+            .lifetime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child_token();
+        start_managed(relay, keys, None, token)
+    }
+
     /// Installs the session for `scope`, shutting down whatever scope held the
     /// slot. Destructive on entry, so every caller must already hold proof it
     /// is the current owner — today that is
@@ -152,7 +176,7 @@ impl NativeRelayClient {
         if let Some(previous) = current.take() {
             previous.session.shutdown();
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = self.start(relay_url, keys);
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -198,12 +222,12 @@ impl NativeRelayClient {
                 }
             } else {
                 SessionLease {
-                    session: start_managed(relay_url, keys, None),
+                    session: self.start(relay_url, keys),
                     private: true,
                 }
             };
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = self.start(relay_url, keys);
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -400,7 +424,7 @@ pub(crate) async fn start(
     keys: impl EventSigner + Clone + 'static,
     auth_tag: Option<nostr::Tag>,
 ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
-    let session = start_managed(relay_url, keys, auth_tag);
+    let session = start_managed(relay_url, keys, auth_tag, CancellationToken::new());
     let events = session.attach_archive().await;
     (session, events)
 }
@@ -409,6 +433,7 @@ fn start_managed(
     relay_url: String,
     keys: impl EventSigner + Clone + 'static,
     auth_tag: Option<nostr::Tag>,
+    cancel: CancellationToken,
 ) -> Arc<RelaySession> {
     let (wake, wake_rx) = mpsc::channel(1);
     let session = Arc::new(RelaySession {
@@ -416,7 +441,7 @@ fn start_managed(
         requests: Arc::new(Mutex::new(HashMap::new())),
         archive_events: Arc::new(Mutex::new(None)),
         wake,
-        cancel: CancellationToken::new(),
+        cancel,
     });
 
     tauri::async_runtime::spawn(run_session(
@@ -443,7 +468,12 @@ async fn run_session(
             return;
         }
 
-        match NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref()).await {
+        let connection = tokio::select! {
+            biased;
+            _ = session.cancel.cancelled() => return,
+            result = NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref()) => result,
+        };
+        match connection {
             Ok(conn) => {
                 // A connection that authenticated is healthy regardless of how
                 // long it then lived, so backoff resets here rather than on

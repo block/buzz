@@ -10,13 +10,15 @@ import 'huddle_wire.dart';
 @immutable
 final class HuddleConnectionParameters {
   final String relayWebSocketUrl;
-  final String nsec;
+  final String? nsec;
+  final EventSigner? signer;
   final String parentChannelId;
   final String ephemeralChannelId;
 
   HuddleConnectionParameters({
     required this.relayWebSocketUrl,
-    required this.nsec,
+    this.nsec,
+    this.signer,
     required this.parentChannelId,
     required this.ephemeralChannelId,
   }) {
@@ -39,7 +41,7 @@ final class HuddleConnectionParameters {
     }
     _validateUuid(parentChannelId, 'parentChannelId');
     _validateUuid(ephemeralChannelId, 'ephemeralChannelId');
-    if (nsec.trim().isEmpty) {
+    if (signer == null && (nsec == null || nsec!.trim().isEmpty)) {
       throw ArgumentError.value(nsec, 'nsec', 'must not be empty');
     }
   }
@@ -67,7 +69,9 @@ abstract final class HuddleAuthV2 {
       throw const HuddleAuthException('Relay challenge must not be empty.');
     }
 
-    final secretKey = _decodeSecretKey(parameters.nsec);
+    final signer =
+        parameters.signer ??
+        LocalEventSigner(_decodeSecretKey(parameters.nsec!));
     final event = await signEvent(
       kind: EventKind.auth,
       content: '',
@@ -75,7 +79,7 @@ abstract final class HuddleAuthV2 {
         ['relay', parameters.relayWebSocketUrl],
         ['challenge', challenge],
       ],
-      signer: LocalEventSigner(secretKey),
+      signer: signer,
       createdAt: createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
 

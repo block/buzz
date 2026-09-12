@@ -552,7 +552,7 @@ actor NativeEmojiRemoteImageLoader {
   }
 
   private static func download(_ request: URLRequest) async throws -> UIImage {
-    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+    let (bytes, response) = try await URLSession.shared.bytes(for: request, delegate: NoMediaRedirects())
     guard
       let httpResponse = response as? HTTPURLResponse,
       (200..<300).contains(httpResponse.statusCode)
@@ -612,5 +612,16 @@ actor NativeEmojiRemoteImageLoader {
       by: cgImage.height
     )
     return overflow ? Int.max : cost
+  }
+}
+
+/// Never forward a Nostr media proof through an HTTP redirect.
+private final class NoMediaRedirects: NSObject, URLSessionTaskDelegate {
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }

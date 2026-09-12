@@ -29,6 +29,7 @@ mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:me
 system-keyring = ["dep:keyring"]
 
 [build-dependencies]
+buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

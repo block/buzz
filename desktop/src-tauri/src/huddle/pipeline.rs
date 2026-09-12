@@ -641,8 +641,8 @@ pub(crate) fn spawn_transcription_task(
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
     let http_client = state.http_client.clone();
-    let keys = match state.keys.lock() {
-        Ok(k) => k.clone(),
+    let keys = match state.event_signer() {
+        Ok(k) => k,
         Err(_) => return,
     };
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
@@ -714,6 +714,9 @@ pub(crate) fn spawn_transcription_task(
                 }
             };
 
+            if session_generation.load(Ordering::Acquire) != spawned_gen {
+                break;
+            }
             let response = {
                 http_client
                     .post(&url)

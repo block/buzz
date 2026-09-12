@@ -231,6 +231,7 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     signedEventRelay: SignedEventRelay(
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
+      signer: config.signer,
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
@@ -250,7 +251,8 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     isDeliveryValid: () {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&
-          currentConfig.nsec == config.nsec;
+          currentConfig.nsec == config.nsec &&
+          identical(currentConfig.remoteSigner, config.remoteSigner);
     },
   );
 });

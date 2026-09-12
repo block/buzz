@@ -379,11 +379,8 @@ void _sendTypingIndicator(
 }) async {
   try {
     final config = ref.read(relayConfigProvider);
-    final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) return;
-
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return;
+    final signer = config.signer;
+    if (signer == null) return;
 
     final tags = <List<String>>[
       ['h', channelId],
@@ -394,16 +391,18 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
+    final session = ref.read(relaySessionProvider.notifier);
+    final lease = session.captureLease();
     final event = await signEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
-      signer: LocalEventSigner(privkeyHex),
+      signer: signer,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
-    final session = ref.read(relaySessionProvider.notifier);
-    session.sendRaw(['EVENT', event.toMap()]);
+    config.remoteSigner?.checkCurrent();
+    session.sendRaw(['EVENT', event.toMap()], lease: lease);
   } catch (_) {
     // Fire-and-forget — typing indicator failure is non-fatal.
   }

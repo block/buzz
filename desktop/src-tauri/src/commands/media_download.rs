@@ -253,9 +253,9 @@ fn redirect_refusal_error(status: reqwest::StatusCode) -> Option<String> {
 }
 
 /// Core streaming fetcher with a caller-supplied byte cap.
-pub(super) async fn fetch_blob_bytes_with_cap(
+pub(crate) async fn fetch_blob_bytes_with_cap(
     url: &str,
-    state: &State<'_, AppState>,
+    state: &AppState,
     cap: u64,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Vec<u8>, String> {
@@ -269,7 +269,7 @@ pub(super) async fn fetch_blob_bytes_with_cap(
     // `validate_download_url`, satisfying the mint_media_get_auth safety
     // contract (the token never leaves the relay origin).
     let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base).await {
+    if let Some(auth) = mint_media_get_auth(state, &relay_base).await? {
         req = req.header("authorization", auth);
     }
 

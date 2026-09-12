@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -119,6 +120,9 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   InviteJoinState build() => const InviteJoinState();
 
   Future<void> prepare(InviteDeepLink invite) async {
+    if (enterpriseEnabled) {
+      throw StateError('Your organization provisions community access');
+    }
     validateInviteRelayUri(Uri.parse(invite.relayUrl));
     final communities = await ref.read(communityListProvider.future);
     final existing = _existingCommunity(communities, invite.relayUrl);
@@ -157,6 +161,9 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   }
 
   Future<void> confirmJoin() async {
+    if (enterpriseEnabled) {
+      throw StateError('Your organization provisions community access');
+    }
     final invite = state.invite;
     if (invite == null ||
         state.requiresFreshInvite ||

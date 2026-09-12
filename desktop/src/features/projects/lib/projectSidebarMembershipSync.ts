@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -60,6 +61,7 @@ export class ProjectSidebarMembershipSyncManager {
   async fetchRemoteMembership(): Promise<
     FetchResult<RemoteProjectSidebarMembership>
   > {
+    if (!supportsLocalIdentityFeatures()) return { status: "failed" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_PROJECT_SIDEBAR_MEMBERSHIP],
@@ -106,6 +108,7 @@ export class ProjectSidebarMembershipSyncManager {
   }
 
   publishMembership(store: ProjectSidebarMembershipStore): void {
+    if (!supportsLocalIdentityFeatures()) return;
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -185,6 +188,7 @@ export class ProjectSidebarMembershipSyncManager {
   async subscribe(
     onUpdate: (remote: RemoteProjectSidebarMembership) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_PROJECT_SIDEBAR_MEMBERSHIP],

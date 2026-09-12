@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   nip44DecryptFromSelf,
@@ -55,6 +56,7 @@ export class ChannelMuteSyncManager {
   }
 
   async fetchRemoteMutes(): Promise<FetchResult<RemoteMutes>> {
+    if (!supportsLocalIdentityFeatures()) return { status: "failed" };
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_MUTES],
@@ -101,6 +103,7 @@ export class ChannelMuteSyncManager {
   }
 
   publishMutes(store: ChannelMuteStore): void {
+    if (!supportsLocalIdentityFeatures()) return;
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -197,6 +200,7 @@ export class ChannelMuteSyncManager {
   async subscribeToMutes(
     onUpdate: (remote: RemoteMutes) => void,
   ): Promise<() => Promise<void>> {
+    if (!supportsLocalIdentityFeatures()) return async () => {};
     return relayClient.subscribeLive(
       {
         kinds: [KIND_CHANNEL_MUTES],

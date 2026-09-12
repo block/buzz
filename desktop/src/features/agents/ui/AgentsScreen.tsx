@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -123,9 +124,16 @@ export function AgentsScreen() {
     >
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
-          <React.Suspense fallback={<ViewLoadingFallback kind="agents" />}>
-            <AgentsView />
-          </React.Suspense>
+          {!supportsLocalIdentityFeatures() ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              Local managed agents are unavailable in this enterprise build. You
+              can still talk to authorized agents in your community.
+            </p>
+          ) : (
+            <React.Suspense fallback={<ViewLoadingFallback kind="agents" />}>
+              <AgentsView />
+            </React.Suspense>
+          )}
           {profilePanelTarget ? (
             <UserProfilePanel
               canResetWidth={threadPanelWidth.canReset}

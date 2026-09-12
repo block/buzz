@@ -139,6 +139,7 @@ void main() {
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
+        expect(request.followRedirects, false);
         fetches += 1;
         return http.Response.bytes(_pngBytes, 200);
       });
@@ -159,6 +160,7 @@ void main() {
     test('sends auth headers with the fetch', () async {
       Map<String, String>? seen;
       final client = http_testing.MockClient((request) async {
+        expect(request.followRedirects, false);
         seen = request.headers;
         return http.Response.bytes(_pngBytes, 200);
       });
@@ -175,6 +177,7 @@ void main() {
     test('failed URL is not refetched until cooldown elapses', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
+        expect(request.followRedirects, false);
         fetches += 1;
         return http.Response('rate limited', 429);
       });
@@ -207,6 +210,7 @@ void main() {
     test('honors Retry-After on 429 (capped)', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
+        expect(request.followRedirects, false);
         fetches += 1;
         return http.Response(
           'rate limited',

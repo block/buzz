@@ -337,29 +337,31 @@ pub(crate) async fn sign_blossom_get_auth_header(
     ))
 }
 
-/// Mint a `t=get` Authorization header value for a relay media fetch, or
-/// `None` when signing is unavailable (identity in recovery mode).
-///
-/// When signing is unavailable, callers send no header and the relay rejects
-/// the read. This keeps recovery mode from accidentally treating a media URL
-/// as a bearer capability.
+/// Mint a relay media read proof. Corporate identity/proof failures propagate;
+/// only OSS recovery or local signing failure permits an unsigned request.
 ///
 /// Safety contract: callers must only attach the returned header to URLs
 /// constructed from (or validated against) the app's own relay base URL —
 /// never to third-party origins, where the bearer token would leak.
-pub(crate) async fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<String> {
+pub(crate) async fn mint_media_get_auth(
+    state: &AppState,
+    base_url: &str,
+) -> Result<Option<String>, String> {
+    if crate::enterprise_identity::enabled() {
+        return state.enterprise.media_read_proof(base_url).await.map(Some);
+    }
     let keys = match state.event_signer() {
         Ok(k) => k,
         Err(e) => {
             eprintln!("buzz-desktop: media get auth unavailable (unsigned request): {e}");
-            return None;
+            return Ok(None);
         }
     };
     match sign_blossom_get_auth_header(&keys, base_url, MEDIA_GET_AUTH_EXPIRY_SECS).await {
-        Ok(header) => Some(header),
+        Ok(header) => Ok(Some(header)),
         Err(e) => {
             eprintln!("buzz-desktop: media get auth signing failed (unsigned request): {e}");
-            None
+            Ok(None)
         }
     }
 }
@@ -418,12 +420,33 @@ async fn do_upload(
     progress: Option<(tauri::AppHandle, String)>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<BlobDescriptor, String> {
+    let lifetime = if crate::enterprise_identity::enabled() {
+        state.enterprise.cancellation()?
+    } else {
+        CancellationToken::new()
+    };
+    tokio::select! {
+        biased;
+        _ = lifetime.cancelled() => Err("Corporate login changed; upload cancelled".into()),
+        result = do_upload_scoped(body, mime, state, progress, cancellation) => result,
+    }
+}
+
+async fn do_upload_scoped(
+    body: Vec<u8>,
+    mime: &str,
+    state: &AppState,
+    progress: Option<(tauri::AppHandle, String)>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
     // Video uploads get a 1-hour auth window to survive slow connections;
     // images use 5 minutes. Must match the server-side max_age_secs values
     // in process_upload (600s) and process_video_upload (3600s).
-    let expiry_secs = if mime.starts_with("video/") {
+    let expiry_secs = if crate::enterprise_identity::enabled() {
+        300
+    } else if mime.starts_with("video/") {
         3600
     } else {
         300

@@ -277,6 +277,7 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
+    ("src/relay/submit_signer_tests.rs", 1, 0), // synthetic ACK relay; guarded production funnel
     ("src/native_relay_client_transport_tests.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),

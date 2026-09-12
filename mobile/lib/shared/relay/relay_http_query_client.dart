@@ -26,8 +26,12 @@ class RelayHttpQueryClient {
         : null;
     generation?.acquire();
     try {
+      final request = http.Request('POST', url)..followRedirects = false;
+      request.headers.addAll(headers);
+      request.bodyBytes = body;
       return await (_injectedClient ?? generation!.client)
-          .post(url, headers: headers, body: body)
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       if (identical(_currentGeneration, generation)) {

@@ -3,6 +3,8 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community_provider.dart';
 import 'relay_client.dart';
+import '../auth/enterprise_identity.dart';
+import '../auth/event_signer.dart';
 
 /// Relay connection configuration.
 ///
@@ -10,7 +12,21 @@ import 'relay_client.dart';
 ///   - `baseUrl` — where the relay lives (used for WS + media upload)
 ///   - `nsec`    — the user's signing key (drives NIP-42 AUTH and event sigs)
 class RelayConfig {
-  const RelayConfig({required String baseUrl, this.nsec}) : _baseUrl = baseUrl;
+  const RelayConfig({required String baseUrl, this.nsec, this.remoteSigner})
+    : _baseUrl = baseUrl;
+
+  /// Capability captured when the server-selected community becomes active.
+  final RemoteEventSigner? remoteSigner;
+
+  /// Local secrets remain separate; never fall back when remote authority fails.
+  EventSigner? get signer {
+    if (remoteSigner != null) return remoteSigner;
+    final secret = nsec;
+    if (secret == null || secret.isEmpty) return null;
+    return LocalEventSigner(nostr.Nip19.decode(payload: secret).data);
+  }
+
+  String? get publicKey => remoteSigner?.publicKey ?? pubkeyFromNsec(nsec);
 
   /// Relay origin exactly as the active community stored it.
   final String _baseUrl;
@@ -53,6 +69,7 @@ class RelayConfig {
 
   /// Derive the websocket URL from the HTTP base URL.
   String get wsUrl {
+    if (baseUrl.isEmpty) throw StateError('No active community');
     final uri = Uri.parse(baseUrl);
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     return uri.replace(scheme: scheme).toString();
@@ -82,6 +99,16 @@ class RelayConfigNotifier extends Notifier<RelayConfig> {
   RelayConfig build() {
     // Watch the active community so that when it changes (community switch),
     // the config rebuilds, triggering the full provider cascade.
+    if (enterpriseEnabled) {
+      final owner = EnterpriseIdentity.instance;
+      void changed() => ref.invalidateSelf();
+      owner.revision.addListener(changed);
+      ref.onDispose(() => owner.revision.removeListener(changed));
+      // Empty config is inert while logged out: no invented key or destination.
+      if (!owner.authenticated) return const RelayConfig(baseUrl: '');
+      final signer = owner.captureSigner();
+      return RelayConfig(baseUrl: signer.relayUrl, remoteSigner: signer);
+    }
     final activeAsync = ref.watch(activeCommunityProvider);
     final active = activeAsync.value;
     if (active != null) {
@@ -93,6 +120,9 @@ class RelayConfigNotifier extends Notifier<RelayConfig> {
   }
 
   void update({required String baseUrl, String? nsec}) {
+    if (enterpriseEnabled) {
+      throw StateError('Corporate community is release-managed');
+    }
     state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
   }
 }
@@ -116,7 +146,7 @@ String? pubkeyFromNsec(String? nsec) {
 /// The current user's hex pubkey, derived from the active community nsec.
 final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return pubkeyFromNsec(config.nsec);
+  return config.publicKey;
 });
 
 /// Provides a [RelayClient] that reacts to config changes.

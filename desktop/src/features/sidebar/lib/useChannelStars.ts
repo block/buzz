@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -44,6 +45,7 @@ export function useChannelStars(
     setStore(readChannelStarsStore(pubkey));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
+    if (!supportsLocalIdentityFeatures()) return;
     managerRef.current = new ChannelStarSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();

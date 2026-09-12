@@ -760,6 +760,7 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     publishedEvents.add(event);

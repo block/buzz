@@ -53,6 +53,12 @@ impl AppState {
     /// this instead of locking `state.keys` directly, so that recovery mode
     /// blocks publishing under an invalid or inaccessible identity.
     pub fn signing_keys(&self) -> Result<Keys, String> {
+        if crate::enterprise_identity::enabled() {
+            return Err(
+                "This feature requires a local private key and is unavailable in corporate builds"
+                    .into(),
+            );
+        }
         if self
             .identity_lost
             .load(std::sync::atomic::Ordering::Acquire)
@@ -67,16 +73,34 @@ impl AppState {
         self.keys
             .lock()
             .map_err(|e| e.to_string())
-            .map(|k| k.clone())
+            .and_then(|k| k.clone().ok_or_else(|| "Local identity unavailable".into()))
     }
 
     /// Capture the active event signer after the same recovery checks as local keys.
     /// Secret export, encryption, pairing and provisioning must use `signing_keys`.
     pub fn event_signer(
         &self,
-    ) -> Result<buzz_ws_client_pkg::event_signer::LocalEventSigner, String> {
-        self.signing_keys()
-            .map(buzz_ws_client_pkg::event_signer::LocalEventSigner::new)
+    ) -> Result<std::sync::Arc<dyn buzz_ws_client_pkg::event_signer::EventSigner>, String> {
+        if crate::enterprise_identity::enabled() {
+            return self.enterprise.event_signer();
+        }
+        Ok(std::sync::Arc::new(
+            buzz_ws_client_pkg::event_signer::LocalEventSigner::new(self.signing_keys()?),
+        ))
+    }
+
+    /// Public identity, including recovery-mode local identity display.
+    pub(crate) fn public_key(&self) -> Result<nostr::PublicKey, String> {
+        if crate::enterprise_identity::enabled() {
+            use buzz_ws_client_pkg::event_signer::EventSigner;
+            return Ok(self.enterprise.event_signer()?.public_key());
+        }
+        self.keys
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .map(Keys::public_key)
+            .ok_or_else(|| "Local identity unavailable".into())
     }
 
     /// Emit the current huddle state to the frontend via Tauri event.

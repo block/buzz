@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { nip44EncryptToSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { RelayEvent } from "@/shared/api/types";
@@ -311,6 +312,11 @@ export class ReadStateManager {
     );
 
     this.hydrateFromLocalStorage();
+    if (!supportsLocalIdentityFeatures()) {
+      this.initialized = true;
+      this.notifyListeners();
+      return;
+    }
 
     await this.fetchAndMerge();
     if (this.destroyed) return;
@@ -632,6 +638,7 @@ export class ReadStateManager {
   }
 
   private schedulePublish(): void {
+    if (!supportsLocalIdentityFeatures()) return;
     if (this.destroyed) return;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
@@ -643,6 +650,7 @@ export class ReadStateManager {
   }
 
   private async publish(): Promise<void> {
+    if (!supportsLocalIdentityFeatures()) return;
     console.debug(`[ReadStateManager] publish starting slotId=${this.slotId}`);
     await this.fetchOwnBlobBeforePublish();
     if (this.destroyed) return;

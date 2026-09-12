@@ -1237,6 +1237,11 @@ async function writeClipboardFlavors({
 
 declare global {
   interface Window {
+    __BUZZ_E2E_ENTERPRISE__?: {
+      enabled: boolean;
+      loginFails?: boolean;
+      loggedIn?: boolean;
+    };
     __BUZZ_E2E__?: E2eConfig;
     /** Last payload written through the native clipboard command. */
     __BUZZ_E2E_LAST_CLIPBOARD__?: { html: string | null; text: string };
@@ -12581,12 +12586,22 @@ export function maybeInstallE2eTauriMocks() {
           return {
             pubkey: identity.pubkey,
             display_name: identity.username,
+            storage: window.__BUZZ_E2E_ENTERPRISE__?.enabled
+              ? "enterprise"
+              : undefined,
             lost: false,
             locked: false,
           };
         }
 
-        return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
+        return {
+          ...DEFAULT_MOCK_IDENTITY,
+          storage: window.__BUZZ_E2E_ENTERPRISE__?.enabled
+            ? "enterprise"
+            : undefined,
+          lost: isLost,
+          locked: isLocked,
+        };
       }
       case "sign_nostr_identity_binding": {
         const request = payload as {
@@ -13408,6 +13423,38 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "enterprise_status": {
+        const enterprise = window.__BUZZ_E2E_ENTERPRISE__;
+        return {
+          enabled: enterprise?.enabled ?? false,
+          identity: enterprise?.loggedIn
+            ? {
+                pubkey: identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+                relayWsUrl: getRelayWsUrl(activeConfig),
+                relayHttpUrl: getRelayWsUrl(activeConfig)
+                  .replace("wss:", "https:")
+                  .replace("ws:", "http:"),
+              }
+            : null,
+        };
+      }
+      case "enterprise_logout":
+        if (window.__BUZZ_E2E_ENTERPRISE__)
+          window.__BUZZ_E2E_ENTERPRISE__.loggedIn = false;
+        return null;
+      case "enterprise_login": {
+        const enterprise = window.__BUZZ_E2E_ENTERPRISE__;
+        if (!enterprise?.enabled || enterprise.loginFails)
+          throw new Error("Corporate login denied");
+        enterprise.loggedIn = true;
+        return {
+          pubkey: identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+          relayWsUrl: getRelayWsUrl(activeConfig),
+          relayHttpUrl: getRelayWsUrl(activeConfig)
+            .replace("wss:", "https:")
+            .replace("ws:", "http:"),
+        };
+      }
       case "auto_connect_default_relay_enabled":
         return activeConfig?.autoConnectDefaultRelay ?? false;
       case "get_legacy_workspace_storage":

@@ -266,6 +266,9 @@ fn load_agent_store<R: tauri::Runtime>(
 pub fn load_managed_agents<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<ManagedAgentRecord>, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local managed-agent keys are unavailable in corporate builds".into());
+    }
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);

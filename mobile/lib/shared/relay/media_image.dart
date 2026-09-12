@@ -97,7 +97,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final uri = Uri.parse(url);
       final http.Response response;
       try {
-        response = await client.get(uri, headers: await auth.headersFor(url));
+        response = await auth.get(client, url);
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         rethrow;
@@ -236,6 +236,7 @@ class MediaImage extends ConsumerWidget {
 
   Widget _image(MediaImageProvider provider, int? cacheWidth) {
     return Image(
+      key: ObjectKey(provider.auth),
       image: ResizeImage.resizeIfNeeded(cacheWidth, null, provider),
       fit: fit,
       width: width,

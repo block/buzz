@@ -27,6 +27,15 @@ struct ProxyState {
 }
 
 async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) -> Response {
+    let app_state = state.app_handle.state::<AppState>();
+    proxy_handler_with_state(&app_state, &state.client, req).await
+}
+
+pub(crate) async fn proxy_handler_with_state(
+    app_state: &AppState,
+    client: &reqwest::Client,
+    req: Request,
+) -> Response {
     // Allow requests with no Origin (e.g. <video> element fetches) or from
     // the Tauri webview origin. Blocks cross-origin JS fetches from other
     // tabs/apps while letting HTML media resource loads through.
@@ -46,21 +55,27 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         .unwrap_or("/");
 
     // Resolve relay URL dynamically so workspace switches take effect immediately.
-    let app_state = state.app_handle.state::<AppState>();
-    let base_url = relay::relay_api_base_url_with_override(&app_state);
+    let base_url = relay::relay_api_base_url_with_override(app_state);
     let upstream_url = format!("{base_url}{path_and_query}");
 
     let has_range = req.headers().contains_key("range");
 
-    let mut upstream = state
-        .client
+    let mut upstream = client
         .get(&upstream_url)
         .timeout(std::time::Duration::from_secs(120));
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&app_state, &base_url).await {
-        upstream = upstream.header("authorization", auth);
+    match mint_media_get_auth(app_state, &base_url).await {
+        Ok(Some(auth)) => upstream = upstream.header("authorization", auth),
+        Ok(None) => {} // OSS optional auth only.
+        Err(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "corporate media authorization failed",
+            )
+                .into_response()
+        }
     }
 
     if let Some(range) = req.headers().get("range") {
@@ -162,7 +177,14 @@ pub async fn handle_buzz_media(
     use tauri::Manager;
 
     let state = app.state::<AppState>();
-    let base = relay::relay_api_base_url_with_override(&state);
+    handle_buzz_media_with_state(&state, request).await
+}
+
+pub(crate) async fn handle_buzz_media_with_state(
+    state: &AppState,
+    request: &http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let base = relay::relay_api_base_url_with_override(state);
 
     // Preserve path + query (thumbnails may have query params).
     // Only proxy /media/ paths — reject anything else.
@@ -187,8 +209,10 @@ pub async fn handle_buzz_media(
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&state, &base).await {
-        upstream = upstream.header("authorization", auth);
+    match mint_media_get_auth(state, &base).await {
+        Ok(Some(auth)) => upstream = upstream.header("authorization", auth),
+        Ok(None) => {} // OSS optional auth only.
+        Err(_) => return error_response(403, "corporate media authorization failed"),
     }
 
     if let Some(range) = request.headers().get("range") {

@@ -1,3 +1,4 @@
+import { requireLocalIdentityFeature } from "@/shared/api/identityCapabilities";
 import { READ_STATE_MAX_PLAINTEXT_BYTES } from "@/features/channels/readState/readStateFormat";
 import type { Community } from "@/features/communities/types";
 import { fetchObservedChannels } from "@/features/communities/communityUnreadObserver";
@@ -81,6 +82,7 @@ export async function publishCommunityReadState(args: {
   encrypt?: (plaintext: string) => Promise<string>;
   sign?: SignEvent;
 }): Promise<void> {
+  requireLocalIdentityFeature("Cross-community read-state sync");
   const { client, pubkey, relayUrl } = args;
   const encrypt = args.encrypt ?? nip44EncryptToSelf;
   const sign = args.sign ?? signRelayEvent;

@@ -22,6 +22,7 @@ void main() {
     final session = RelaySessionNotifier(httpClient: client);
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(_FakeAuthNotifier.new),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -32,6 +33,7 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    await container.read(authProvider.future);
 
     const filter = NostrFilter(
       kinds: EventKind.channelTimelineContentKinds,
@@ -54,6 +56,7 @@ void main() {
     expect(capturedRequest!.headers['Content-Type'], 'application/json');
     expect(jsonDecode(capturedRequest!.body), [filter.toJson()]);
 
+    expect(capturedRequest!.followRedirects, false);
     final authHeader = capturedRequest!.headers['Authorization'];
     expect(authHeader, isNotNull);
     expect(authHeader, startsWith('Nostr '));
@@ -88,6 +91,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(_FakeAuthNotifier.new),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -98,6 +102,7 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    await container.read(authProvider.future);
 
     await expectLater(
       container.read(relaySessionProvider.notifier).queryRelay(const []),
@@ -116,6 +121,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        authProvider.overrideWith(_FakeAuthNotifier.new),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -126,6 +132,7 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    await container.read(authProvider.future);
     container.read(relaySessionProvider);
 
     await expectLater(
@@ -157,6 +164,7 @@ void main() {
       );
       final container = ProviderContainer(
         overrides: [
+          authProvider.overrideWith(_FakeAuthNotifier.new),
           relaySessionProvider.overrideWith(() => session),
           relayConfigProvider.overrideWith(
             () => _FakeRelayConfigNotifier(
@@ -167,6 +175,7 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
+      await container.read(authProvider.future);
       container.read(relaySessionProvider);
       await Future<void>.delayed(Duration.zero);
 
@@ -209,7 +218,7 @@ void main() {
       },
     );
     const body = '{"error":"rate-limited: quota exceeded; retry in 4s"}';
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async => http.Response(body, 429)),
     );
@@ -239,7 +248,7 @@ void main() {
       },
     );
     const body = '{"error":"rate-limited: shared admission unavailable"}';
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async => http.Response(body, 503)),
     );
@@ -269,7 +278,7 @@ void main() {
       },
     );
     const body = '{"error":"not found"}';
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async => http.Response(body, 404)),
     );
@@ -299,7 +308,7 @@ void main() {
       },
     );
     const body = 'upstream unavailable';
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async => http.Response(body, 503)),
     );
@@ -328,7 +337,7 @@ void main() {
         return timer;
       },
     );
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async => http.Response('[]', 200)),
     );
@@ -345,7 +354,7 @@ void main() {
       timerFactory: _ManualTimer.new,
     );
     var requestCount = 0;
-    final harness = _queryHarness(
+    final harness = await _queryHarness(
       gate: gate,
       client: http_testing.MockClient((_) async {
         requestCount++;
@@ -464,6 +473,7 @@ void main() {
           ({
             required wsUrl,
             required nsec,
+            signer,
             required onMessage,
             required onConnected,
             required onDisconnected,
@@ -537,6 +547,7 @@ void main() {
             ({
               required wsUrl,
               required nsec,
+              signer,
               required onMessage,
               required onConnected,
               required onDisconnected,
@@ -594,6 +605,7 @@ void main() {
             ({
               required wsUrl,
               required nsec,
+              signer,
               required onMessage,
               required onConnected,
               required onDisconnected,
@@ -1410,7 +1422,7 @@ void main() {
       final session = RelaySessionNotifier(rateLimitGate: gate);
       session.debugAttachSocketForTest(_RecordingRelaySocket());
 
-      final publish = session.publish(_event());
+      final publish = session.publish(_event(), lease: session.captureLease());
       session.debugHandleMessage([
         'OK',
         'event-1',
@@ -1446,7 +1458,10 @@ void main() {
       final session = RelaySessionNotifier(rateLimitGate: gate);
       session.debugAttachSocketForTest(socket);
 
-      final firstPublish = session.publish(_event(id: 'event-a'));
+      final firstPublish = session.publish(
+        _event(id: 'event-a'),
+        lease: session.captureLease(),
+      );
       session.debugHandleMessage([
         'OK',
         'event-a',
@@ -1457,6 +1472,7 @@ void main() {
 
       var secondSettled = false;
       final secondPublish = session.publish(
+        lease: session.captureLease(),
         _event(id: 'event-b'),
         timeout: Duration.zero,
       );
@@ -1505,7 +1521,10 @@ void main() {
       session.debugAttachSocketForTest(socket);
       gate.activate(4);
 
-      final publish = session.publish(_event(id: 'event-b'));
+      final publish = session.publish(
+        _event(id: 'event-b'),
+        lease: session.captureLease(),
+      );
       session.debugSupersedeConnection();
       gateTimers.single.fire();
 
@@ -1519,7 +1538,7 @@ void main() {
     final session = RelaySessionNotifier(rateLimitGate: gate);
     session.debugAttachSocketForTest(_RecordingRelaySocket());
 
-    final publish = session.publish(_event());
+    final publish = session.publish(_event(), lease: session.captureLease());
     session.debugHandleMessage([
       'OK',
       'event-1',
@@ -1596,13 +1615,14 @@ class _QueryHarness {
   _QueryHarness({required this.container, required this.session});
 }
 
-_QueryHarness _queryHarness({
+Future<_QueryHarness> _queryHarness({
   required RelayRateLimitGate gate,
   required http.Client client,
-}) {
+}) async {
   final session = RelaySessionNotifier(httpClient: client, rateLimitGate: gate);
   final container = ProviderContainer(
     overrides: [
+      authProvider.overrideWith(_FakeAuthNotifier.new),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(
         () => _FakeRelayConfigNotifier(
@@ -1612,6 +1632,7 @@ _QueryHarness _queryHarness({
       ),
     ],
   );
+  await container.read(authProvider.future);
   container.read(relaySessionProvider);
   return _QueryHarness(container: container, session: session);
 }

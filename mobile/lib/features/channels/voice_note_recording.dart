@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -468,7 +469,8 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
        _client = client,
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory,
        _requiresAuthenticatedLocalFile =
-           requiresAuthenticatedLocalFile ?? Platform.isIOS,
+           requiresAuthenticatedLocalFile ??
+           (Platform.isIOS || enterpriseEnabled),
        _downloadTimeout = downloadTimeout,
        _maxDownloadBytes = maxDownloadBytes,
        _player = player ?? _DeviceVoiceNoteAudioPlayerBackend() {
@@ -608,7 +610,8 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
         'GET',
         uri,
         abortTrigger: requestAbort.future,
-      )..headers.addAll(await remote.headers());
+      )..followRedirects = false;
+      request.headers.addAll(await remote.headers());
       if (_disposed ||
           sourceGeneration != _sourceGeneration ||
           playbackOperationGeneration != _playbackOperationGeneration) {

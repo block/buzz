@@ -673,7 +673,7 @@ pub async fn mint_agent_card(
             // `media_download.rs`).
             let relay_base = crate::relay::relay_api_base_url_with_override(&state);
             let auth = if is_same_origin(url, &relay_base) {
-                crate::commands::media::mint_media_get_auth(&state, &relay_base).await
+                crate::commands::media::mint_media_get_auth(&state, &relay_base).await?
             } else {
                 None
             };

@@ -16,7 +16,7 @@ class _CommunitySection extends ConsumerWidget {
       label: 'Community',
       verticalPadding: Grid.twelve,
       children: [
-        if (canInvite)
+        if (canInvite && !enterpriseEnabled)
           AppListRow(
             icon: LucideIcons.userPlus,
             title: 'Invite to community',
@@ -25,16 +25,17 @@ class _CommunitySection extends ConsumerWidget {
               context,
             ).push(MaterialPageRoute<void>(builder: invitePageBuilder)),
           ),
-        AppListRow(
-          key: const ValueKey('community-theme-row'),
-          icon: LucideIcons.palette,
-          title: 'Theme',
-          value: themeSelectionLabel(preference.theme, preference.mode),
-          trailing: const _RowChevron(),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
+        if (!enterpriseEnabled)
+          AppListRow(
+            key: const ValueKey('community-theme-row'),
+            icon: LucideIcons.palette,
+            title: 'Theme',
+            value: themeSelectionLabel(preference.theme, preference.mode),
+            trailing: const _RowChevron(),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
+            ),
           ),
-        ),
       ],
     );
   }

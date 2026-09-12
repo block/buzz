@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import * as React from "react";
 
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -111,7 +112,10 @@ export function useCommunityUnread(
     };
 
     const pollInactiveCommunities = async () => {
-      if (inactiveCommunities.length === 0) {
+      if (
+        !supportsLocalIdentityFeatures() ||
+        inactiveCommunities.length === 0
+      ) {
         return;
       }
 

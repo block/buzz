@@ -125,11 +125,7 @@ pub async fn build_nip98_auth_header(
     body: &[u8],
     state: &AppState,
 ) -> Result<String, String> {
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    let keys = state.event_signer()?;
     build_nip98_auth_header_for_keys(&keys, method, url, body).await
 }
 
@@ -646,11 +642,12 @@ pub async fn submit_event_with_keys(
     keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
+    let base = relay_api_base_url_with_override(state);
     let event = builder
         .sign_with_event_signer(keys)
         .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
-    submit_signed_event_with_keys(&event, state, keys, auth_tag).await
+    submit_signed_event_at_with_auth(&event, state, &base, keys, auth_tag).await
 }
 
 /// POST an already-signed event using the same explicit identity for NIP-98.
@@ -660,11 +657,22 @@ pub async fn submit_signed_event_with_keys(
     keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
+    let base = relay_api_base_url_with_override(state);
+    submit_signed_event_at_with_auth(event, state, &base, keys, auth_tag).await
+}
+
+pub(crate) async fn submit_signed_event_at_with_auth(
+    event: &nostr::Event,
+    state: &AppState,
+    base: &str,
+    keys: &(impl EventSigner + ?Sized),
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
     if event.pubkey != keys.public_key() {
         return Err("signed event does not match the publishing identity".to_string());
     }
     crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let url = format!("{}/events", base.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header =
@@ -693,6 +701,9 @@ pub async fn submit_signed_event_with_keys(
 
     if !result.accepted {
         return Err(format!("relay rejected event: {}", result.message));
+    }
+    if result.event_id != event.id.to_hex() {
+        return Err("Relay acknowledgement ID mismatch".into());
     }
 
     Ok(result)

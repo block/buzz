@@ -54,8 +54,7 @@ mod truncated_display_name_tests {
 
 #[tauri::command]
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    let pubkey = keys.public_key();
+    let pubkey = state.public_key()?;
     let pubkey_hex = pubkey.to_hex();
     let display_name = truncated_display_name(&pubkey)?;
     let lost = state
@@ -71,7 +70,11 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
-        storage: state.identity_storage().as_str().to_string(),
+        storage: if crate::enterprise_identity::enabled() {
+            "enterprise".into()
+        } else {
+            state.identity_storage().as_str().to_string()
+        },
         lost,
         locked,
         reset_failed,
@@ -368,6 +371,10 @@ pub async fn import_identity(
     password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local identity changes are unavailable in enterprise mode".into());
+    }
+
     tokio::task::spawn_blocking(move || {
         // NIP-49 backups require a passphrase and decrypt entirely in Rust.
         // Raw nsec/hex input follows the existing parser path unchanged.
@@ -439,8 +446,12 @@ pub(crate) fn commit_imported_identity(
     keys: nostr::Keys,
     persist: impl FnOnce(&nostr::Keys) -> Result<crate::app_state::IdentityStorage, String>,
 ) -> Result<(nostr::PublicKey, crate::app_state::IdentityStorage), String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local-key import is unavailable in enterprise mode".into());
+    }
+
     // Capture the previous pubkey up front for post-commit cleanup.
-    let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+    let previous_pubkey = state.public_key()?;
 
     let storage = persist(&keys)?;
 
@@ -450,7 +461,7 @@ pub(crate) fn commit_imported_identity(
     let pubkey = keys.public_key();
     {
         let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
-        *active_keys = keys;
+        *active_keys = Some(keys);
         state.set_identity_storage(storage);
     }
 
@@ -496,6 +507,10 @@ pub(crate) fn commit_imported_identity(
 pub async fn persist_current_identity(
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local identity changes are unavailable in enterprise mode".into());
+    }
+
     tokio::task::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
 
@@ -513,7 +528,7 @@ pub async fn persist_current_identity(
         }
 
         // Clone current keys without holding the mutex across keyring I/O.
-        let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+        let keys = state.signing_keys()?;
 
         let data_dir = app_handle
             .path()
@@ -645,11 +660,7 @@ pub async fn sign_nostr_identity_binding(
         &expires_at,
     )?;
 
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let event = build_nostr_identity_binding_event(

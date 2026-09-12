@@ -19,6 +19,19 @@ pub trait EventSigner: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Event, String>> + Send + '_>>;
 }
 
+// Shared capability snapshots remain the same exact-event boundary.
+impl<T: EventSigner + ?Sized> EventSigner for std::sync::Arc<T> {
+    fn public_key(&self) -> PublicKey {
+        (**self).public_key()
+    }
+    fn sign(
+        &self,
+        event: UnsignedEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<Event, String>> + Send + '_>> {
+        (**self).sign(event)
+    }
+}
+
 /// An in-process signer backed by local keys. Key management remains outside the signer.
 #[derive(Clone)]
 pub struct LocalEventSigner {

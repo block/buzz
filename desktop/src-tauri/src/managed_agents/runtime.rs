@@ -452,6 +452,10 @@ pub fn spawn_agent_child(
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local managed-agent processes are unavailable in corporate builds".into());
+    }
+
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }

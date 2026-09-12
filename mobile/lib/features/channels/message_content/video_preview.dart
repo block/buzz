@@ -30,8 +30,12 @@ final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   ref,
 ) {
   final auth = ref.watch(mediaGetAuthServiceProvider);
-  return (url) async =>
-      _loadVideoPreviewFrame(url, headers: await auth.headersFor(url));
+  return (url) async {
+    // No full-file download per timeline card and no proof handed to a native
+    // redirect-following player. Corporate videos use their poster or viewer.
+    if (auth.isRemote) return null;
+    return _loadVideoPreviewFrame(url, headers: await auth.headersFor(url));
+  };
 });
 
 class _MessageVideoPreview extends HookConsumerWidget {

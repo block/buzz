@@ -935,7 +935,7 @@ fn signing_keys_returns_ok_when_normal() {
         "signing_keys() must return Ok when neither flag is set"
     );
     // The returned keys must match the stored keys.
-    let expected = state.keys.lock().unwrap().clone();
+    let expected = state.keys.lock().unwrap().as_ref().unwrap().clone();
     assert_key_eq(&result.unwrap(), &expected);
 }
 

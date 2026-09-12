@@ -17,6 +17,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final service = MediaUploadService(
     baseUrl: config.baseUrl,
     nsec: config.nsec,
+    signer: config.signer,
     pickGalleryImage: () => picker.pickImage(
       source: ImageSource.gallery,
       requestFullMetadata: false,

@@ -1,10 +1,18 @@
 part of '../media_viewer_page.dart';
 
+/// Android supports authenticated range requests; other platforms use a file.
+/// Overridable so widget tests can exercise the actual streaming path.
+final mediaVideoStreamingSupportedProvider = Provider<bool>(
+  (ref) => Platform.isAndroid,
+);
+
 class MediaVideoViewerPage extends HookConsumerWidget {
   final String videoUrl;
   final String? posterUrl;
   final VoidCallback? onReply;
 
+  static const _maxDownloadBytes = 256 * 1024 * 1024;
+  static const _downloadTimeout = Duration(minutes: 2);
   static const _dismissThreshold = 100.0;
   static const _dismissVelocity = 700.0;
   static const _backgroundFadeDivisor = 300.0;
@@ -18,11 +26,8 @@ class MediaVideoViewerPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(mediaGetAuthServiceProvider);
     final controller = useState<VideoPlayerController?>(null);
-    final videoFile = useRef<File?>(null);
-    final downloadRequestAbort = useRef<Completer<void>?>(null);
-    final downloadSubscription = useRef<StreamSubscription<List<int>>?>(null);
-    final downloadSink = useRef<IOSink?>(null);
     final initializeFuture = useState<Future<void>?>(null);
     final error = useState<String?>(null);
     final dragOffset = useState(0.0);
@@ -31,35 +36,49 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       duration: const Duration(milliseconds: 200),
     );
 
-    Future<void> deleteVideoFile() async {
-      final file = videoFile.value;
-      videoFile.value = null;
-      if (file == null) return;
-      try {
-        if (await file.exists()) await file.delete();
-      } on FileSystemException {
-        // Temporary storage cleanup should not make closing the viewer fail.
-      }
-    }
-
     useEffect(() {
+      // Each effect owns its resources: retired cleanup must not touch a new
+      // login/community's download even when the video URL is unchanged.
+      File? videoFile;
+      Completer<void>? downloadRequestAbort;
+      StreamSubscription<List<int>>? downloadSubscription;
+      IOSink? downloadSink;
+      final cancelled = Completer<void>();
       var disposed = false;
+      controller.value = null;
+      error.value = null;
+      Future<void> deleteVideoFile() async {
+        final file = videoFile;
+        videoFile = null;
+        if (file == null) return;
+        try {
+          if (await file.exists()) await file.delete();
+        } on FileSystemException {
+          // Best-effort cleanup of the temporary playback copy.
+        }
+      }
+
       Future<void> initializeVideo() async {
-        final auth = ref.read(mediaGetAuthServiceProvider);
         final uri = Uri.parse(videoUrl);
 
         // ExoPlayer supports the request headers on every range request, so
         // keep Android on its streaming path. iOS uses the authenticated local
         // copy below because AVPlayer can drop those headers after the first
         // request.
-        if (Platform.isAndroid) {
+        if (ref.read(mediaVideoStreamingSupportedProvider) && !auth.isRemote) {
           VideoPlayerController? streamingController;
           try {
+            final headers = await auth.headersFor(videoUrl);
+            if (disposed) return;
             streamingController = VideoPlayerController.networkUrl(
               uri,
-              httpHeaders: await auth.headersFor(videoUrl),
+              httpHeaders: headers,
             );
             await streamingController.initialize();
+            if (disposed) {
+              await streamingController.dispose();
+              return;
+            }
             await streamingController.play();
             if (disposed) {
               await streamingController.dispose();
@@ -71,26 +90,40 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             if (streamingController != null) {
               await streamingController.dispose();
             }
+            if (disposed) return;
             // Fall through to the authenticated local-file path only when the
             // streaming controller cannot initialize.
           }
         }
 
+        VideoPlayerController? localController;
         try {
           final client = ref.read(mediaHttpClientProvider);
+          final headers = await auth.headersFor(videoUrl);
+          if (disposed) return;
           final requestAbort = Completer<void>();
-          downloadRequestAbort.value = requestAbort;
+          downloadRequestAbort = requestAbort;
           final request = http.AbortableStreamedRequest(
             'GET',
             uri,
             abortTrigger: requestAbort.future,
-          )..headers.addAll(await auth.headersFor(videoUrl));
+          )..followRedirects = false;
+          request.headers.addAll(headers);
+          auth.checkCurrent();
           late final http.StreamedResponse response;
           try {
-            response = await client.send(request);
+            response = await client
+                .send(request)
+                .timeout(
+                  _downloadTimeout,
+                  onTimeout: () {
+                    if (!requestAbort.isCompleted) requestAbort.complete();
+                    throw TimeoutException('Video download timed out');
+                  },
+                );
           } finally {
-            if (downloadRequestAbort.value == requestAbort) {
-              downloadRequestAbort.value = null;
+            if (downloadRequestAbort == requestAbort) {
+              downloadRequestAbort = null;
             }
           }
           if (disposed) {
@@ -98,31 +131,53 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            await response.stream.drain<void>();
+            await _cancelVideoResponse(response);
             throw HttpException(
               'Video download failed (${response.statusCode})',
               uri: uri,
             );
           }
 
-          final responseSubscription = response.stream.listen(null)..pause();
-          downloadSubscription.value = responseSubscription;
+          try {
+            auth.checkCurrent();
+          } catch (_) {
+            await _cancelVideoResponse(response);
+            rethrow;
+          }
+          if ((response.contentLength ?? 0) > _maxDownloadBytes) {
+            await _cancelVideoResponse(response);
+            throw StateError('Video download is too large');
+          }
+          var downloadedBytes = 0;
+          final responseSubscription =
+              response.stream
+                  .map((chunk) {
+                    downloadedBytes += chunk.length;
+                    if (downloadedBytes > _maxDownloadBytes) {
+                      throw StateError('Video download is too large');
+                    }
+                    return chunk;
+                  })
+                  .listen(null)
+                ..pause();
+          downloadSubscription = responseSubscription;
           final directory = await getTemporaryDirectory();
           if (disposed) {
             await responseSubscription.cancel();
-            if (downloadSubscription.value == responseSubscription) {
-              downloadSubscription.value = null;
+            if (downloadSubscription == responseSubscription) {
+              downloadSubscription = null;
             }
             return;
           }
+          auth.checkCurrent();
           final file = File(
             '${directory.path}${Platform.pathSeparator}'
             'buzz-video-${DateTime.now().microsecondsSinceEpoch}'
             '${_videoFileExtension(uri)}',
           );
-          videoFile.value = file;
+          videoFile = file;
           final sink = file.openWrite();
-          downloadSink.value = sink;
+          downloadSink = sink;
           final completed = Completer<void>();
           responseSubscription
             ..onData(sink.add)
@@ -137,24 +192,39 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               if (!completed.isCompleted) completed.complete();
             })
             ..resume();
-          await completed.future;
-          downloadSubscription.value = null;
-          downloadSink.value = null;
+          await Future.any([
+            completed.future,
+            cancelled.future,
+          ]).timeout(_downloadTimeout);
+          downloadSubscription = null;
+          downloadSink = null;
           if (disposed) {
             await deleteVideoFile();
             return;
           }
 
-          final localController = VideoPlayerController.file(file);
+          auth.checkCurrent();
+          localController = VideoPlayerController.file(file);
           await localController.initialize();
+          if (disposed) {
+            await localController.dispose();
+            await deleteVideoFile();
+            return;
+          }
+          auth.checkCurrent();
           await localController.play();
           if (disposed) {
             await localController.dispose();
             await deleteVideoFile();
             return;
           }
+          auth.checkCurrent();
           controller.value = localController;
         } catch (loadError) {
+          await downloadSubscription?.cancel();
+          await downloadSink?.close();
+          await localController?.dispose();
+          await deleteVideoFile();
           if (!disposed) error.value = loadError.toString();
         }
       }
@@ -162,17 +232,18 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       initializeFuture.value = initializeVideo();
       return () {
         disposed = true;
-        final activeRequestAbort = downloadRequestAbort.value;
+        cancelled.complete();
+        final activeRequestAbort = downloadRequestAbort;
         if (activeRequestAbort != null && !activeRequestAbort.isCompleted) {
           activeRequestAbort.complete();
         }
-        unawaited(downloadSubscription.value?.cancel() ?? Future.value());
-        unawaited(downloadSink.value?.close() ?? Future.value());
+        unawaited(downloadSubscription?.cancel() ?? Future.value());
+        unawaited(downloadSink?.close() ?? Future.value());
         final activeController = controller.value;
         if (activeController != null) unawaited(activeController.dispose());
         unawaited(deleteVideoFile());
       };
-    }, [videoUrl]);
+    }, [videoUrl, auth]);
 
     void animateSnapBack() {
       isDragging.value = false;

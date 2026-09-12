@@ -308,11 +308,7 @@ pub async fn start_huddle(
                     *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) =
                         successful_agents.clone();
                     hs.maybe_auto_enable_transcription_for_agents();
-                    let own_pubkey = state
-                        .keys
-                        .lock()
-                        .map(|k| k.public_key().to_hex())
-                        .unwrap_or_default();
+                    let own_pubkey = state.public_key().map(|k| k.to_hex()).unwrap_or_default();
                     let mut participants = successful_agents.clone();
                     if !own_pubkey.is_empty() && !participants.contains(&own_pubkey) {
                         participants.insert(0, own_pubkey);
@@ -428,11 +424,7 @@ pub async fn join_huddle(
     };
 
     // Seed participant list with own pubkey as a fallback until relay responds.
-    let own_pubkey = state
-        .keys
-        .lock()
-        .map(|k| k.public_key().to_hex())
-        .unwrap_or_default();
+    let own_pubkey = state.public_key().map(|k| k.to_hex()).unwrap_or_default();
 
     let committed = {
         let mut hs = state.huddle()?;

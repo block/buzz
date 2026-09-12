@@ -1,3 +1,4 @@
+import { supportsLocalIdentityFeatures } from "@/shared/api/identityCapabilities";
 import { ArrowLeft, Bell, Check, Clock, ExternalLink, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -306,6 +307,15 @@ export function RemindersPanel({
     () => groups.flatMap((group) => group.reminders),
     [groups],
   );
+
+  if (!supportsLocalIdentityFeatures()) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        Encrypted reminders are unavailable with an organization-managed
+        identity.
+      </p>
+    );
+  }
 
   if (remindersQuery.isLoading) {
     return (
