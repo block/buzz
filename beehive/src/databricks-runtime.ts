@@ -45,6 +45,7 @@ export async function databricksRuntime(input: { host: string; key: ProviderRefe
       controller.signal.throwIfAborted();
       if (!token.secret || /\s/.test(token.secret)) throw Error();
       const headers = new Headers({ authorization: `Bearer ${token.secret}`, 'content-type': 'application/json' });
+      if (url.pathname === '/ai-gateway/anthropic/v1/messages') headers.set('anthropic-version', '2023-06-01');
       token.secret = undefined;
       const upstream = await fetcher(host + url.pathname + url.search, { method: req.method, headers, ...(body ? { body: body.toString() } : {}), signal: controller.signal, redirect: 'error' });
       if (upstream.status === 401 || upstream.status === 403) { denied = true; await upstream.body?.cancel(); error(res, 401); return; }
@@ -56,7 +57,7 @@ export async function databricksRuntime(input: { host: string; key: ProviderRefe
       finally { await reader.cancel(); reader.releaseLock(); }
       controller.signal.throwIfAborted();
       if (stopped || res.destroyed) return;
-      res.writeHead(200, { 'content-type': 'application/json' }); res.end(Buffer.concat(chunks));
+      res.writeHead(200, { 'content-type': upstream.headers.get('content-type')?.startsWith('text/event-stream') ? 'text/event-stream' : 'application/json' }); res.end(Buffer.concat(chunks));
     } catch { error(res, 503); }
     finally { clearTimeout(timer); req.removeListener('aborted', abort); res.removeListener('close', abort); active.delete(controller); }
   }

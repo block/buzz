@@ -162,3 +162,30 @@ merely sending BUZZ_AGENT_PROVIDER to an unrelated process.
 
 Evidence for this continuation, final suite and remaining work:
 `/Users/loganj/.buzz/artifacts/beehive-adapter-integration-9b0f8958/INTEGRATION_RESULT.md`.
+
+## Pi runtime continuation (supersedes Pi-disabled statements above)
+
+Pi now uses the Desktop `buzz-pi-acp` fork plus a separately resolved `pi` CLI
+with saved OpenAI and Databricks providers. Desktop imposes no Pi semver floor:
+execution requires fork identity, ACP protocol 1, and positive exact model and
+thinking config-option evidence before prompts. Both probe and conversation broker
+use `_meta.systemPrompt` and immutable spawn-time provider/model/effort settings.
+
+A run-owned wrapper creates an isolated Pi directory. Its public `models.json`
+contains `$BEEHIVE_PI_KEY`, never a credential. OpenAI uses native Pi Responses;
+Databricks uses shared-manifest Responses/Anthropic/MLflow routing, preserving raw
+model/FQN and workspace. Its adapter receives only a private loopback capability;
+every provider request enters the existing native workspace-bound token source.
+No Desktop credentials, persistent Pi auth files, native OAuth copy or plugin
+framework. Unknown/custom models remain exact and do not gain guessed effort.
+Supported Pi thinking levels are the intersection of model capabilities and Pi's
+native vocabulary. No selection is explicitly `off`, not retained user settings.
+
+Save/registration remain inert; existing runs keep their snapshots. Explicit
+Start/Stop own wrapper, adapter, Pi descendants, proxy and temporary directory.
+No native binary change; exports still require `src/*.ts`, `src/*.json` and the
+existing `bin/beehive-databricks`. Tests use explicit synthetic module/process
+seams (`pi-isolation-loader.mjs`), fake external ACP executables and loopback
+provider servers, not installed harnesses or real OS stores. Targeted cases live
+in `pi-host.test.ts`, `pi-conversation.test.ts`, and `pi.test.ts`. This slice does
+not claim completion of Codex/Claude or erase prior combined-suite failures.

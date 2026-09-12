@@ -276,8 +276,8 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
         const selected = this.harnesses?.find(h => h.id === (v.harness ?? 'buzz-agent'));
         const previous = readSettings(this.hostDirectory);
         const provider = previous.providers.find(p => p.id === v.provider);
-        if (!selected?.executable || !provider || !selected.providers.includes(provider.type) || !['buzz-agent','codex'].includes(selected.id)) throw plain('No supported executable/provider combination found.');
-        saveSettings(this.hostDirectory,{ ...previous, runtimes: [...previous.runtimes,{ id: settingsId(), name: v.name ?? '', harness: selected.id as 'buzz-agent' | 'codex', executable: selected.executable, ...(selected.id === 'codex' ? { cli: selected.cli } : {}), providerId: v.provider ?? '', model: v.model ?? '', ...(v.effort ? { effort: v.effort } : {}) }] },previous.revision);
+        if (!selected?.executable || !provider || !selected.providers.includes(provider.type) || !['buzz-agent','codex','pi'].includes(selected.id)) throw plain('No supported executable/provider combination found.');
+        saveSettings(this.hostDirectory,{ ...previous, runtimes: [...previous.runtimes,{ id: settingsId(), name: v.name ?? '', harness: selected.id as 'buzz-agent' | 'codex' | 'pi', executable: selected.executable, ...(['codex','pi'].includes(selected.id) ? { cli: selected.cli } : {}), providerId: v.provider ?? '', model: v.model ?? '', ...(v.effort ? { effort: v.effort } : {}) }] },previous.revision);
         this.status = 'Runtime saved for new runs. Running agents did not change. Host loading is reported separately.';
       } else if (request.action === 'host-start') {
         this.service = await startService(this.hostDirectory); check(); this.status = 'Host running. Registration and settings do not start agents.';

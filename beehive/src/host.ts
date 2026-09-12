@@ -1,3 +1,4 @@
+import { validatePi } from './pi.ts';
 import { readSettings } from './settings.ts';
 import { runtimeBindings } from './settings-runtime.ts';
 import { managerCredential } from './manager-credential.ts';
@@ -25,7 +26,7 @@ import { spawnOwned, type OwnedProcess } from './owned.ts';
 import { AgentSession, prepareAgent, type AgentLaunch, type Catalog, type Evidence } from './acp.ts';
 import { prepareConversation, conversationSummary, type ConversationSetup } from './conversation.ts';
 
-export type Setup = { host: string; ownerSecret?: string; ownerPublic?: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; custom?: CustomAcp; buzzProvider?: BuzzProvider; mode: 'buzz-agent-api-key' | 'diagnostic-acp' | 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
+export type Setup = { host: string; ownerSecret?: string; ownerPublic?: string; agentSecret?: string; runner: string; args: string[]; workspace: string; allowedWorkspaces?: string[]; custom?: CustomAcp; buzzProvider?: BuzzProvider; mode: 'buzz-agent-api-key' | 'diagnostic-acp' | 'fixture' | 'buzz-agent-databricks-v2' | 'goose' | 'claude' | 'codex' | 'pi'; piCli?: string; codex?: CodexSetup; claude?: ClaudeSetup; gooseProvider?: string; gooseModels?: string[]; databricksHost?: string; serviceHome?: string; configDirectory?: string; conversation?: ConversationSetup };
 /** Definition-only fingerprint: common host authority and agent key are excluded. */
 export function bindingFingerprint(setup: Setup): string {
   const { host: _host, ownerSecret: _owner, ownerPublic: _ownerPublic, agentSecret: _agent, ...harness } = setup;
@@ -45,16 +46,18 @@ export function setupOwner(setup: Pick<Setup, 'ownerPublic' | 'ownerSecret'>): s
   return owner;
 }
 /** Operator-approved compatible models, not an authenticated provider catalog. */
-export function setupModels(s: Setup): string[] { return s.mode === 'buzz-agent-api-key' ? [...s.buzzProvider!.models] : s.mode === 'diagnostic-acp' ? [] : s.mode === 'codex' ? [...s.codex!.models] : s.mode === 'claude' ? [...s.claude!.models] : s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
+export function setupModels(s: Setup): string[] { return (s.mode === 'buzz-agent-api-key' || s.mode === 'pi') ? [...s.buzzProvider!.models] : s.mode === 'diagnostic-acp' ? [] : s.mode === 'codex' ? [...s.codex!.models] : s.mode === 'claude' ? [...s.claude!.models] : s.mode === 'goose' ? [...s.gooseModels!] : [s.mode === 'fixture' ? 'fixture-model' : 'databricks-claude-haiku-4-5']; }
 export function validateSetup(value: unknown): Setup {
   const s = object(value);
   for (const key of ['host','runner','workspace']) text(s[key]);
   if (s.allowedWorkspaces !== undefined && (!Array.isArray(s.allowedWorkspaces) || s.allowedWorkspaces.length > 32 || s.allowedWorkspaces.some(w => typeof w !== 'string' || !isAbsolute(w)))) throw Error('Invalid allowed workspaces');
   setupOwner(s as Setup);
   if (s.agentSecret !== undefined) publicKey(String(s.agentSecret));
-  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['buzz-agent-api-key','diagnostic-acp','fixture','buzz-agent-databricks-v2','goose','claude','codex'].includes(String(s.mode))) throw Error('Invalid local setup');
-  if (s.buzzProvider !== undefined && s.mode !== 'buzz-agent-api-key') throw Error('Buzz provider belongs only to Buzz Agent API-key bindings');
-  if (s.mode === 'buzz-agent-api-key') {
+  if (!isAbsolute(String(s.runner)) || !isAbsolute(String(s.workspace)) || !Array.isArray(s.args) || s.args.some(a => typeof a !== 'string') || !['buzz-agent-api-key','diagnostic-acp','fixture','buzz-agent-databricks-v2','goose','claude','codex','pi'].includes(String(s.mode))) throw Error('Invalid local setup');
+  if (s.piCli !== undefined && s.mode !== 'pi') throw Error('Pi CLI belongs only to Pi bindings');
+  if (s.buzzProvider !== undefined && s.mode !== 'buzz-agent-api-key' && s.mode !== 'pi') throw Error('Buzz provider belongs only to Buzz Agent API-key bindings');
+  if (s.mode === 'buzz-agent-api-key' || s.mode === 'pi') {
+    if (s.mode === 'pi') validatePi(String(s.piCli), s.buzzProvider as BuzzProvider);
     validateBuzzProvider(s.buzzProvider as BuzzProvider);
     if (s.args.length || typeof s.serviceHome !== 'string' || !isAbsolute(s.serviceHome) || typeof s.configDirectory !== 'string' || !isAbsolute(s.configDirectory) || s.databricksHost !== undefined || s.gooseProvider !== undefined || s.claude !== undefined || s.codex !== undefined || s.custom !== undefined) throw Error('Buzz Agent requires dedicated local context and zero args, not another harness auth contract');
   }
@@ -251,7 +254,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
         resolvedProviderKey = result.secret; result.secret = undefined;
       } finally { if (credentialRead === controller) credentialRead = undefined; }
     }
-    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { ...(resolvedProviderKey ? { resolvedProviderKey } : {}), executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
+    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { ...(resolvedProviderKey ? { resolvedProviderKey } : {}), executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'pi' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'pi' ? { harness: 'pi' as const, piCli: setup.piCli } : {}), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
     const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, executionSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing

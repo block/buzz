@@ -36,6 +36,7 @@ export function prepareConversationBinding(input: ConversationSetup, agent: Agen
   if (prepared.plan.args.some(a => a.includes('\0'))) throw Error('ACP arguments cannot contain NUL');
   if (input.authTag !== undefined && (typeof input.authTag !== 'string' || input.authTag.length > 16384 || !input.authTag.length)) throw Error('Invalid local owner attestation');
   const providerEnv = { ...prepared.env };
+  if (agent.harness === 'pi') { delete providerEnv.BEEHIVE_PI_KEY; delete providerEnv.BEEHIVE_PI_RUNTIME; }
   // The relay transport/shim never needs the OS-backed Databricks bearer.
   // The actual model consumer obtains a run-local capability in spawnAgent.
   if (agent.buzzProvider?.provider === 'databricks_v2' && agent.buzzProvider.credential) delete providerEnv.DATABRICKS_TOKEN;
@@ -53,7 +54,7 @@ export function prepareConversationBinding(input: ConversationSetup, agent: Agen
       BUZZ_RELAY_URL: url.href,
       BUZZ_ACP_AGENT_OWNER: owner,
       ...(input.authTag === undefined ? {} : { BUZZ_AUTH_TAG: input.authTag }),
-      ...((prepared.plan.harness === 'claude' || prepared.plan.harness === 'codex') ? {} : { BUZZ_ACP_MODEL: prepared.plan.model }),
+      ...((prepared.plan.harness === 'claude' || prepared.plan.harness === 'codex' || prepared.plan.harness === 'pi') ? {} : { BUZZ_ACP_MODEL: prepared.plan.model }),
       ...(prepared.plan.instructions === undefined ? {} : { BUZZ_ACP_SYSTEM_PROMPT: prepared.plan.instructions }),
       BUZZ_ACP_MCP_COMMAND: '',
       BUZZ_ACP_AGENTS: '1',

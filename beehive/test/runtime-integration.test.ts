@@ -101,10 +101,11 @@ test('Desktop contract detects fake adapter/CLI independently, strict Codex vers
   const rows = await discoverHarnesses(new AbortController().signal, {home:root,path:root,bundled:[],common:[],loginShells:[]});
   assert.equal(rows.find(r => r.id === 'pi')?.executable,join(root,'buzz-pi-acp'));
   assert.equal(rows.find(r => r.id === 'pi')?.state,'available');
+  assert.deepEqual(rows.find(r => r.id === 'pi')?.providers,['openai','databricks_v2']);
   assert.equal(rows.find(r => r.id === 'codex')?.state,'available');
   assert.equal(rows.find(r => r.id === 'claude')?.state,'cli-missing');
   assert.equal(rows.find(r => r.id === 'goose')?.state,'not-installed');
-  assert.deepEqual(rows.filter(r => r.providers.length).map(r => r.id),['codex','buzz-agent']);
+  assert.deepEqual(rows.filter(r => r.providers.length).map(r => r.id),['codex','buzz-agent','pi']);
   for (const value of ['1.9.99','1.10','1.10.0-rc1','not-version']) assert.equal(compatibleCodex(value),false);
   for (const value of ['1.10.0','pkg 2.0.0']) assert.equal(compatibleCodex(value),true);
   const slow = join(root,'slow'); writeFileSync(slow,'#!/bin/sh\nexec /bin/sleep 60\n',{mode:0o700});

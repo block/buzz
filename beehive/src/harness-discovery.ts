@@ -78,7 +78,7 @@ export async function discoverHarnesses(signal: AbortSignal, options: { home?: s
     let state: DetectedHarness['state'] = !binary ? 'not-installed' : row.underlyingCli && !cli ? 'cli-missing' : 'available';
     if (state === 'available' && row.id === 'codex' && !compatibleCodex(await probe(binary!, ['--version'], [...managed, path].join(delimiter), home, signal) ?? '')) state = 'incompatible';
     signal.throwIfAborted();
-    const providers = state === 'available' && row.id === 'buzz-agent' ? ['openai', 'databricks_v2'] : state === 'available' && row.id === 'codex' ? ['openai'] : [];
+    const providers = state === 'available' && ['buzz-agent','pi'].includes(row.id) ? ['openai', 'databricks_v2'] : state === 'available' && row.id === 'codex' ? ['openai'] : [];
     const reason = state === 'not-installed' ? 'Not installed' : state === 'cli-missing' ? `Underlying ${row.underlyingCli} CLI not installed` : state === 'incompatible' ? 'Codex ACP 1.10.0 or newer required; version unknown/outdated' : providers.length ? 'Detected; provider/model access unverified' : 'Detected; this catalog’s OS-backed providers are not supported by this adapter. Use existing local setup for native authentication.';
     result.push({ id: row.id, label: row.label!, executable: binary, cli, state, providers, reason });
   }

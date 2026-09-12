@@ -1,3 +1,4 @@
+import { PI_ADAPTER, piEnvironment, piConfigEvidence } from './pi.ts';
 import { fileURLToPath } from 'node:url';
 import { buzzProviderEnvironment, type BuzzProvider } from './buzz-provider.ts';
 import { validateCustom, type CustomAcp } from './custom-acp.ts';
@@ -10,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
 /** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ resolvedProviderKey?: string; buzzProvider?: BuzzProvider; custom?: CustomAcp; executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
+export type AgentLaunch = Readonly<{ resolvedProviderKey?: string; buzzProvider?: BuzzProvider; custom?: CustomAcp; executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex' | 'pi'; piCli?: string; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -35,6 +36,10 @@ export function prepareAgent(input: AgentLaunch) {
   if (plan.custom) {
     const d = validateCustom(plan.custom);
     if (plan.harness !== 'goose' || d.contract !== 'goose-native' || d.executable !== plan.executable || JSON.stringify(d.args) !== JSON.stringify(plan.args)) throw Error('Unsupported custom launch contract');
+  }
+  if (plan.harness === 'pi') {
+    if (plan.args.length || !plan.piCli || !plan.buzzProvider) throw Error('Invalid Pi launch');
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze(piEnvironment(plan.piCli, plan.buzzProvider, plan.home, plan.model, plan.resolvedProviderKey)), cliExecutableHash: hash(readFileSync(plan.piCli)) });
   }
   if (plan.harness === 'codex') {
     identifier(plan.model);
@@ -89,6 +94,7 @@ export class AgentSession {
   private stoppingProbe = false;
   private session = '';
   private codexModelVerified = false;
+  private piModelVerified = false;
   private response = '';
   private prompting = false;
   private timeoutMs: number;
@@ -162,10 +168,12 @@ export class AgentSession {
         // Only observations belonging to this owned session can invalidate its proof.
         // Model acknowledgement is not permanent: keep this guard active after completion.
         if (p.sessionId !== this.session) return;
-        if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== this.prepared.plan.model) throw Error('ACP model changed');
+        if (this.prepared.plan.harness === 'pi' && update.sessionUpdate === 'current_mode_update' && update.currentModeId !== (this.prepared.plan.buzzProvider?.effort ?? 'off')) throw Error('Pi effort changed');
+        if (update.sessionUpdate === 'current_model_update' && update.currentModelId !== (this.prepared.plan.harness === 'pi' ? `beehive/${this.prepared.plan.model}` : this.prepared.plan.model)) throw Error('ACP model changed');
         if (update.sessionUpdate === 'config_option_update') {
+          if (this.prepared.plan.harness === 'pi') piConfigEvidence(update, this.prepared.plan.model, this.prepared.plan.buzzProvider?.effort);
           if (!Array.isArray(update.configOptions)) throw Error('Invalid ACP model update');
-          for (const option of update.configOptions) if (record(option).category === 'model' && record(option).currentValue !== this.prepared.plan.model) throw Error('ACP model changed');
+          for (const option of update.configOptions) if (record(option).category === 'model' && record(option).currentValue !== (this.prepared.plan.harness === 'pi' ? `beehive/${this.prepared.plan.model}` : this.prepared.plan.model)) throw Error('ACP model changed');
         }
         if (p.sessionId !== this.session || !this.prompting) return;
         if (update.sessionUpdate === 'agent_message_chunk') {
@@ -202,9 +210,13 @@ export class AgentSession {
     const nativeBuzz = !this.prepared.plan.harness;
     const protocol = this.prepared.plan.harness === 'codex' || nativeBuzz ? 2 : 1;
     const init = record(await this.request('initialize', { protocolVersion: protocol, clientCapabilities: {}, clientInfo: { name: 'beehive', version: '0.0.1' } }));
-    if (init.protocolVersion !== protocol || record(init.agentInfo).name !== (this.prepared.plan.harness === 'codex' ? CODEX_ADAPTER : this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
-    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...((this.prepared.plan.harness === 'codex' || nativeBuzz) && this.prepared.plan.instructions !== undefined ? { systemPrompt: this.prepared.plan.instructions } : {}), ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
+    if (init.protocolVersion !== protocol || record(init.agentInfo).name !== (this.prepared.plan.harness === 'pi' ? PI_ADAPTER : this.prepared.plan.harness === 'codex' ? CODEX_ADAPTER : this.prepared.plan.harness === 'claude' ? CLAUDE_ADAPTER : this.prepared.plan.harness === 'goose' ? 'goose' : 'buzz-agent')) throw Error('Unsupported harness capabilities');
+    const created = record(await this.request('session/new', { cwd: this.prepared.plan.workspace, mcpServers: [], ...(this.prepared.plan.harness === 'pi' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: this.prepared.plan.instructions } } : {}), ...((this.prepared.plan.harness === 'codex' || nativeBuzz) && this.prepared.plan.instructions !== undefined ? { systemPrompt: this.prepared.plan.instructions } : {}), ...(this.prepared.plan.harness === 'claude' && this.prepared.plan.instructions !== undefined ? { _meta: { systemPrompt: { append: this.prepared.plan.instructions } } } : {}) }));
     this.session = identifier(created.sessionId);
+    if (this.prepared.plan.harness === 'pi') {
+      const models = piConfigEvidence(created, this.prepared.plan.model, this.prepared.plan.buzzProvider?.effort);
+      this.piModelVerified = true; return { state: 'reported', models, authentication: 'unverified' };
+    }
     if (this.prepared.plan.harness === 'codex') {
       const models = codexModels(created, this.prepared.plan.model);
       this.codexModelVerified = true;
@@ -221,6 +233,7 @@ export class AgentSession {
   /** Require explicit exact-model acknowledgement, then a response in the SAME session/process. */
   async verify(): Promise<Evidence> {
     if (!this.session) throw Error('Create ACP session first');
+    if (this.prepared.plan.harness === 'pi' && !this.piModelVerified) throw Error('Pi exact model/effort evidence required');
     if (this.prepared.plan.harness === 'codex' && !this.codexModelVerified) throw Error('Codex exact fresh model evidence required before prompts');
     const model = this.prepared.plan.model;
     if (!this.prepared.plan.harness) {
@@ -245,6 +258,7 @@ export class AgentSession {
 export function spawnAgent(prepared: ReturnType<typeof prepareAgent>, extra: Record<string, string> = {}) {
   const { plan } = prepared;
   const env = { ...prepared.env, ...extra };
+  if (plan.harness === 'pi') return spawnOwned(process.execPath, [fileURLToPath(new URL('./pi-runtime-child.ts', import.meta.url)), plan.executable], plan.workspace, env);
   if (plan.buzzProvider?.provider === 'databricks_v2' && plan.buzzProvider.credential) {
     delete env.DATABRICKS_TOKEN;
     env.BEEHIVE_DATABRICKS_RUNTIME = JSON.stringify({ host: plan.buzzProvider.baseUrl, key: plan.buzzProvider.credential, model: plan.model });

@@ -1,3 +1,4 @@
+import { PI_ADAPTER, piConfigEvidence } from './pi.ts';
 import { CODEX_ADAPTER, codexModels } from './codex.ts';
 import { CLAUDE_ADAPTER, claudeModels } from './claude.ts';
 import { gooseModels } from './acp.ts';
@@ -158,6 +159,7 @@ export class ConversationSession {
     const pending = new Map<string | number, Pending>();
     const sessions = new Set<string>();
     const customProfiles = new Set<string>();
+    let piNative = false;
     const modelConfigs = new Set<string>(['model']);
     const prompts = new Map<string, { id: string | number; hash: ReturnType<typeof createHash>; text: boolean; cancelled: boolean }>();
     this.cancellations.push(() => {
@@ -192,6 +194,15 @@ export class ConversationSession {
           if (['session/load', 'session/resume'].includes(msg.method)) throw Error('Custom contract requires fresh session/Restart');
           if (msg.method === '_goose/unstable/session/system-prompt/set' && this.prepared.plan.instructions !== undefined) {
             if (p?.mode !== 'set' || p.key !== 'buzz' || typeof p.text !== 'string' || !p.text.includes(this.prepared.plan.instructions)) throw Error('Custom exact native profile missing');
+          }
+        }
+        if (this.prepared.plan.harness === 'pi') {
+          if (msg.method === 'initialize') p.protocolVersion = 1;
+          if (['session/load','session/resume','session/set_model','session/set_mode','session/set_config_option'].includes(msg.method)) throw Error('Pi requires fresh session/Restart');
+          if (msg.method === 'session/new') {
+            if (!piNative) throw Error('Pi initialize required');
+            delete p.systemPrompt;
+            if (this.prepared.plan.instructions !== undefined) p._meta = { ...p._meta, systemPrompt: this.prepared.plan.instructions };
           }
         }
         if (this.prepared.plan.harness === 'codex') {
@@ -260,6 +271,10 @@ export class ConversationSession {
         if (request.method === 'initialize' && this.prepared.plan.custom) {
           if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== 'goose') throw Error('Custom Goose-native contract unavailable');
         }
+        if (request.method === 'initialize' && this.prepared.plan.harness === 'pi') {
+          if (msg.result?.protocolVersion !== 1 || msg.result?.agentInfo?.name !== PI_ADAPTER) throw Error('Pi fork capability missing');
+          piNative = true;
+        }
         if (request.method === 'initialize' && this.prepared.plan.harness === 'codex') {
           if (msg.result?.protocolVersion !== 2 || msg.result?.agentInfo?.name !== CODEX_ADAPTER) throw Error('Codex native profile capability unavailable');
           codexNative = true;
@@ -282,6 +297,10 @@ export class ConversationSession {
           }
           if (modelConfigs.size > 128) throw Error();
           sessions.delete(session);
+          if (this.prepared.plan.harness === 'pi') {
+            piConfigEvidence(msg.result, this.prepared.plan.model, this.prepared.plan.buzzProvider?.effort);
+            sessions.add(session); send(socket, msg); return;
+          }
           if (this.prepared.plan.harness === 'codex') {
             codexModels(msg.result, this.prepared.plan.model);
             sessions.add(session); send(socket, msg); return;
@@ -313,9 +332,13 @@ export class ConversationSession {
       }
       if (fromHarness && msg.method === 'session/update') {
         const p = msg.params; const u = p?.update;
-        if (u?.sessionUpdate === 'current_model_update' && u.currentModelId !== this.prepared.plan.model) throw Error();
+        if (this.prepared.plan.harness === 'pi') {
+          if (u?.sessionUpdate === 'config_option_update') piConfigEvidence(u, this.prepared.plan.model, this.prepared.plan.buzzProvider?.effort);
+          if (u?.sessionUpdate === 'current_mode_update' && u.currentModeId !== (this.prepared.plan.buzzProvider?.effort ?? 'off')) throw Error('Pi effort changed');
+        }
+        if (u?.sessionUpdate === 'current_model_update' && u.currentModelId !== (this.prepared.plan.harness === 'pi' ? `beehive/${this.prepared.plan.model}` : this.prepared.plan.model)) throw Error();
         if (u?.sessionUpdate === 'config_option_update' && Array.isArray(u.configOptions)) {
-          for (const option of u.configOptions) if (option.category === 'model' && option.currentValue !== this.prepared.plan.model) throw Error();
+          for (const option of u.configOptions) if (option.category === 'model' && option.currentValue !== (this.prepared.plan.harness === 'pi' ? `beehive/${this.prepared.plan.model}` : this.prepared.plan.model)) throw Error();
         }
         const prompt = prompts.get(p?.sessionId);
         if (prompt && u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text' && typeof u.content.text === 'string') {

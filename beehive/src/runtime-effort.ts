@@ -3,12 +3,25 @@ import manifest from './model-capabilities.json' with { type: 'json' };
 /** Packaged verbatim from scripts/model-capabilities.json. Interpretation mirrors
  * Desktop modelCapabilities.ts exact/family precedence. No fallback effort picker:
  * unknown custom names and UC FQNs deliberately omit tuning rather than guessing. */
-export function runtimeEfforts(provider: string, model: string): readonly string[] {
+export function runtimeCapabilities(provider: string, model: string) {
   const canon = provider === 'openai-compat' ? 'openai' : provider;
-  if (canon === 'databricks_v2' && model.split('.').length === 3 && model.split('.').every(v => v.length > 0 && !/[\s/]/.test(v))) return [];
+  if (canon === 'databricks_v2' && model.split('.').length === 3 && model.split('.').every(v => v.length > 0 && !/[\s/]/.test(v))) {
+    const service = model.split('.')[2]!.toLowerCase();
+    const tokens = manifest.family_tokens.flatMap(token => {
+      let from = 0;
+      while (true) {
+        const i = service.indexOf(token, from); if (i < 0) return [];
+        if (i === 0 || !/[a-z0-9]/.test(service[i-1]!)) return [i];
+        from = i + 1;
+      }
+    });
+    const stripped = service.slice(tokens.length ? Math.min(...tokens) : 0);
+    const version = /^gpt-(\d+)(?=[^a-z0-9]|$)/.exec(stripped);
+    return { ...manifest.provider_fallbacks.databricks_v2.concrete_unknown, supported_efforts: [] as string[], databricks_v2_wire_route: version && Number(version[1]) >= 5 ? 'openai-responses' : 'mlflow-chat' };
+  }
   const lower = model.toLowerCase();
   const exact = manifest.exact_records.find(r => r.provider === canon && r.raw_model_id.toLowerCase() === lower);
-  if (exact) return exact.thinking_mode === 'omit-fields' ? [] : exact.supported_efforts;
+  if (exact) return exact;
   let start = lower.length;
   for (const token of manifest.family_tokens) {
     let from = 0;
@@ -26,7 +39,14 @@ export function runtimeEfforts(provider: string, model: string): readonly string
     return lengths.length ? [{ rule, length: Math.max(...lengths) }] : [];
   }).sort((a, b) => b.length - a.length || (a.rule.id < b.rule.id ? -1 : 1));
   const rule = matches[0]?.rule;
-  return !rule || rule.thinking_mode === 'omit-fields' ? [] : rule.supported_efforts;
+  if (rule) return rule;
+  const fallback = manifest.provider_fallbacks[canon as keyof typeof manifest.provider_fallbacks]?.concrete_unknown;
+  return fallback ? { ...fallback, supported_efforts: [] as string[] } : undefined;
+}
+
+export function runtimeEfforts(provider: string, model: string): readonly string[] {
+  const result = runtimeCapabilities(provider, model);
+  return !result || result.thinking_mode === 'omit-fields' ? [] : result.supported_efforts;
 }
 
 /** Recheck at save AND actual launch; no caller can inject a universal level. */

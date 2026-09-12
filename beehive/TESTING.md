@@ -686,3 +686,15 @@ The fixture reuses the private NIP42/59 relay via an optional HTTP handler; it d
 not change that relay's existing default admission behavior. No production relay,
 OS credential or installed-native public metadata evidence is claimed.
 See PUBLIC_METADATA.md for the editing and explicit publication path and limits.
+
+### Pi saved-provider runtime slice
+
+From package CWD, direct pinned Node: `node --test test/pi.test.ts
+ test/pi-host.test.ts test/pi-conversation.test.ts test/runtime-integration.test.ts`.
+Pi host/conversation tests import `pi-isolation-loader.mjs` before dynamically
+loading product modules. The hook explicitly injects itself into the owned Pi
+wrapper and replaces only the native Databricks invocation with workspace/reference
+checked synthetic refresh. HTTPS destinations are denied except the exact fixture
+route, rewritten to a test-created loopback provider. Do not replace this with
+HOME isolation or run these fixtures against an installed harness. The negative
+Pi boundary tests use only saved synthetic OpenAI keys and make no provider call.
