@@ -213,9 +213,21 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 
 ## Relay Membership (NIP-43)
 
-When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the
-`relay_members` table. In today's single-community deployment this is the relay-wide member list; in multi-community mode the same rule is scoped to the host-derived community. Only pubkeys with a row for that community may use that community. The relay owner
-is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup.
+Every authenticated connection is checked for a direct role in the
+`relay_members` table. When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, pubkeys without
+a qualifying row are denied; on an open relay they retain the normal open-relay
+authority. In today's single-community deployment this is the relay-wide member
+list; in multi-community mode the same rule is scoped to the host-derived
+community. The relay owner is bootstrapped automatically from
+`RELAY_OWNER_PUBKEY` on startup.
+
+The `observer` role is directly provisioned and grants exactly
+`messages:read`. Existing channel membership still determines which private
+channel events it may read. It cannot delegate through NIP-OA or use event
+submission, media, Git, huddle, GIF, workflow, membership, join, or leave
+mutation paths. Observer pubkeys and their role are included in the relay's
+kind:13534 membership snapshot, so observer identities are operational service
+identities and must not be treated as secret.
 
 ### CLI: Managing Members
 
@@ -227,6 +239,7 @@ In a Docker Compose deployment, use `run.sh`:
 ./run.sh add-member npub1abc...
 ./run.sh add-member <64-char-hex-pubkey>
 ./run.sh add-member npub1abc... --role admin
+./run.sh add-member npub1observer... --role observer
 
 # Remove a member
 ./run.sh remove-member npub1abc...
@@ -241,6 +254,7 @@ Or invoke `buzz-admin` directly inside the container:
 ```bash
 docker compose exec relay buzz-admin add-member --pubkey npub1abc...
 docker compose exec relay buzz-admin add-member --pubkey npub1abc... --role admin
+docker compose exec relay buzz-admin add-member --pubkey npub1observer... --role observer
 docker compose exec relay buzz-admin remove-member --pubkey npub1abc...
 docker compose exec relay buzz-admin list-members
 ```
@@ -271,9 +285,9 @@ the sender to be authenticated (NIP-42) as the relay owner or an admin.
 
 | Kind | Action | Required tags |
 |------|--------|---------------|
-| 9030 | Add member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
-| 9031 | Remove member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
-| 9032 | Change role | `["p", "<hex-pubkey>"]`, `["role", "member\|admin"]` |
+| 9030 | Add member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin\|observer"]`; only the owner may grant `admin` or `observer` |
+| 9031 | Remove member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin\|observer"]` |
+| 9032 | Change role | `["p", "<hex-pubkey>"]`, `["role", "member\|admin\|observer"]`; owner only |
 | 9033 | Set workspace profile (icon) | `["icon", "<https-url or data:image/* URL>"]` (empty clears) |
 
 Example using `nak`:

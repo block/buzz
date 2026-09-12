@@ -517,7 +517,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
-            Ok(Scope::ChannelsRead)
+            Ok(Scope::ChannelsWrite)
         }
         // Huddle lifecycle events + guidelines
         KIND_HUDDLE_STARTED
@@ -3716,6 +3716,22 @@ mod postgres_tests {
         // requires_h_channel_scope — it's handled separately in the pipeline
         // because it needs special "open-only" validation
         assert!(!requires_h_channel_scope(KIND_NIP29_JOIN_REQUEST));
+    }
+
+    #[test]
+    fn membership_mutations_require_channels_write() {
+        let event = make_dummy_event();
+        for kind in [
+            KIND_NIP29_JOIN_REQUEST,
+            KIND_NIP29_LEAVE_REQUEST,
+            KIND_NIP43_LEAVE_REQUEST,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &event),
+                Ok(Scope::ChannelsWrite),
+                "membership mutation kind {kind} must never accept a read scope"
+            );
+        }
     }
 
     #[test]

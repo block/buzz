@@ -52,8 +52,9 @@ enum Command {
         #[arg(long)]
         pubkey: String,
 
-        /// Role: "admin" or "member" (default: member). Cannot be "owner" —
-        /// use RELAY_OWNER_PUBKEY config to set the relay owner.
+        /// Role: "admin", "member", or "observer" (default: member). An
+        /// observer can read channel events but cannot mutate relay state.
+        /// Cannot be "owner" — use RELAY_OWNER_PUBKEY config to set the owner.
         #[arg(long, default_value = "member")]
         role: String,
     },
@@ -299,15 +300,15 @@ async fn cmd_list_members() -> Result<i32> {
     Ok(0)
 }
 
-/// Validate that `role` is `"member"` or `"admin"`. Rejects `"owner"`.
+/// Validate a role that can be directly provisioned by the operator CLI.
 fn validate_role(role: &str) -> std::result::Result<(), String> {
     match role {
-        "member" | "admin" => Ok(()),
+        "member" | "admin" | "observer" => Ok(()),
         "owner" => {
             Err("role 'owner' cannot be set via CLI — use RELAY_OWNER_PUBKEY config".to_string())
         }
         other => Err(format!(
-            "invalid role '{other}': must be 'member' or 'admin'"
+            "invalid role '{other}': must be 'member', 'admin', or 'observer'"
         )),
     }
 }
@@ -630,4 +631,19 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_role;
+
+    #[test]
+    fn operator_can_provision_only_supported_non_owner_roles() {
+        for role in ["member", "admin", "observer"] {
+            assert_eq!(validate_role(role), Ok(()), "role {role}");
+        }
+        assert!(validate_role("owner").is_err());
+        assert!(validate_role("future-role").is_err());
+        assert!(validate_role("").is_err());
+    }
 }

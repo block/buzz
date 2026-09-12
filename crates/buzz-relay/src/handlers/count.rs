@@ -5,6 +5,8 @@ use std::sync::Arc;
 use nostr::Filter;
 use tracing::warn;
 
+use buzz_auth::Scope;
+
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
     event_visible_to_reader, filter_can_match_result_gated_kinds,
@@ -26,6 +28,13 @@ pub async fn handle_count(
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => {
+                if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
+                    conn.send(RelayMessage::closed(
+                        &sub_id,
+                        "restricted: insufficient scope",
+                    ));
+                    return;
+                }
                 (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids.clone())
             }
             _ => {

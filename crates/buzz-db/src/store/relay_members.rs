@@ -20,7 +20,7 @@ use crate::{observability, replaceable, CommunityId, Db, RouteDecision, RoutePre
 pub struct RelayMember {
     /// 64-char lowercase hex pubkey.
     pub pubkey: String,
-    /// Role: `"owner"`, `"admin"`, or `"member"`.
+    /// Role: `"owner"`, `"admin"`, `"member"`, or `"observer"`.
     pub role: String,
     /// Hex pubkey of who added this member, or `None` for bootstrap entries.
     pub added_by: Option<String>,
@@ -1270,6 +1270,56 @@ mod postgres_tests {
             list_b.iter().all(|m| m.pubkey != pubkey),
             "community B list must not contain A's member"
         );
+    }
+
+    /// The authoritative NIP-43 snapshot must advertise the same observer role
+    /// that drives admission. Omitting observers would create protocol/DB drift;
+    /// dropping the role would hide the relay policy clients are allowed to
+    /// display even though the server remains authoritative for permissions.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn observer_role_round_trips_through_nip43_snapshot_and_reconciliation() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let observer = test_pubkey();
+        add_relay_member(&pool, community, &observer, "observer", None)
+            .await
+            .expect("add observer");
+
+        let db = Db::from_pool(pool.clone());
+        let relay_keys = nostr::Keys::generate();
+        let (snapshot, inserted, member_count) = db
+            .publish_nip43_membership_locked(community, &relay_keys)
+            .await
+            .expect("publish membership snapshot");
+        assert!(inserted);
+        assert_eq!(member_count, 1);
+        assert!(snapshot.event.tags.iter().any(|tag| {
+            tag.as_slice()
+                == [
+                    "member".to_string(),
+                    observer.clone(),
+                    "observer".to_string(),
+                ]
+        }));
+        assert!(!db
+            .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
+                community,
+                &relay_keys.public_key(),
+            )
+            .await
+            .expect("snapshot matches canonical observer row"));
+
+        update_relay_member_role(&pool, community, &observer, "member")
+            .await
+            .expect("change observer role");
+        assert!(db
+            .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
+                community,
+                &relay_keys.public_key(),
+            )
+            .await
+            .expect("role drift is detected"));
     }
 
     /// Owner bootstrap is community-scoped: bootstrapping the owner in A does not
