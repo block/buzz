@@ -80,7 +80,9 @@ buzz-ws-client = { path = "../buzz-ws-client" }
 # CryptoProvider at startup. Without this the standalone `buzz` binary panics when
 # a multi-package release build (buzz-acp + buzz-dev-mcp + buzz-cli in one cargo
 # invocation) unifies both ring and aws-lc-rs features, leaving rustls unable to
-# auto-select a provider. See crates/buzz-acp/Cargo.toml for the same dependency.
+# auto-select a provider. Workspace builds pull both rustls crypto providers (ring
+# via relay crates, aws-lc-rs via reqwest). Install ring at CLI entry so wss://
+# publish paths (agents draft-create, …) don't panic — see #2308 / #2329 / #2457.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Random number generation — full jitter for exponential backoff in with_retry

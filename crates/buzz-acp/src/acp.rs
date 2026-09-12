@@ -2201,6 +2201,58 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
     result.get("models").cloned()
 }
 
+/// Match exact IDs or a bare moving family and its single bracket qualifier.
+/// Full IDs and two differently qualified IDs must remain exact.
+fn model_id_matches(candidate: &str, desired: &str) -> MatchKind {
+    if candidate == desired {
+        return MatchKind::Exact;
+    }
+    fn qualified_family(id: &str) -> Option<&str> {
+        let (family, qualifier) = id.split_once('[')?;
+        let qualifier = qualifier.strip_suffix(']')?;
+        if matches!(family, "opus" | "fable" | "sonnet" | "haiku")
+            && !qualifier.is_empty()
+            && !qualifier.contains(['[', ']'])
+        {
+            Some(family)
+        } else {
+            None
+        }
+    }
+    if qualified_family(candidate) == Some(desired) || qualified_family(desired) == Some(candidate)
+    {
+        MatchKind::Alias
+    } else {
+        MatchKind::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchKind {
+    Exact,
+    Alias,
+    None,
+}
+
+fn pick_matching_model_id<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    desired: &str,
+) -> Option<String> {
+    let mut aliases = Vec::new();
+    for candidate in candidates {
+        match model_id_matches(candidate, desired) {
+            MatchKind::Exact => return Some(candidate.to_string()),
+            MatchKind::Alias => aliases.push(candidate.to_string()),
+            MatchKind::None => {}
+        }
+    }
+    if aliases.len() == 1 {
+        aliases.pop()
+    } else {
+        None
+    }
+}
+
 /// Extract the `configId` for the `thought_level` category option from a
 /// `session/new` result, if the adapter advertised one.
 ///
@@ -2234,7 +2286,7 @@ pub fn resolve_model_switch_method(
     desired_model: &str,
 ) -> Option<ModelSwitchMethod> {
     // 1. Search stable configOptions for a "model"-category entry whose
-    //    options contain a value matching desired_model.
+    //    options contain a value matching desired_model (exact or moving-family compatibility).
     for config_opt in extract_model_config_options(session_new_result) {
         // Adapters disagree on the key: the ACP spec says `configId`, but
         // claude-agent-acp emits `id`. Accept both; the set request always
@@ -2248,13 +2300,14 @@ pub fn resolve_model_switch_method(
             None => continue,
         };
         if let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) {
-            for opt in options {
-                if opt.get("value").and_then(|v| v.as_str()) == Some(desired_model) {
-                    return Some(ModelSwitchMethod::ConfigOption {
-                        config_id: config_id.to_string(),
-                        option_value: desired_model.to_string(),
-                    });
-                }
+            let values = options
+                .iter()
+                .filter_map(|opt| opt.get("value").and_then(|v| v.as_str()));
+            if let Some(option_value) = pick_matching_model_id(values, desired_model) {
+                return Some(ModelSwitchMethod::ConfigOption {
+                    config_id: config_id.to_string(),
+                    option_value,
+                });
             }
         }
     }
@@ -2262,12 +2315,11 @@ pub fn resolve_model_switch_method(
     // 2. Search unstable availableModels for a matching modelId.
     if let Some(models) = extract_model_state(session_new_result) {
         if let Some(available) = models.get("availableModels").and_then(|v| v.as_array()) {
-            for model in available {
-                if model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model) {
-                    return Some(ModelSwitchMethod::SetModel {
-                        model_id: desired_model.to_string(),
-                    });
-                }
+            let ids = available
+                .iter()
+                .filter_map(|model| model.get("modelId").and_then(|v| v.as_str()));
+            if let Some(model_id) = pick_matching_model_id(ids, desired_model) {
+                return Some(ModelSwitchMethod::SetModel { model_id });
             }
         }
     }
@@ -2287,28 +2339,25 @@ pub fn model_in_catalog(
     available_models: Option<&serde_json::Value>,
     desired_model: &str,
 ) -> bool {
-    let in_config_options = config_options.iter().any(|config_opt| {
+    let config_values = config_options.iter().flat_map(|config_opt| {
         config_opt
             .get("options")
             .and_then(|v| v.as_array())
-            .is_some_and(|options| {
-                options
-                    .iter()
-                    .any(|opt| opt.get("value").and_then(|v| v.as_str()) == Some(desired_model))
-            })
+            .into_iter()
+            .flatten()
+            .filter_map(|opt| opt.get("value").and_then(|v| v.as_str()))
     });
-    if in_config_options {
+    if pick_matching_model_id(config_values, desired_model).is_some() {
         return true;
     }
 
-    available_models
+    let ids = available_models
         .and_then(|models| models.get("availableModels"))
         .and_then(|v| v.as_array())
-        .is_some_and(|available| {
-            available
-                .iter()
-                .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model))
-        })
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("modelId").and_then(|v| v.as_str()));
+    pick_matching_model_id(ids, desired_model).is_some()
 }
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
@@ -2930,6 +2979,87 @@ mod tests {
             }
         });
         assert!(super::resolve_model_switch_method(&result, "nonexistent-model").is_none());
+    }
+
+    #[test]
+    fn moving_family_matches_preserve_advertised_values_in_both_catalogs() {
+        for family in ["opus", "fable", "sonnet", "haiku"] {
+            let qualified = format!("{family}[1m]");
+            for (candidate, desired) in [(family, qualified.as_str()), (qualified.as_str(), family)]
+            {
+                let result = serde_json::json!({
+                    "configOptions": [{"configId": "model", "category": "model",
+                        "options": [{"value": candidate}]}]
+                });
+                assert_eq!(
+                    super::resolve_model_switch_method(&result, desired),
+                    Some(super::ModelSwitchMethod::ConfigOption {
+                        config_id: "model".to_string(),
+                        option_value: candidate.to_string(),
+                    })
+                );
+                assert!(super::model_in_catalog(
+                    &super::extract_model_config_options(&result),
+                    None,
+                    desired
+                ));
+
+                let result = serde_json::json!({
+                    "models": {"availableModels": [{"modelId": candidate}]}
+                });
+                assert_eq!(
+                    super::resolve_model_switch_method(&result, desired),
+                    Some(super::ModelSwitchMethod::SetModel {
+                        model_id: candidate.to_string()
+                    })
+                );
+                assert!(super::model_in_catalog(&[], result.get("models"), desired));
+            }
+        }
+    }
+
+    #[test]
+    fn model_aliases_reject_pinned_case_and_qualified_variant_changes() {
+        for (candidate, desired) in [
+            ("claude-opus-4-20250514", "opus"),
+            ("opus", "claude-opus-4-20250514"),
+            ("composer-2.5[fast=true]", "composer-2.5[fast=false]"),
+            ("composer-2.5[fast=true]", "composer-2.5"),
+            ("opus[1m]", "opus[fast=true]"),
+            ("Opus", "opus"),
+            ("OPUS[1m]", "opus"),
+            ("opus[1m][fast=true]", "opus"),
+            ("opus[]", "opus"),
+        ] {
+            let result = serde_json::json!({
+                "configOptions": [{"configId": "model", "category": "model",
+                    "options": [{"value": candidate}]}],
+                "models": {"availableModels": [{"modelId": candidate}]}
+            });
+            assert!(
+                super::resolve_model_switch_method(&result, desired).is_none(),
+                "{candidate} must not match {desired}"
+            );
+            assert!(!super::model_in_catalog(
+                &super::extract_model_config_options(&result),
+                result.get("models"),
+                desired
+            ));
+            assert!(super::resolve_model_switch_method(&result, candidate).is_some());
+        }
+    }
+
+    #[test]
+    fn model_aliases_prefer_exact_and_reject_ambiguous_qualifiers() {
+        assert_eq!(
+            super::pick_matching_model_id(["opus[1m]", "opus"], "opus"),
+            Some("opus".to_string())
+        );
+        assert_eq!(
+            super::pick_matching_model_id(["opus", "opus[1m]"], "opus[1m]"),
+            Some("opus[1m]".to_string())
+        );
+        assert!(super::pick_matching_model_id(["opus[1m]", "opus[fast=true]"], "opus").is_none());
     }
 
     #[test]
