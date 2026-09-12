@@ -909,3 +909,27 @@ test("rememberPublishedId_evictsOldestBeyondCap", () => {
 
   mgr.destroy();
 });
+
+test("enterprise local-only read state never queries or publishes encrypted blobs", async () => {
+  globalThis.window.localStorage = makeLocalStorage();
+  let calls = 0;
+  const relay = {
+    fetchEvents: async () => {
+      calls++;
+      return [];
+    },
+    publishEvent: async () => {
+      calls++;
+    },
+    subscribeLive: () => {
+      calls++;
+      return () => {};
+    },
+  };
+  const manager = new ReadStateManager("a".repeat(64), relay, false);
+  await manager.initialize();
+  manager.markContextRead("channel-local", 123);
+  assert.equal(manager.getEffectiveTimestamp("channel-local"), 123);
+  manager.destroy();
+  assert.equal(calls, 0);
+});

@@ -1,3 +1,4 @@
+import '../auth/enterprise_identity.dart';
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -79,7 +80,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     final activeCommunity = ref.watch(activeCommunityProvider).value;
 
     final nsec = relayConfig.nsec?.trim();
-    if (nsec == null || nsec.isEmpty) {
+    if (!enterpriseEnabled && (nsec == null || nsec.isEmpty)) {
       return const ReadStateState.inert();
     }
 
@@ -94,7 +95,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       return const ReadStateState.inert();
     }
 
-    final crypto = ReadStateCrypto.tryCreate(nsec: nsec, pubkey: pubkey);
+    final crypto = enterpriseEnabled
+        ? const ReadStateCrypto.localOnly()
+        : ReadStateCrypto.tryCreate(nsec: nsec!, pubkey: pubkey);
     if (crypto == null) {
       return const ReadStateState.inert();
     }
@@ -107,7 +110,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
       signedEventRelay: signedRelay,
-      remoteEnabled: true,
+      remoteEnabled: !enterpriseEnabled,
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;

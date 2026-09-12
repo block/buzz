@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
@@ -14,8 +15,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';

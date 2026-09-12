@@ -2,7 +2,8 @@ export type IdentityStorage =
   | "system-keyring"
   | "local-file"
   | "environment"
-  | "ephemeral";
+  | "ephemeral"
+  | "enterprise";
 
 export type Identity = {
   pubkey: string;

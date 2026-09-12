@@ -73,7 +73,7 @@ async fn connect_authenticated_audio_socket(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
-    keys: &nostr::Keys,
+    keys: &crate::enterprise_identity::SigningIdentity,
     auth_tag_json: Option<&str>,
 ) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
     use nostr::JsonUtil;
@@ -107,7 +107,25 @@ async fn connect_authenticated_audio_socket(
     .await
     .map_err(|_| "timeout waiting for challenge from relay".to_string())??;
 
-    let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?;
+    let event = match keys {
+        crate::enterprise_identity::SigningIdentity::Local(keys) => {
+            build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?
+        }
+        _ => {
+            if auth_tag_json.is_some() {
+                return Err("Enterprise agent delegation unavailable".into());
+            }
+            let tags = [
+                nostr::Tag::parse(["relay", relay_url]),
+                nostr::Tag::parse(["challenge", challenge.as_str()]),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+            keys.sign(nostr::EventBuilder::new(nostr::Kind::Custom(22242), "").tags(tags))
+                .await?
+        }
+    };
     let event_json: serde_json::Value = serde_json::from_str(&event.as_json())
         .map_err(|e| format!("failed to serialize auth event: {e}"))?;
     let auth_msg = serde_json::json!({
@@ -184,7 +202,7 @@ pub(crate) async fn connect_audio_relay(
     state: &AppState,
 ) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.signing_identity()?;
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
     let (
@@ -326,7 +344,7 @@ pub(crate) async fn connect_tts_audio_publisher(
         channel_id,
         parent_channel_id,
         &relay_url,
-        keys,
+        &crate::enterprise_identity::SigningIdentity::from(keys),
         auth_tag_json,
     )
     .await?;

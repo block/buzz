@@ -53,8 +53,15 @@ mod truncated_display_name_tests {
 
 #[tauri::command]
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    let pubkey = keys.public_key();
+    let pubkey = if crate::enterprise_identity::enabled() {
+        state.public_key()?
+    } else {
+        state
+            .keys
+            .lock()
+            .map_err(|error| error.to_string())?
+            .public_key()
+    };
     let pubkey_hex = pubkey.to_hex();
     let display_name = truncated_display_name(&pubkey)?;
     let lost = state
@@ -70,7 +77,11 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
-        storage: state.identity_storage().as_str().to_string(),
+        storage: if crate::enterprise_identity::enabled() {
+            "enterprise".into()
+        } else {
+            state.identity_storage().as_str().to_string()
+        },
         lost,
         locked,
         reset_failed,
@@ -139,27 +150,17 @@ pub async fn sign_event(
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let nostr_tags = tags
-            .into_iter()
-            .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
-        if let Some(created_at) = created_at {
-            builder = builder.custom_created_at(Timestamp::from(created_at));
-        }
-
-        let event = builder
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    let identity = state.signing_identity()?;
+    let nostr_tags = tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+    if let Some(created_at) = created_at {
+        builder = builder.custom_created_at(Timestamp::from(created_at));
+    }
+    Ok(identity.sign(builder).await?.as_json())
 }
 
 #[tauri::command]
@@ -366,6 +367,10 @@ pub async fn import_identity(
     password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local identity changes are unavailable in enterprise mode".into());
+    }
+
     tokio::task::spawn_blocking(move || {
         // NIP-49 backups require a passphrase and decrypt entirely in Rust.
         // Raw nsec/hex input follows the existing parser path unchanged.
@@ -437,6 +442,10 @@ pub(crate) fn commit_imported_identity(
     keys: nostr::Keys,
     persist: impl FnOnce(&nostr::Keys) -> Result<crate::app_state::IdentityStorage, String>,
 ) -> Result<(nostr::PublicKey, crate::app_state::IdentityStorage), String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local-key import is unavailable in enterprise mode".into());
+    }
+
     // Capture the previous pubkey up front for post-commit cleanup.
     let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
 
@@ -494,6 +503,10 @@ pub(crate) fn commit_imported_identity(
 pub async fn persist_current_identity(
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Local identity changes are unavailable in enterprise mode".into());
+    }
+
     tokio::task::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
 

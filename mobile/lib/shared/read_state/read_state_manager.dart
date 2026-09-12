@@ -13,7 +13,9 @@ import 'read_state_storage.dart';
 import 'read_state_time.dart';
 
 class ReadStateCrypto {
-  final Uint8List conversationKey;
+  final Uint8List? conversationKey;
+
+  const ReadStateCrypto.localOnly() : conversationKey = null;
 
   const ReadStateCrypto._(this.conversationKey);
 
@@ -33,10 +35,21 @@ class ReadStateCrypto {
     }
   }
 
-  String encrypt(String plaintext) => nip44Encrypt(conversationKey, plaintext);
+  String encrypt(String plaintext) => nip44Encrypt(
+    conversationKey ??
+        (throw StateError(
+          'Read-state sync is unavailable for corporate identities',
+        )),
+    plaintext,
+  );
 
-  String decrypt(String ciphertext) =>
-      nip44Decrypt(conversationKey, ciphertext);
+  String decrypt(String ciphertext) => nip44Decrypt(
+    conversationKey ??
+        (throw StateError(
+          'Read-state sync is unavailable for corporate identities',
+        )),
+    ciphertext,
+  );
 }
 
 enum _ApplyRemoteContextResult { unchanged, advanced }

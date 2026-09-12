@@ -197,7 +197,7 @@ class _CoordinatedPlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 

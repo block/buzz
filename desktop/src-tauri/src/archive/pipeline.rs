@@ -263,7 +263,7 @@ pub(super) fn commit_archive(
     pre_dropped: u32,
     identity_pk: &str,
     relay_url: &str,
-    owner_keys: &nostr::Keys,
+    owner_keys: Option<&nostr::Keys>,
     now: i64,
     conn: &Connection,
 ) -> Result<ArchiveBatchResult, String> {
@@ -319,6 +319,10 @@ pub(super) fn commit_archive(
             // ciphertext or partial output.
             let stored_json =
                 if p.event.kind.as_u16() as u64 == super::KIND_AGENT_TURN_METRIC as u64 {
+                    let Some(owner_keys) = owner_keys else {
+                        dropped += 1;
+                        continue;
+                    };
                     match buzz_core_pkg::agent_turn_metric::decrypt_agent_turn_metric(
                         owner_keys, &p.event,
                     ) {
@@ -459,11 +463,13 @@ pub(super) fn commit_archive(
             // Write a status row regardless of outcome so backfill never
             // re-processes this frame (INSERT OR IGNORE on PK is a no-op if
             // the row is already present from a prior run).
-            let channel_id_for_index: Option<String> =
-                buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
-                    owner_keys, &p.event,
-                )
-                .ok()
+            let channel_id_for_index: Option<String> = owner_keys
+                .and_then(|keys| {
+                    buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
+                        keys, &p.event,
+                    )
+                    .ok()
+                })
                 .and_then(|v| v.get("channelId")?.as_str().map(|s| s.to_owned()));
             store::upsert_observer_channel_index(
                 &tx,

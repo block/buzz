@@ -59,7 +59,7 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&app_state, &base_url) {
+    if let Some(auth) = mint_media_get_auth(&app_state, &base_url).await {
         upstream = upstream.header("authorization", auth);
     }
 
@@ -187,7 +187,7 @@ pub async fn handle_buzz_media(
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&state, &base) {
+    if let Some(auth) = mint_media_get_auth(&state, &base).await {
         upstream = upstream.header("authorization", auth);
     }
 

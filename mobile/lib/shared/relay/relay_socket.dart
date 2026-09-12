@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
+import '../auth/enterprise_identity.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -192,37 +192,25 @@ class RelaySocket {
   }
 
   /// Handle the relay's AUTH challenge: sign a kind:22242 event and respond.
-  void _handleAuthChallenge(List<dynamic> data) {
+  void _handleAuthChallenge(List<dynamic> data) async {
     if (data.length < 2) return;
     final challenge = data[1] as String;
 
-    if (_nsec == null) {
-      _failAuth(Exception('No nsec available for NIP-42 auth'));
-      return;
-    }
-
+    final channel = _channel;
     try {
-      // Decode bech32 nsec to hex private key.
-      final privkeyHex = nostr.Nip19.decode(payload: _nsec).data;
-      if (privkeyHex.isEmpty) {
-        _failAuth(Exception('Invalid nsec'));
-        return;
-      }
-
-      // Build the auth tags.
-      final tags = <List<String>>[
-        ['relay', _wsUrl],
-        ['challenge', challenge],
-      ];
-
-      // Create and sign the kind:22242 AUTH event.
-      final event = nostr.Event.from(
+      final event = await signClientEvent(
+        nsec: _nsec,
         kind: EventKind.auth,
         content: '',
-        tags: tags,
-        secretKey: privkeyHex,
+        tags: [
+          ['relay', _wsUrl],
+          ['challenge', challenge],
+        ],
       );
-
+      if (!identical(channel, _channel) ||
+          _state != SocketState.authenticating) {
+        return;
+      }
       _pendingAuthEventId = event.id;
       send(['AUTH', event.toMap()]);
     } catch (e) {

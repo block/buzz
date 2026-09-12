@@ -52,12 +52,12 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         // keep Android on its streaming path. iOS uses the authenticated local
         // copy below because AVPlayer can drop those headers after the first
         // request.
-        if (Platform.isAndroid) {
+        if (Platform.isAndroid && !enterpriseEnabled) {
           VideoPlayerController? streamingController;
           try {
             streamingController = VideoPlayerController.networkUrl(
               uri,
-              httpHeaders: auth.headersFor(videoUrl),
+              httpHeaders: await auth.headersForAsync(videoUrl),
             );
             await streamingController.initialize();
             await streamingController.play();
@@ -80,11 +80,14 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           final client = ref.read(mediaHttpClientProvider);
           final requestAbort = Completer<void>();
           downloadRequestAbort.value = requestAbort;
-          final request = http.AbortableStreamedRequest(
-            'GET',
-            uri,
-            abortTrigger: requestAbort.future,
-          )..headers.addAll(auth.headersFor(videoUrl));
+          final request =
+              http.AbortableStreamedRequest(
+                  'GET',
+                  uri,
+                  abortTrigger: requestAbort.future,
+                )
+                ..followRedirects = false
+                ..headers.addAll(await auth.headersForAsync(videoUrl));
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);

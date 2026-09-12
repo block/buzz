@@ -44,6 +44,10 @@ pub async fn update_profile(
     nip05_handle: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProfileInfo, String> {
+    if crate::enterprise_identity::enabled() {
+        return Err("Your organization manages your profile".into());
+    }
+
     // Read-merge-write: kind 0 is a full profile snapshot.
     let my_pubkey = current_pubkey_hex(&state)?;
     let prior_events = query_relay(
@@ -393,8 +397,7 @@ pub async fn get_presence(
 }
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
+    Ok(state.public_key()?.to_hex())
 }
 
 fn current_pubkey_hex_unwrap(state: &AppState) -> String {

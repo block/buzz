@@ -137,10 +137,7 @@ pub async fn get_agent_memory(
     let agent = PublicKey::from_hex(&agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
-    let viewer_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let viewer_pubkey = { state.public_key()?.to_hex() };
 
     let managed = load_managed_agents(&app)?;
     let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
@@ -163,7 +160,7 @@ pub async fn get_agent_memory(
     // Owner = viewer. Clone the secret key out of the lock immediately so
     // we don't hold the mutex across the relay round trip.
     let (owner_pubkey, owner_seckey) = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let keys = state.signing_keys()?;
         (keys.public_key(), keys.secret_key().clone())
     };
 

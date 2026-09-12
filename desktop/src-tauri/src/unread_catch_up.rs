@@ -139,7 +139,7 @@ pub(crate) async fn unread_catch_up(
     relay_client: State<'_, NativeRelayClient>,
     app: AppHandle,
 ) -> Result<UnreadCatchUpResponse, String> {
-    let keys = state.signing_keys()?;
+    let keys = state.signing_identity()?;
     let owner = keys.public_key().to_hex();
     if !owner.eq_ignore_ascii_case(&request.self_pubkey) {
         return Err("unread catch-up identity does not match active scope".to_string());
@@ -217,7 +217,7 @@ pub(crate) async fn unread_catch_up(
 
     fetched.sort_by_key(|item| item.order);
 
-    let current_keys = state.signing_keys()?;
+    let current_keys = state.signing_identity()?;
     if current_keys.public_key().to_hex() != owner
         || crate::relay::relay_ws_url_with_override(&state) != relay_url
     {

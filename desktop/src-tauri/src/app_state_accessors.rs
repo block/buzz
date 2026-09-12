@@ -49,7 +49,28 @@ impl AppState {
     /// unavailable this boot). All signing and publish commands must call
     /// this instead of locking `state.keys` directly, so that recovery mode
     /// blocks publishing under an invalid or inaccessible identity.
+    pub(crate) fn signing_identity(
+        &self,
+    ) -> Result<crate::enterprise_identity::SigningIdentity, String> {
+        if crate::enterprise_identity::enabled() {
+            self.enterprise.identity()
+        } else {
+            self.signing_keys().map(Into::into)
+        }
+    }
+
+    pub(crate) fn public_key(&self) -> Result<nostr::PublicKey, String> {
+        self.signing_identity().map(|s| s.public_key())
+    }
+
     pub fn signing_keys(&self) -> Result<Keys, String> {
+        if crate::enterprise_identity::enabled() {
+            return Err(
+                "This feature requires a local private key and is unavailable in enterprise mode"
+                    .into(),
+            );
+        }
+
         if self
             .identity_lost
             .load(std::sync::atomic::Ordering::Acquire)
