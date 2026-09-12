@@ -16,6 +16,7 @@ import 'package:video_player/video_player.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
+import '../../shared/widgets/agent_provenance.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -878,6 +879,7 @@ class _MentionMd extends InlineMd {
     final pill = _MentionPill(
       label: visibleLabel,
       semanticsLabel: fullLabel,
+      pubkey: pubkey,
       isAgent: isAgent,
       textStyle: config.style,
     );
@@ -893,12 +895,14 @@ class _MentionMd extends InlineMd {
 }
 
 class _MentionPill extends StatelessWidget {
+  final String? pubkey;
   final String label;
   final String? semanticsLabel;
   final bool isAgent;
   final TextStyle? textStyle;
 
   const _MentionPill({
+    this.pubkey,
     required this.label,
     this.semanticsLabel,
     required this.isAgent,
@@ -950,6 +954,7 @@ class _MentionPill extends StatelessWidget {
           Flexible(
             child: Text(label, style: style, semanticsLabel: semanticsLabel),
           ),
+          AgentProvenance(pubkey: pubkey),
         ],
       ),
     );

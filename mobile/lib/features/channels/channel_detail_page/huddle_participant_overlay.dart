@@ -205,6 +205,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                   ),
                 ),
                 child: AvatarImage(
+                  pubkey: pubkey,
                   imageUrl: profile?.avatarUrl,
                   radius: _huddleParticipantSpotlightRadius,
                   backgroundColor: context.colors.primaryContainer,
@@ -346,6 +347,7 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                               child: Row(
                                 children: [
                                   AvatarImage(
+                                    pubkey: pubkey,
                                     imageUrl: profile?.avatarUrl,
                                     radius: 22,
                                     backgroundColor:

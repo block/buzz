@@ -2662,6 +2662,19 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     void Function(String message)? onClosed,
   }) async => () {};
 
+  // The directory now uses the status-aware SDK seam. Do not fall through
+  // to a real session (and its EOSE fallback) in this connection-state fake.
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    void Function(RelaySubscriptionStatus status)? onStatusChanged,
+  }) async {
+    onStatusChanged?.call(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
   void connect() {
     state = const SessionState(status: SessionStatus.connected);
   }

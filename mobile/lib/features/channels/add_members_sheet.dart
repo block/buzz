@@ -186,6 +186,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                               child: ListTile(
                                 contentPadding: EdgeInsets.zero,
                                 leading: AvatarImage(
+                                  pubkey: user.pubkey,
                                   imageUrl: user.avatarUrl,
                                   radius: 20,
                                   backgroundColor:

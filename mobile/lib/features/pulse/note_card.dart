@@ -67,6 +67,7 @@ class NoteCard extends HookConsumerWidget {
           GestureDetector(
             onTap: () => showUserProfileSheet(context, note.pubkey),
             child: AvatarImage(
+              pubkey: note.pubkey,
               imageUrl: profile?.avatarUrl,
               radius: 18,
               backgroundColor: context.colors.primaryContainer,

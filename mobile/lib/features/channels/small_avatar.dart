@@ -34,6 +34,7 @@ class SmallAvatar extends StatelessWidget {
         border: Border.all(color: context.colors.surface, width: 1.5),
       ),
       child: AvatarImage(
+        pubkey: pubkey,
         imageUrl: avatarUrl,
         radius: (size - 2) / 2,
         backgroundColor: context.colors.primaryContainer,
