@@ -16,10 +16,11 @@ jobs:
     name: Authorize Security Review
     # This workflow posts an advisory review; its skipped jobs are not a merge
     # gate and must not be configured as required status checks.
-    # MEMBER and OWNER are GitHub's associations for members of the `block`
-    # organization. The trusted prepare step checks the live PR instead of the
-    # event snapshot. Outside contributors require this exact command from one
-    # of those members: @buzz-security-review <full-head-sha>
+    # Authors with live write or admin access to `block/buzz` are reviewed
+    # automatically. This calculated repository permission includes direct,
+    # team, organization, and enterprise grants. Outside contributors require
+    # this exact command from a Block organization member:
+    # @buzz-security-review <full-head-sha>
     if: >-
       github.repository == 'block/buzz' && (
         (
@@ -307,7 +308,7 @@ jobs:
           codex-version: '0.150.1'
           model: ${{ env.CODEX_MODEL }}
           codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
-          # The trusted authorization job already enforced repository membership.
+          # The trusted authorization job already enforced repository write access.
           allow-users: '*'
           safety-strategy: drop-sudo
           permission-profile: ':read-only'
