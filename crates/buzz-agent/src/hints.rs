@@ -409,11 +409,18 @@ mod tests {
             "first wins (.agents/)"
         );
         // Path should point to the .agents/ version (first wins).
-        assert!(skills[0]
-            .path
-            .to_str()
-            .unwrap()
-            .contains(".agents/skills/shared"));
+        //
+        // Compared with `ends_with`, which matches whole path components, not
+        // as a substring: the separator is `\` on Windows, so a literal
+        // ".agents/skills/shared" never matched there and this test failed on
+        // every Windows host regardless of the behaviour it was checking.
+        assert!(
+            skills[0]
+                .path
+                .ends_with(Path::new(".agents/skills/shared/SKILL.md")),
+            "expected the .agents/ copy to win, got {:?}",
+            skills[0].path
+        );
     }
 
     #[test]
