@@ -4367,13 +4367,302 @@ fn try_native_steer(
             true
         }
         Err(e) => {
+            // Structured fixed-reason label from the stock admission owner
+            // (`pool::send_steer`): task_absent / sender_absent /
+            // mailbox_full / mailbox_closed. Only admission refusals reach
+            // this arm — the ack watcher is spawned solely on `Ok(())`, so
+            // ack-native write failures are logged by the main loop's
+            // SteerAck arm instead and are never conflated with admission.
+            // The label never carries request content.
+            let reason = e
+                .admission_reason()
+                .map(|reason| reason.as_str())
+                .unwrap_or("unclassified");
             tracing::info!(
                 channel = %channel_id,
-                error = ?e,
+                reason,
                 "non-cancelling steer not accepted — falling back to cancel+merge"
             );
             false
         }
+    }
+}
+
+// ── try_native_steer fallback-log tests ───────────────────────────────────────
+//
+// Regression for the production tracing event `try_native_steer`'s Err arm
+// emits before the caller falls back to the universal cancel+merge path. The
+// `send_steer` admission-reason tests in pool.rs pin the refusal *labels*
+// through `SteerError::admission_reason` alone — mutating this log's `reason`
+// field leaves that suite green. These tests instead drive the REAL
+// `try_native_steer` (real pool, real queue, real signed event, real steer
+// body construction) through each of the four admission refusal branches and
+// pin the log itself: the exact reason label, the exact production message,
+// exactly the `channel`+`reason` fields (never request or error content), and
+// the unchanged `false` return that keeps the caller on the fallback.
+#[cfg(test)]
+mod try_native_steer_fallback_log_tests {
+    use super::*;
+    use crate::pool::{SteerRequest, TaskMeta};
+    use nostr::{EventBuilder, Keys, Kind};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Sentinel carried in the real event content — it flows into the steer
+    /// request body `try_native_steer` builds, and the fallback log must
+    /// never surface it.
+    const SECRET_REQUEST_CONTENT: &str = "SECRET-STEER-REQUEST-CONTENT";
+
+    /// One captured fallback log event: the exact values recorded for the
+    /// message/channel/reason fields, plus the names of any field beyond
+    /// that fixed vocabulary.
+    #[derive(Debug, Default)]
+    struct FallbackLog {
+        message: Option<String>,
+        channel: Option<String>,
+        reason: Option<String>,
+        unexpected_fields: Vec<String>,
+    }
+
+    /// Records event field values (str values via `record_str`, Display and
+    /// format_args values via `record_debug`, exactly as tracing routes them)
+    /// and collects any field outside the fixed message/channel/reason set.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        log: FallbackLog,
+    }
+
+    impl Recorder {
+        fn store(&mut self, name: &str, value: String) {
+            match name {
+                "message" => self.log.message = Some(value),
+                "channel" => self.log.channel = Some(value),
+                "reason" => self.log.reason = Some(value),
+                _ => self.log.unexpected_fields.push(name.to_string()),
+            }
+        }
+    }
+
+    impl tracing::field::Visit for Recorder {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.store(field.name(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.store(field.name(), format!("{value:?}"));
+        }
+    }
+
+    /// Captures INFO events on `buzz_acp` carrying a `reason` field — the
+    /// fallback log's signature — mirroring the workspace's Layer+Visit
+    /// capture fixture (buzz-agent `count_silent_turn_warnings`).
+    struct Capture {
+        logs: Arc<std::sync::Mutex<Vec<FallbackLog>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::INFO {
+                return;
+            }
+            if event.metadata().target() != "buzz_acp" {
+                return;
+            }
+            let mut recorder = Recorder::default();
+            event.record(&mut recorder);
+            if recorder.log.reason.is_some() {
+                self.logs
+                    .lock()
+                    .unwrap()
+                    .push(std::mem::take(&mut recorder.log));
+            }
+        }
+    }
+
+    /// Conversation scope for the steered channel — the same shape the
+    /// pool.rs admission fixtures use.
+    fn steer_scope() -> scope::SessionScope {
+        scope::SessionScope::Conversation {
+            channel_id: Uuid::nil(),
+        }
+    }
+
+    /// A real signed kind:20001 stream message whose content becomes part of
+    /// the real steer request body `try_native_steer` builds.
+    fn stream_event() -> nostr::Event {
+        EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            SECRET_REQUEST_CONTENT,
+        )
+        .sign_with_keys(&Keys::generate())
+        .expect("sign test stream message")
+    }
+
+    /// Insert an in-flight task_map entry for `scope` carrying `steer_tx`,
+    /// mirroring `mark_agent_busy` — the existing seam for simulating an
+    /// in-flight prompt task without spawning a real agent turn (same shape
+    /// as the pool.rs `mark_agent_busy_with_steer_tx` fixture).
+    fn mark_in_flight_with_steer_tx(
+        pool: &mut AgentPool,
+        busy_scope: scope::SessionScope,
+        steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    ) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(busy_scope.channel_id()),
+                scope: Some(busy_scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// Drive the REAL `try_native_steer` exactly as the production caller
+    /// (`QueuedNormalListenerEvent::steer_or_interrupt`) does — event already
+    /// pushed into the queue, steer-eligible event, live steer-ack channel —
+    /// under a capturing subscriber. Returns the function's return value and
+    /// the fallback logs it emitted on this thread.
+    fn try_native_steer_capturing(pool: &mut AgentPool) -> (bool, Vec<FallbackLog>) {
+        let busy_scope = steer_scope();
+        let event = stream_event();
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        // Caller invariant: the event is already queued before the steer
+        // attempt (see `try_native_steer`'s doc comment).
+        assert!(
+            queue.push(QueuedEvent {
+                channel_id: Uuid::nil(),
+                scope: busy_scope.clone(),
+                event: event.clone(),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "mention".into(),
+            }),
+            "queued event must be accepted before the steer attempt"
+        );
+        let (steer_ack_tx, _steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture { logs: logs.clone() });
+        let returned = tracing::subscriber::with_default(subscriber, || {
+            try_native_steer(
+                pool,
+                &mut queue,
+                busy_scope.clone(),
+                event,
+                "mention".into(),
+                &steer_ack_tx,
+            )
+        });
+        let logs_out = std::mem::take(&mut *logs.lock().unwrap());
+        (returned, logs_out)
+    }
+
+    /// Assert the captured logs are exactly one production fallback event for
+    /// `expected_reason`: exact message, exact reason, exact channel, no
+    /// additional fields, and no request or error content anywhere.
+    fn assert_single_fallback_log(logs: &[FallbackLog], expected_reason: &str) {
+        assert_eq!(
+            logs.len(),
+            1,
+            "exactly one fallback log must be emitted per refusal, got {logs:?}"
+        );
+        let log = &logs[0];
+        assert_eq!(
+            log.message.as_deref(),
+            Some("non-cancelling steer not accepted — falling back to cancel+merge"),
+            "fallback log message must stay the exact production bytes"
+        );
+        assert_eq!(
+            log.reason.as_deref(),
+            Some(expected_reason),
+            "fallback log reason must be the exact admission label"
+        );
+        let expected_channel = Uuid::nil().to_string();
+        assert_eq!(
+            log.channel.as_deref(),
+            Some(expected_channel.as_str()),
+            "fallback log channel must be the scope's channel id"
+        );
+        assert!(
+            log.unexpected_fields.is_empty(),
+            "fallback log must carry only channel+reason — no request/error \
+             content fields: {:?}",
+            log.unexpected_fields
+        );
+        let rendered = format!("{log:?}");
+        assert!(
+            !rendered.contains(SECRET_REQUEST_CONTENT),
+            "fallback log must not leak request content: {rendered}"
+        );
+    }
+
+    /// No in-flight task owns the scope: `send_steer` refuses with
+    /// `PromptCompleted`, classified as `task_absent`.
+    #[test]
+    fn try_native_steer_logs_task_absent_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "task_absent");
+    }
+
+    /// The in-flight task has no steer sender installed: `sender_absent`.
+    #[tokio::test]
+    async fn try_native_steer_logs_sender_absent_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), None);
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "sender_absent");
+    }
+
+    /// The capacity-1 steer mailbox already holds one in-flight steer:
+    /// `mailbox_full`.
+    #[tokio::test]
+    async fn try_native_steer_logs_mailbox_full_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), Some(tx.clone()));
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
+        tx.try_send(SteerRequest {
+            prompt_blocks: vec!["first in-flight steer".into()],
+            ack_tx,
+        })
+        .expect("capacity-1 mailbox accepts the first in-flight steer");
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "mailbox_full");
+    }
+
+    /// The read loop's steer receiver is torn down: `mailbox_closed`.
+    #[tokio::test]
+    async fn try_native_steer_logs_mailbox_closed_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (tx, rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), Some(tx));
+        drop(rx); // read loop torn down before this steer arrived
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "mailbox_closed");
     }
 }
 

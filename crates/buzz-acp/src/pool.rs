@@ -540,7 +540,11 @@ pub enum SteerError {
     ///   running or just ended.
     AgentError { code: i64, message: String },
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
-    /// violation, etc. The string carries the underlying `AcpError`'s display.
+    /// violation, etc. For read-loop (post-admission) failures the string
+    /// carries the underlying `AcpError`'s display. For admission refusals
+    /// returned by [`AgentPool::send_steer`] it instead carries the fixed
+    /// [`SteerAdmissionReason`] label so callers can log a structured
+    /// reason without dumping request content.
     Transport(String),
     /// At steer-write time neither steer transport was available: no
     /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
@@ -574,6 +578,80 @@ pub enum SteerError {
     /// for the channel. Never sent through the ack channel — the ack
     /// watcher is only spawned on `send_steer` success.
     PromptCompleted,
+}
+
+/// Fixed-vocabulary reason the stock admission owner
+/// ([`AgentPool::send_steer`]) refused a native-steer request before any
+/// wire write was attempted.
+///
+/// These are structured diagnostic labels only — never request content,
+/// agent output, or tokens. They classify *admission* (getting the request
+/// into the in-flight read loop's capacity-1 steer mailbox) and are
+/// deliberately distinct from post-admission failures: a steer that was
+/// admitted and then failed at the wire keeps [`SteerError::Transport`]
+/// carrying the underlying `AcpError` display, and `AgentError` /
+/// `ExpectedRunIdMissing` / `OutcomeRejected` keep their own variants (see
+/// [`SteerError::admission_reason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerAdmissionReason {
+    /// No in-flight task owns the scope. Returned as
+    /// [`SteerError::PromptCompleted`], which keeps its distinct
+    /// release-and-normal-dispatch semantics — a separate branch, not a
+    /// transport refusal.
+    TaskAbsent,
+    /// The in-flight task has no `steer_tx` sender installed.
+    SenderAbsent,
+    /// The capacity-1 steer mailbox already holds one in-flight steer.
+    MailboxFull,
+    /// The read loop's steer receiver has been torn down.
+    MailboxClosed,
+}
+
+impl SteerAdmissionReason {
+    /// Fixed, greppable label. Carried in the admission refusal's
+    /// [`SteerError::Transport`] string and in the main loop's fallback
+    /// log `reason` field; never contains request content.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskAbsent => "task_absent",
+            Self::SenderAbsent => "sender_absent",
+            Self::MailboxFull => "mailbox_full",
+            Self::MailboxClosed => "mailbox_closed",
+        }
+    }
+
+    /// Wrap the reason as the transport-refusal error `send_steer` returns,
+    /// preserving the historical `Err(SteerError::Transport(_))` return
+    /// contract for these branches.
+    fn transport_refusal(self) -> SteerError {
+        SteerError::Transport(self.as_str().to_owned())
+    }
+}
+
+impl SteerError {
+    /// Structured admission-refusal classification for errors produced by
+    /// the stock admission owner, [`AgentPool::send_steer`]. Returns `None`
+    /// for every post-admission error — ack-native steer write failures
+    /// (`Transport` carrying an `AcpError` display), `AgentError`,
+    /// `ExpectedRunIdMissing`, and `OutcomeRejected` — so admission
+    /// refusals are never conflated with wire failures. The fixed labels
+    /// mirror [`SteerAdmissionReason::as_str`] and are pinned together by
+    /// unit tests.
+    pub fn admission_reason(&self) -> Option<SteerAdmissionReason> {
+        match self {
+            Self::PromptCompleted => Some(SteerAdmissionReason::TaskAbsent),
+            Self::Transport(msg) => match msg.as_str() {
+                "sender_absent" => Some(SteerAdmissionReason::SenderAbsent),
+                "mailbox_full" => Some(SteerAdmissionReason::MailboxFull),
+                "mailbox_closed" => Some(SteerAdmissionReason::MailboxClosed),
+                // Any other Transport string is a post-admission wire
+                // failure (an AcpError display from the read loop), not an
+                // admission refusal.
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// Outcome of a mid-turn steer, sent from the read loop back to the
@@ -1106,9 +1184,11 @@ impl AgentPool {
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
     /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
+    /// (already-in-flight write, or read loop torn down); the `Transport`
+    /// string is the fixed [`SteerAdmissionReason`] label
+    /// (`sender_absent`/`mailbox_full`/`mailbox_closed`), never request
+    /// content. Callers must fall back to the universal
+    /// `ControlSignal::Steer` cancel+merge path on `Err`.
     ///
     /// This does **not** spawn the ack watcher — the caller owns the
     /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
@@ -1135,9 +1215,20 @@ impl AgentPool {
         let tx = meta
             .steer_tx
             .as_ref()
-            .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
-        tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .ok_or_else(|| SteerAdmissionReason::SenderAbsent.transport_refusal())?;
+        match tx.try_send(request) {
+            Ok(()) => Ok(()),
+            // Capacity-1 mailbox already holds one in-flight steer write.
+            // The refused request (including its oneshot ack) comes back
+            // inside the error and is dropped here, exactly as before.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(SteerAdmissionReason::MailboxFull.transport_refusal())
+            }
+            // Read loop receiver torn down before this request arrived.
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(SteerAdmissionReason::MailboxClosed.transport_refusal())
+            }
+        }
     }
 
     /// Durably associate a successful steer with the exact ACP session that
@@ -8760,6 +8851,191 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
         result.agent.acp.install_steer_rx(steer_rx);
         // Reaching here without a panic is the test.
+    }
+
+    // ── send_steer admission-reason tests ─────────────────────────────────
+    //
+    // These pin the fixed structured admission-refusal labels the stock
+    // admission owner (`send_steer`) reports, and that the fallback log's
+    // `reason` classification (via `SteerError::admission_reason`) matches
+    // them branch for branch without touching request content.
+
+    /// Insert an in-flight task_map entry for `scope` carrying `steer_tx`,
+    /// mirroring `mark_agent_busy` — the existing seam for simulating an
+    /// in-flight prompt task without spawning a real agent turn.
+    fn mark_agent_busy_with_steer_tx(
+        pool: &mut AgentPool,
+        scope: SessionScope,
+        steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    ) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(scope.channel_id()),
+                scope: Some(scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// A minimal steer request; the ack oneshot is dropped with the request
+    /// when admission refuses it, exactly as in production.
+    fn steer_request() -> SteerRequest {
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<SteerAck>();
+        SteerRequest {
+            prompt_blocks: vec!["steer block".into()],
+            ack_tx,
+        }
+    }
+
+    #[test]
+    fn send_steer_reports_task_absent_when_no_task_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        // Unchanged return shape: the separate task-absent branch keeps
+        // PromptCompleted's release-and-normal-dispatch semantics.
+        assert!(matches!(err, SteerError::PromptCompleted));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::TaskAbsent)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_sender_absent_when_no_steer_sender_installed() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        // The existing seam inserts the in-flight task with steer_tx: None.
+        mark_agent_busy(&mut pool, 0, scope.clone());
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "sender_absent"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::SenderAbsent)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_mailbox_full_when_one_steer_already_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx.clone()));
+        // Fill the capacity-1 mailbox: one steer write already in flight.
+        tx.try_send(steer_request())
+            .expect("capacity-1 mailbox accepts the first in-flight steer");
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "mailbox_full"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::MailboxFull)
+        );
+        // The already-admitted request is untouched by the refused second
+        // attempt: send results are preserved.
+        let admitted = rx.try_recv().expect("first in-flight steer still queued");
+        assert_eq!(admitted.prompt_blocks, vec!["steer block".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_mailbox_closed_after_receiver_dropped() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx));
+        drop(rx); // read loop torn down before this request arrived
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "mailbox_closed"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::MailboxClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_ok_hands_request_to_read_loop_receiver() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx));
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel::<SteerAck>();
+        pool.send_steer(
+            &scope,
+            SteerRequest {
+                prompt_blocks: vec!["steer block".into()],
+                ack_tx,
+            },
+        )
+        .expect("admission succeeds with a live receiver");
+        let admitted = rx
+            .recv()
+            .await
+            .expect("request reaches the read loop mailbox");
+        assert_eq!(admitted.prompt_blocks, vec!["steer block".to_string()]);
+        admitted
+            .ack_tx
+            .send(SteerAck::PromptCompletedNeutral)
+            .expect("ack oneshot survives admission");
+        assert!(matches!(
+            ack_rx.try_recv(),
+            Ok(SteerAck::PromptCompletedNeutral)
+        ));
+    }
+
+    #[test]
+    fn steer_admission_reason_labels_round_trip_with_send_steer_refusals() {
+        // send_steer writes exactly these labels via transport_refusal;
+        // admission_reason must classify them back without drift.
+        for reason in [
+            SteerAdmissionReason::SenderAbsent,
+            SteerAdmissionReason::MailboxFull,
+            SteerAdmissionReason::MailboxClosed,
+        ] {
+            assert_eq!(reason.transport_refusal().admission_reason(), Some(reason));
+        }
+        assert_eq!(
+            SteerError::PromptCompleted.admission_reason(),
+            Some(SteerAdmissionReason::TaskAbsent)
+        );
+        // Fixed vocabulary the fallback log reports.
+        assert_eq!(SteerAdmissionReason::TaskAbsent.as_str(), "task_absent");
+        assert_eq!(SteerAdmissionReason::SenderAbsent.as_str(), "sender_absent");
+        assert_eq!(SteerAdmissionReason::MailboxFull.as_str(), "mailbox_full");
+        assert_eq!(
+            SteerAdmissionReason::MailboxClosed.as_str(),
+            "mailbox_closed"
+        );
+    }
+
+    #[test]
+    fn steer_admission_reason_excludes_post_admission_errors() {
+        // Ack-native write failures are built in the read loop AFTER
+        // admission (acp.rs carries the AcpError display); they and the
+        // other ack outcomes must never classify as admission refusals.
+        let post_admission = [
+            SteerError::Transport("I/O error: broken pipe mid-write".into()),
+            SteerError::AgentError {
+                code: -32601,
+                message: "method not found".into(),
+            },
+            SteerError::ExpectedRunIdMissing,
+            SteerError::OutcomeRejected {
+                outcome: "failed".into(),
+            },
+        ];
+        for err in post_admission {
+            assert_eq!(
+                err.admission_reason(),
+                None,
+                "{err:?} is post-admission and must not classify as admission"
+            );
+        }
     }
 
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
