@@ -1,0 +1,139 @@
+suite: isolated storage accounting
+templates:
+  - templates/storage-accounting-cronjob.yaml
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+tests:
+  - it: renders no worker by default
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/storage-accounting-cronjob.yaml
+  - it: renders a non-overlapping worker with an isolated cap
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.region: us-west-2
+      s3.addressingStyle: virtual
+      s3.accessKey: test
+      s3.secretKey: test
+      storageAccounting:
+        enabled: true
+        relayMode: external
+        maxObjects: 10000000
+        activeDeadlineSeconds: 3600
+        serviceAccountName: buzz-storage-accounting
+        podLabels:
+          tags.datadoghq.com/env: production
+          tags.datadoghq.com/service: buzz-storage-accounting
+          tags.datadoghq.com/version: test-sha
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: kind
+          value: CronJob
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.backoffLimit
+          value: 0
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.activeDeadlineSeconds
+          value: 3600
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.restartPolicy
+          value: Never
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: buzz-storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.annotations["sidecar.istio.io/inject"]
+          value: "false"
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: production
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: test-sha
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          value: ["storage-snapshot", "--max-objects", "10000000"]
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.memory
+          value: 20Gi
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.memory
+          value: 20Gi
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: 0.1.0
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_BUCKET
+            value: buzz-media-example
+        template: templates/storage-accounting-cronjob.yaml
+      - lengthEqual:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          count: 8
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_METRICS
+            value: external
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SWEEP_MAX_OBJECTS
+            value: "10000000"
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_RELAY_PRIVATE_KEY
+        template: templates/storage-accounting-cronjob.yaml
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_GIT_HOOK_HMAC_SECRET
+        template: templates/storage-accounting-cronjob.yaml

@@ -217,6 +217,23 @@
         "secretKey": { "type": "string" }
       }
     },
+    "storageAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string", "minLength": 1 },
+        "maxObjects": { "type": "integer", "minimum": 1 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 },
+        "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "relayMode": { "type": "string", "enum": ["inline", "external", "off"] },
+        "serviceAccountName": { "type": "string" },
+        "podLabels": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "resources": { "type": "object" }
+      }
+    },
     "minio": {
       "type": "object",
       "additionalProperties": false,

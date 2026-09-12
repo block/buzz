@@ -1,0 +1,74 @@
+{{- if .Values.storageAccounting.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "buzz.fullname" . }}-storage-accounting
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage-accounting
+spec:
+  schedule: {{ .Values.storageAccounting.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.storageAccounting.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.storageAccounting.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.storageAccounting.activeDeadlineSeconds }}
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "buzz.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: storage-accounting
+            {{- with .Values.storageAccounting.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            {{- toYaml .Values.storageAccounting.podAnnotations | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ default (include "buzz.serviceAccountName" .) .Values.storageAccounting.serviceAccountName }}
+          securityContext:
+            {{- toYaml .Values.relay.securityContext | nindent 12 }}
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: storage-accounting
+              image: {{ include "buzz.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- omit .Values.relay.containerSecurityContext "readOnlyRootFilesystem" | toYaml | nindent 16 }}
+                readOnlyRootFilesystem: true
+              command: ["/usr/local/bin/buzz-admin"]
+              args: ["storage-snapshot", "--max-objects", {{ .Values.storageAccounting.maxObjects | int64 | quote }}]
+              env:
+                {{- $s3Endpoint := include "buzz.s3Endpoint" . }}
+                {{- if $s3Endpoint }}
+                - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
+                {{- end }}
+                - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
+                - { name: BUZZ_S3_REGION, value: {{ .Values.s3.region | quote }} }
+                - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ .Values.s3.addressingStyle | quote }} }
+                - { name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA, value: {{ include "buzz.imageRevision" . | quote }} }
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "buzz.envSecretName" . }}
+                      key: DATABASE_URL
+                - name: BUZZ_S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "buzz.envSecretName" . }}
+                      key: BUZZ_S3_ACCESS_KEY
+                      optional: true
+                - name: BUZZ_S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "buzz.envSecretName" . }}
+                      key: BUZZ_S3_SECRET_KEY
+                      optional: true
+              resources:
+                {{- toYaml .Values.storageAccounting.resources | nindent 16 }}
+{{- end }}
