@@ -299,6 +299,19 @@ impl MediaStorage {
         }
     }
 
+    /// Max bytes we will skip from the start of a full-object stream when the
+    /// native ranged GET is unavailable. Near-tail ranges on multi-GB objects
+    /// must fail closed rather than transfer-and-discard the prefix.
+    const MAX_STREAM_FALLBACK_SKIP: u64 = 16 * 1024 * 1024;
+
+    /// Whether an HTTP status from a failed ranged GET may safely fall back to
+    /// full-object streaming. Only the R2/rust-s3 Range incompatibility class
+    /// (malformed/unsupported Range → 400/416). Auth (401/403), throttling,
+    /// and 5xx stay hard errors — never become a full scan.
+    fn is_range_incompatibility_status(status: u16) -> bool {
+        matches!(status, 400 | 416)
+    }
+
     /// Retrieve a byte range from an object via S3-native `Range` GET.
     ///
     /// `start` and `end` are inclusive byte offsets. Only the requested slice
@@ -308,8 +321,67 @@ impl MediaStorage {
         match self.bucket.get_object_range(key, start, Some(end)).await {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
+            Err(s3::error::S3Error::HttpFailWithBody(status, _))
+                if Self::is_range_incompatibility_status(status) =>
+            {
+                self.get_range_via_stream(key, start, end).await
+            }
             Err(e) => Err(MediaError::StorageError(e.to_string())),
         }
+    }
+
+    /// Fallback for S3-compatible stores (notably Cloudflare R2) where
+    /// rust-s3's ranged GET helper fails even though full-object streaming works.
+    async fn get_range_via_stream(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, MediaError> {
+        use futures_util::StreamExt;
+
+        let byte_count = end
+            .checked_sub(start)
+            .and_then(|delta| delta.checked_add(1))
+            .ok_or_else(|| MediaError::StorageError("invalid byte range".to_string()))?
+            as usize;
+
+        if start > Self::MAX_STREAM_FALLBACK_SKIP {
+            return Err(MediaError::StorageError(format!(
+                "ranged GET unavailable and start offset {start} exceeds \
+                 stream-fallback skip budget ({})",
+                Self::MAX_STREAM_FALLBACK_SKIP
+            )));
+        }
+
+        let mut stream = self.get_stream(key).await?;
+        let mut skipped = 0u64;
+        let mut collected = Vec::with_capacity(byte_count.min(16 * 1024 * 1024));
+
+        while collected.len() < byte_count {
+            let chunk = match stream.next().await {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(err)) => return Err(err),
+                None => {
+                    return Err(MediaError::StorageError(
+                        "unexpected EOF while reading ranged media object".to_string(),
+                    ));
+                }
+            };
+
+            for byte in chunk {
+                if skipped < start {
+                    skipped += 1;
+                    continue;
+                }
+                collected.push(byte);
+                if collected.len() >= byte_count {
+                    break;
+                }
+            }
+        }
+
+        Ok(collected)
     }
 
     /// Stream an object's bytes from S3 without loading into RAM.
@@ -1085,6 +1157,24 @@ mod tests {
             sidecars[&MediaStorage::ctx_sidecar_key(&b, &sha)],
             "video/mp4"
         );
+    }
+
+    #[test]
+    fn stream_fallback_skip_budget_is_sixteen_mebibytes() {
+        assert_eq!(MediaStorage::MAX_STREAM_FALLBACK_SKIP, 16 * 1024 * 1024);
+        // Near-tail ranges past the budget must fail closed (no full-object scan).
+        assert!(32 * 1024 * 1024 > MediaStorage::MAX_STREAM_FALLBACK_SKIP);
+    }
+
+    #[test]
+    fn stream_fallback_only_for_range_incompatibility_statuses() {
+        assert!(MediaStorage::is_range_incompatibility_status(400));
+        assert!(MediaStorage::is_range_incompatibility_status(416));
+        assert!(!MediaStorage::is_range_incompatibility_status(401));
+        assert!(!MediaStorage::is_range_incompatibility_status(403));
+        assert!(!MediaStorage::is_range_incompatibility_status(500));
+        assert!(!MediaStorage::is_range_incompatibility_status(503));
+        assert!(!MediaStorage::is_range_incompatibility_status(404));
     }
 }
 
