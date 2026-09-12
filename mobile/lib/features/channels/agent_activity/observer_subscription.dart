@@ -107,6 +107,26 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
     return _startFuture!;
   }
 
+  /// Re-attempts the observer subscription after a terminal error.
+  ///
+  /// The `build()` method only re-runs when the relay config or session
+  /// changes, so an error emitted by the `onClosed` relay callback (where the
+  /// session itself stays connected) previously dead-ended the UI with no
+  /// re-entry point. This method is the user-driven re-entry: it invalidates
+  /// any in-flight subscribe via the epoch guard, clears the stale error, and
+  /// re-enters the existing [_ensureSubscribed] seam with the same filter
+  /// shape. Safe to call repeatedly; a no-op when already subscribed.
+  Future<void> retry() {
+    if (_disposed) return Future.value();
+    if (_unsubscribe != null) return Future.value();
+
+    _subscriptionEpoch += 1;
+    _startFuture = null;
+    _errorMessage = null;
+    _emit(connection: ObserverConnectionState.connecting);
+    return _ensureSubscribed();
+  }
+
   Future<void> _subscribe(int epoch) async {
     try {
       if (_disposed || epoch != _subscriptionEpoch) {
