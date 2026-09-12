@@ -36,6 +36,8 @@ export type ChannelPaneProps = {
   onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
   channelManagementOpen?: boolean;
+  /** Width of the channel content container, used for responsive pane topology. */
+  channelContentWidthPx: number;
   currentPubkey?: string;
   editTarget?: MessageComposerEditTarget | null;
   fetchOlder?: () => Promise<void>;
@@ -95,6 +97,7 @@ export type ChannelPaneProps = {
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
   onCloseIdleAuxiliaryPanel?: () => void;
+  onCloseMarkdownDoc?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: (options?: { beforeSend?: () => void }) => void;
   onAddFiles?: () => void;
@@ -180,6 +183,8 @@ export type ChannelPaneProps = {
     tab: ProfilePanelTab,
     options?: { replace?: boolean },
   ) => void;
+  markdownDocName?: string | null;
+  markdownDocUrl?: string | null;
   profilePanelPubkey?: string | null;
   profilePanelTab: ProfilePanelTab;
   profilePanelView: ProfilePanelView;

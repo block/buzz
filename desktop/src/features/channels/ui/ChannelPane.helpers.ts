@@ -10,6 +10,7 @@ export function shouldUseFocusIdleDrawer({
   hasAgentSession,
   hasIdleAuxiliaryPanel,
   hasIdlePanelCloseHandler,
+  hasMarkdownDoc,
   hasProfilePanel,
   hasThreadSurface,
   overrideThread = false,
@@ -19,6 +20,7 @@ export function shouldUseFocusIdleDrawer({
   hasAgentSession: boolean;
   hasIdleAuxiliaryPanel: boolean;
   hasIdlePanelCloseHandler: boolean;
+  hasMarkdownDoc: boolean;
   hasProfilePanel: boolean;
   hasThreadSurface: boolean;
   overrideThread?: boolean;
@@ -28,6 +30,7 @@ export function shouldUseFocusIdleDrawer({
     (useSplitAuxiliaryPane || overrideThread) &&
     !channelManagementOpen &&
     !hasAgentSession &&
+    !hasMarkdownDoc &&
     !hasProfilePanel &&
     (!hasThreadSurface || overrideThread) &&
     hasIdleAuxiliaryPanel &&
