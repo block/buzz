@@ -1,5 +1,6 @@
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -120,6 +121,59 @@ void main() {
     expect(state().isForcedUnread(channelId), isFalse);
     expect(state().isForcedUnread(msgKey), isTrue);
     expect(state().locallyForcedChannelIds, {channelId});
+  });
+
+  test('a re-emitted equal community does not rebuild read state', () async {
+    // The production loop this pins: reservePushLeaseGeneration saves the
+    // community on every publish attempt, so activeCommunityProvider re-emits a
+    // NEW Community object carrying identical values. ReadStateNotifier.build()
+    // disposes and recreates its manager, so without Community.== every publish
+    // attempt tore down the relay work that attempt depended on.
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final nsec = nostr.Keys.generate().nsec;
+    var communityName = 'Buzz';
+
+    final localContainer = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => _FakeRelayConfig(nsec)),
+        relaySessionProvider.overrideWith(_FakeRelaySession.new),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'community-1',
+            name: communityName,
+            relayUrl: 'https://relay.test',
+            addedAt: DateTime.utc(2026, 8, 5),
+          ),
+        ),
+        appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
+      ],
+    );
+    addTearDown(localContainer.dispose);
+
+    var rebuilds = 0;
+    final sub = localContainer.listen(
+      readStateProvider,
+      (_, _) => rebuilds += 1,
+    );
+    addTearDown(sub.close);
+    await localContainer.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    rebuilds = 0;
+
+    // Force a fresh Community object carrying identical values.
+    localContainer.invalidate(activeCommunityProvider);
+    await localContainer.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(rebuilds, 0);
+
+    // A genuine change must still rebuild.
+    communityName = 'Renamed';
+    localContainer.invalidate(activeCommunityProvider);
+    await localContainer.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(rebuilds, greaterThan(0));
   });
 }
 

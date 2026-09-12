@@ -57,6 +57,18 @@ class RelayConfig {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     return uri.replace(scheme: scheme).toString();
   }
+
+  /// Value equality, because the identity fallback documented on [baseUrl] only
+  /// holds for the const fallback. The community-derived config is built fresh
+  /// on every rebuild, so identity made it a new value every time — and
+  /// RelaySessionNotifier watches this provider, disposes its socket on rebuild
+  /// and reconnects, so an unchanged config was tearing the relay session down.
+  @override
+  bool operator ==(Object other) =>
+      other is RelayConfig && other._baseUrl == _baseUrl && other.nsec == nsec;
+
+  @override
+  int get hashCode => Object.hash(_baseUrl, nsec);
 }
 
 /// Compile-time environment config via --dart-define.
@@ -82,8 +94,13 @@ class RelayConfigNotifier extends Notifier<RelayConfig> {
   RelayConfig build() {
     // Watch the active community so that when it changes (community switch),
     // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeCommunityProvider);
-    final active = activeAsync.value;
+    // Selected, not watched whole: activeCommunityProvider is a FutureProvider,
+    // so every recompute passes through AsyncLoading and would rebuild this
+    // config — and with it the relay session — even when the community is
+    // unchanged.
+    final active = ref.watch(
+      activeCommunityProvider.select((community) => community.value),
+    );
     if (active != null) {
       return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
     }

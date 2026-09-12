@@ -106,6 +106,37 @@ class Community {
     );
   }
 
+  @override
+  bool operator ==(Object other) =>
+      other is Community &&
+      other.id == id &&
+      other.name == name &&
+      other.relayUrl == relayUrl &&
+      other.pubkey == pubkey &&
+      other.nsec == nsec &&
+      other.sensitiveActionPolicy == sensitiveActionPolicy &&
+      other.pushNotificationsEnabled == pushNotificationsEnabled &&
+      other.pushLeaseInstallationId == pushLeaseInstallationId &&
+      other.starterSetupIncomplete == starterSetupIncomplete &&
+      other.addedAt == addedAt &&
+      buzzPushSubscriptionStateFingerprint(other.pushSubscriptionState) ==
+          buzzPushSubscriptionStateFingerprint(pushSubscriptionState);
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    relayUrl,
+    pubkey,
+    nsec,
+    sensitiveActionPolicy,
+    pushNotificationsEnabled,
+    pushLeaseInstallationId,
+    starterSetupIncomplete,
+    addedAt,
+    buzzPushSubscriptionStateFingerprint(pushSubscriptionState),
+  );
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
