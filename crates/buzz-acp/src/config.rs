@@ -190,6 +190,27 @@ pub struct ModelsArgs {
     pub json: bool,
 }
 
+/// CLI args for `buzz-acp prompt` — run one local ACP turn without connecting
+/// to a relay. The prompt is read from stdin so it is not exposed in the
+/// process list and is not constrained by command-line length limits.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp prompt",
+    about = "Run one prompt with the configured agent"
+)]
+pub struct PromptArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Optional system prompt for this one-shot session.
+    #[arg(long, env = "BUZZ_ACP_SYSTEM_PROMPT")]
+    pub system_prompt: Option<String>,
+
+    /// Output structured JSON instead of the message text alone.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Shared agent-spawn flags for lightweight local ACP helper subcommands.
 #[derive(Debug, Parser)]
 pub struct AuthAgentArgs {

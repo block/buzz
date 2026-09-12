@@ -87,6 +87,18 @@
   color: hsl(var(--primary));
 }
 
+/* Welcome links and images use the channel chip's exact box model while
+ * supplying their icon as markup instead of a masked pseudo-element. */
+.message-markdown .welcome-message-inline-chip {
+  gap: var(--inline-chip-icon-gap);
+}
+
+.message-markdown .welcome-message-inline-chip > svg {
+  width: var(--inline-chip-icon-size);
+  height: var(--inline-chip-icon-size);
+  flex: none;
+}
+
 .message-markdown .mention-chip.wrapping-inline-chip {
   display: inline;
   line-height: calc(
