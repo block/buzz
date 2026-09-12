@@ -64,6 +64,7 @@ import {
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
   KIND_HUDDLE_STARTED,
+  KIND_INTERACTION_STATE,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
@@ -4910,6 +4911,18 @@ function emitMockHistory(
   const events = channelIds
     .flatMap((channelId) => getMockMessageStore(channelId))
     .filter((event) => {
+      // Interaction cards query individual prompts and addressable summaries;
+      // returning another card's first event would invalidate the control.
+      if (filter.ids && !filter.ids.includes(event.id)) return false;
+      if (filter.authors && !filter.authors.includes(event.pubkey))
+        return false;
+      if (
+        filter["#d"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "d" && filter["#d"]?.includes(tag[1]),
+        )
+      )
+        return false;
       if (filter.kinds && !filter.kinds.includes(event.kind)) {
         return false;
       }
@@ -10889,6 +10902,12 @@ function sendToMockSocket(args: {
         kinds: kinds.size > 0 ? [...kinds] : null,
         ownerPubkeys: [...ownerPubkeys],
       });
+      // Interaction cards use one history + live REQ, including on remount.
+      for (const filter of filters) {
+        if (filter.kinds?.includes(KIND_INTERACTION_STATE)) {
+          emitMockHistory(socket, subId, [...channelIds], filter);
+        }
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }

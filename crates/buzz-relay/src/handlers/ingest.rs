@@ -21,7 +21,8 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_INTERACTION_CLOSE, KIND_INTERACTION_PROMPT,
+    KIND_INTERACTION_RESPONSE, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
     KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
@@ -467,6 +468,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_EMOJI_SET
         | KIND_EMOJI_LIST
         | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
+        KIND_INTERACTION_PROMPT | KIND_INTERACTION_RESPONSE | KIND_INTERACTION_CLOSE => Ok(Scope::MessagesWrite),
         KIND_DELETION
         | KIND_REACTION
         | KIND_GIFT_WRAP
@@ -707,7 +709,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
 pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_STREAM_MESSAGE
+        KIND_INTERACTION_PROMPT | KIND_INTERACTION_RESPONSE | KIND_INTERACTION_CLOSE
+            | KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_EDIT
             | KIND_STREAM_MESSAGE_PINNED
@@ -2189,6 +2192,8 @@ async fn ingest_event_inner(
             .await,
     )?;
 
+    super::interactions::check_enabled(state.config.experimental_interactions, kind_u32)?;
+
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
             "invalid: AUTH events cannot be submitted".into(),
@@ -3009,6 +3014,44 @@ async fn ingest_event_inner(
     } else {
         None
     };
+
+    if state.config.experimental_interactions {
+        if let Some(result) = super::interactions::try_ingest(
+            tenant,
+            state,
+            &event,
+            thread_meta.as_ref().map(|m| m.as_params()),
+        )
+        .await?
+        {
+            if let Some(channel) = channel_id {
+                let claimed_community = claimed_community_from_event(&event);
+                let action = if result.message == "duplicate" {
+                    TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(channel),
+                        claimed_community,
+                    }
+                } else {
+                    TraceAction::WriteInsert {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(channel),
+                        claimed_community,
+                    }
+                };
+                emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+            }
+            if let Some(meta) = &thread_meta {
+                crate::handlers::side_effects::emit_live_thread_summary(
+                    tenant,
+                    state,
+                    meta.channel_id,
+                    meta.root_event_id.clone(),
+                );
+            }
+            return Ok(result);
+        }
+    }
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.

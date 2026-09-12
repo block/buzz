@@ -30,6 +30,12 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "interactions",
+      "name": "Interaction cards",
+      "description": "Experimental signed buttons, forms and polls on supporting relays",
+      "platforms": ["desktop"]
     }
   ]
 }

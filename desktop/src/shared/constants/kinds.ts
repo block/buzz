@@ -174,3 +174,9 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
 export function isConversationalUnreadKind(kind: number | undefined): boolean {
   return kind === undefined || !NON_CONVERSATIONAL_UNREAD_KINDS.has(kind);
 }
+
+// Experimental interactions (buzz-core/src/kind.rs).
+export const KIND_INTERACTION_PROMPT = 40010;
+export const KIND_INTERACTION_RESPONSE = 40011;
+export const KIND_INTERACTION_CLOSE = 40012;
+export const KIND_INTERACTION_STATE = 39010;

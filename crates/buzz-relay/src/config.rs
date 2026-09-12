@@ -116,6 +116,8 @@ pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Enable experimental signed interaction prompts and answers (default false).
+    pub experimental_interactions: bool,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -809,6 +811,16 @@ impl Config {
             .collect();
 
         let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
+        let experimental_interactions = parse_bool("BUZZ_EXPERIMENTAL_INTERACTIONS", false)?;
+        if experimental_interactions
+            && relay_private_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_EXPERIMENTAL_INTERACTIONS requires a stable BUZZ_RELAY_PRIVATE_KEY".into(),
+            ));
+        }
 
         let uds_path = std::env::var("BUZZ_UDS_PATH")
             .ok()
@@ -1239,6 +1251,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
+            experimental_interactions,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,

@@ -34,6 +34,11 @@ abstract final class EventKind {
   static const channelWindowBounds = 39006;
   static const streamMessageEdit = 40003;
   static const streamMessageDiff = 40008;
+  // Experimental interaction protocol; mobile uses message projections.
+  static const interactionPrompt = 40010;
+  static const interactionResponse = 40011;
+  static const interactionClose = 40012;
+  static const interactionState = 39010;
   static const systemMessage = 40099;
   static const jobRequest = 43001;
   static const jobAccepted = 43002;
