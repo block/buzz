@@ -359,7 +359,10 @@ test("ready offers starting development, reusing the ready head's own stream and
   await installMockBridge(page, {
     bwSnapshot: {
       activation: ACTIVATION,
-      records: { [ROOT]: rootEvent(ROOT, "Starting development") },
+      records: {
+        [ROOT]: rootEvent(ROOT, "Starting development"),
+        [ASSIGN_A]: assignmentEvent(ASSIGN_A, ROOT, WRITER, "assignment"),
+      },
       projection: {
         issues: { [ROOT]: "ready" },
         issue_state: {
@@ -390,6 +393,7 @@ test("ready offers starting development, reusing the ready head's own stream and
       stream: "windows-integration",
       assignment: ASSIGN_A,
     },
+    signerPubkey: WRITER,
   });
 });
 
@@ -494,7 +498,10 @@ test("in-development requires a tests summary and never sends a client-claimed c
   await installMockBridge(page, {
     bwSnapshot: {
       activation: ACTIVATION,
-      records: { [ROOT]: rootEvent(ROOT, "Marking implemented") },
+      records: {
+        [ROOT]: rootEvent(ROOT, "Marking implemented"),
+        [ASSIGN_A]: assignmentEvent(ASSIGN_A, ROOT, WRITER, "assignment"),
+      },
       projection: {
         issues: { [ROOT]: "in-development" },
         issue_state: {
@@ -529,6 +536,9 @@ test("in-development requires a tests summary and never sends a client-claimed c
   // command itself, never sent as a caller claim.
   expect(content).not.toHaveProperty("commit");
   expect(content).not.toHaveProperty("remote_readback");
+  expect((call?.payload as { signerPubkey?: string }).signerPubkey).toBe(
+    WRITER,
+  );
 });
 
 test("an implemented issue displays the commit, tests and verified readback exactly as Core accepted them", async ({
@@ -608,7 +618,13 @@ test("relations show both directions and leaf eligibility, and adding/removing a
   });
 
   await panel.getByTestId("bw-relation-type").selectOption("blocks");
-  await panel.getByTestId("bw-relation-target").fill(ROOT_B);
+  await panel.getByTestId("bw-relation-target").fill("ISS-2222");
+  const targetOption = page.getByTestId("bw-relation-target-option");
+  await expect(targetOption).toContainText("ISS-22222222");
+  await expect(targetOption).toContainText("Child issue");
+  await expect(targetOption).toContainText("Backlog");
+  await panel.getByTestId("bw-relation-target").press("Enter");
+  await expect(panel.getByTestId("bw-relation-target")).toHaveValue(ROOT_B);
   await expect(panel.getByTestId("bw-relation-add")).toBeEnabled();
   await panel.getByTestId("bw-relation-add").click();
 

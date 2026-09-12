@@ -48,6 +48,7 @@ mod personas;
 mod prevent_sleep;
 mod profile;
 mod project_bw_assignment;
+mod project_bw_signer;
 mod project_bw_write;
 mod project_git;
 mod project_git_branches;

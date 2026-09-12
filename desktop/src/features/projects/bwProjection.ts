@@ -173,6 +173,77 @@ export function bwAssignmentHead(
   };
 }
 
+/** Resolve the writer identity bound into the current issue-state head.
+ * `assignment` is an event id, not a writer pubkey: follow that exact accepted
+ * kind:1 assignment instead of using a possibly newer UI selection. Core
+ * revalidates the same binding when the writer-signed transition is submitted. */
+export function bwBoundWriter(
+  snapshot: BwSnapshot,
+  issueId: string,
+): string | null {
+  const assignmentId = snapshot.projection.issue_state[issueId]?.assignment;
+  if (!assignmentId) return null;
+  const assignment = snapshot.records[assignmentId];
+  if (
+    assignment?.kind !== 1 ||
+    bwTag(assignment, "t") !== "assignment" ||
+    bwTag(assignment, "e") !== issueId
+  ) {
+    return null;
+  }
+  return bwTag(assignment, "p") ?? null;
+}
+
+export type BwRelationTargetCandidate = {
+  id: string;
+  reference: string;
+  state: string;
+  title: string;
+};
+
+/** Autocomplete candidates for an issue relation. NIP-BW allows any other
+ * enrolled issue in the same repository; it does not restrict targets to
+ * backlog/ready. `projection.issues` is Core's accepted enrollment/state
+ * inventory, so pending/foreign roots never appear here. */
+export function bwRelationTargetCandidates(
+  snapshot: BwSnapshot,
+  currentIssueId: string,
+): BwRelationTargetCandidate[] {
+  return Object.entries(snapshot.projection.issues)
+    .filter(([id]) => id !== currentIssueId)
+    .map(([id, state]) => {
+      const root = snapshot.records[id];
+      const rootTitle = root?.tags.find((tag) => tag[0] === "subject")?.[1];
+      return {
+        id,
+        reference: `ISS-${id.slice(0, 8).toUpperCase()}`,
+        state,
+        title:
+          snapshot.projection.issue_fields[id]?.title || rootTitle || "Issue",
+      };
+    })
+    .sort((left, right) => left.reference.localeCompare(right.reference));
+}
+
+/** Match issue autocomplete text against its user-facing number, full event
+ * id, title and current Core state. Accept an optional `ISS-` prefix so users
+ * can type the number exactly as it is displayed elsewhere. */
+export function filterBwRelationTargets(
+  candidates: BwRelationTargetCandidate[],
+  query: string,
+): BwRelationTargetCandidate[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return candidates;
+  const idQuery = normalized.replace(/^iss-/, "");
+  return candidates.filter(
+    (candidate) =>
+      candidate.id.toLowerCase().includes(idQuery) ||
+      candidate.reference.toLowerCase().includes(normalized) ||
+      candidate.title.toLowerCase().includes(normalized) ||
+      candidate.state.toLowerCase().includes(normalized),
+  );
+}
+
 type BwTriageDelegation = {
   issue?: string;
   action?: string;

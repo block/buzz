@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BwConflictError,
+  submitBwInDevelopmentTransition,
   submitBwIssueTextUpdate,
   submitBwReadyTransition,
   submitBwTriageAction,
@@ -141,6 +142,35 @@ test("no delegation keeps delegate:false and the ordinary previous chain (P4F)",
     captured.input.tags.find((tag) => tag[0] === "previous"),
     ["previous", existingHead.id],
   );
+});
+
+test("in-development is signed by the writer bound into the ready head", async () => {
+  const writer = "d".repeat(64);
+  const assignmentId = "1".repeat(64);
+  const readyId = "2".repeat(64);
+  const current = snapshot([assignmentRecord(assignmentId, writer)]);
+  current.projection.issue_state = {
+    [issueId]: {
+      state: "ready",
+      stream: "windows-integration",
+      assignment: assignmentId,
+    },
+  };
+  current.projection.issue_state_id = { [issueId]: readyId };
+  let captured;
+  withMockInvoke(async (_command, args) => {
+    captured = args.input;
+    return { eventId: "3".repeat(64), projection: {} };
+  });
+
+  await submitBwInDevelopmentTransition({ issueId, repo, snapshot: current });
+
+  assert.equal(captured.signerPubkey, writer);
+  assert.deepEqual(captured.content, {
+    state: "in-development",
+    stream: "windows-integration",
+    assignment: assignmentId,
+  });
 });
 
 test("changing a ready writer unassigns, assigns, then rebinds ready to the new assignment", async () => {

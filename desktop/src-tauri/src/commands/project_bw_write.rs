@@ -27,9 +27,11 @@
 //! same way `assemble_bw_tags` already overwrites a caller-supplied `policy`.
 
 use super::project_bw::load as load_bw_input;
+use super::project_bw_signer::explicit_writer_signer;
 use super::project_git_exec::{
     build_git_auth_config, run_git, validate_workspace_clone_url, GitAuthConfig,
 };
+use super::project_git_workflow::project_owner_identity;
 use crate::app_state::AppState;
 use crate::bw_projection;
 use crate::relay::{query_relay, submit_signed_event_with_keys};
@@ -38,7 +40,7 @@ use buzz_sdk_pkg::bw::{record as bw_record, Publication, RecordType};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 /// The four P4D/P4E-scoped 46100 record types this command will sign. Every
 /// other BW record type (release/build/test/verdict machinery) belongs to a
@@ -165,6 +167,10 @@ pub struct SubmitBwRecordInput {
     content: Value,
     #[serde(default)]
     delegate: bool,
+    /// Optional explicit signer for the two writer-owned state transitions.
+    /// It must resolve to the current identity or a locally managed agent;
+    /// every candidate still passes Core's exact role/causality checks.
+    signer_pubkey: Option<String>,
 }
 
 const RESERVED_CALLER_TAGS: [&str; 4] = ["record", "a", "policy", "delegation"];
@@ -207,9 +213,15 @@ fn assemble_bw_tags(
 #[tauri::command]
 pub async fn submit_project_bw_record(
     input: SubmitBwRecordInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let kind = record_type(&input.record)?;
+    let explicit_signer = explicit_writer_signer(
+        &input.record,
+        &input.content,
+        input.signer_pubkey.as_deref(),
+    )?;
     let bw_input = load_bw_input(&state, &input.repo).await?;
     let (mut consumer, _) = bw_projection::replay(&bw_input);
     // `bw_input.now` is captured before `load_bw_input`'s own network round
@@ -225,7 +237,17 @@ pub async fn submit_project_bw_record(
     let activation = consumer
         .activation()
         .map_err(|refusal| refusal.to_string())?;
-    let keys = state.signing_keys()?;
+    let signing_identity = explicit_signer
+        .as_deref()
+        .map(|signer| project_owner_identity(&app, &state, signer))
+        .transpose()?;
+    let keys = match signing_identity.as_ref() {
+        Some(identity) => identity.keys.clone(),
+        None => state.signing_keys()?,
+    };
+    let auth_tag = signing_identity
+        .as_ref()
+        .and_then(|identity| identity.auth_tag.as_deref());
 
     let mut content = input.content;
     if matches!(kind, RecordType::IssueState)
@@ -313,7 +335,7 @@ pub async fn submit_project_bw_record(
     publication
         .seal(&event)
         .map_err(|error| error.to_string())?;
-    submit_signed_event_with_keys(&event, &state, &keys, None).await?;
+    submit_signed_event_with_keys(&event, &state, &keys, auth_tag).await?;
 
     let readback = query_relay(
         &state,

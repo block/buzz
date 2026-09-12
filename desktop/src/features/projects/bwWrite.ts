@@ -11,6 +11,7 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import {
   bwAssignmentHead,
+  bwBoundWriter,
   bwChainHead,
   type BwAssignmentOperation,
   type BwSnapshot,
@@ -417,6 +418,12 @@ export async function submitBwInDevelopmentTransition({
       "This issue has no valid ready state with a bound assignment yet.",
     );
   }
+  const writer = bwBoundWriter(snapshot, issueId);
+  if (!writer) {
+    throw new Error(
+      "The ready state is not bound to a valid selected writer anymore.",
+    );
+  }
   const tags: string[][] = [
     ["issue", issueId],
     ["previous", previousId],
@@ -432,6 +439,7 @@ export async function submitBwInDevelopmentTransition({
         assignment: current.assignment,
       },
       delegate: false,
+      signerPubkey: writer,
     },
   });
 }
@@ -459,6 +467,12 @@ export async function submitBwImplementedTransition({
   if (!previousId || !current?.stream || !current.assignment) {
     throw new Error("This issue is not in development yet.");
   }
+  const writer = bwBoundWriter(snapshot, issueId);
+  if (!writer) {
+    throw new Error(
+      "The development state is not bound to a valid selected writer anymore.",
+    );
+  }
   const normalizedTests = tests.trim();
   if (!normalizedTests) {
     throw new Error("A tests summary is required.");
@@ -479,6 +493,7 @@ export async function submitBwImplementedTransition({
         tests: normalizedTests,
       },
       delegate: false,
+      signerPubkey: writer,
     },
   });
 }

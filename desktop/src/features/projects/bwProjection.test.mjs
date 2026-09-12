@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bwBoundWriter,
   bwChainHead,
   bwFieldConflict,
   bwMatchingTriageDelegation,
+  bwRelationTargetCandidates,
+  filterBwRelationTargets,
   mergeBwIssues,
 } from "./bwProjection.ts";
 import { eventToProjectIssue } from "./projectIssues.mjs";
@@ -54,6 +57,56 @@ test("Core ready projects as Ready instead of remaining in Backlog", () => {
   const [issue] = mergeBwIssues([], snapshot("ready"));
   assert.equal(issue.status, "Ready");
   assert.equal(issue.bw.state, "ready");
+});
+
+test("bwBoundWriter follows the exact assignment event bound into ready", () => {
+  const s = snapshot("ready");
+  const assignmentId = "1".repeat(64);
+  const writer = "d".repeat(64);
+  s.records[assignmentId] = {
+    id: assignmentId,
+    kind: 1,
+    tags: [
+      ["e", root.id, "", "root"],
+      ["a", s.repo],
+      ["p", writer],
+      ["t", "assignment"],
+    ],
+  };
+  s.projection.issue_state = {
+    [root.id]: { state: "ready", assignment: assignmentId },
+  };
+  assert.equal(bwBoundWriter(s, root.id), writer);
+  s.records[assignmentId].tags[3][1] = "unassignment";
+  assert.equal(bwBoundWriter(s, root.id), null);
+});
+
+test("relation autocomplete offers every other enrolled state and matches visible issue numbers", () => {
+  const s = snapshot("backlog");
+  const readyId = "1".repeat(64);
+  const developmentId = "2".repeat(64);
+  s.projection.issues[readyId] = "ready";
+  s.projection.issues[developmentId] = "in-development";
+  s.projection.issue_fields[readyId] = { title: "Windows fix" };
+  s.records[developmentId] = {
+    id: developmentId,
+    kind: 1621,
+    tags: [["subject", "Foundation refactor"]],
+  };
+
+  const candidates = bwRelationTargetCandidates(s, root.id);
+  assert.deepEqual(
+    candidates.map(({ id, state }) => ({ id, state })),
+    [
+      { id: readyId, state: "ready" },
+      { id: developmentId, state: "in-development" },
+    ],
+  );
+  assert.equal(filterBwRelationTargets(candidates, "ISS-1111")[0].id, readyId);
+  assert.equal(
+    filterBwRelationTargets(candidates, "foundation")[0].id,
+    developmentId,
+  );
 });
 test("Pending enrollment never adopts legacy workflow authority", () => {
   const s = snapshot();

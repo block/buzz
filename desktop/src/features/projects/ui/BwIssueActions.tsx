@@ -23,6 +23,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { invokeTauri } from "@/shared/api/tauri";
 import { BwAssignmentSection } from "./BwAssignmentSection";
+import { BwRelationTargetCombobox } from "./BwRelationTargetCombobox";
 import {
   bwReadyStreamOptions,
   bwReadyUpdateUnavailable,
@@ -760,6 +761,8 @@ function BwRelations({
   const leaf = issue.bw.snapshot.projection.leaf[issue.id];
   const normalizedTarget = target.trim().toLowerCase();
   const targetIsKnownRoot =
+    normalizedTarget !== issue.id &&
+    issue.bw.snapshot.projection.issues[normalizedTarget] !== undefined &&
     issue.bw.snapshot.records[normalizedTarget]?.kind === 1621;
 
   const run = async (op: "add" | "remove", rel: string, tgt: string) => {
@@ -834,11 +837,11 @@ function BwRelations({
             </option>
           ))}
         </select>
-        <input
-          className="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
-          data-testid="bw-relation-target"
-          onChange={(event) => setTarget(event.target.value)}
-          placeholder="Target issue id"
+        <BwRelationTargetCombobox
+          currentIssueId={issue.id}
+          disabled={pending}
+          onChange={setTarget}
+          snapshot={issue.bw.snapshot}
           value={target}
         />
         <button
