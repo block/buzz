@@ -84,6 +84,11 @@ impl Llm {
         tools: &[ToolDef],
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
+        if cfg.openai_api == OpenAiApi::Realtime {
+            return Err(AgentError::Llm(
+                "realtime requires a persistent ACP session".into(),
+            ));
+        }
         let effort = cfg.thinking_effort;
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
@@ -2611,6 +2616,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            realtime_audio_output: None,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,

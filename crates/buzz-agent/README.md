@@ -143,7 +143,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
-| `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses` \| `realtime`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
@@ -383,3 +383,63 @@ Test strategy is **real subprocess, no mocks**:
 - **Fake LLM** — `tests/fake_llm.rs` and the helpers in `tests/regressions.rs` spin up a real `tokio::net::TcpListener` on port 0, parse `Content-Length`, and return scripted JSON. No HTTP mocking library.
 - **Fake MCP server** — `tests/bin/fake_mcp.rs` is a separate binary controlled by env vars: `FAKE_MCP_HANG_INIT`, `FAKE_MCP_TOOL_DELAY`, `FAKE_MCP_SPAWN_GRANDCHILD`, etc. Each fault path is a real process being abused.
 - **Regression tests are the changelog.** Each `#[test]` in `regressions.rs` is named for the bug it locks down: `assistant_text_preserved_across_prompts`, `cancel_leaves_history_valid_for_next_prompt`, `mcp_init_timeout_kills_child`, `oversize_line_kills_connection`. Read them in order to learn the protocol's failure modes.
+
+### Realtime sessions
+
+`OPENAI_COMPAT_API=realtime` selects the GA OpenAI Realtime WebSocket protocol.
+The same configured model, API key and base URL apply. HTTP API roots receive
+`/realtime`; explicit `ws(s)` URLs retain their path. Non-loopback endpoints
+require TLS. This is endpoint-agnostic, not a Frankie-specific wire format.
+
+ACP prompts accept text, inline PNG/JPEG images (512 KiB each; bounded item
+frames), and complete mono PCM16 24 kHz WAV audio (100 ms to 30 s).
+`BUZZ_AGENT_REALTIME_OUTPUT=auto|text|audio` selects output: the default `auto`
+uses audio when the prompt contains audio, otherwise text. `audio` enables
+text-to-speech and image-to-speech without dummy audio input. Audio responses
+include a transcript and a complete WAV content block, not incremental playback.
+
+The server owns transient conversation state. Buzz retains ACP, MCP execution
+and permissions. Rejected mutations, cancellation, transport loss or expiry
+end the ACP Realtime session; create a new session rather than replaying possible
+tool effects. Steer, model changes, hooks and require-reply policies are not
+supported in this mode. Hosted OpenAI interoperability is
+not yet live-verified; local protocol fixtures and native inference are separate
+gates.
+
+
+#### Opt-in live audio
+
+The [local voice demo](../../examples/realtime-audio/README.md) uses a versioned,
+unstable ACP extension for continuous microphone capture and incremental playback.
+Existing clients keep manual turns unless they opt in:
+
+1. Send `clientCapabilities._meta.buzz.realtimeAudio: 1` in `initialize` and
+   require `agentCapabilities._meta.buzz.realtimeAudio: 1` in its result.
+2. Create a fresh session and send `session/prompt` with
+   `_meta.buzz.realtimeAudio: 1`. Its prompt may contain initial text context.
+   This request stays pending until the live conversation ends.
+3. Wait for `_buzz/unstable/realtime/update` with `update.type: "ready"`.
+   Its parameters include `sessionId`, `streamId`, and the negotiated PCM limits.
+4. Send requests to `_buzz/unstable/realtime/append` with both IDs, an increasing
+   `sequence` starting at zero, and base64 `data` containing mono PCM16 LE at
+   24 kHz (at most 4,800 bytes / 100 ms). Optional `playbackData` contains the
+   aligned, actually rendered PCM for providers that advertise duplex input.
+5. Play `audio` updates in order. Report actual device-clock positions through
+   `.../playback` with `playback: {responseId, itemId, contentIndex: 0, playedSamples}`.
+   A `clear` update requires stopping queued output and reporting the final
+   position with `stopped: true`. `.../interrupt` accepts the same final position
+   for client-initiated interruption. Positions cannot exceed emitted samples.
+6. Send `.../close` to end the live prompt, or use ordinary `session/cancel`.
+
+Provider VAD commits user turns. Buzz coordinates response creation, cancellation,
+playback truncation acknowledgment, and the existing tool executor and permission
+broker. Capture and control queues are separate and bounded; stale stream IDs,
+invalid positions, unsupported provider configuration, and stalled clients fail
+visibly. Output token/audio exhaustion ends that response while capture remains
+live. A fresh connection never replays tools from a previous one.
+
+`BUZZ_AGENT_THINKING_EFFORT=none|minimal|low|medium|high|xhigh|max` is forwarded in
+`session.update.reasoning.effort` and must be acknowledged by the provider.
+Frankie's optional duplex and backchannel extensions are used only when the
+provider advertises them. The browser renders audio at the native 24 kHz rate and
+has bounded buffering for capture stalls and playback.
