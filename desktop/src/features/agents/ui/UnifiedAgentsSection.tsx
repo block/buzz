@@ -289,7 +289,11 @@ function AgentPersonaCard({
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
     : persona.avatarUrl;
   const friendlyError = agent
-    ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
+    ? friendlyAgentLastError(
+        agent.lastError,
+        agent.lastErrorCode,
+        agent.provider,
+      )?.copy
     : null;
 
   return (
@@ -397,6 +401,7 @@ function StandaloneAgentCard({
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
+    agent.provider,
   )?.copy;
   const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
