@@ -25,7 +25,7 @@ pub(crate) use login_shell::{
 };
 pub(crate) use presets::{
     canonical_harness_command, command_for_runtime_id, preset_harness_definitions,
-    preset_harness_ids,
+    preset_harness_ids, preset_mcp_command_for,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::EffortNormalization;
@@ -151,6 +151,16 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
                 .any(|command| normalized == normalize_command_identity(command))
             || runtime.aliases.iter().any(|alias| normalized == *alias)
     })
+}
+
+/// Resolve the MCP sidecar command for an agent harness.
+///
+/// Builtins declare `mcp_command` on `KNOWN_ACP_RUNTIMES`. Presets are not in
+/// that table, so fall through to `preset_mcp_command_for` (#7023).
+pub(crate) fn resolve_mcp_command(command: &str) -> Option<&'static str> {
+    known_acp_runtime(command)
+        .and_then(|runtime| runtime.mcp_command)
+        .or_else(|| preset_mcp_command_for(command))
 }
 
 pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
