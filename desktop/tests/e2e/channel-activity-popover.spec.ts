@@ -244,6 +244,13 @@ async function seedChannelActivity(
     );
   }
 
+  // Thread activity owns the trailing row affordance; mentions additionally
+  // bold the channel name but do not add a numeric badge.
+  await expect(page.getByTestId("channel-general")).toHaveCSS(
+    "font-weight",
+    "700",
+  );
+  await expect(page.getByTestId("channel-unread-general")).toHaveCount(0);
   await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
   if (includeAgent) {
     await expect(page.getByTestId("channel-working-general")).toBeVisible();
@@ -337,6 +344,12 @@ test.describe("channel activity hover preview", () => {
     await expect(
       popover.getByTestId(`channel-activity-agent-${AGENT_PUBKEY}`),
     ).toContainText("Charlie");
+    // The authored name also supplies the row avatar's initials.
+    await expect(
+      popover
+        .getByTestId(`channel-activity-agent-${AGENT_PUBKEY}`)
+        .getByText("C", { exact: true }),
+    ).toBeVisible();
     await expect(
       popover.getByTestId(`channel-activity-agent-${AGENT_PUBKEY}`),
     ).toContainText("Working");
@@ -363,6 +376,56 @@ test.describe("channel activity hover preview", () => {
     const threadPanel = page.getByTestId("message-thread-panel");
     await expect(threadPanel).toBeVisible();
     await expect(threadPanel).toContainText("direct thread link");
+  });
+
+  test("unnamed working agents keep distinct key-tail initials, not AN", async ({
+    page,
+  }) => {
+    // npubEncode of the fixture keys: "a"×64 → npub1424…rcaj (tail RC),
+    // "b"×64 → npub1hwa…04hu (tail 04). Neither has a seeded profile, so
+    // the rows show the generated "Agent npub1…" fallback label.
+    const unnamedAgents = [
+      { initials: "RC", label: "Agent npub1424…rcaj", pubkey: "a".repeat(64) },
+      { initials: "04", label: "Agent npub1hwa…04hu", pubkey: "b".repeat(64) },
+    ];
+
+    await page.goto("/");
+    await page.waitForFunction(
+      () =>
+        typeof (window as Window & { __BUZZ_E2E_SEED_ACTIVE_TURNS__?: unknown })
+          .__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+    );
+    for (const { pubkey } of unnamedAgents) {
+      await page.evaluate(
+        ({ agentPubkey, channelId }) => {
+          (
+            window as Window & {
+              __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+                agentPubkey: string;
+                channelId: string;
+                turnId: string;
+              }) => void;
+            }
+          ).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+            agentPubkey,
+            channelId,
+            turnId: "unnamed-agent-initials",
+          });
+        },
+        { agentPubkey: pubkey, channelId: CHANNEL_GENERAL },
+      );
+    }
+
+    const popover = await openActivityPopover(page);
+    for (const { initials, label, pubkey } of unnamedAgents) {
+      const row = popover.getByTestId(`channel-activity-agent-${pubkey}`);
+      await expect(row).toContainText(label);
+      // The avatar abbreviates its key's visible tail (UserAvatar's fallback
+      // settles after its 200ms delay; expect retries past it), never the
+      // "Agent" word initials of the prefixed label.
+      await expect(row.getByText(initials, { exact: true })).toBeVisible();
+      await expect(row.getByText("AN", { exact: true })).toHaveCount(0);
+    }
   });
 
   test("removes the dot and preview after the final activity is read", async ({
@@ -773,10 +836,11 @@ test.describe("channel activity hover preview", () => {
     await rootRow.hover();
     const actionBar = page.getByTestId(`message-action-bar-${root.id}`);
     await expect(actionBar).toBeVisible();
-    await actionBar
-      .getByRole("button", { name: /^React with / })
-      .first()
-      .click();
+    await actionBar.getByRole("button", { name: "Open reactions" }).click();
+    const picker = page.locator("em-emoji-picker");
+    await expect(picker).toBeVisible();
+    await picker.locator("input[type='search']").fill("thumbs up");
+    await picker.getByRole("button", { name: "👍" }).first().click();
     await expect(
       rootRow.getByRole("button", { name: /^Toggle .* reaction$/ }),
     ).toBeVisible();

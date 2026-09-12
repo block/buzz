@@ -42,6 +42,8 @@ type ForumChannelContentProps = {
   profilePanelView: ProfilePanelView;
   selectedPostId: string | null;
   targetReplyId: string | null;
+  targetSearchMessageId?: string;
+  targetSearchQuery?: string;
 };
 
 /**
@@ -71,6 +73,8 @@ export function ForumChannelContent({
   profilePanelView,
   selectedPostId,
   targetReplyId,
+  targetSearchMessageId,
+  targetSearchQuery,
 }: ForumChannelContentProps) {
   return (
     <>
@@ -88,6 +92,8 @@ export function ForumChannelContent({
               onSelectPost={onSelectPost}
               selectedPostId={selectedPostId}
               targetReplyId={targetReplyId}
+              targetSearchMessageId={targetSearchMessageId}
+              targetSearchQuery={targetSearchQuery}
             />
           </React.Suspense>
         </section>

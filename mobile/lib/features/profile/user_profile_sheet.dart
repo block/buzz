@@ -19,7 +19,7 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
-import 'user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
@@ -83,14 +83,23 @@ class UserProfileSheet extends HookConsumerWidget {
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
-    final displayName = profile?.displayName;
+    // Canonical npub for the copy action; null when [pubkey] is not a valid
+    // identity, in which case the copy tile is disabled — an invalid key is
+    // never placed on the clipboard.
+    final npub = fullNpub(pubkey);
+
+    // Routed through the shared label so a blank cached name (empty or
+    // whitespace-only, relay-valid) falls back to the compact npub instead
+    // of an empty heading.
+    final displayName = profile?.label;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
     Future<void> copyPublicKey() async {
-      await Clipboard.setData(ClipboardData(text: pubkey));
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
       copied.value = true;
       _showProfileCopyToast(context);
@@ -151,6 +160,7 @@ class UserProfileSheet extends HookConsumerWidget {
                               child: _ProfileAvatar(
                                 avatarUrl: avatarUrl,
                                 initial: initial,
+                                isAgent: profile?.isAgent == true,
                               ),
                             ),
                           ),
@@ -238,6 +248,7 @@ class UserProfileSheet extends HookConsumerWidget {
                                 ? LucideIcons.check
                                 : LucideIcons.key,
                             label: copied.value ? 'Copied' : 'Copy public key',
+                            isEnabled: npub != null,
                             onTap: copyPublicKey,
                           ),
                         ),
@@ -377,8 +388,13 @@ class _ProfilePresenceChip extends StatelessWidget {
 class _ProfileAvatar extends HookWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _ProfileAvatar({required this.avatarUrl, required this.initial});
+  const _ProfileAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -398,17 +414,26 @@ class _ProfileAvatar extends HookWidget {
                   stoppedAnimationUrl.value == animatedAvatar.animationUrl
                   ? null
                   : animatedAvatar.animationUrl,
-        child: ClipOval(
-          child: isPlaying
-              ? ProgressiveAnimatedAvatar(
-                  key: ValueKey(animatedAvatar.animationUrl),
-                  descriptor: animatedAvatar,
-                  fallback: _AvatarFallback(initial: initial),
-                )
-              : AvatarImageContent(
-                  imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                  fallback: _AvatarFallback(initial: initial),
-                ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final avatar = isPlaying
+                ? ProgressiveAnimatedAvatar(
+                    key: ValueKey(animatedAvatar.animationUrl),
+                    descriptor: animatedAvatar,
+                    fallback: _AvatarFallback(initial: initial),
+                  )
+                : AvatarImageContent(
+                    imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                    fallback: _AvatarFallback(initial: initial),
+                  );
+            if (!isAgent) return ClipOval(child: avatar);
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(
+                constraints.biggest.shortestSide * 0.3,
+              ),
+              child: avatar,
+            );
+          },
         ),
       ),
     );

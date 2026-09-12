@@ -41,6 +41,7 @@ fn workflow_from_event_maps_all_fields() {
     let wf = workflow_from_event(&ev);
 
     assert_eq!(wf.id, WF);
+    assert_eq!(wf.revision, ev.id.to_hex());
     assert_eq!(wf.channel_id.as_deref(), Some(CHAN));
     assert_eq!(wf.owner_pubkey, ev.pubkey.to_hex());
     assert_eq!(wf.name, "Greet on join");
@@ -120,6 +121,7 @@ fn tag_value_reads_d_and_h_and_misses_absent() {
 fn workflow_record_shapes_save_inputs() {
     let wf = workflow_record(
         WF.to_string(),
+        "revision-1".to_string(),
         Some(CHAN.to_string()),
         "deadbeef".to_string(),
         YAML,
@@ -139,6 +141,7 @@ fn workflow_record_shapes_save_inputs() {
 fn save_wire_serializes_flat_with_optional_secret() {
     let workflow = workflow_record(
         WF.to_string(),
+        "revision-1".to_string(),
         Some(CHAN.to_string()),
         "deadbeef".to_string(),
         YAML,
@@ -176,6 +179,7 @@ fn workflow_wire_serializes_with_snake_case_keys() {
     let v = serde_json::to_value(workflow_from_event(&ev)).expect("serialize");
     for key in [
         "id",
+        "revision",
         "name",
         "owner_pubkey",
         "channel_id",
@@ -186,6 +190,87 @@ fn workflow_wire_serializes_with_snake_case_keys() {
     ] {
         assert!(v.get(key).is_some(), "missing wire key: {key}");
     }
+}
+
+#[test]
+fn multi_channel_workflow_query_uses_one_filter_per_channel() {
+    let other_channel = "33333333-3333-3333-3333-333333333333";
+    let filters = channel_workflow_filters(vec![CHAN.to_string(), other_channel.to_string()])
+        .expect("valid channels");
+
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        filters[0],
+        serde_json::json!({
+            "kinds": [30620],
+            "#h": [CHAN],
+        })
+    );
+    assert_eq!(
+        filters[1],
+        serde_json::json!({
+            "kinds": [30620],
+            "#h": [other_channel],
+        })
+    );
+}
+
+#[test]
+fn workflow_queries_respect_relay_explicit_channel_limit() {
+    for (channel_count, expected_batch_sizes) in [
+        (WORKFLOW_QUERY_CHANNEL_BATCH_SIZE, vec![128]),
+        (WORKFLOW_QUERY_CHANNEL_BATCH_SIZE + 1, vec![128, 1]),
+    ] {
+        let channel_ids = (0..channel_count)
+            .map(|index| uuid::Uuid::from_u128(index as u128 + 1).to_string())
+            .collect();
+        let batches = channel_workflow_filter_batches(channel_ids).expect("valid channels");
+
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            expected_batch_sizes
+        );
+        assert!(batches.iter().flatten().all(|filter| filter["#h"]
+            .as_array()
+            .is_some_and(|values| values.len() == 1)));
+    }
+}
+
+#[test]
+fn workflow_query_results_are_deduplicated_by_event_id() {
+    let first = wf_event(WF, CHAN, YAML);
+    let second_workflow = "33333333-3333-3333-3333-333333333333";
+    let second = wf_event(second_workflow, CHAN, YAML);
+    let mut workflows = Vec::new();
+    let mut seen_event_ids = HashSet::new();
+
+    append_unique_workflows(
+        &mut workflows,
+        &mut seen_event_ids,
+        &[first.clone(), second.clone()],
+    );
+    append_unique_workflows(&mut workflows, &mut seen_event_ids, &[first, second]);
+
+    assert_eq!(workflows.len(), 2);
+    assert_eq!(workflows[0].id, WF);
+    assert_eq!(workflows[1].id, second_workflow);
+}
+
+#[test]
+fn channel_workflow_filters_reject_malformed_or_blank_channel_ids() {
+    for channel_id in ["not-a-uuid", "", "   "] {
+        let error = channel_workflow_filters(vec![channel_id.to_string()])
+            .expect_err("malformed channel id must fail before querying the relay");
+        assert_eq!(error, "invalid channel id");
+    }
+}
+
+#[test]
+fn channel_workflow_filters_accepts_empty_input() {
+    assert_eq!(
+        channel_workflow_filters(Vec::new()).expect("empty input is valid"),
+        Vec::<Value>::new()
+    );
 }
 
 #[test]

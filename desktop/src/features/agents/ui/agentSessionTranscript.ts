@@ -19,12 +19,12 @@ import {
   extractBlockText,
   extractContentText,
   extractPlanText,
-  extractPromptText,
+  extractPromptBlocks,
   extractTriggeringEventIds,
   extractToolArgs,
   extractToolIdentity,
   extractToolResult,
-  parsePromptText,
+  parsePromptBlocks,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
 import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
@@ -839,9 +839,9 @@ export function processTranscriptEvent(
         }
       }
     } else if (event.kind === "acp_write" && method === "session/prompt") {
-      const promptText = extractPromptText(payload);
-      if (promptText) {
-        const parsedPrompt = parsePromptText(promptText);
+      const promptBlocks = extractPromptBlocks(payload);
+      if (promptBlocks.length > 0) {
+        const parsedPrompt = parsePromptBlocks(promptBlocks);
         if (parsedPrompt.userText) {
           upsertMessage(
             d,
@@ -871,14 +871,17 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
-      // the harness as [Base]/[System]/[Agent Memory — core]/[Channel Canvas].
-      // claude-agent-acp uses _meta.systemPrompt.append instead; both paths
-      // produce the same standalone card (turnId: null, acpSource "session/new");
+      // the harness as <base>/<agent-instructions>/<core-memory>/<channel-canvas>.
+      // ACP adapters may use a replacement string or a replace/append object
+      // under _meta.systemPrompt. All paths produce the same standalone card
+      // (turnId: null, acpSource "session/new");
       // the bare field takes precedence when both are present.
       const params = asRecord(payload.params);
-      const metaPrompt = asString(
-        asRecord(asRecord(params._meta).systemPrompt).append,
-      );
+      const metaSystemPrompt = asRecord(params._meta).systemPrompt;
+      const metaPrompt =
+        asString(metaSystemPrompt) ??
+        asString(asRecord(metaSystemPrompt).replace) ??
+        asString(asRecord(metaSystemPrompt).append);
       const systemPrompt = asString(params.systemPrompt) ?? metaPrompt;
       if (systemPrompt) {
         const sections = parseSystemPromptSections(systemPrompt);
@@ -898,9 +901,9 @@ export function processTranscriptEvent(
       event.kind === "acp_write" &&
       method === "_goose/unstable/session/steer"
     ) {
-      const promptText = extractPromptText(payload);
-      if (promptText) {
-        const parsedPrompt = parsePromptText(promptText);
+      const promptBlocks = extractPromptBlocks(payload);
+      if (promptBlocks.length > 0) {
+        const parsedPrompt = parsePromptBlocks(promptBlocks);
         if (parsedPrompt.userText) {
           upsertMessage(
             d,

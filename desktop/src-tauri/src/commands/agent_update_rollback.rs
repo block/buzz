@@ -11,13 +11,19 @@ use crate::{
 pub(super) struct AgentUpdateRollback {
     attempted_record: ManagedAgentRecord,
     previous_record: ManagedAgentRecord,
+    preserve_access_policy: bool,
 }
 
 impl AgentUpdateRollback {
-    pub(super) fn new(previous_record: ManagedAgentRecord, attempted: &ManagedAgentRecord) -> Self {
+    pub(super) fn new(
+        previous_record: ManagedAgentRecord,
+        attempted: &ManagedAgentRecord,
+        preserve_access_policy: bool,
+    ) -> Self {
         Self {
             attempted_record: attempted.clone(),
             previous_record,
+            preserve_access_policy,
         }
     }
 }
@@ -64,6 +70,13 @@ fn restore_agent_update(
         attempted_with_current_runtime != rollback.attempted_record
     };
     let mut restored = rollback.previous_record;
+    if rollback.preserve_access_policy {
+        restored.respond_to = current.respond_to;
+        restored
+            .respond_to_allowlist
+            .clone_from(&current.respond_to_allowlist);
+        restored.updated_at.clone_from(&current.updated_at);
+    }
     copy_runtime_state(current, &mut restored);
     if runtime_changed {
         restored.updated_at.clone_from(&current.updated_at);
@@ -137,7 +150,7 @@ mod tests {
         attempted.name = "New name".to_string();
         attempted.model = Some("new-model".to_string());
         attempted.updated_at = "attempt".to_string();
-        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        let rollback = AgentUpdateRollback::new(previous, &attempted, false);
         let mut records = vec![attempted];
 
         restore_agent_update(&mut records, "abcd1234", rollback)
@@ -149,12 +162,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_profile_sync_keeps_a_tightened_access_policy() {
+        let previous = record("Old name", "before");
+        let mut attempted = previous.clone();
+        attempted.name = "New name".to_string();
+        attempted.respond_to = crate::managed_agents::RespondTo::OwnerOnly;
+        attempted.updated_at = "attempt".to_string();
+        let rollback = AgentUpdateRollback::new(previous, &attempted, true);
+        let mut records = vec![attempted];
+
+        restore_agent_update(&mut records, "abcd1234", rollback)
+            .expect("matching attempted update rolls back non-access fields");
+
+        assert_eq!(records[0].name, "Old name");
+        assert_eq!(
+            records[0].respond_to,
+            crate::managed_agents::RespondTo::OwnerOnly
+        );
+        assert_eq!(records[0].updated_at, "attempt");
+    }
+
+    #[test]
     fn failed_profile_sync_does_not_overwrite_a_newer_agent_update() {
         let previous = record("Old name", "before");
         let mut attempted = previous.clone();
         attempted.name = "New name".to_string();
         attempted.updated_at = "attempt".to_string();
-        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        let rollback = AgentUpdateRollback::new(previous, &attempted, false);
         let mut newer = attempted;
         newer.name = "Newest name".to_string();
         newer.updated_at = "newer".to_string();
@@ -175,7 +209,7 @@ mod tests {
         attempted.name = "New name".to_string();
         attempted.model = Some("new-model".to_string());
         attempted.updated_at = "attempt".to_string();
-        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        let rollback = AgentUpdateRollback::new(previous, &attempted, false);
         let mut churned = attempted;
         churned.runtime_pid = None;
         churned.last_stopped_at = Some("stopped".to_string());

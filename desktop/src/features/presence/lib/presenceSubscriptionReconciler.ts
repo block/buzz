@@ -41,8 +41,11 @@ export class PresenceSubscriptionReconciler {
     this.retryDelay =
       options.retryDelay ??
       ((attempt) => Math.min(1000 * 2 ** attempt, 30_000));
-    this.setTimer = options.setTimer ?? setTimeout;
-    this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.setTimer =
+      options.setTimer ??
+      ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+    this.clearTimer =
+      options.clearTimer ?? ((timer) => globalThis.clearTimeout(timer));
   }
 
   setAuthors(authors: string[]) {

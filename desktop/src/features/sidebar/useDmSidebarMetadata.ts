@@ -130,6 +130,10 @@ export function useDmSidebarMetadata({
                 profiles: dmProfiles,
                 pubkey: participant.pubkey,
               }),
+              ...(dmProfiles?.[participant.pubkey.toLowerCase()]?.isAgent ===
+              true
+                ? { isAgent: true }
+                : {}),
               pubkey: participant.pubkey,
             })),
           ];

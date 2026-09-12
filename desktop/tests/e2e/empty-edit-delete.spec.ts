@@ -6,7 +6,6 @@ import { installMockBridge } from "../helpers/bridge";
 // DEFAULT_MOCK_IDENTITY.pubkey in e2eBridge.ts). Editing/deleting one's own
 // message is exactly Sam's workflow: "delete a message by clearing its edit."
 const OWN_MESSAGE_ID = "mock-general-welcome";
-const ORIGINAL_CONTENT = "Welcome to #general";
 const RENDERED_ORIGINAL_CONTENT = "Welcome to general";
 
 // Open the more-actions menu for a message row and wait for the menu to mount.

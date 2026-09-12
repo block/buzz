@@ -6,7 +6,11 @@ import {
   getMentionOffsets,
   hasMention,
 } from "./hasMention.ts";
-import { extractMentionPubkeys } from "./extractMentionPubkeys.ts";
+import {
+  extractMentionPubkeys,
+  selectedMentionLabel,
+  selectedMentionLabels,
+} from "./extractMentionPubkeys.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -244,4 +248,80 @@ test("does not treat escaped or unclosed backticks as code", () => {
 test("requires matching inline-code delimiter lengths", () => {
   assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
   assert.equal(hasMention("`` @Alice `", "Alice"), true);
+});
+
+for (const selected of [false, true]) {
+  test(`duplicate names ${selected ? "stay bound to selection after rename" : "require explicit selection"}`, () => {
+    const opts = {
+      text: "@Scout hello",
+      selectedMentions: new Map(selected ? [["Scout", "first"]] : []),
+      memberCandidates: [
+        {
+          pubkey: "first",
+          displayName: selected ? "Renamed" : "Scout",
+          isMember: true,
+        },
+        { pubkey: "second", displayName: "Scout", isMember: true },
+      ],
+    };
+    if (selected) assert.deepEqual(extractMentionPubkeys(opts), ["first"]);
+    else
+      assert.throws(
+        () => extractMentionPubkeys(opts),
+        /ambiguous.*Choose a recipient/,
+      );
+  });
+}
+
+test("a second same-name selection cannot redirect the first mention", () => {
+  const selected = new Map([["Scout", "first"]]);
+  const secondLabel = selectedMentionLabel("Scout", "second", selected);
+  selected.set(secondLabel, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @${secondLabel}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
+});
+
+test("qualified-looking names cannot redirect an existing selection", () => {
+  const selected = new Map([
+    ["Scout", "first"],
+    ["Scout (second)", "third"],
+  ]);
+  const label = selectedMentionLabel("Scout", "second", selected);
+  assert.notEqual(label.toLowerCase(), "scout (second)");
+  selected.set(label, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @Scout (second) and @${label}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "third", "second"],
+  );
+  assert.equal(selectedMentionLabel("Scout", "second", selected), label);
+});
+
+test("same-name teammates are bound sequentially without replacing either recipient", () => {
+  const selected = selectedMentionLabels(
+    [
+      { displayName: "Scout", pubkey: "first" },
+      { displayName: "Scout", pubkey: "second" },
+    ],
+    new Map(),
+  );
+  const bindings = new Map(selected.map((s) => [s.displayName, s.pubkey]));
+  assert.equal(bindings.size, 2);
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: selected.map((s) => `@${s.displayName}`).join(" "),
+      selectedMentions: bindings,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
 });

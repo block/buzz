@@ -5,7 +5,7 @@ import type {
   ChannelRole,
   UserSearchResult,
 } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 export function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -46,6 +46,7 @@ export type MentionCandidate = {
   secondaryLabel?: string | null;
   ownerPubkey?: string | null;
   isAgent: boolean;
+  isActiveAgent?: boolean;
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };
@@ -53,7 +54,7 @@ export type MentionCandidate = {
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (
     candidate.displayName ??
-    (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent")
+    (candidate.pubkey ? truncateNpub(candidate.pubkey) : "agent")
   );
 }
 
@@ -127,11 +128,14 @@ export function buildTeamMentionCandidates(
       .filter((member): member is TeamMentionMember => member !== null);
     if (teamMembers.length !== resolution.resolvedPersonas.length) return [];
 
-    const mentionNames = new Set<string>();
+    const mentionNames = new Map<string, TeamMentionMember>();
     for (const member of teamMembers) {
       const mentionName = member.displayName.trim().toLowerCase();
-      if (mentionNames.has(mentionName)) return [];
-      mentionNames.add(mentionName);
+      const previous = mentionNames.get(mentionName);
+      // Exact-key members can reserve distinct labels at selection time. A
+      // persona without a key cannot yet be disambiguated that way.
+      if (previous && (!previous.pubkey || !member.pubkey)) return [];
+      mentionNames.set(mentionName, member);
     }
 
     return [

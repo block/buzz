@@ -56,6 +56,21 @@
   animation: buzz-logo-pulse 1.8s ease-in-out infinite;
 }
 
+@keyframes buzz-logo-scale-pulse {
+  0%,
+  100% {
+    transform: scale(0.94);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+
+.buzz-logo--scale-pulse .buzz-logo__mark {
+  animation: buzz-logo-scale-pulse 1.8s ease-in-out infinite;
+  transform-origin: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .buzz-logo animate {
     display: none;
@@ -64,5 +79,10 @@
   .buzz-logo--pulse .buzz-logo__mark {
     animation: none;
     opacity: 0.8;
+  }
+
+  .buzz-logo--scale-pulse .buzz-logo__mark {
+    animation: none;
+    transform: none;
   }
 }

@@ -6,9 +6,14 @@ class ComposeBar extends HookConsumerWidget {
   final String? hintText;
   final ComposeBarOnSend onSend;
 
-  /// Runs immediately before the editor requests focus, allowing a parent to
-  /// prepare focus-dependent layout (for example, following a thread tail).
+  /// Lets a parent prepare its layout before the editor requests focus.
   final VoidCallback? onFocusRequested;
+
+  /// Parent-owned if set; otherwise internally created and disposed.
+  final FocusNode? focusNode;
+
+  /// Receives a restorer which becomes a no-op after replacement/unmount.
+  final ValueChanged<VoidCallback>? onFocusRestorerChanged;
 
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
@@ -20,6 +25,8 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.focusNode,
+    this.onFocusRestorerChanged,
     this.onFocusRequested,
     required this.onSend,
   });
@@ -31,34 +38,21 @@ class ComposeBar extends HookConsumerWidget {
       () => controller.text,
     );
     useEffect(() => controller.dispose, [controller]);
-    // Restore and persist unsent text as a local draft so the Activity
-    // inbox Drafts filter reflects real composer state.
-    //
-    // The effect is additionally keyed on the active relay + pubkey identity:
-    // provider-level namespacing alone cannot protect a composer that stays
-    // mounted through an in-place community/account switch — the controller
-    // would retain the old identity's text and the next edit would persist it
-    // into the new identity's store. On identity change we replace the
-    // controller content with the new identity's own saved draft (or clear).
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
-    final draftIdentity =
-        '${ref.watch(relayConfigProvider).baseUrl}'
-        ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+    final draftIdentity = _composerDraftIdentity(ref);
     final isComposerExpanded = useState(false);
     final androidImeTransitionStarted = useState(
       defaultTargetPlatform != TargetPlatform.android,
     );
     final androidImeFallbackTimer = useRef<Timer?>(null);
-    final focusNode = useFocusNode();
+    final ownedFocusNode = useFocusNode();
+    final focusNode = this.focusNode ?? ownedFocusNode;
     useEffect(
-      () =>
-          () => androidImeFallbackTimer.value?.cancel(),
-      [androidImeFallbackTimer],
-    );
-    useEffect(
-      () =>
-          () => _dismissComposerKeyboard(focusNode),
+      () => () {
+        androidImeFallbackTimer.value?.cancel();
+        _dismissComposerKeyboard(focusNode);
+      },
       [focusNode],
     );
     final isEmojiPickerOpen = useState(false);
@@ -80,7 +74,21 @@ class ComposeBar extends HookConsumerWidget {
     final uploadProgress = useState(0.0);
     final uploadGeneration = useRef(0);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
+    final voiceNote = _useComposerVoiceNote(
+      context: context,
+      ref: ref,
+      focusNode: focusNode,
+      isComposerExpanded: isComposerExpanded,
+      showFormatting: showFormatting,
+      attachmentSurface: attachmentSurface,
+      uploadError: uploadError,
+      draftRevision: draftRevision,
+      attachments: attachments,
+    );
+    final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
+    final mentionMap = useRef(<String, MentionCandidate>{});
     _useComposeDraftLifecycle(
+      mentionMap: mentionMap,
       ref: ref,
       controller: controller,
       draftKey: draftKey,
@@ -96,6 +104,7 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface: attachmentSurface,
       uploadError: uploadError,
       iosAttachmentPopover: iosAttachmentPopover,
+      onDraftIdentityChanged: voiceNote.onDraftIdentityChanged,
     );
     final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
@@ -136,13 +145,14 @@ class ComposeBar extends HookConsumerWidget {
           if (defaultTargetPlatform == TargetPlatform.android) {
             androidImeTransitionStarted.value = false;
           }
+          voiceNote.onKeyboardHidden();
           collapseComposer();
           focusNode.unfocus();
         },
       );
       WidgetsBinding.instance.addObserver(observer);
       return () => WidgetsBinding.instance.removeObserver(observer);
-    }, [appView, focusNode]);
+    }, [appView, focusNode, voiceNote.isPreparing]);
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
@@ -211,7 +221,6 @@ class ComposeBar extends HookConsumerWidget {
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
-    final mentionMap = useRef(<String, MentionCandidate>{});
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -236,9 +245,7 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
-    final agentMentionLabels = _agentMentionLabels(
-      candidates: mentionMap.value.values,
-    );
+    final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',
     );
@@ -255,6 +262,9 @@ class ComposeBar extends HookConsumerWidget {
         );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
+          ...mentionMap.value.values
+              .where((c) => c.requiresRevalidation && c.pubkey.isNotEmpty)
+              .map((c) => c.pubkey),
           ...?relayAgents?.map((a) => a.pubkey),
           ...?agentOwners?.values,
         ];
@@ -264,6 +274,8 @@ class ComposeBar extends HookConsumerWidget {
         return null;
       },
       [
+        draftIdentity,
+        draftKey,
         membersAsync.asData?.value.length,
         cachedMembers.length,
         relayAgents?.length,
@@ -374,7 +386,10 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
-      final name = candidate.label;
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+        for (final entry in mentionMap.value.entries)
+          entry.key: entry.value.pubkey,
+      });
       // Track the resolved candidate so we can pass its pubkey and prepare
       // selected non-member agents at send time.
       mentionMap.value[name] = candidate;
@@ -456,15 +471,51 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
+      final submittedDraftRevision = draftRevision.value;
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
 
       // Extract pubkeys for mentions present in the final text.
-      final selectedMentions = <MentionCandidate>[
-        for (final entry in mentionMap.value.entries)
-          if (hasMention(text, entry.key)) entry.value,
-      ];
+      List<MentionCandidate> selectedMentions;
+      try {
+        selectedMentions = _resolveComposerMentions(
+          text,
+          mentionMap.value,
+          buildMentionCandidates(
+            members: channelMembersForAutocomplete(
+              membersAsync: membersAsync,
+              sessionStatus: sessionStatus,
+              cachedMembers: cachedMembers,
+            ),
+            relayAgents: const [],
+            sharedChannelIds: const {},
+            userCache: userCache,
+            ownerByAgentPubkey: agentOwners ?? const {},
+          ),
+          buildMentionCandidates(
+            members: membersAsync.asData?.value ?? const [],
+            relayAgents: relayAgents ?? const [],
+            sharedChannelIds: {
+              for (final c in channels)
+                if (c.isMember && !c.isArchived) c.id,
+            },
+            userCache: userCache,
+            ownerByAgentPubkey: agentOwners ?? const {},
+            currentPubkey: currentPubkey,
+            // Reuse ordinary search-result classification, not membership as
+            // permission. Persisted keys/flags themselves prove no role.
+            searchResults: [
+              for (final c in mentionMap.value.values)
+                if (c.requiresRevalidation && userCache[c.pubkey] != null)
+                  userCache[c.pubkey]!,
+            ],
+          ),
+        );
+      } on FormatException catch (error) {
+        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+        return;
+      }
       final outgoing = _OutgoingMentions(selectedMentions);
       final scan = await _scanNonMemberMentions(
         ref,
@@ -501,29 +552,25 @@ class ComposeBar extends HookConsumerWidget {
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
-          try {
-            await addMentionedNonMembers();
-            final payload = _ComposeDraftPayload.fromDraft(
+          if (!context.mounted) return;
+          await _sendTextOnlyDraft(
+            context: context,
+            controller: controller,
+            mentionMap: mentionMap,
+            draftRevision: draftRevision,
+            submittedDraftRevision: submittedDraftRevision,
+            focusNode: focusNode,
+            clearComposer: clearComposer,
+            addMentionedNonMembers: addMentionedNonMembers,
+            payload: _ComposeDraftPayload.fromDraft(
               text: text,
               attachments: const [],
               customEmoji: customEmoji,
-            );
-            await onSend(
-              payload.content,
-              outgoing.pubkeys,
-              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-            );
-            if (context.mounted) clearComposer();
-          } on StateError {
-            _reportSendCancelledByCommunitySwitch(messenger);
-          } catch (error) {
-            // send() runs unawaited, so a relay rejection or publish timeout
-            // would otherwise vanish with the composer looking idle. The draft
-            // is kept (clearComposer never ran) so the user can retry.
-            messenger?.showSnackBar(
-              SnackBar(content: Text(_composeSendErrorMessage(error))),
-            );
-          }
+            ),
+            outgoing: outgoing,
+            onSend: onSend,
+            messenger: messenger,
+          );
           return;
         }
 
@@ -584,12 +631,12 @@ class ComposeBar extends HookConsumerWidget {
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {
-              controller.value = draftText;
               attachments.value = draftAttachments;
               retainedForRetry = true;
               mentionMap.value
                 ..clear()
                 ..addAll(draftMentions);
+              controller.value = draftText;
               focusNode.requestFocus();
             }
           } finally {
@@ -609,23 +656,22 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
-    final queueAttachment = useCallback((
-      XFile file,
-      _PendingAttachmentKind kind, {
-      bool deleteAfterUse = false,
-    }) {
-      draftRevision.value += 1;
-      uploadError.value = null;
-      attachments.value = [
-        ...attachments.value,
-        _PendingAttachment(
-          file: file,
-          kind: kind,
-          deleteAfterUse: deleteAfterUse,
-        ),
-      ];
-    }, [draftRevision, uploadError, attachments]);
-
+    final queueAttachment = useCallback(
+      (
+        XFile file,
+        _PendingAttachmentKind kind, {
+        bool deleteAfterUse = false,
+      }) => _queueComposerAttachment(
+        file,
+        kind,
+        voiceNoteRef,
+        attachments,
+        uploadError,
+        draftRevision,
+        deleteAfterUse: deleteAfterUse,
+      ),
+      [voiceNoteRef, draftRevision, uploadError, attachments],
+    );
     Future<void> pickThenQueue({
       required Future<XFile?> Function() pick,
       required _PendingAttachmentKind kind,
@@ -642,20 +688,15 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
-    void queueImages(List<XFile> images, {bool deleteAfterUse = false}) {
-      if (images.isEmpty) return;
-      draftRevision.value += 1;
-      uploadError.value = null;
-      attachments.value = [
-        ...attachments.value,
-        for (final image in images)
-          _PendingAttachment(
-            file: image,
-            kind: _PendingAttachmentKind.image,
-            deleteAfterUse: deleteAfterUse,
-          ),
-      ];
-    }
+    bool queueImages(List<XFile> images, {bool deleteAfterUse = false}) =>
+        _queueComposerImages(
+          images,
+          voiceNote,
+          attachments,
+          uploadError,
+          draftRevision,
+          deleteAfterUse,
+        );
 
     Future<void> retainAndQueueImages(List<XFile> images) =>
         _retainAndQueueImages(context, images, queueImages);
@@ -759,23 +800,18 @@ class ComposeBar extends HookConsumerWidget {
       focusNode.requestFocus();
     }
 
-    // ----- Widget tree ----------------------------------------------------
-
     void chooseAttachment(
       Future<void> Function() choose, {
       String? errorMessage,
-    }) {
-      attachmentSurface.value = _AttachmentSurface.closed;
-      unawaited(() async {
-        try {
-          await choose();
-        } catch (error) {
-          if (context.mounted) {
-            uploadError.value = errorMessage ?? _formatUploadError(error);
-          }
-        }
-      }());
-    }
+    }) => _rejectsNonVoiceAttachment(voiceNote, attachments.value, uploadError)
+        ? attachmentSurface.value = _AttachmentSurface.closed
+        : _chooseComposerAttachment(
+            context,
+            attachmentSurface,
+            uploadError,
+            choose,
+            errorMessage: errorMessage,
+          );
 
     void toggleAttachments() {
       attachmentSurface.value = switch (attachmentSurface.value) {
@@ -812,6 +848,7 @@ class ComposeBar extends HookConsumerWidget {
                   kind: _PendingAttachmentKind.video,
                 );
               }),
+              onVoiceNote: voiceNote.start,
               onFiles: () => chooseAttachment(() {
                 final service = ref.read(mediaUploadServiceProvider);
                 return pickThenQueue(
@@ -863,6 +900,13 @@ class ComposeBar extends HookConsumerWidget {
       androidImeFallbackTimer: androidImeFallbackTimer,
     );
 
+    _useComposerFocusRestorer(
+      onChanged: onFocusRestorerChanged,
+      isExpanded: isComposerExpanded,
+      focusNode: focusNode,
+      expand: expandComposer,
+    );
+
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
       mentionSuggestions: suggestions,
@@ -889,6 +933,7 @@ class ComposeBar extends HookConsumerWidget {
             kind: _PendingAttachmentKind.video,
           );
         }),
+        onVoiceNote: voiceNote.start,
         onFiles: () => chooseAttachment(() {
           final service = ref.read(mediaUploadServiceProvider);
           return pickThenQueue(
@@ -916,6 +961,7 @@ class ComposeBar extends HookConsumerWidget {
     final hasPendingUploads = uploadingCount.value > 0;
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
+      forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -939,6 +985,7 @@ class ComposeBar extends HookConsumerWidget {
               attachmentSurface.value = _AttachmentSurface.closed;
             },
             child: _ComposeBarLayout(
+              voiceNoteRecorder: voiceNote.recorder,
               attachments: attachments.value,
               onRemoveAttachment: removeAttachment,
               uploadError: uploadError.value,

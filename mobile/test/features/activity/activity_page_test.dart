@@ -11,9 +11,10 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
@@ -31,7 +32,7 @@ void main() {
   final testMention = FeedItem(
     id: 'm1',
     kind: 9,
-    pubkey: 'alice_pk',
+    pubkey: 'a11ce00000000000000000000000000000000000000000000000000000000000',
     content: 'Hey check this out',
     createdAt: now - 120,
     channelId: 'ch1',
@@ -100,11 +101,13 @@ void main() {
   ];
 
   final testUsers = <String, UserProfile>{
-    'alice_pk': const UserProfile(
-      pubkey: 'alice_pk',
-      displayName: 'Alice',
-      nip05Handle: 'alice@example.com',
-    ),
+    'a11ce00000000000000000000000000000000000000000000000000000000000':
+        const UserProfile(
+          pubkey:
+              'a11ce00000000000000000000000000000000000000000000000000000000000',
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        ),
     'bob_pk': const UserProfile(pubkey: 'bob_pk', displayName: 'Bob'),
     'agent_pk': const UserProfile(pubkey: 'agent_pk', displayName: 'Scout'),
   };
@@ -120,6 +123,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
+    Set<String> knownAgentPubkeys = const {},
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -135,6 +139,7 @@ void main() {
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier(users ?? testUsers),
         ),
+        knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
         readStateProvider.overrideWith(
           () => _FakeReadStateNotifier(readContexts),
         ),
@@ -197,6 +202,7 @@ void main() {
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
     expect(appBar.bottomHeight, Grid.xxs);
+    expect(appBar.centerTitle, isFalse);
     expect(find.byTooltip('Back'), findsNothing);
   });
 
@@ -403,7 +409,8 @@ void main() {
         eventId: 'm1',
         channelId: 'ch1',
         preview: 'Follow up',
-        authorPubkey: 'alice_pk',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
       ),
       note: null,
       createdAt: now - 60,
@@ -532,6 +539,64 @@ void main() {
     );
   });
 
+  testWidgets('blank cached sender names fall back to the compact npub', (
+    tester,
+  ) async {
+    // Relay profiles can cache blank display names (empty and
+    // whitespace-only) unchanged, so the sender must resolve through the
+    // shared nonblank-name label contract: the row shows the compact npub
+    // of the a11ce key instead of a blank author label. Binds the production
+    // seam — the sender resolves through the user cache exactly as the live
+    // page does. Keyed remounts keep each ProviderScope (and its user-cache
+    // override) fresh between scenarios, so each iteration actually
+    // consumes its own blank-name fixture.
+    const sender =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    for (final blankName in const ['', '   ']) {
+      await tester.pumpWidget(
+        KeyedSubtree(
+          key: ValueKey('blank-sender-${blankName.length}'),
+          child: await buildTestable(
+            users: {
+              ...testUsers,
+              sender: UserProfile(pubkey: sender, displayName: blankName),
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(blankName), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('inbox-row-m1')),
+          matching: find.text('npub15yw…ccpw'),
+        ),
+        findsOneWidget,
+      );
+    }
+  });
+
+  testWidgets('directory-known Activity authors use agent avatars', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(knownAgentPubkeys: const {'agent_pk'}),
+    );
+    await tester.pumpAndSettle();
+
+    final agentRow = find.byKey(const ValueKey('inbox-row-ag1'));
+    final agentAvatar = tester.widget<AvatarImage>(
+      find.descendant(of: agentRow, matching: find.byType(AvatarImage)),
+    );
+    final humanRow = find.byKey(const ValueKey('inbox-row-m1'));
+    final humanAvatar = tester.widget<AvatarImage>(
+      find.descendant(of: humanRow, matching: find.byType(AvatarImage)),
+    );
+    expect(agentAvatar.isAgent, isTrue);
+    expect(humanAvatar.isAgent, isFalse);
+  });
+
   testWidgets('multiple top-level messages in one DM render one row', (
     tester,
   ) async {
@@ -550,7 +615,8 @@ void main() {
     FeedItem dmMessage(String id, int age) => FeedItem(
       id: id,
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'dm body $id',
       createdAt: now - age,
       channelId: 'dm1',
@@ -654,7 +720,8 @@ void main() {
     final threadMention = FeedItem(
       id: 'reply-event',
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'Reply in a thread',
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       channelId: 'ch1',
@@ -684,6 +751,10 @@ void main() {
     expect(page.channel.id, 'ch1');
     expect(page.initialThreadRootId, 'parent-reply');
     expect(page.initialMessageId, 'reply-event');
+    expect(
+      page.initialThreadRouteBehavior,
+      InitialThreadRouteBehavior.replaceCurrentRoute,
+    );
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
@@ -903,14 +974,20 @@ void main() {
     );
   });
 
-  testWidgets('falls back to short pubkey when user not cached', (
+  testWidgets('falls back to a compact npub when user is not cached', (
     tester,
   ) async {
     await tester.pumpWidget(await buildTestable(users: const {}));
     await tester.pumpAndSettle();
 
-    // Sender label falls back to the (short) pubkey.
-    expect(find.text('alice_pk'), findsOneWidget);
+    // Sender label falls back to the compact npub of the author's key.
+    expect(
+      find.text(
+        'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      findsNothing,
+    );
+    expect(find.text('npub15yw\u2026ccpw'), findsOneWidget);
     expect(find.text('Alice'), findsNothing);
   });
 }

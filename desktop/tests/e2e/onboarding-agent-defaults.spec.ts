@@ -1036,6 +1036,14 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
   await expect(tooltip).toContainText("npm ERR! code EACCES");
   await expect(tooltip).toContainText("Hint: Run as Administrator");
 
+  // Moving from the trigger into the portalled tooltip must keep it open so
+  // pointer users can operate the scrollable error detail.
+  const tooltipBox = await tooltip.boundingBox();
+  if (!tooltipBox) throw new Error("Expected runtime error tooltip bounds");
+  await page.mouse.move(tooltipBox.x + 8, tooltipBox.y + 8);
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveCSS("pointer-events", "auto");
+
   // Locate the scroll container using page-level locator since Radix portals
   // can place content outside the tooltip role element's subtree in the DOM.
   // Use .first() because Radix keeps a hidden duplicate in the light DOM.

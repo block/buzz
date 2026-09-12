@@ -30,12 +30,7 @@ export function useProjectRepoPresentation(
     controls: {
       externalUrl: host.kind === "external" ? webUrl : null,
       remoteKind: host.kind === "unresolved" ? undefined : host.kind,
-      remoteLabel:
-        host.kind === "external"
-          ? host.host
-          : host.kind === "buzz"
-            ? "Buzz"
-            : "Remote",
+      remoteLabel: host.kind === "external" ? host.host : "Remote",
     },
   };
 }

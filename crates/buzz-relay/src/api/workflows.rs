@@ -62,20 +62,22 @@ async fn authorize_workflow_read(
 
     let path_with_query = request_path(path, raw_query);
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        bridge::verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        signed_created_at,
+    } = bridge::verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
     let pubkey_bytes = pubkey.to_bytes().to_vec();
-    let auth_tag = headers
-        .get("x-auth-tag")
-        .and_then(|value| value.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        signed_created_at,
     )
     .await?;
 

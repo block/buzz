@@ -2,6 +2,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { isAgentAddressMentionTag } from "./agentAddressMention.mjs";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 const PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
@@ -32,17 +33,38 @@ export function getSendToChannelSemantics(
   );
   const seenMentions = new Set<string>();
   const mentionPubkeys: string[] = [];
+  const mentionProps = resolveMentionProps(
+    message.tags,
+    profiles,
+    message.body,
+  );
+  const hasMentionSnapshot = Boolean(
+    message.edited &&
+      message.tags?.some((tag) => tag[0] === "buzz:mention-snapshot"),
+  );
+  const notifiedPubkeys = new Set(
+    (message.tags ?? [])
+      .filter((tag) => tag[0] === "p")
+      .map((tag) => normalizePubkey(tag[1] ?? "")),
+  );
   const effectiveMentionPubkeys = message.edited
     ? new Set(
-        (message.tags ?? []).some((tag) => tag[0] === "buzz:mention-snapshot")
+        hasMentionSnapshot
           ? (message.tags ?? [])
-              .filter((tag) => tag[0] === "mention")
+              .filter(
+                (tag) =>
+                  tag[0] === "mention" &&
+                  (tag.length === 2 ||
+                    (isAgentAddressMentionTag(tag) &&
+                      notifiedPubkeys.has(normalizePubkey(tag[1] ?? "")))),
+              )
               .map((tag) => normalizePubkey(tag[1] ?? ""))
               .filter((pubkey) => PUBKEY_PATTERN.test(pubkey))
           : orderMentionPubkeysByText(
               message.body,
-              resolveMentionProps(message.tags, profiles).mentionPubkeysByName,
+              mentionProps.mentionPubkeysByName,
               () => true,
+              mentionProps.mentionNames,
             ),
       )
     : null;
@@ -52,7 +74,10 @@ export function getSendToChannelSemantics(
   );
 
   for (const tag of message.tags ?? []) {
-    if (tag[0] === "p") {
+    // A latest edit snapshot is the complete current audience. Newly added
+    // recipients' p-tags may exist only on an earlier edit, not the original
+    // event against which the latest edit is overlaid.
+    if (hasMentionSnapshot ? tag[0] === "mention" : tag[0] === "p") {
       const pubkey = normalizePubkey(tag[1] ?? "");
       if (
         PUBKEY_PATTERN.test(pubkey) &&
@@ -64,7 +89,7 @@ export function getSendToChannelSemantics(
         seenMentions.add(pubkey);
         mentionPubkeys.push(pubkey);
       }
-      continue;
+      if (tag[0] === "p") continue;
     }
 
     if (SHAREABLE_TAG_KINDS.has(tag[0] ?? "")) {

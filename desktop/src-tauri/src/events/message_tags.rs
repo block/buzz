@@ -4,6 +4,7 @@ use super::check_pubkey;
 
 const MAX_THREAD_ROOT_EXCERPT_CHARS: usize = 64;
 const SENT_FROM_THREAD_TAG: &str = "buzz:sent-from-thread";
+const AGENT_ADDRESS_MENTION_MARKER: &str = "agent-address";
 
 pub(super) fn mention_reference_tags(
     mentions: &[Vec<String>],
@@ -19,10 +20,20 @@ pub(super) fn mention_reference_tags(
         let Some(pubkey) = mention.get(1) else {
             return Err("mention reference tag missing pubkey".into());
         };
+        if mention.len() > 3
+            || (mention.len() == 3
+                && mention.get(2).map(String::as_str) != Some(AGENT_ADDRESS_MENTION_MARKER))
+        {
+            return Err("mention reference tag has invalid display metadata".into());
+        }
         check_pubkey(pubkey)?;
+        let normalized_pubkey = pubkey.to_ascii_lowercase();
+        let mut parts = vec!["mention", normalized_pubkey.as_str()];
+        if mention.len() == 3 {
+            parts.push(AGENT_ADDRESS_MENTION_MARKER);
+        }
         tags.push(
-            Tag::parse(vec!["mention", &pubkey.to_ascii_lowercase()])
-                .map_err(|error| format!("invalid mention reference tag: {error}"))?,
+            Tag::parse(parts).map_err(|error| format!("invalid mention reference tag: {error}"))?,
         );
     }
     Ok(())
@@ -115,7 +126,38 @@ pub(super) fn append_client_tags(
 mod tests {
     use super::*;
 
+    const PUBKEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const ROOT_HEX: &str = "d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1";
+
+    #[test]
+    fn mention_reference_preserves_agent_address_display_metadata() {
+        let mut tags = Vec::new();
+        mention_reference_tags(
+            &[vec![
+                "mention".into(),
+                PUBKEY.to_ascii_uppercase(),
+                AGENT_ADDRESS_MENTION_MARKER.into(),
+            ]],
+            &mut tags,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tags[0].as_slice(),
+            &["mention", PUBKEY, AGENT_ADDRESS_MENTION_MARKER]
+        );
+    }
+
+    #[test]
+    fn mention_reference_rejects_unknown_display_metadata() {
+        let mut tags = Vec::new();
+        let result = mention_reference_tags(
+            &[vec!["mention".into(), PUBKEY.into(), "unknown".into()]],
+            &mut tags,
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn message_accepts_only_valid_sent_from_thread_provenance() {

@@ -80,7 +80,9 @@ class _InboxRow extends HookConsumerWidget {
         pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
     };
     final profile = profiles[senderPubkey];
-    final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
+    // The shared label contract: blank cached names (empty or whitespace-only
+    // are relay-valid) fall back to the compact npub, never a blank sender.
+    final senderLabel = profile?.label ?? shortPubkey(item.item.pubkey);
     final profileMentionNames = {
       for (final pubkey in mentionPubkeys)
         if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
@@ -89,6 +91,9 @@ class _InboxRow extends HookConsumerWidget {
     final knownAgentPubkeys = channel == null
         ? ref.watch(knownAgentPubkeysProvider)
         : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final isAgent =
+        knownAgentPubkeys.contains(senderPubkey) ||
+        profile?.ownerPubkey != null;
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
@@ -223,6 +228,7 @@ class _InboxRow extends HookConsumerWidget {
                             _RowAvatar(
                               pubkey: item.item.pubkey,
                               profile: profile,
+                              isAgent: isAgent,
                             ),
                             const SizedBox(width: messageAvatarContentGap),
                             Expanded(
@@ -453,8 +459,13 @@ class _InboxSwipeAction extends StatelessWidget {
 class _RowAvatar extends StatelessWidget {
   final String pubkey;
   final UserProfile? profile;
+  final bool isAgent;
 
-  const _RowAvatar({required this.pubkey, required this.profile});
+  const _RowAvatar({
+    required this.pubkey,
+    required this.profile,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -472,6 +483,7 @@ class _RowAvatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }

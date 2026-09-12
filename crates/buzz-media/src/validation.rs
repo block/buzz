@@ -294,7 +294,7 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
 /// - Exactly one video track using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
 /// - At most one audio track, using `mp4a` (AAC)
 /// - Duration ≤ 600 seconds (from mvhd timescale, not edit lists)
-/// - Resolution ≤ 3840×2160
+/// - Resolution: short edge ≤ 2160 and long edge ≤ 3840 (portrait or landscape)
 /// - moov atom precedes mdat (fast-start / web-optimised)
 ///
 /// Returns [`VideoMeta`] on success.
@@ -370,10 +370,14 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                     return Err(MediaError::DurationTooLong);
                 }
 
-                // Resolution check.
+                // Resolution check. Apply the 2160×3840 envelope independent
+                // of orientation so equivalent portrait and landscape videos
+                // receive the same treatment.
                 let width = track.width() as u32;
                 let height = track.height() as u32;
-                if width > 3840 || height > 2160 {
+                let short_edge = width.min(height);
+                let long_edge = width.max(height);
+                if short_edge > 2160 || long_edge > 3840 {
                     return Err(MediaError::ResolutionTooHigh);
                 }
 
@@ -2544,6 +2548,43 @@ mod tests {
         assert!(
             matches!(result, Err(MediaError::InvalidVideo)),
             "expected InvalidVideo for zero-duration, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_video_accepts_portrait_resolution() {
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 1_000, 2160, 3840, false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+
+        let meta = validate_video_file(tmp.path(), &test_config())
+            .expect("portrait video within the 2160x3840 envelope should be accepted");
+        assert_eq!((meta.width, meta.height), (2160, 3840));
+    }
+
+    #[test]
+    fn test_validate_video_rejects_resolution_above_short_edge_limit() {
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 1_000, 2161, 3840, false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+
+        let result = validate_video_file(tmp.path(), &test_config());
+        assert!(
+            matches!(result, Err(MediaError::ResolutionTooHigh)),
+            "expected ResolutionTooHigh, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_video_rejects_resolution_above_long_edge_limit() {
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 1_000, 2160, 3841, false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+
+        let result = validate_video_file(tmp.path(), &test_config());
+        assert!(
+            matches!(result, Err(MediaError::ResolutionTooHigh)),
+            "expected ResolutionTooHigh, got {result:?}"
         );
     }
 

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   createMockAgentMemoryListing,
@@ -251,20 +252,31 @@ async function addGenericAgent(
   );
 }
 
-async function waitForMockLiveSubscription(page: Page, channelName: string) {
+async function waitForMockLiveSubscription(
+  page: Page,
+  channelName: string,
+  kind?: number,
+) {
   await expect
     .poll(async () => {
-      return page.evaluate((channelName) => {
-        return (
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName }) ?? false
-        );
-      }, channelName);
+      return page.evaluate(
+        ({ channelName, kind }) => {
+          return (
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind?: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName,
+              kind,
+            }) ?? false
+          );
+        },
+        { channelName, kind },
+      );
     })
     .toBe(true);
 }
@@ -409,7 +421,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     .getByRole("button", { name: `Open profile for ${agentName}` })
     .click();
   await expect(page.getByTestId("user-profile-public-key")).toContainText(
-    agentPubkey.slice(0, 8),
+    npubEncode(agentPubkey).slice(0, 8),
   );
   const dmSurface = await readOwnedAgentProfileContract(page);
 
@@ -479,7 +491,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
 
   await expect(page.getByTestId("profile-identity-details")).toBeHidden();
   await expandIdentity(page);
-  await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
+  // The mock identity pubkey is "deadbeef" repeated 8×; its canonical npub
+  // is npub1m6kmam774…zuz0, so the identity row shows the npub, not the hex.
+  await expect(page.getByTestId("profile-pubkey")).toContainText(
+    npubEncode("deadbeef".repeat(8)).slice(0, 8),
+  );
+  await expect(page.getByTestId("profile-pubkey")).not.toContainText(
+    "deadbeefdeadbeef",
+  );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
 
   await page.getByTestId("profile-metadata-edit").click();
@@ -1131,6 +1150,25 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     "Memory Bot",
     longAgentInstruction,
   );
+  // A running process is not presence. Supply this scenario's snapshot and
+  // authored kind-20001 updates through the mock relay, not the query cache.
+  const emitAgentPresence = (status: "online" | "offline") =>
+    page.evaluate(
+      ({ pubkey, status }) => {
+        const emit = (
+          window as Window & {
+            __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
+              pubkey: string;
+              status: "online" | "offline";
+            }) => void;
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_PRESENCE__;
+        if (!emit) throw new Error("Mock presence emitter is unavailable.");
+        emit({ pubkey, status });
+      },
+      { pubkey: agentPubkey, status },
+    );
+  await emitAgentPresence("online");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1169,6 +1207,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("user-profile-message")).toBeVisible();
   await expect(page.getByTestId("user-profile-huddle")).toHaveCount(0);
   await expect(page.getByTestId("user-profile-wave")).toHaveCount(0);
+  await expectHashSearchParam(page, "profile", agentPubkey);
   const agentPresenceBadge = page.getByTestId("user-profile-presence-badge");
   await expect(agentPresenceBadge).toBeVisible();
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
@@ -1231,9 +1270,13 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
+  await waitForMockLiveSubscription(page, "general", 20001);
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Start agent");
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  await emitAgentPresence("offline");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await expectHashSearchParam(page, "profile", agentPubkey);
   await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
   await expect(agentPrimaryAction).toHaveClass(/text-background/);
   await expect(page.getByTestId("user-profile-agent-restart")).toHaveCount(0);
@@ -1250,6 +1293,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(agentPrimaryAction).toBeEnabled();
   await agentPrimaryAction.click();
   await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Stop");
+  await waitForMockLiveSubscription(page, "general", 20001);
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await emitAgentPresence("online");
   await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
   await expect(page.getByTestId("user-profile-agent-restart")).toBeVisible();
   await expectHashSearchParam(page, "profileTab", null);
@@ -1444,7 +1490,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(publicKeyCopy).toHaveAttribute("data-copied", "true");
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(agentPubkey);
+    .toBe(npubEncode(agentPubkey));
   await expect(page.getByTestId("user-profile-agent-instruction")).toHaveCount(
     0,
   );
@@ -1834,9 +1880,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
-test("an older agent message opens the same persona instance as the Agents library", async ({
+test("an older agent message stays exact while persona navigation selects the live instance", async ({
   page,
-}) => {
+}, testInfo) => {
   const personaId = "profile-parity-agent";
   const historicalPubkey = TEST_IDENTITIES.charlie.pubkey;
   const currentPubkey = "d".repeat(64);
@@ -1875,7 +1921,6 @@ test("an older agent message opens the same persona instance as the Agents libra
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
-  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
 
   await page.getByTestId("user-profile-tab-runtime").click();
   await page.getByTestId("user-profile-instances").click();
@@ -1889,6 +1934,8 @@ test("an older agent message opens the same persona instance as the Agents libra
     page.getByTestId(`user-profile-instance-${historicalPubkey}`),
   ).toContainText("Current");
 
+  const exactInstanceContract = await readOwnedAgentProfileContract(page);
+
   await page.getByTestId("auxiliary-panel-close").click();
   await page.getByTestId("channel-agents").click();
   const historicalMessage = page
@@ -1898,10 +1945,15 @@ test("an older agent message opens the same persona instance as the Agents libra
   await historicalMessage.locator("button").first().click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Stop");
+  ).toHaveAttribute("aria-label", "Start agent");
   const messageContract = await readOwnedAgentProfileContract(page);
 
-  expect(messageContract).toEqual(agentsLibraryContract);
+  expect(messageContract).toEqual(exactInstanceContract);
+  await page.getByTestId("user-profile-tab-info").click();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("historical-exact-instance.png"),
+  });
 });
 
 test("restored Inbox deep link hides the back arrow", async ({ page }) => {
@@ -2489,7 +2541,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   const getTextScaleState = () =>
     page.evaluate(() => ({
-      fontSize: getComputedStyle(document.documentElement).fontSize,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
       storedScale: localStorage.getItem("buzz:text-scale"),
       webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
         .__BUZZ_E2E_WEBVIEW_ZOOM__,
@@ -2520,7 +2572,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "17.6px",
+    rootFontSize: "17.6px",
     storedScale: "1.1",
     webviewZoom: 1,
   });
@@ -2528,7 +2580,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("-", "Minus");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2537,7 +2589,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "19.2px",
+    rootFontSize: "19.2px",
     storedScale: "1.2",
     webviewZoom: 1,
   });
@@ -2545,10 +2597,90 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("0", "Digit0");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
+});
+
+test("storage clear resets composed font size and keyboard zoom across windows", async ({
+  context,
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+  await page.getByTestId("font-size-larger").click();
+
+  const dispatchZoomIn = () =>
+    page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Equal",
+          ctrlKey: !isMac,
+          key: "+",
+          metaKey: isMac,
+          shiftKey: true,
+        }),
+      );
+    });
+
+  for (let step = 0; step < 5; step += 1) {
+    await dispatchZoomIn();
+  }
+
+  // Zoom scales the real root; the Font size preference layers a text-only
+  // multiplier on top. Resolve the composed type rem through a rendered probe
+  // so the CSS calc is actually evaluated (root px × 15/14 for "larger").
+  const readTypographyState = () =>
+    page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.fontSize = "var(--buzz-type-rem)";
+      document.documentElement.appendChild(probe);
+      const typeRemPx =
+        Math.round(Number.parseFloat(getComputedStyle(probe).fontSize) * 100) /
+        100;
+      probe.remove();
+      return {
+        fontSize: document.documentElement.dataset.fontSize,
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+        typeRemPx,
+        textScale: localStorage.getItem("buzz:text-scale"),
+      };
+    });
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "larger",
+    rootFontSize: "24px",
+    typeRemPx: 25.71,
+    textScale: "1.5",
+  });
+
+  const peerPage = await context.newPage();
+  await installMockBridge(peerPage);
+  await peerPage.goto("/");
+  await peerPage.evaluate(() => localStorage.clear());
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "16px",
+    typeRemPx: 16,
+    textScale: null,
+  });
+
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+-" : "Control+-",
+  );
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "14.4px",
+    typeRemPx: 14.4,
+    textScale: "0.9",
+  });
+
+  await peerPage.close();
 });
 
 test("shows agent runtimes in agent settings", async ({ page }) => {
@@ -2592,16 +2724,13 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
 
   const agentsSecondaryColor = await agentsPage
-    .getByText(
-      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
-    )
+    .getByTestId("settings-automatic-agent-mentions")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page
-    .getByTestId("link-preview-style-trigger")
-    .locator("..")
-    .locator("p")
-    .nth(1)
+    .getByTestId("link-preview-style-group")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
 });

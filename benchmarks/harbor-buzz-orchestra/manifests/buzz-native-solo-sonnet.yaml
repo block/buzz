@@ -1,0 +1,25 @@
+# Single production Buzz agent for the local Buzz-native Harbor dataset.
+# buzz-acp supplies crates/buzz-acp/src/base_prompt.md from the checked-out
+# source build; this small persona only establishes that there is no team.
+schema_version: "1"
+condition: buzz-native-solo-sonnet46
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: claude-sonnet-4-6
+    model_revision: claude-sonnet-4-6
+    prompt:
+      path: personas/buzz-native-solo.md
+      sha256: 972950f0e2bfb9bf540c98e70e075479ab80cd596cb5ad405dad0cafdc60840b
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 200000
+prices:
+  claude-sonnet-4-6:
+    input_per_million_usd: 3
+    cached_input_per_million_usd: 0.3
+    output_per_million_usd: 15
+trial_budget:
+  timeout_seconds: 300

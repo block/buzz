@@ -6,12 +6,19 @@ void main() {
   const animationUrl = 'https://relay.example/media/animation.png?loop=1';
 
   test('parses the selected poster and animated PNG URLs', () {
-    final url = '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+    final url = buildAnimatedAvatarUrl(posterUrl, animationUrl);
 
     final parsed = parseAnimatedAvatarUrl(url);
 
     expect(parsed?.posterUrl, posterUrl);
     expect(parsed?.animationUrl, animationUrl);
+  });
+
+  test('builds the shared desktop and mobile fragment format', () {
+    expect(
+      buildAnimatedAvatarUrl(posterUrl, animationUrl),
+      '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}',
+    );
   });
 
   test('rejects malformed and non-http animated avatar URLs', () {

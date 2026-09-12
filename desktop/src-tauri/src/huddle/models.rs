@@ -587,6 +587,10 @@ fn tts_model_slot() -> ModelSlot {
         .with_expected_sizes(tts_expected_size)
 }
 
+fn models_dir(nest_dir: PathBuf) -> PathBuf {
+    nest_dir.join("models")
+}
+
 // ── ModelManager ──────────────────────────────────────────────────────────────
 
 /// Manages download and location of STT/TTS model files.
@@ -594,18 +598,18 @@ fn tts_model_slot() -> ModelSlot {
 /// Cheap to clone — all inner state is behind `Arc`.
 #[derive(Clone)]
 pub struct ModelManager {
-    /// `~/.buzz/models/`
+    /// Model storage under the selected build's nest.
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
 }
 
 impl ModelManager {
-    /// Create a new `ModelManager` rooted at `~/.buzz/models/`.
+    /// Create a new `ModelManager` rooted in the selected build's nest.
     ///
-    /// Returns `None` if the home directory cannot be resolved.
+    /// Returns `None` if the nest directory cannot be resolved.
     pub fn new() -> Option<Self> {
-        let models_dir = dirs::home_dir()?.join(".buzz").join("models");
+        let models_dir = models_dir(crate::managed_agents::nest_dir()?);
         let manager = Self {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),

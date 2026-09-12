@@ -1,10 +1,15 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../shared/utils/string_utils.dart';
+
 /// A mention autocomplete candidate. Mirrors the desktop's
 /// `MentionCandidateForRanking` (desktop/src/features/messages/lib/mentionRanking.ts).
 @immutable
 class MentionCandidate {
   final String pubkey;
+
+  /// Restored identity only: eligibility must come from current community state.
+  final bool requiresRevalidation;
   final String? displayName;
   final String? secondaryLabel;
   final String? avatarUrl;
@@ -15,6 +20,7 @@ class MentionCandidate {
 
   const MentionCandidate({
     required this.pubkey,
+    this.requiresRevalidation = false,
     this.displayName,
     this.secondaryLabel,
     this.avatarUrl,
@@ -27,7 +33,16 @@ class MentionCandidate {
   String get label {
     final name = displayName?.trim();
     if (name != null && name.isNotEmpty) return name;
-    return pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
+    return shortPubkey(pubkey);
+  }
+
+  /// Avatar initial: display-name-derived, or keyed to the hex public key
+  /// so unnamed identities keep distinct initials (a compact npub would
+  /// render `N` for everyone).
+  String get initial {
+    final name = displayName?.trim();
+    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
   }
 }
 

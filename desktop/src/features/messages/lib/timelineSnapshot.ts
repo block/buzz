@@ -181,16 +181,18 @@ export function selectDeferredListRenderState(
   return "pending";
 }
 
-export type TimelineBodySurface = "skeleton" | "empty" | "list";
+export type TimelineBodySurface = "skeleton" | "error" | "empty" | "list";
 
 export function selectTimelineBodySurface({
   deferredCount,
   preserveSettledEmptyIntro = false,
+  isError = false,
   isLoading,
   liveCount,
 }: {
   deferredCount: number;
   preserveSettledEmptyIntro?: boolean;
+  isError?: boolean;
   isLoading: boolean;
   liveCount: number;
 }): TimelineBodySurface {
@@ -199,12 +201,86 @@ export function selectTimelineBodySurface({
   }
 
   const renderState = selectDeferredListRenderState(deferredCount, liveCount);
+  if (renderState === "list") {
+    return "list";
+  }
+  if (isError && liveCount === 0) {
+    return "error";
+  }
   if (renderState === "pending") {
     // Preserve a channel/DM intro across a new append only when this channel
     // already committed an authoritative empty timeline. On first load, the
     // live query can resolve before React's deferred rows commit; painting the
     // intro in that gap flashes empty-channel actions over incoming messages.
     return preserveSettledEmptyIntro ? "empty" : "skeleton";
+  }
+  return renderState;
+}
+
+/**
+ * Which surface the thread-reply body should paint, in strict precedence.
+ *
+ * Extracted as a pure function so the load-bearing invariant — a terminal fetch
+ * error must NEVER be shown as the "empty" (no-replies) state — is unit-tested
+ * without a DOM. The precedence mirrors the JSX branch order in
+ * `MessageThreadPanel`:
+ *
+ *   1. "skeleton" → the query is still pending (first load, no cache)
+ *   2. "list"     → the deferred snapshot has rows; paint them (even under a
+ *                   later error, cached replies stay visible non-destructively)
+ *   3. "error"    → the load terminally failed and there is nothing to show;
+ *                   paint "Couldn't load replies" + Retry, never the empty state
+ *   4. "empty"    → the load succeeded and the branch is genuinely empty
+ *   5. "pending"  → deferred is empty but the live list has content; paint
+ *                   nothing yet (rows are streaming in on the deferred commit)
+ *
+ * Huddle transcripts flatten replies into the chat timeline and never show the
+ * skeleton/error/empty affordances, so their non-list surfaces collapse to
+ * "pending" (render nothing).
+ */
+export type ThreadRepliesSurface =
+  | "skeleton"
+  | "list"
+  | "error"
+  | "empty"
+  | "pending";
+
+export function selectThreadRepliesSurface({
+  isPending,
+  isError,
+  renderState,
+  isHuddleTranscript = false,
+}: {
+  isPending: boolean;
+  isError: boolean;
+  renderState: DeferredListRenderState;
+  isHuddleTranscript?: boolean;
+}): ThreadRepliesSurface {
+  const surface = resolveThreadRepliesSurface({
+    isPending,
+    isError,
+    renderState,
+  });
+  return isHuddleTranscript && surface !== "list" ? "pending" : surface;
+}
+
+function resolveThreadRepliesSurface({
+  isPending,
+  isError,
+  renderState,
+}: {
+  isPending: boolean;
+  isError: boolean;
+  renderState: DeferredListRenderState;
+}): ThreadRepliesSurface {
+  if (isPending) {
+    return "skeleton";
+  }
+  if (renderState === "list") {
+    return "list";
+  }
+  if (isError) {
+    return "error";
   }
   return renderState;
 }

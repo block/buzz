@@ -1,7 +1,7 @@
 //! Kind-44200 (NIP-AM agent turn metric) archive and `get_agent_usage_series`
 //! integration tests for `archive/mod.rs`.
 //!
-//! Kept in a sibling file so `mod_tests.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `mod_tests.rs` stays under the 1500-line gate;
 //! `#[path]`-included from there so the shared fixtures (`in_memory`,
 //! `add_sub`, `candidate`, `make_observer_frame`, `run_batch_sync_with_keys`)
 //! stay private to `mod_tests`.

@@ -15,8 +15,9 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/utils/string_utils.dart';
+import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
 import 'forum_models.dart';
 import 'forum_provider.dart';
@@ -332,7 +333,7 @@ class _OriginalPost extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(post.pubkey);
+    final displayName = profile?.label ?? shortPubkey(post.pubkey);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -359,9 +360,11 @@ class _OriginalPost extends ConsumerWidget {
               GestureDetector(
                 onTap: () => showUserProfileSheet(context, post.pubkey),
                 child: _Avatar(
+                  key: ValueKey('forum-original-avatar-${post.eventId}'),
                   profile: profile,
                   pubkey: post.pubkey,
                   radius: 16,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -432,7 +435,7 @@ class _ReplyRow extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(reply.pubkey);
+    final displayName = profile?.label ?? shortPubkey(reply.pubkey);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -462,9 +465,11 @@ class _ReplyRow extends ConsumerWidget {
               GestureDetector(
                 onTap: () => showUserProfileSheet(context, reply.pubkey),
                 child: _Avatar(
+                  key: ValueKey('forum-reply-avatar-${reply.eventId}'),
                   profile: profile,
                   pubkey: reply.pubkey,
                   radius: 12,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -620,11 +625,14 @@ class _Avatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
   final double radius;
+  final bool isAgent;
 
   const _Avatar({
+    super.key,
     required this.profile,
     required this.pubkey,
     required this.radius,
+    required this.isAgent,
   });
 
   @override
@@ -645,6 +653,7 @@ class _Avatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }
@@ -661,9 +670,4 @@ Map<String, String> _buildMentionNames(
     }
   }
   return names;
-}
-
-String _shortPubkey(String pubkey) {
-  if (pubkey.length > 12) return '${pubkey.substring(0, 8)}\u2026';
-  return pubkey;
 }

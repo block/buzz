@@ -200,22 +200,21 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 
         let event: nostr::Event = serde_json::from_str(&event_json)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid auth event").into_response())?;
+        let signed_auth_created_at = event.created_at.as_secs();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
         // attach their NIP-OA attestation to the signed NIP-98 event, matching
         // the WebSocket NIP-42 flow.
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
-        let header_auth_tag = parts
-            .headers
-            .get("x-auth-tag")
-            .and_then(|value| value.to_str().ok());
+        let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
         if crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
+            Some(signed_auth_created_at),
         )
         .await
         .is_err()
@@ -224,7 +223,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
-        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+        deny_banned_git_principal(
+            &state.db,
+            tenant.community(),
+            &pubkey,
+            auth_tag,
+            Some(signed_auth_created_at),
+        )
+        .await?;
 
         Ok(GitAuth { pubkey, tenant })
     }
@@ -241,11 +247,12 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 /// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
 /// `handlers::auth`: banning a human must also revoke their agents, or the ban
 /// is bypassable by cloning and pushing through an agent key.
-async fn deny_banned_git_principal(
+pub(super) async fn deny_banned_git_principal(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
     auth_tag: Option<&str>,
+    signed_auth_created_at: Option<u64>,
 ) -> Result<(), Response> {
     let agent = git_restriction_state(db, community, pubkey).await?;
 
@@ -254,7 +261,11 @@ async fn deny_banned_git_principal(
     let owner = if agent.banned {
         None
     } else {
-        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+        crate::api::relay_members::extract_nip_oa_owner(
+            pubkey.as_bytes(),
+            auth_tag,
+            signed_auth_created_at,
+        )
     };
     let owner_state = match owner {
         Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
@@ -351,7 +362,7 @@ fn git_expected_url(
 /// repo root — but the *name* validation stays because owner/repo are
 /// still used as object-store key components via `manifest::pointer_key`.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
+pub(super) fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
     // Owner must be exactly 64 lowercase hex chars.
     if owner.len() != 64
         || !owner
@@ -472,13 +483,13 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
 /// — so the remediation body leaks nothing, and only the author can rebind
 /// (kind:30617 is keyed by `(author, d)`). A *broken* binding stays generic
 /// even for the author: ambiguity fails closed.
-async fn authorize_git_read(
+pub(super) async fn authorize_git_read(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     caller: &nostr::PublicKey,
     owner_hex: &str,
     repo_name: &str,
-) -> Result<(), Response> {
+) -> Result<nostr::Event, Response> {
     fn denied() -> Response {
         (StatusCode::NOT_FOUND, "repository not found").into_response()
     }
@@ -541,7 +552,7 @@ async fn authorize_git_read(
         .get_member_role(community, channel_id, &caller.to_bytes())
         .await
     {
-        Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
+        Ok(role) if read_role_allows(role.as_deref()) => Ok(repo_event.event),
         Ok(_) => Err(denied()),
         Err(e) => {
             error!(repo = %repo_name, error = %e, "git read gate: role lookup failed (deny)");
@@ -2107,6 +2118,7 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .merge(super::settings::router())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2424,8 +2436,102 @@ mod track_c_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
+    async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-announce-lease-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let (request, claim) = approved_deletion(&state, &host).await;
+        let tenant = TenantContext::resolved(community, host.clone());
+        let owner_keys = Keys::generate();
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let event = EventBuilder::new(Kind::Custom(30_617), "")
+            .tags([Tag::parse(["d", &repo]).expect("d tag")])
+            .sign_with_keys(&owner_keys)
+            .expect("sign announcement");
+        let gate = Arc::new(crate::handlers::side_effects::GitRepoAnnouncementGate::default());
+        let hooks = crate::handlers::side_effects::GitRepoAnnouncementHooks {
+            post_lease_gate: Some(Arc::clone(&gate)),
+        };
+        let announce_state = Arc::clone(&state);
+        let announce_tenant = tenant.clone();
+        let announce = tokio::spawn(async move {
+            let result = crate::handlers::side_effects::handle_git_repo_announcement_inner(
+                &announce_tenant,
+                &event,
+                &announce_state,
+                &hooks,
+            )
+            .await;
+            let owner_hex = hex::encode(owner_keys.public_key().to_bytes());
+            (result, owner_hex)
+        });
+
+        gate.reached.notified().await;
+        state
+            .db
+            .deletion_store()
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("quiesce after announcement lease");
+        let error = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect_err("announcement serving lease must block fence");
+        assert!(matches!(
+            error,
+            buzz_db::DbError::ServingWritesNotDrained { .. }
+        ));
+
+        gate.resume.notify_one();
+        let (announce_result, owner_hex) = announce.await.expect("announcement task");
+        announce_result.expect("announcement completes");
+        let pointer_key = crate::api::git::manifest::pointer_key(community, &owner_hex, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer_key)
+                .await
+                .expect("read pointer")
+                .is_some(),
+            "announcement pointer must be durable before lease release"
+        );
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released"));
+        let generation = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect("fence after pointer seed");
+        assert_eq!(generation, 1);
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request.id)
+                .await
+                .expect("fenced request")
+                .stage,
+            buzz_db::deletion::DeletionStage::Fenced
+        );
+        drop(state);
+        pool.close().await;
+    }
+
     async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
         let (state, pool) = finalize_test_state().await;
         let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());
@@ -2517,8 +2623,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2557,6 +2661,26 @@ mod track_c_tests {
             .expect("serving lease released on failure"));
         drop(state);
         pool.close().await;
+    }
+
+    mod external_infra_minio_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+            super::repo_announcement_holds_serving_lease_until_pointer_is_seeded().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
+            super::finalize_push_holds_serving_lease_through_post_cas_publication().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
+            super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
+        }
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -3071,7 +3195,7 @@ mod track_c_tests {
 }
 
 #[cfg(test)]
-mod sec005_read_gate_tests {
+mod sec005_postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -3182,7 +3306,7 @@ mod sec005_read_gate_tests {
     /// can assert on the exact bytes a git client would see. A blind
     /// `.is_err()` cannot distinguish the generic 404 from the remediation
     /// 404 — and that distinction IS the security property.
-    async fn denial_parts(result: Result<(), Response>) -> (StatusCode, String) {
+    async fn denial_parts<T: std::fmt::Debug>(result: Result<T, Response>) -> (StatusCode, String) {
         let response = result.expect_err("expected a denial");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -3554,7 +3678,7 @@ mod sec005_read_gate_tests {
         db.ensure_user(community, &member_pk).await.expect("member");
 
         assert!(
-            deny_banned_git_principal(&db, community, &member.public_key(), None)
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None)
                 .await
                 .is_ok(),
             "precondition: an unbanned member passes the git ban gate"
@@ -3565,7 +3689,7 @@ mod sec005_read_gate_tests {
             .expect("ban");
 
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None).await,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3588,9 +3712,15 @@ mod sec005_read_gate_tests {
             .expect("auth tag");
 
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
-                .await
-                .is_ok(),
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+            )
+            .await
+            .is_ok(),
             "precondition: neither agent nor owner is banned"
         );
 
@@ -3600,7 +3730,14 @@ mod sec005_read_gate_tests {
             .expect("ban owner");
 
         let (status, _) = denial_parts(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -3612,7 +3749,7 @@ mod sec005_read_gate_tests {
         // An unattested request from the same agent key is unaffected: the
         // cascade must follow a verified owner, not punish every agent.
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+            deny_banned_git_principal(&db, community, &agent.public_key(), None, None)
                 .await
                 .is_ok(),
             "without an attestation there is no owner to inherit from"
@@ -3634,7 +3771,8 @@ mod sec005_read_gate_tests {
 
         let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None, None)
+                .await,
         )
         .await;
         assert_eq!(
