@@ -381,6 +381,29 @@ export function BackupStep({
                     <Eye className="h-6 w-6" aria-hidden="true" />
                   )}
                 </Button>
+                <Button
+                  aria-label={
+                    copyState === "copied"
+                      ? "Private key copied"
+                      : "Copy private key"
+                  }
+                  className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
+                  data-testid="backup-key-copy"
+                  disabled={copyState === "copying"}
+                  onClick={() => void copyKeyToClipboard()}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  {copyState === "copied" ? (
+                    <Check
+                      className="h-6 w-6 text-primary"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Copy className="h-6 w-6" aria-hidden="true" />
+                  )}
+                </Button>
               </div>
             </Card>
 
