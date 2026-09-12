@@ -68,6 +68,10 @@ import {
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
+import {
+  registerExistingAgent,
+  type RegisterExistingAgentInput,
+} from "@/shared/api/tauriAgentRegistration";
 import { teamsQueryKey } from "@/features/agents/teamHooks";
 import type {
   AcpRuntime,
@@ -511,6 +515,18 @@ export function useCreatePersonaMutation() {
     },
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: personasQueryKey });
+    },
+  });
+}
+
+export function useRegisterExistingAgentMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: RegisterExistingAgentInput) =>
+      registerExistingAgent(input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
     },
   });
 }

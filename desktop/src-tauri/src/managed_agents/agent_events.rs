@@ -111,16 +111,27 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
 /// Returns an unsigned `EventBuilder` — the caller signs and submits. The
 /// `d_tag` is the agent's pubkey.
 pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, String> {
+    build_agent_event_from_content(&record.pubkey, &agent_event_content(record))
+}
+
+/// Build a kind:30177 event from an already-sanitized public projection.
+///
+/// This is also used when an owner registers an independently operated agent:
+/// Desktop knows the public identity and access policy, but intentionally does
+/// not possess or create a local [`ManagedAgentRecord`] or the agent's key.
+pub fn build_agent_event_from_content(
+    agent_pubkey: &str,
+    content: &ManagedAgentEventContent,
+) -> Result<EventBuilder, String> {
     super::validate_managed_agent_definition_text(
-        &record.name,
-        record.persona_id.as_deref(),
-        record.system_prompt.as_deref(),
+        &content.name,
+        content.persona_id.as_deref(),
+        content.system_prompt.as_deref(),
     )
     .map_err(|error| format!("Managed agent definition is unsafe to publish: {error}"))?;
-    let content = serde_json::to_string(&agent_event_content(record))
+    let content = serde_json::to_string(content)
         .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
-    let tags =
-        vec![Tag::parse(["d", record.pubkey.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    let tags = vec![Tag::parse(["d", agent_pubkey]).map_err(|e| format!("invalid d-tag: {e}"))?];
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags(tags))
 }
 
