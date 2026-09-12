@@ -10,6 +10,7 @@ import { generateSecretKey } from "nostr-tools/pure";
 import {
   classifyKeyImportInput,
   isPlausibleNcryptsec,
+  isPlausibleTwoSkdBackup,
   keyImportSubmitEnabled,
   NCRYPTSEC_ENCODED_LENGTH,
 } from "./keyImportInput.ts";
@@ -19,10 +20,12 @@ const NCRYPTSEC =
   "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
 
 const VALID_NSEC = nsecEncode(generateSecretKey());
+const TWO_SKD_BACKUP = `buzz2skd1:${"A".repeat(80)}`;
 
 test("classify_by_hrp_with_whitespace_tolerance", () => {
   assert.equal(classifyKeyImportInput(`  ${NCRYPTSEC}\n`), "ncryptsec");
   assert.equal(classifyKeyImportInput(VALID_NSEC), "nsec");
+  assert.equal(classifyKeyImportInput(TWO_SKD_BACKUP), "two-skd");
   assert.equal(classifyKeyImportInput("npub1whatever"), "unknown");
   assert.equal(classifyKeyImportInput(""), "unknown");
   // nsec must not be shadowed by the longer HRP check.
@@ -70,4 +73,22 @@ test("submit_gating_ncryptsec_requires_passphrase", () => {
   assert.equal(keyImportSubmitEnabled(NCRYPTSEC, "hunter2hunter2"), true);
   // Structurally implausible blob never submits, passphrase or not.
   assert.equal(keyImportSubmitEnabled("ncryptsec1bio", "hunter2"), false);
+});
+
+test("2SKD backup requires both password and recovery code", () => {
+  assert.equal(isPlausibleTwoSkdBackup(TWO_SKD_BACKUP), true);
+  assert.equal(keyImportSubmitEnabled(TWO_SKD_BACKUP, "", ""), false);
+  assert.equal(
+    keyImportSubmitEnabled(TWO_SKD_BACKUP, "hunter2hunter2", ""),
+    false,
+  );
+  assert.equal(
+    keyImportSubmitEnabled(
+      TWO_SKD_BACKUP,
+      "hunter2hunter2",
+      "buzz-recovery-v1-00112233445566778899aabbccddeeff",
+    ),
+    true,
+  );
+  assert.equal(isPlausibleTwoSkdBackup("buzz2skd1:not valid"), false);
 });

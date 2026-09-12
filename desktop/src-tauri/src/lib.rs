@@ -37,6 +37,7 @@ mod observed_unread;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
+mod recovery_sheet;
 mod relay;
 mod relay_admission;
 mod reset;
@@ -49,6 +50,7 @@ mod terminal_runtime;
 mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
+mod two_skd;
 mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
@@ -555,8 +557,12 @@ pub fn run() {
             get_nsec,
             generate_backup_passphrase,
             create_ncryptsec_backup,
+            create_2skd_backup,
             verify_ncryptsec_backup,
+            verify_2skd_backup,
             save_ncryptsec_copy,
+            save_2skd_backup_copy,
+            save_2skd_recovery_sheet,
             import_identity,
             persist_current_identity,
             get_profile,

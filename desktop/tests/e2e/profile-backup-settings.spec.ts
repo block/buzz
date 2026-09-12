@@ -11,6 +11,14 @@ const BACKUP_FILE = {
   mimeType: "text/plain",
   buffer: Buffer.from("ncryptsec1mockbackupmaterial"),
 };
+const TWO_SKD_BACKUP = `buzz2skd1:${"A".repeat(80)}`;
+const TWO_SKD_RECOVERY_CODE =
+  "buzz-recovery-v1-00112233445566778899aabbccddeeff";
+const TWO_SKD_FILE = {
+  name: "identity.buzzbackup",
+  mimeType: "text/plain",
+  buffer: Buffer.from(TWO_SKD_BACKUP),
+};
 
 async function openIdentity(page: Page) {
   const identity = page.getByTestId("profile-identity-card");
@@ -46,6 +54,14 @@ async function openCreateBackup(page: Page) {
   await openPrivateKeyMenu(page);
   await page.getByTestId("private-key-create-backup").click();
   const dialog = page.getByTestId("encrypted-backup-dialog");
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+async function openCreateRecoveryKit(page: Page) {
+  await openPrivateKeyMenu(page);
+  await page.getByTestId("private-key-create-recovery-kit").click();
+  const dialog = page.getByTestId("two-skd-dialog");
   await expect(dialog).toBeVisible();
   return dialog;
 }
@@ -90,6 +106,9 @@ test("private key menu replaces the backup settings rows", async ({ page }) => {
   await expect(page.getByTestId("private-key-create-backup")).toHaveText(
     "Create backup",
   );
+  await expect(page.getByTestId("private-key-create-recovery-kit")).toHaveText(
+    "Create recovery kit",
+  );
   await expect(page.getByTestId("private-key-test-backup")).toHaveText(
     "Test backup",
   );
@@ -103,7 +122,64 @@ test("private key menu replaces the backup settings rows", async ({ page }) => {
   const testDialog = page.getByTestId("backup-test-dialog");
   await expect(testDialog).toContainText("Test a key backup");
   await expect(testDialog.getByText("Select your backup file")).toBeVisible();
-  await expect(testDialog).toContainText("standard NIP-49 format");
+  await expect(testDialog).toContainText("Standard NIP-49 backups");
+});
+
+test("2SKD recovery kit keeps the recovery code separate from the saved backup", async ({
+  page,
+}) => {
+  await openBackupSettings(page, {
+    backupSavePaths: ["/Users/test/Downloads/identity.buzzbackup"],
+    recoverySheetSavePaths: ["/Users/test/Documents/buzz-recovery-sheet.pdf"],
+  });
+  const dialog = await openCreateRecoveryKit(page);
+  const password = dialog.getByLabel("Recovery password");
+  const create = dialog.getByTestId("two-skd-create");
+
+  await password.fill("short");
+  await expect(create).toBeDisabled();
+  await password.fill("mock horse battery staple lake orbit");
+  await create.click();
+
+  await expect(dialog.getByTestId("two-skd-recovery-code-step")).toBeVisible();
+  await expect(dialog.getByTestId("two-skd-recovery-code")).toHaveText(
+    TWO_SKD_RECOVERY_CODE,
+  );
+  await expect(dialog).toContainText(
+    "/Users/test/Downloads/identity.buzzbackup",
+  );
+  await dialog.getByTestId("two-skd-save-recovery-sheet").click();
+  await expect(dialog.getByTestId("two-skd-recovery-sheet-path")).toContainText(
+    "/Users/test/Documents/buzz-recovery-sheet.pdf",
+  );
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).toContain("create_2skd_backup");
+  expect(commands).toContain("save_2skd_backup_copy");
+  expect(commands).toContain("save_2skd_recovery_sheet");
+});
+
+test("2SKD recovery kit verification requires the code and password", async ({
+  page,
+}) => {
+  await openBackupSettings(page);
+  const dialog = await openTestBackup(page);
+  await page.getByTestId("backup-test-file-input").setInputFiles(TWO_SKD_FILE);
+  await expect(dialog.getByTestId("backup-test-recovery-code")).toBeVisible();
+
+  await dialog
+    .getByTestId("backup-test-password")
+    .fill("mock horse battery staple lake orbit");
+  await expect(dialog.getByTestId("backup-test-verify")).toBeDisabled();
+  await dialog
+    .getByTestId("backup-test-recovery-code")
+    .fill(TWO_SKD_RECOVERY_CODE);
+  await dialog.getByTestId("backup-test-verify").click();
+
+  await expect(dialog.getByTestId("backup-test-success")).toContainText(
+    "It restores your current Buzz identity.",
+  );
 });
 
 test("creation requires a sufficiently long password and exposes a temporary header download", async ({

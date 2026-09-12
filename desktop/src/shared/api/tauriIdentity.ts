@@ -32,9 +32,14 @@ export async function getNsec(): Promise<string> {
 export async function importIdentity(
   nsec: string,
   password?: string,
+  recoverySecret?: string,
 ): Promise<Identity> {
   return fromRawIdentity(
-    await invokeTauri<RawIdentity>("import_identity", { nsec, password }),
+    await invokeTauri<RawIdentity>("import_identity", {
+      nsec,
+      password,
+      recoverySecret,
+    }),
   );
 }
 
@@ -77,6 +82,41 @@ export async function createNcryptsecBackup(password: string): Promise<string> {
   return invokeTauri<string>("create_ncryptsec_backup", { password });
 }
 
+export type CreatedTwoSkdBackup = {
+  backup: string;
+  recoverySecret: string;
+};
+
+/** Create a 2SKD backup and its separately-held recovery code in Rust. */
+export async function createTwoSkdBackup(
+  password: string,
+): Promise<CreatedTwoSkdBackup> {
+  return invokeTauri<CreatedTwoSkdBackup>("create_2skd_backup", { password });
+}
+
+/** Save only the encrypted half of a 2SKD recovery kit. */
+export async function saveTwoSkdBackupCopy(
+  backup: string,
+): Promise<string | null> {
+  return (
+    (await invokeTauri<string | null>("save_2skd_backup_copy", { backup })) ??
+    null
+  );
+}
+
+/** Save the recovery code and public identity as a printable PDF. */
+export async function saveTwoSkdRecoverySheet(
+  backup: string,
+  recoverySecret: string,
+): Promise<string | null> {
+  return (
+    (await invokeTauri<string | null>("save_2skd_recovery_sheet", {
+      backup,
+      recoverySecret,
+    })) ?? null
+  );
+}
+
 /** Save a portable backup copy. Returns null when the native dialog is cancelled. */
 export async function saveNcryptsecCopy(
   ncryptsec: string,
@@ -101,5 +141,18 @@ export async function verifyNcryptsecBackup(
   return invokeTauri<BackupVerification>("verify_ncryptsec_backup", {
     ncryptsec,
     password,
+  });
+}
+
+/** Verify all three inputs for a 2SKD recovery without exposing the nsec. */
+export async function verifyTwoSkdBackup(
+  backup: string,
+  password: string,
+  recoverySecret: string,
+): Promise<BackupVerification> {
+  return invokeTauri<BackupVerification>("verify_2skd_backup", {
+    backup,
+    password,
+    recoverySecret,
   });
 }

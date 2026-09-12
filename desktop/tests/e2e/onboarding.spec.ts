@@ -952,11 +952,11 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     .getByTestId("nostr-import-file-input");
   await expect(fileInput).toHaveAttribute(
     "accept",
-    ".key,.ncryptsec,text/plain",
+    ".key,.ncryptsec,.buzzbackup,text/plain",
   );
 
   await fileInput.setInputFiles({
-    buffer: Buffer.alloc(1_025, "x"),
+    buffer: Buffer.alloc(4_097, "x"),
     mimeType: "text/plain",
     name: "not-a-backup.txt",
   });
@@ -1040,6 +1040,36 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   await backupDialog
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
+  await backupDialog.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+});
+
+test("first-launch import accepts a 2SKD recovery kit", async ({ page }) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page.getByTestId("nostr-import-file-button").click();
+
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  const backup = `buzz2skd1:${"A".repeat(80)}`;
+  await backupDialog.getByTestId("nostr-import-file-input").setInputFiles({
+    buffer: Buffer.from(backup),
+    mimeType: "text/plain",
+    name: "identity.buzzbackup",
+  });
+
+  const recoveryCode = backupDialog.getByTestId("nostr-import-recovery-code");
+  await expect(recoveryCode).toBeFocused();
+  await backupDialog
+    .getByTestId("nostr-import-passphrase")
+    .fill("mock horse battery staple lake orbit");
+  await expect(backupDialog.getByTestId("nostr-import-submit")).toBeDisabled();
+  await recoveryCode.fill("buzz-recovery-v1-00112233445566778899aabbccddeeff");
   await backupDialog.getByTestId("nostr-import-submit").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
