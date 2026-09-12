@@ -31,7 +31,10 @@ export function useAgentAddressLockPicker({
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
-  onAddressAgentMention?: (suggestion: MentionSuggestion) => void;
+  onAddressAgentMention?: (
+    suggestion: MentionSuggestion,
+    options?: { persist?: boolean },
+  ) => void;
   onAutoPinAgentMention?: (
     suggestion: MentionSuggestion,
     options: { reinstateExcluded: boolean },
@@ -235,7 +238,7 @@ export function useAgentAddressLockPicker({
         }
         trackMentionAddressedAgent(pubkey);
         if (onAddressAgentMention) {
-          onAddressAgentMention(suggestion);
+          onAddressAgentMention(suggestion, { persist: true });
         } else {
           audience.addPubkey(pubkey);
           onPulseAddressLock(pubkey);
