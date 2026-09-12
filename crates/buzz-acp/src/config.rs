@@ -1375,11 +1375,28 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
+            // `subscribe=all` historically built channel filters with
+            // `kinds: None` (every event), so ephemeral/system traffic —
+            // kind:20002 typing indicators, presence, NIP-29 admin events —
+            // was forwarded into the agent's model context, spending tokens
+            // and adding latency on every turn for events that are never useful
+            // model input. Give it the same content-aware default Mentions
+            // already ships (stream messages, workflow approvals, reminders),
+            // still overridable via BUZZ_ACP_KINDS. All differs from Mentions
+            // only in `require_mention: false` (every content message in the
+            // channel, not just mentions).
+            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
+                vec![
+                    KIND_STREAM_MESSAGE,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    KIND_STREAM_REMINDER,
+                ]
+            });
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: Some(kinds.clone()),
                         require_mention: false,
                     },
                 );
