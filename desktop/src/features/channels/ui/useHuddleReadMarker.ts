@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useAppFocused } from "@/shared/lib/useDocumentVisible";
 import type { RelayEvent } from "@/shared/api/types";
 
 type MarkChannelRead = (
@@ -64,8 +65,14 @@ export function useHuddleReadMarker({
     : activeReadAt;
   const lastHuddleReadKeyRef = React.useRef<string | null>(null);
 
+  // Same focus gate as useChannelOpenReadState: never advance the read
+  // marker from a backgrounded or occluded window (#7470). On regaining
+  // focus the effect re-runs and catches the marker up.
+  const appFocused = useAppFocused();
+
   React.useEffect(() => {
     if (!activeChannelId || activeChannelIsMember === false) return;
+    if (!appFocused) return;
     const huddleReadKey = hasFlattenedHuddleReplies
       ? `${activeChannelId}:${huddleReadAt}`
       : null;
@@ -82,6 +89,7 @@ export function useHuddleReadMarker({
   }, [
     activeChannelId,
     activeChannelIsMember,
+    appFocused,
     hasFlattenedHuddleReplies,
     huddleReadAt,
     markChannelRead,
