@@ -27,9 +27,21 @@ mod store;
 /// Database error types.
 pub mod error;
 
+#[cfg(test)]
+mod test_support;
+
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, ReadSession,
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, DbReadinessOutcome,
+    ReadSession,
 };
+
+/// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
+    runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
+
+/// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
+pub const DB_POOL_ACQUIRE_RAW_SERIES_PER_POD: usize =
+    runtime::observability::POOL_ACQUIRE_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
     RoutePredicate,

@@ -67,6 +67,7 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
+| `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
@@ -74,9 +75,38 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler — `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
-Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. To enable it, set `podMonitor.enabled=true` (renders a prometheus-operator `PodMonitor` scraping the `health` port `/metrics`) and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper — this adds a single `8081` ingress rule scoped to that source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless.
+Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
+
+```yaml
+podAnnotations:
+  ad.datadoghq.com/gateway.checks: |
+    {
+      "openmetrics": {
+        "init_config": {},
+        "instances": [{
+          "openmetrics_endpoint": "http://%%host%%:8081/metrics",
+          "service": "buzz-push-gateway",
+          "namespace": "block.buzz_push_gateway",
+          "metrics": ["push_gateway_.*"],
+          "histogram_buckets_as_distributions": true,
+          "send_distribution_buckets": true,
+          "send_monotonic_counter": true,
+          "collect_counters_with_distributions": true
+        }]
+      }
+    }
+networkPolicy:
+  monitoring:
+    enabled: true
+    namespaceSelector: # replace with the Datadog Agent namespace labels
+      kubernetes.io/metadata.name: datadog
+    podSelector: # replace with the Datadog Agent pod labels
+      app.kubernetes.io/name: datadog-agent
+```
+
+Both modes add one `8081` ingress rule scoped to the configured source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless. Do not enable `PodMonitor` in clusters without its CRD.
 
 Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`prometheusRule.enabled=true`). Thresholds and operator actions:
 
@@ -189,10 +219,22 @@ The chart defaults to the `main` image tag because `.github/workflows/docker.yml
 ```bash
 gh attestation verify \
   oci://ghcr.io/block/buzz-push-gateway@sha256:<64-lowercase-hex> \
-  --owner block
+  --repo block/buzz \
+  --signer-workflow block/buzz/.github/workflows/docker.yml \
+  --source-digest <40-lowercase-hex-source-commit>
 ```
 
-Only after that command succeeds, set the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. `values-production.yaml` is an intentionally invalid production-input contract: deployment CI must inject this verified `image.digest`, the provisioned dogfood Apple application identifier, an environment-owned Gateway parent reference, and the actual PostgreSQL network. Schema validation rejects the artifact when any remains empty; the render guard proves both rejection and a fully injected render.
+Only after that command succeeds, inject the exact digest as `image.digest` in
+the environment's GitOps values; the chart then renders
+`ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
+`values-production.yaml` remains an intentionally invalid production-input
+contract: deployment CI must inject the verified image digest, the provisioned
+dogfood Apple application identifier, and the actual PostgreSQL network. In an
+environment with an existing ingress or service mesh route, keep
+`httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
+inject an environment-owned `parentRef`; schema validation rejects an enabled
+route with no parent. The render guard proves both rejection of missing required
+inputs and fully injected renders.
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
@@ -201,8 +243,9 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 ## Gateway chart release
 
 The gateway chart has a collision-free release lane separate from the main
-`buzz` chart. To publish version `X.Y.Z`, update both `version` and `appVersion`
-in `deploy/charts/buzz-push-gateway/Chart.yaml`, validate the chart, and open a
+`buzz` chart. To publish chart version `X.Y.Z`, update `version` in
+`deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
+gateway binary's workspace package version. Validate the chart, then open a
 same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
 
 ```bash
@@ -220,3 +263,10 @@ version. The publisher verifies the checked-out commit is the tag target and the
 chart version equals `X.Y.Z` before pushing
 `oci://ghcr.io/block/buzz/charts/buzz-push-gateway`. A manually pushed
 `push-chart-vX.Y.Z` tag is the documented rescue path and runs the same checks.
+After the publisher succeeds, inspect and fetch the published chart version
+before use:
+
+```bash
+helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+```

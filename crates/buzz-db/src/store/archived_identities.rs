@@ -34,11 +34,16 @@ pub struct ArchivedIdentity {
 
 /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
 pub async fn is_archived(pool: &PgPool, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let row =
         sqlx::query("SELECT 1 FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
             .bind(community_id.as_uuid())
             .bind(pubkey)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *connection)
             .await?;
     Ok(row.is_some())
 }
@@ -59,6 +64,11 @@ pub async fn archive(
     replaced_by: Option<&str>,
     request_event_id: &str,
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "INSERT INTO archived_identities \
          (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
@@ -72,7 +82,7 @@ pub async fn archive(
     .bind(reason)
     .bind(replaced_by)
     .bind(request_event_id)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -83,11 +93,16 @@ pub async fn archive(
 /// Returns `true` if a row was deleted, `false` if the identity was not archived
 /// in that community.
 pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result =
         sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
             .bind(community_id.as_uuid())
             .bind(pubkey)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
 
     Ok(result.rows_affected() > 0)
@@ -98,12 +113,17 @@ pub async fn list_archived(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<Vec<ArchivedIdentity>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let rows = sqlx::query(
         "SELECT pubkey, consent_path, actor, reason, replaced_by, request_event_id, archived_at \
          FROM archived_identities WHERE community_id = $1 ORDER BY archived_at ASC",
     )
     .bind(community_id.as_uuid())
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     rows.into_iter()
@@ -176,13 +196,11 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     async fn setup_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
     }

@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport,
+    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -141,9 +141,18 @@ pub struct SessionState {
     /// Per-scope successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
+    /// Pool-assigned ownership generation for each scope. A worker returning
+    /// after another worker forked the scope carries an older generation; the
+    /// pool uses this fence to discard that stale provider session before the
+    /// worker becomes claimable again.
+    scope_owner_generations: HashMap<SessionScope, u64>,
 }
 
 impl SessionState {
+    pub(crate) fn set_scope_owner_generation(&mut self, scope: SessionScope, generation: u64) {
+        self.scope_owner_generations.insert(scope, generation);
+    }
+
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
@@ -165,6 +174,7 @@ impl SessionState {
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
+        self.scope_owner_generations.remove(scope);
         self.sessions.remove(scope).is_some()
     }
 
@@ -179,6 +189,7 @@ impl SessionState {
             .chain(self.core_sections.keys())
             .chain(self.canvas_sections.keys())
             .chain(self.deliveries.keys())
+            .chain(self.scope_owner_generations.keys())
             .filter(|s| s.channel_id() == *channel_id)
             .cloned()
             .collect::<HashSet<_>>()
@@ -203,6 +214,7 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.scope_owner_generations.clear();
     }
 
     pub(crate) fn mark_scope_delivery_success(
@@ -287,7 +299,7 @@ fn has_system_prompt_support(
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
-    } else if agent_name == CLAUDE_AGENT_ACP_NAME {
+    } else if agent_name == BUZZ_PI_ACP_NAME || agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
         protocol_version >= 2
@@ -300,7 +312,11 @@ fn session_new_system_prompt<'a>(
     agent_name: &str,
     prompt: Option<&'a str>,
 ) -> Option<SystemPromptTransport<'a>> {
-    if is_goose || (protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME) {
+    if is_goose {
+        None
+    } else if agent_name == BUZZ_PI_ACP_NAME {
+        prompt.map(SystemPromptTransport::PiMeta)
+    } else if protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME {
         None
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         prompt.map(SystemPromptTransport::ClaudeMeta)
@@ -336,7 +352,23 @@ pub struct AgentPool {
     /// cause another worker to open a duplicate session for the same thread.
     /// Best-effort: stale entries (rotation, crash/respawn) self-heal on the
     /// next dispatch and are pruned on channel-wide session invalidation.
-    session_owners: HashMap<SessionScope, usize>,
+    session_owners: HashMap<SessionScope, SessionOwner>,
+    /// Monotonic validity fence assigned whenever a scope is dispatched. The
+    /// generation distinguishes a newly forked owner from every older copy of
+    /// that scope's provider session.
+    next_scope_owner_generation: u64,
+    /// First time each scope was held for a busy owner, so the bounded hold can
+    /// expire and fork rather than starve behind an unbounded turn. Derived
+    /// state: cleared on every dispatch/invalidation path, and only ever holds
+    /// `Thread` scopes (the sole variant [`hold_decision`](Self::hold_decision)
+    /// stamps).
+    held_since: HashMap<SessionScope, tokio::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionOwner {
+    agent_index: usize,
+    generation: u64,
 }
 
 /// Result returned by a completed prompt task.
@@ -824,13 +856,33 @@ impl AgentPool {
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
             session_owners: HashMap::new(),
+            next_scope_owner_generation: 1,
+            held_since: HashMap::new(),
         }
     }
 
-    /// Record which worker is handling `scope` so a later dispatch can detect a
-    /// busy owner and avoid opening a duplicate session on another worker.
-    pub fn record_scope_owner(&mut self, scope: SessionScope, agent_index: usize) {
-        self.session_owners.insert(scope, agent_index);
+    /// Record `agent_index` as the newest owner of `scope`, returning the
+    /// generation that the caller must install on the checked-out worker.
+    /// Returning workers are accepted only while this exact
+    /// `(worker, generation)` pair remains authoritative.
+    pub fn record_scope_owner(&mut self, scope: SessionScope, agent_index: usize) -> u64 {
+        let generation = self.next_scope_owner_generation;
+        self.next_scope_owner_generation = self.next_scope_owner_generation.wrapping_add(1);
+        if self.next_scope_owner_generation == 0 {
+            // Preserve zero as an unassigned sentinel. Reaching this requires
+            // 2^64 dispatches in one process, but resetting safely is cheap:
+            // every previously tagged session becomes stale on return/claim.
+            self.next_scope_owner_generation = 1;
+            self.session_owners.clear();
+        }
+        self.session_owners.insert(
+            scope,
+            SessionOwner {
+                agent_index,
+                generation,
+            },
+        );
+        generation
     }
 
     /// True when this scope should be **held** (left queued) rather than
@@ -847,8 +899,54 @@ impl AgentPool {
             return false;
         }
         match self.session_owners.get(scope) {
-            Some(&owner_idx) => self.task_map.values().any(|m| m.agent_index == owner_idx),
+            Some(owner) => self
+                .task_map
+                .values()
+                .any(|m| m.agent_index == owner.agent_index),
             None => false,
+        }
+    }
+
+    /// Decide whether to hold `scope`'s batch for its busy session owner, fork it
+    /// after a bounded hold, or dispatch immediately. Stamps the first-held time
+    /// so the bounded window survives across dispatch cycles; `now` and
+    /// `timeout` are injected for testability. An expired
+    /// stamp remains sticky until [`clear_hold`](Self::clear_hold) confirms a
+    /// worker was successfully claimed, so pool exhaustion cannot restart the
+    /// bounded window.
+    ///
+    /// Gated on the scope variant, not the session policy: `Conversation` scopes
+    /// (channel-policy channels and all DMs) never hold — a busy owner there means
+    /// fork onto another idle worker, the pre-thread-sessions behavior. Only
+    /// `Thread` scopes hold, so a momentarily busy owner does not cause a
+    /// duplicate provider session for the same thread.
+    pub fn hold_decision(
+        &mut self,
+        scope: &SessionScope,
+        now: tokio::time::Instant,
+        timeout: Duration,
+    ) -> HoldDecision {
+        if !scope.is_thread() || !self.should_hold_for_busy_owner(scope) {
+            self.held_since.remove(scope);
+            return HoldDecision::Dispatch;
+        }
+        let owner_index = self
+            .session_owners
+            .get(scope)
+            .map(|owner| owner.agent_index)
+            .unwrap_or_default();
+        let first = *self.held_since.entry(scope.clone()).or_insert(now);
+        let held_for = now.saturating_duration_since(first);
+        if held_for >= timeout {
+            HoldDecision::ForkAfterHold {
+                held_for,
+                owner_index,
+            }
+        } else {
+            HoldDecision::Hold {
+                held_for,
+                owner_index,
+            }
         }
     }
 
@@ -866,7 +964,7 @@ impl AgentPool {
         if let Some(scope) = scope {
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(scope))
+                    .map(|a| self.agent_owns_scope(a, scope))
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -880,7 +978,27 @@ impl AgentPool {
     }
 
     /// Return an agent to its slot after a task completes.
-    pub fn return_agent(&mut self, agent: OwnedAgent) {
+    pub fn return_agent(&mut self, mut agent: OwnedAgent) {
+        let stale_scopes: Vec<SessionScope> = agent
+            .state
+            .sessions
+            .keys()
+            .filter(|scope| !self.agent_owns_scope(&agent, scope))
+            .cloned()
+            .collect();
+        for scope in stale_scopes {
+            tracing::info!(
+                agent = agent.index,
+                scope = %scope.telemetry_label(),
+                "discarding stale session after ownership changed"
+            );
+            agent.state.invalidate_scope(&scope);
+        }
+        let live_scopes: HashSet<SessionScope> = agent.state.sessions.keys().cloned().collect();
+        agent
+            .state
+            .scope_owner_generations
+            .retain(|scope, _| live_scopes.contains(scope));
         let idx = agent.index;
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
@@ -900,14 +1018,62 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
+    /// Confirm that pending work for `scope` successfully claimed a worker.
+    ///
+    /// In particular, an expired busy-owner hold must not be consumed until
+    /// this point: `try_claim` can fail while every worker remains checked out.
+    pub(crate) fn clear_hold(&mut self, scope: &SessionScope) {
+        self.held_since.remove(scope);
+    }
+
+    /// Remove derived hold stamps for scopes that no longer have pending work.
+    pub(crate) fn retain_held_scopes(
+        &mut self,
+        mut has_pending_work: impl FnMut(&SessionScope) -> bool,
+    ) {
+        self.held_since.retain(|scope, _| has_pending_work(scope));
+    }
+
     /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
     pub fn has_session_for(&self, scope: &SessionScope) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(scope))
+                .map(|a| self.agent_owns_scope(a, scope))
                 .unwrap_or(false)
         })
+    }
+
+    fn agent_owns_scope(&self, agent: &OwnedAgent, scope: &SessionScope) -> bool {
+        let Some(owner) = self.session_owners.get(scope) else {
+            return false;
+        };
+        owner.agent_index == agent.index
+            && agent.state.scope_owner_generations.get(scope) == Some(&owner.generation)
+            && agent.state.sessions.contains_key(scope)
+    }
+
+    /// Earliest scheduled wake for a currently held scope that can claim a
+    /// worker. A worker return wakes the main loop independently, so arming an
+    /// already-expired timer while every slot is checked out would only spin.
+    pub(crate) fn next_hold_deadline(&self, timeout: Duration) -> Option<tokio::time::Instant> {
+        if !self.any_idle() {
+            return None;
+        }
+        self.held_since
+            .values()
+            .map(|held_since| *held_since + timeout)
+            .min()
+    }
+
+    /// Sleep until a held scope's scheduled wake, or remain pending when no
+    /// scope is held. This is the future polled directly by the main
+    /// `select!`, kept here so paused-time tests exercise the production seam.
+    pub(crate) async fn wait_for_hold_deadline(deadline: Option<tokio::time::Instant>) {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Count of agents that are alive: idle OR checked out (have a task_map entry).
@@ -925,6 +1091,13 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    /// Whether a first-held stamp is currently recorded for `scope`. Test seam
+    /// for [`hold_decision`](Self::hold_decision) callers outside this module.
+    #[cfg(test)]
+    pub(crate) fn held_since_contains(&self, scope: &SessionScope) -> bool {
+        self.held_since.contains_key(scope)
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -1057,6 +1230,10 @@ impl AgentPool {
         // owner after the channel's sessions are gone.
         self.session_owners
             .retain(|scope, _| scope.channel_id() != channel_id);
+        // Prune held-since stamps for the same channel so an expiring hold cannot
+        // reference a scope whose sessions are gone.
+        self.held_since
+            .retain(|scope, _| scope.channel_id() != channel_id);
         count
     }
 
@@ -1078,6 +1255,7 @@ impl AgentPool {
             }
         }
         self.session_owners.remove(scope);
+        self.held_since.remove(scope);
         count
     }
 
@@ -1164,8 +1342,29 @@ impl AgentPool {
         agent.desired_model_request_id = request_id;
         agent.state.invalidate_scope(&scope);
         self.session_owners.remove(&scope);
+        self.held_since.remove(&scope);
         IdleSwitchResult::Switched
     }
+}
+
+/// Outcome of [`AgentPool::hold_decision`] for one queued batch.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HoldDecision {
+    /// Dispatch now: never-hold scope (conversation), idle owner holds the
+    /// session, or no busy owner is recorded.
+    Dispatch,
+    /// Leave queued this cycle: the thread's session owner is busy and the
+    /// bounded hold window has not elapsed.
+    Hold {
+        held_for: Duration,
+        owner_index: usize,
+    },
+    /// Bounded hold expired — dispatch anyway, forking a fresh session on an
+    /// idle worker.
+    ForkAfterHold {
+        held_for: Duration,
+        owner_index: usize,
+    },
 }
 
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
@@ -1205,6 +1404,12 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded window a `Thread` batch waits for its busy session-owner before we
+/// stop holding and fork a fresh session on an idle worker. Kept below the 30s
+/// maintenance tick so even a silent system re-evaluates a held batch shortly
+/// after expiry, versus the max-turn deadline it could starve behind today.
+pub(crate) const HOLD_BUSY_OWNER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Placeholder [`fetch_channel_info`] substitutes when a channel's metadata
 /// event carries no `name` tag. Not a real channel name — consumers that need
@@ -1876,7 +2081,7 @@ pub(crate) fn prepend_standing_for_legacy(
 /// The static base remains first for prompt-prefix caching. When a base is
 /// present, the dynamic workspace anchor follows it and precedes the user-owned
 /// agent instructions. A persona-only agent still yields
-/// `<system>…</system>` rather than an unlabeled blob that would be mistaken
+/// `<agent-instructions>…</agent-instructions>` rather than an unlabeled blob that would be mistaken
 /// for `<base>`.
 fn framed_system_prompt(
     cwd: &str,
@@ -1888,14 +2093,17 @@ fn framed_system_prompt(
             "{}\n\n{}\n\n{}",
             crate::queue::base_section(bp),
             workspace_section(cwd),
-            crate::prompt_framing::semantic_section("system", sp),
+            crate::prompt_framing::semantic_section("agent-instructions", sp),
         )),
         (Some(bp), None) => Some(format!(
             "{}\n\n{}",
             crate::queue::base_section(bp),
             workspace_section(cwd)
         )),
-        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section("system", sp)),
+        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section(
+            "agent-instructions",
+            sp,
+        )),
         (None, None) => None,
     }
 }
@@ -1907,7 +2115,7 @@ fn workspace_section(cwd: &str) -> String {
     )
 }
 
-/// Append the team-owned instruction section after `<system>` and before core memory.
+/// Append the team-owned instruction section after `<agent-instructions>` and before core memory.
 fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
     let instructions = instructions
         .map(str::trim)
@@ -2144,7 +2352,7 @@ pub async fn run_prompt_task(
 
     //
     // Core memory is delivered inside the system prompt the harness already
-    // builds (system role for protocol >= 2, the `<system>` user-message
+    // builds (system role for protocol >= 2, the `<agent-instructions>` user-message
     // section for legacy agents). To put it on the wire at `session/new` for
     // modern agents, the fetch must run *before* the session is created — so
     // we do it here and cache the rendered section in `state.core_sections`.
@@ -4989,14 +5197,21 @@ pub(crate) async fn post_failure_notice(
             parent_event_id: parent_id,
         })
     });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
+    let builder = match buzz_sdk::build_message(
+        channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+        &[],
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+            return;
+        }
+    };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
@@ -5274,56 +5489,7 @@ mod tests {
         assert_eq!(composed, "<base>\nbe helpful\n</base>\n\ntick");
     }
 
-    #[test]
-    fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
-        assert!(!has_system_prompt_support(2, "goose", None));
-        assert!(!has_system_prompt_support(2, "goose", Some(false)));
-        assert!(has_system_prompt_support(2, "goose", Some(true)));
-        assert!(has_system_prompt_support(1, "goose", Some(true)));
-        assert!(has_system_prompt_support(2, "buzz-agent", None));
-        // Goose never receives system prompt via session/new (uses post-hoc method).
-        assert_eq!(
-            session_new_system_prompt(true, 2, "goose", Some("instructions")),
-            None
-        );
-        // Protocol-v2 non-goose gets Field transport.
-        assert_eq!(
-            session_new_system_prompt(false, 2, "buzz-agent", Some("instructions")),
-            Some(SystemPromptTransport::Field("instructions"))
-        );
-        // Protocol-v1 non-goose, non-claude gets None (legacy user-message framing).
-        assert_eq!(
-            session_new_system_prompt(false, 1, "codex", Some("instructions")),
-            None
-        );
-        // claude-agent-acp gets ClaudeMeta transport regardless of protocol version.
-        assert_eq!(
-            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            Some(SystemPromptTransport::ClaudeMeta("instructions"))
-        );
-        assert_eq!(
-            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            None,
-            "goose path must never produce a transport even when agent_name matches"
-        );
-    }
-
-    #[test]
-    fn claude_agent_acp_has_system_prompt_support_regardless_of_protocol_version() {
-        // claude-agent-acp declares protocolVersion:1 but supports _meta.systemPrompt;
-        // has_system_prompt_support must return true so user-message framing is suppressed.
-        assert!(has_system_prompt_support(1, CLAUDE_AGENT_ACP_NAME, None));
-        assert!(has_system_prompt_support(2, CLAUDE_AGENT_ACP_NAME, None));
-    }
-
-    #[test]
-    fn old_zed_adapter_name_falls_through_to_protocol_version_gate() {
-        // The renamed @zed-industries package predates the _meta.systemPrompt support,
-        // so it must not be treated as capable and stays on legacy user-message framing.
-        let old_name = "@zed-industries/claude-code-acp";
-        assert!(!has_system_prompt_support(1, old_name, None));
-        assert!(has_system_prompt_support(2, old_name, None));
-    }
+    include!("pool/system_prompt_tests.rs");
 
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
@@ -5353,7 +5519,7 @@ mod tests {
         let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
         let positions: Vec<usize> = [
             "<base>",
-            "<system>",
+            "<agent-instructions>",
             "<team-instructions>",
             "<core-memory>",
             "<huddle-instructions>",
@@ -5413,7 +5579,7 @@ mod tests {
             .expect("both present yields Some");
         assert_eq!(
             framed,
-            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<system>\npersona text\n</system>"
+            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<agent-instructions>\npersona text\n</agent-instructions>"
         );
     }
 
@@ -5430,18 +5596,24 @@ mod tests {
     #[test]
     fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
-        // its own <system> boundary even when no base prompt exists.
+        // its own <agent-instructions> boundary even when no base prompt exists.
         let framed = framed_system_prompt("/workspace", None, Some("persona text"))
             .expect("persona yields Some");
-        assert_eq!(framed, "<system>\npersona text\n</system>");
+        assert_eq!(
+            framed,
+            "<agent-instructions>\npersona text\n</agent-instructions>"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_preserves_persona_bytes_verbatim() {
-        let persona = "literal </system>, <T>, &quot;, & <policy>";
+        let persona = "literal </agent-instructions>, <T>, &quot;, & <policy>";
         let framed =
             framed_system_prompt("/workspace", None, Some(persona)).expect("persona yields Some");
-        assert_eq!(framed, format!("<system>\n{persona}\n</system>"));
+        assert_eq!(
+            framed,
+            format!("<agent-instructions>\n{persona}\n</agent-instructions>")
+        );
     }
 
     #[test]
@@ -7361,8 +7533,18 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         agent.state.sessions.insert(ta.clone(), "sess-a".into());
         agent.state.sessions.insert(tb.clone(), "sess-b".into());
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
-        pool.record_scope_owner(ta.clone(), 0);
-        pool.record_scope_owner(tb.clone(), 0);
+        let ta_generation = pool.record_scope_owner(ta.clone(), 0);
+        let tb_generation = pool.record_scope_owner(tb.clone(), 0);
+        let agent = pool.agents[0].as_mut().expect("idle test agent");
+        agent
+            .state
+            .set_scope_owner_generation(ta.clone(), ta_generation);
+        agent
+            .state
+            .set_scope_owner_generation(tb.clone(), tb_generation);
+        let now = tokio::time::Instant::now();
+        pool.held_since.insert(ta.clone(), now);
+        pool.held_since.insert(tb.clone(), now);
 
         let cleared = pool.invalidate_scope_session(&ta);
 
@@ -7380,6 +7562,350 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pool.session_owners.contains_key(&tb),
             "thread B owner retained"
         );
+        assert!(
+            !pool.held_since.contains_key(&ta),
+            "thread A hold stamp dropped"
+        );
+        assert!(
+            pool.held_since.contains_key(&tb),
+            "thread B hold stamp retained"
+        );
+    }
+
+    /// Insert a `task_map` entry so `agent_index` reads as checked-out (busy)
+    /// for the busy-owner predicate, mirroring an in-flight prompt task without
+    /// spawning a real one. `busy_scope` is the turn the worker is running.
+    fn mark_agent_busy(pool: &mut AgentPool, agent_index: usize, busy_scope: SessionScope) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index,
+                channel_id: Some(busy_scope.channel_id()),
+                scope: Some(busy_scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// An idle agent (slot 0) holding a provider session for `scope`, so
+    /// `has_session_for(scope)` is true.
+    async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
+        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
+            .await
+            .expect("spawn dummy ACP");
+        let mut agent = OwnedAgent {
+            index,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        agent.state.sessions.insert(scope, "sess".into());
+        agent
+    }
+
+    // `hold_decision` is gated on the scope variant (not session policy),
+    // short-circuits when an idle worker already holds the session or no busy
+    // owner is recorded, and only a busy `Thread` owner holds — for a bounded
+    // window, after which it forks. The `Conversation` + busy row is the
+    // cross-channel head-of-line-blocking regression guard (PR #6732).
+    #[tokio::test]
+    async fn hold_decision_covers_variant_session_busy_and_timeout() {
+        #[derive(Debug)]
+        enum Expect {
+            Dispatch,
+            Hold,
+            ForkAfterHold,
+        }
+        struct Row {
+            name: &'static str,
+            is_thread: bool,
+            has_session: bool,
+            owner_busy: bool,
+            elapsed: Duration,
+            expect: Expect,
+        }
+        let timeout = Duration::from_secs(10);
+        let rows = [
+            // Cross-channel regression guard: a conversation scope with a busy
+            // recorded owner dispatches (forks) rather than starving a sibling.
+            Row {
+                name: "conversation + busy owner dispatches",
+                is_thread: false,
+                has_session: false,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // An idle worker already holds the thread session — reuse it.
+            Row {
+                name: "thread + idle session dispatches",
+                is_thread: true,
+                has_session: true,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // No busy owner recorded — nothing to wait for.
+            Row {
+                name: "thread + no busy owner dispatches",
+                is_thread: true,
+                has_session: false,
+                owner_busy: false,
+                elapsed: Duration::ZERO,
+                expect: Expect::Dispatch,
+            },
+            // Busy thread owner within the window — hold.
+            Row {
+                name: "thread + busy owner within window holds",
+                is_thread: true,
+                has_session: false,
+                owner_busy: true,
+                elapsed: Duration::ZERO,
+                expect: Expect::Hold,
+            },
+            // Busy thread owner past the window — fork onto an idle worker.
+            Row {
+                name: "thread + busy owner past window forks",
+                is_thread: true,
+                has_session: false,
+                owner_busy: true,
+                elapsed: timeout,
+                expect: Expect::ForkAfterHold,
+            },
+        ];
+
+        let base = tokio::time::Instant::now();
+        for row in rows {
+            let ch = Uuid::new_v4();
+            let scope = if row.is_thread {
+                thread_scope(ch, &"a".repeat(64))
+            } else {
+                conv(ch)
+            };
+            let slots = if row.has_session {
+                vec![Some(idle_agent_with_session(0, scope.clone()).await)]
+            } else {
+                vec![]
+            };
+            let mut pool = AgentPool::from_slots(slots);
+            if row.has_session {
+                let generation = pool.record_scope_owner(scope.clone(), 0);
+                pool.agents[0]
+                    .as_mut()
+                    .expect("idle test agent")
+                    .state
+                    .set_scope_owner_generation(scope.clone(), generation);
+            } else if row.owner_busy {
+                pool.record_scope_owner(scope.clone(), 1);
+                mark_agent_busy(&mut pool, 1, thread_scope(ch, &"b".repeat(64)));
+            }
+
+            // A non-zero elapsed needs a first stamping call before the second
+            // evaluates the window against the same base instant.
+            if !row.elapsed.is_zero() {
+                assert!(
+                    matches!(
+                        pool.hold_decision(&scope, base, timeout),
+                        HoldDecision::Hold { .. }
+                    ),
+                    "{}: first call stamps a hold",
+                    row.name
+                );
+            }
+            let decision = pool.hold_decision(&scope, base + row.elapsed, timeout);
+
+            match (&row.expect, &decision) {
+                (Expect::Dispatch, HoldDecision::Dispatch)
+                | (Expect::Hold, HoldDecision::Hold { .. })
+                | (Expect::ForkAfterHold, HoldDecision::ForkAfterHold { .. }) => {}
+                _ => panic!("{}: expected {:?}, got {decision:?}", row.name, row.expect),
+            }
+
+            // An expired hold remains sticky until a worker is successfully
+            // claimed; only immediate dispatch clears it here.
+            if matches!(
+                decision,
+                HoldDecision::Hold { .. } | HoldDecision::ForkAfterHold { .. }
+            ) {
+                assert!(
+                    pool.held_since.contains_key(&scope),
+                    "{}: hold stamps held_since",
+                    row.name
+                );
+            } else {
+                assert!(
+                    !pool.held_since.contains_key(&scope),
+                    "{}: dispatch/fork clears held_since",
+                    row.name
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_scope_deadline_wakes_a_quiet_dispatch_loop() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        let idle_agent = idle_agent_with_session(0, idle_scope).await;
+        let mut pool = AgentPool::from_slots(vec![Some(idle_agent)]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        let deadline = pool
+            .next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT)
+            .expect("held scope schedules an independent wake");
+        let wake = AgentPool::wait_for_hold_deadline(Some(deadline));
+        tokio::pin!(wake);
+
+        tokio::time::advance(HOLD_BUSY_OWNER_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut wake)
+                .await
+                .is_err(),
+            "quiet loop stays asleep before deadline"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        wake.await;
+
+        assert!(matches!(
+            pool.hold_decision(&scope, tokio::time::Instant::now(), HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_hold_survives_pool_exhaustion_until_a_worker_is_claimable() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let mut pool = AgentPool::from_slots(vec![None]);
+        pool.record_scope_owner(scope.clone(), 1);
+        mark_agent_busy(&mut pool, 1, thread_scope(channel_id, &"b".repeat(64)));
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT,
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        assert!(
+            pool.held_since.contains_key(&scope),
+            "failed claim must not restart the timeout"
+        );
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            None,
+            "an expired hold cannot spin while all workers are checked out"
+        );
+
+        let idle_scope = thread_scope(channel_id, &"c".repeat(64));
+        pool.agents[0] = Some(idle_agent_with_session(0, idle_scope).await);
+        assert_eq!(
+            pool.next_hold_deadline(HOLD_BUSY_OWNER_TIMEOUT),
+            Some(started + HOLD_BUSY_OWNER_TIMEOUT),
+            "worker availability immediately re-arms the expired deadline"
+        );
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT + Duration::from_secs(1),
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+        pool.clear_hold(&scope);
+        assert!(!pool.held_since.contains_key(&scope));
+    }
+
+    #[tokio::test]
+    async fn forked_scope_discards_stale_session_when_busy_owner_returns() {
+        let channel_id = Uuid::new_v4();
+        let scope = thread_scope(channel_id, &"a".repeat(64));
+        let busy_scope = thread_scope(channel_id, &"b".repeat(64));
+        let old_owner = idle_agent_with_session(0, scope.clone()).await;
+        let replacement = idle_agent_with_session(1, busy_scope.clone()).await;
+        let mut pool = AgentPool::from_slots(vec![Some(old_owner), Some(replacement)]);
+
+        let mut old_owner = pool.try_claim(None).expect("claim worker 0");
+        let old_generation = pool.record_scope_owner(scope.clone(), old_owner.index);
+        old_owner
+            .state
+            .set_scope_owner_generation(scope.clone(), old_generation);
+        mark_agent_busy(&mut pool, old_owner.index, busy_scope);
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            pool.hold_decision(&scope, started, HOLD_BUSY_OWNER_TIMEOUT),
+            HoldDecision::Hold { .. }
+        ));
+        assert!(matches!(
+            pool.hold_decision(
+                &scope,
+                started + HOLD_BUSY_OWNER_TIMEOUT,
+                HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            HoldDecision::ForkAfterHold { .. }
+        ));
+
+        let mut replacement = pool
+            .try_claim(Some(&scope))
+            .expect("idle worker receives forked scope");
+        pool.clear_hold(&scope);
+        assert_eq!(replacement.index, 1);
+        replacement
+            .state
+            .sessions
+            .insert(scope.clone(), "fresh-session".into());
+        let fresh_generation = pool.record_scope_owner(scope.clone(), replacement.index);
+        replacement
+            .state
+            .set_scope_owner_generation(scope.clone(), fresh_generation);
+
+        // Both turns return. Slot order must not make worker 0's old provider
+        // context claimable after worker 1 became the authoritative owner.
+        pool.return_agent(replacement);
+        pool.task_map
+            .retain(|_, meta| meta.agent_index != old_owner.index);
+        pool.return_agent(old_owner);
+        assert!(
+            !pool.agents[0]
+                .as_ref()
+                .expect("worker 0 returned")
+                .state
+                .sessions
+                .contains_key(&scope),
+            "return cleanup removes the old provider session"
+        );
+
+        let claimed = pool
+            .try_claim(Some(&scope))
+            .expect("authoritative owner remains claimable");
+        assert_eq!(claimed.index, 1, "next turn resumes the forked session");
     }
 
     #[test]
@@ -10156,6 +10682,8 @@ done"#
         // selected scope and its owner are cleared without broad channel cleanup.
         pool.invalidate_scope_session(&scopes[1]);
         pool.record_scope_owner(scopes[0].clone(), 0);
+        pool.held_since
+            .insert(scopes[0].clone(), tokio::time::Instant::now());
         assert_eq!(
             pool.switch_idle_agent_model(channel_id, "model-b", Some("pick".into())),
             IdleSwitchResult::Switched,
@@ -10164,6 +10692,10 @@ done"#
         assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
         assert!(!agent.state.sessions.contains_key(&scopes[0]));
         assert!(!pool.session_owners.contains_key(&scopes[0]));
+        assert!(
+            !pool.held_since.contains_key(&scopes[0]),
+            "switched scope's hold stamp cleared with its session"
+        );
     }
 
     #[tokio::test]
@@ -10637,3 +11169,7 @@ done"#
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "pool/pi_prompt_tests.rs"]
+mod pi_prompt_tests;

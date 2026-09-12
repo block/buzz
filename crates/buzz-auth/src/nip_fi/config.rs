@@ -27,6 +27,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use super::jwks::JwksSourceContract;
+
 /// Maximum accepted length of an `iss` or `aud` string.
 const MAX_URI_LEN: usize = 2_048;
 /// Maximum accepted length of a claim name.
@@ -67,7 +69,11 @@ pub(crate) const MAX_JWKS_KEYS: usize = 64;
 /// semantics** so prepared evidence built against an older contract is
 /// invalidated. Per-policy fields (issuer, class, bounds, …) are hashed
 /// separately and need no bump.
-pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 1;
+///
+/// v2 (PR #7221): `nostr_pubkey` absence now unconditionally rejects — the
+/// per-issuer `require_attested_key` knob is removed and the NIP-FI v2 spec
+/// requirement is always enforced.
+pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 2;
 
 /// The transport-contract fingerprint folded into [`TransportContractId`].
 /// **Bump on any change** to the client-attached parsing, attachment,
@@ -345,10 +351,14 @@ pub struct IssuerPolicy {
     token_class: TokenClass,
     freshness: FreshnessClass,
     algorithms: Vec<Algorithm>,
-    require_attested_key: bool,
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
+    /// The authenticated key-source contract: validated JWKS URI, refresh
+    /// interval, and hard deadline. Included in `derive_assertion_policy_id`
+    /// so that a change to the endpoint, refresh schedule, or hard-deadline
+    /// rule changes the policy ID and invalidates all prepared evidence.
+    jwks_source_contract: JwksSourceContract,
     id: AssertionPolicyId,
 }
 
@@ -382,6 +392,10 @@ pub enum IssuerPolicyError {
     /// so subject classification could not be total and mutually exclusive.
     #[error("subject class contract is not exclusive")]
     NonExclusiveSubjectClass,
+    /// The [`JwksSourceContract`] was not valid — invalid URI, zero or
+    /// out-of-range timing, or `refresh_interval >= hard_deadline`.
+    #[error("invalid JWKS source contract")]
+    InvalidJwksSourceContract,
 }
 
 impl IssuerPolicy {
@@ -393,10 +407,10 @@ impl IssuerPolicy {
         token_class: TokenClass,
         freshness: FreshnessClass,
         algorithms: Vec<Algorithm>,
-        require_attested_key: bool,
         skew_seconds: u64,
         maximum_assertion_age_seconds: u64,
         maximum_status_age_seconds: Option<u64>,
+        jwks_source_contract: JwksSourceContract,
     ) -> Result<Self, IssuerPolicyError> {
         // Identity-bearing strings are validated for bounds but never mutated:
         // exact `iss`/`aud`/`sub` bytes select policies and form the identity
@@ -455,10 +469,10 @@ impl IssuerPolicy {
             &token_class,
             freshness,
             &algorithms,
-            require_attested_key,
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
+            &jwks_source_contract,
         );
 
         Ok(Self {
@@ -467,10 +481,10 @@ impl IssuerPolicy {
             token_class,
             freshness,
             algorithms,
-            require_attested_key,
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
+            jwks_source_contract,
             id,
         })
     }
@@ -500,11 +514,6 @@ impl IssuerPolicy {
         &self.algorithms
     }
 
-    /// Whether enrollment requires a `nostr_pubkey` claim equal to the actor.
-    pub const fn require_attested_key(&self) -> bool {
-        self.require_attested_key
-    }
-
     /// The accepted clock skew, in seconds.
     pub const fn skew_seconds(&self) -> u64 {
         self.skew_seconds
@@ -523,6 +532,11 @@ impl IssuerPolicy {
     /// The stable policy identity.
     pub const fn id(&self) -> AssertionPolicyId {
         self.id
+    }
+
+    /// The authenticated key-source contract for this policy's JWKS endpoint.
+    pub fn jwks_source_contract(&self) -> &JwksSourceContract {
+        &self.jwks_source_contract
     }
 }
 
@@ -559,6 +573,12 @@ impl IssuerRegistry {
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
+    }
+
+    /// Iteration order is deliberately unspecified; callers must not depend on
+    /// registration order.
+    pub fn all_policies(&self) -> impl Iterator<Item = &IssuerPolicy> {
+        self.policies.values()
     }
 }
 
@@ -621,10 +641,10 @@ fn derive_assertion_policy_id(
     token_class: &TokenClass,
     freshness: FreshnessClass,
     algorithms: &[Algorithm],
-    require_attested_key: bool,
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
+    jwks_source_contract: &JwksSourceContract,
 ) -> AssertionPolicyId {
     let mut hasher = Sha256::new();
     hasher.update(b"buzz:nip-fi:assertion-policy:v1\0");
@@ -676,10 +696,26 @@ fn derive_assertion_policy_id(
         &mut hasher,
         algorithms.iter().map(|a| algorithm_tag(*a).as_bytes()),
     );
-    hasher.update([u8::from(require_attested_key)]);
     hasher.update(skew_seconds.to_be_bytes());
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
     hasher.update(maximum_status_age_seconds.unwrap_or(0).to_be_bytes());
+    // Authenticated key-source contract (NIP-FI.md, "Policy identity and
+    // snapshots"): URI selects the authenticated source; interval defines
+    // bounded refresh; hard deadline defines the accepted time rule. These are
+    // contract, not mutable state — key rotation (JWKS content change) leaves
+    // all three unchanged and must not move the ID.
+    hasher.update(b"jwks-source-contract\0");
+    hash_field(&mut hasher, jwks_source_contract.jwks_uri().as_bytes());
+    hasher.update(
+        jwks_source_contract
+            .refresh_interval_seconds()
+            .to_be_bytes(),
+    );
+    hasher.update(
+        jwks_source_contract
+            .key_snapshot_hard_deadline_seconds()
+            .to_be_bytes(),
+    );
     AssertionPolicyId(hasher.finalize().into())
 }
 

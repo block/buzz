@@ -9,14 +9,15 @@ use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
     CatalogSource, RelayMeshConfig, RespondTo,
 };
+use crate::managed_agents::AcpSessionPolicy;
 
 /// The NIP-AP behavioral group as one grouped request field.
 ///
 /// Grouped (not flat) because `update_persona` has legacy callers that don't
 /// send behavioral fields at all — flat replace semantics would silently wipe
 /// a stored behavior group on every team-import edit. Absent group = don't touch the
-/// stored behavior group; present group = validate and replace the fields as a unit
-/// (mode and allowlist must travel together).
+/// stored behavior group; present group = validate and replace all four fields as a
+/// unit (mode and allowlist must travel together).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonaBehaviorRequest {
@@ -26,6 +27,9 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    /// Absent inside a present behavior group selects the channel default.
+    #[serde(default)]
+    pub session_policy: Option<AcpSessionPolicy>,
 }
 
 /// Validate a behavior group and apply it onto a persona record.
@@ -68,6 +72,7 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
+    record.session_policy = behavior.session_policy.unwrap_or_default();
     Ok(())
 }
 
@@ -260,6 +265,16 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear the canonical effort column
+    /// (revert to inherited default). `"value"` = set the column.
+    ///
+    /// When present, persisted inside the locked update/restart transaction
+    /// so that an access-policy-change restart snapshots and launches the new
+    /// effort value rather than the old one. Uses the same
+    /// `apply_picker_effort_level` logic (via `apply_effort_update`) so
+    /// the record-scope alias sweep runs atomically with the column write.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub effort_level: Option<Option<String>>,
 }
 
 #[cfg(test)]
@@ -276,6 +291,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            session_policy: Default::default(),
             description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
@@ -316,18 +332,21 @@ mod tests {
     #[test]
     fn present_behavior_replaces_all_four_as_a_unit() {
         let mut record = record_with_quad();
+        record.session_policy = AcpSessionPolicy::Thread;
         apply_persona_behavior(
             &mut record,
             Some(PersonaBehaviorRequest {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
                 parallelism: None,
+                session_policy: None,
             }),
         )
         .unwrap();
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
         assert_eq!(record.parallelism, None);
+        assert_eq!(record.session_policy, AcpSessionPolicy::Channel);
     }
 
     #[test]
@@ -409,6 +428,7 @@ mod tests {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
                 parallelism: Some(3),
+                session_policy: Some(AcpSessionPolicy::Thread),
             }),
         )
         .unwrap();
@@ -416,6 +436,7 @@ mod tests {
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
         assert_eq!(content.parallelism, Some(3));
+        assert_eq!(content.session_policy, AcpSessionPolicy::Thread);
     }
 
     #[test]

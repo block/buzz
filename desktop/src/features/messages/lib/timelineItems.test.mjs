@@ -155,6 +155,71 @@ test("buildTimelineItems: contiguous self-joins group across different members",
   );
 });
 
+test("buildTimelineItems: mixed arrival actors collapse into one cohort", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberAddedEntry({
+      actor: "viewer",
+      createdAt: start,
+      id: "elrond",
+      target: "elrond",
+    }),
+    memberAddedEntry({
+      actor: "elrond",
+      createdAt: start + 60,
+      id: "legolas",
+      target: "legolas",
+    }),
+    memberAddedEntry({
+      actor: "elrond",
+      createdAt: start + 120,
+      id: "gimli",
+      target: "gimli",
+    }),
+    memberAddedEntry({
+      actor: "viewer",
+      createdAt: start + 180,
+      id: "gandalf",
+      target: "gandalf",
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["elrond", "legolas", "gimli", "gandalf"],
+  );
+  assert.equal(group?.key, "gandalf");
+});
+
+test("buildTimelineItems: self-joins and additions share one arrival cohort", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberJoinedEntry({ id: "a", target: "target-a", createdAt: start }),
+    memberAddedEntry({
+      actor: "target-a",
+      id: "b",
+      target: "target-b",
+      createdAt: start + 60,
+    }),
+    memberJoinedEntry({
+      id: "c",
+      target: "target-c",
+      createdAt: start + 120,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["a", "b", "c"],
+  );
+});
+
 test("buildTimelineItems: prepending membership history preserves the loaded suffix", () => {
   const start = dayAt(2026, 6, 14);
   const loaded = [
@@ -194,28 +259,44 @@ test("buildTimelineItems: contiguous member additions extend a group outside one
   );
 });
 
-test("buildTimelineItems: incompatible arrivals remain separate", () => {
+test("buildTimelineItems: arrival cohorts stop at unread dividers", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
     memberAddedEntry({
-      id: "b",
       actor: "actor-b",
+      id: "b",
       target: "target-b",
       createdAt: start + 30,
     }),
-    entry({ id: "message", createdAt: start + 60 }),
-    memberAddedEntry({
+    memberJoinedEntry({
       id: "c",
-      actor: "actor-b",
       target: "target-c",
-      createdAt: start + 90,
+      createdAt: start + 60,
     }),
+  ];
+
+  const { items } = buildTimelineItems(entries, "b");
+  assert.deepEqual(kinds(items), [
+    "day-divider",
+    "system",
+    "unread-divider",
+    "system-group",
+  ]);
+});
+
+test("buildTimelineItems: arrival cohorts stop at day boundaries", () => {
+  const entries = [
     memberAddedEntry({
-      id: "self-join",
-      actor: "target-d",
-      target: "target-d",
-      createdAt: start + 120,
+      actor: "viewer",
+      id: "a",
+      target: "target-a",
+      createdAt: dayAt(2026, 6, 14, 23, 59),
+    }),
+    memberJoinedEntry({
+      id: "b",
+      target: "target-b",
+      createdAt: dayAt(2026, 6, 15, 0, 0),
     }),
   ];
 
@@ -223,11 +304,47 @@ test("buildTimelineItems: incompatible arrivals remain separate", () => {
   assert.deepEqual(kinds(items), [
     "day-divider",
     "system",
-    "system",
-    "message",
-    "system",
+    "day-divider",
     "system",
   ]);
+});
+
+test("buildTimelineItems: arrival cohorts stop at non-membership rows", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
+    entry({ id: "message", createdAt: start + 60 }),
+    memberAddedEntry({
+      actor: "actor-b",
+      id: "b",
+      target: "target-c",
+      createdAt: start + 90,
+    }),
+    memberJoinedEntry({ id: "c", target: "target-d", createdAt: start + 120 }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), [
+    "day-divider",
+    "system",
+    "message",
+    "system-group",
+  ]);
+});
+
+test("buildTimelineItems: arrival cohorts stop at >1 hour adjacent gaps", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
+    memberJoinedEntry({
+      id: "b",
+      target: "target-b",
+      createdAt: start + 3_601,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system", "system"]);
 });
 
 test("buildTimelineItems: a member joining then leaving is one lifecycle group", () => {
@@ -244,6 +361,30 @@ test("buildTimelineItems: a member joining then leaving is one lifecycle group",
     group?.entries.map((groupEntry) => groupEntry.message.id),
     ["joined", "left"],
   );
+});
+
+test("buildTimelineItems: duplicate self-joins then leaving stay one group keyed by the departure", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberJoinedEntry({ id: "joined-1", target: "member-a", createdAt: start }),
+    memberJoinedEntry({
+      id: "joined-2",
+      target: "member-a",
+      createdAt: start + 30,
+    }),
+    memberLeftEntry({ id: "left", target: "member-a", createdAt: start + 90 }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["joined-1", "joined-2", "left"],
+  );
+  // Anchored on the newest entry so prepending older history cannot repartition
+  // the loaded rows; splitting this into separate rows would change both.
+  assert.equal(group?.key, "left");
 });
 
 test("buildTimelineItems: consecutive same-author messages within the window are grouped", () => {

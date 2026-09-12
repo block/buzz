@@ -134,7 +134,11 @@ pub async fn query_mentions(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_mentions_on(
         &mut conn,
         community,
@@ -218,7 +222,11 @@ pub async fn query_needs_action(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_needs_action_on(
         &mut conn,
         community,
@@ -287,7 +295,11 @@ pub async fn query_activity(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_activity_on(&mut conn, community, accessible_channel_ids, since, limit).await
 }
 
@@ -345,7 +357,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_mentions_on(
                 &mut tx,
                 community,
@@ -422,7 +441,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::feed::query_needs_action_on(
                     &mut tx,
@@ -492,7 +518,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_activity_on(
                 &mut tx,
                 community,
@@ -536,7 +569,7 @@ impl Db {
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use uuid::Uuid;
@@ -1120,14 +1153,11 @@ mod tests {
     /// `insert_mentions` must index every p-tag even past Postgres's
     /// bind-parameter statement cap.
     ///
-    /// Relay-signed kind 39002 member snapshots carry one p-tag per channel
-    /// member, and a multi-row INSERT binds 6 parameters per row — a single
-    /// statement tops out at ~10.9k rows against the 65,535-parameter limit.
-    /// Clients discover their channels via `{kinds:[39002], "#p":[me]}`, so a
-    /// failed insert silently breaks discovery for the whole channel.
+    /// A multi-row INSERT binds 6 parameters per p-tag, so a single statement
+    /// tops out at ~10.9k rows against the 65,535-parameter limit.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn insert_mentions_indexes_rosters_past_bind_parameter_cap() {
+    async fn insert_mentions_indexes_p_tags_past_bind_parameter_cap() {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = insert_test_channel(&pool, community).await;
@@ -1148,7 +1178,15 @@ mod tests {
         let tags: Vec<Tag> = (1..=mention_count)
             .map(|n| Tag::parse(["p", &format!("{n:064x}"), "", "member"]).expect("p tag"))
             .collect();
-        let event = store_feed_event(&pool, community, 39002, "", Some(channel), tags).await;
+        let event = store_feed_event(
+            &pool,
+            community,
+            KIND_STREAM_MESSAGE,
+            "",
+            Some(channel),
+            tags,
+        )
+        .await;
 
         let indexed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
@@ -1160,7 +1198,7 @@ mod tests {
         .expect("count indexed mentions");
         assert_eq!(
             indexed as usize, mention_count,
-            "every roster p-tag must land in event_mentions"
+            "every p-tag must land in event_mentions"
         );
     }
 }

@@ -8,6 +8,7 @@ import {
 import { uploadMediaFile } from "@/shared/api/tauriMedia";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
+import { isVoiceNoteFile } from "./audioAttachment";
 import { useFilePicker } from "./useFilePicker";
 import { isVideoFile, videoMimeForFile } from "./videoFileType";
 
@@ -169,7 +170,8 @@ export function useMediaUpload({
     deferUploadsUntilSend &&
     (!e2eConfig || e2eConfig.mock?.deferredComposerUploads === true);
   const shouldQueueFile = React.useCallback(
-    (file: File) => queueUntilSend && isVideoFile(file),
+    (file: File) =>
+      queueUntilSend && (isVideoFile(file) || isVoiceNoteFile(file)),
     [queueUntilSend],
   );
   const [uploadState, setUploadState] = React.useState<UploadState>({
@@ -320,9 +322,10 @@ export function useMediaUpload({
       const attachments = files.map((file) => {
         const id = nextQueuedAttachmentIdRef.current;
         nextQueuedAttachmentIdRef.current += 1;
-        const previewUrl = file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : undefined;
+        const previewUrl =
+          file.type.startsWith("image/") || file.type.startsWith("audio/")
+            ? URL.createObjectURL(file)
+            : undefined;
         if (isVideoFile(file)) {
           void captureVideoPosterFrame(file).then((poster) => {
             if (poster) updateQueuedVideoPoster(id, poster.posterUrl);
@@ -887,8 +890,8 @@ export function useMediaUpload({
   /**
    * True while any attachment upload is in flight.
    *
-   * Send paths must gate on this: with `deferUploadsUntilSend`, only videos
-   * are queued locally, so an in-flight photo/file is in neither
+   * Send paths must gate on this: with `deferUploadsUntilSend`, videos and
+   * audio are queued locally, so an in-flight photo/file is in neither
    * `pendingImeta` nor `queuedAttachments`. Sending mid-flight would publish
    * the message without that attachment and land the descriptor in an
    * already-cleared composer.

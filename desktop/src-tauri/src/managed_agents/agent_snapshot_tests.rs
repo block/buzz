@@ -1,7 +1,7 @@
 //! Unit tests for `managed_agents/agent_snapshot.rs`.
 //!
 //! Kept in a sibling file so `agent_snapshot.rs` stays under the
-//! 1000-line gate; `#[path]`-included from there.
+//! 1500-line gate; `#[path]`-included from there.
 
 use super::*;
 use crate::managed_agents::types::{BackendKind, ManagedAgentRecord, RespondTo};
@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 /// relevant to snapshot export are filled; the rest use defaults.
 fn minimal_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: "deadbeef".to_string(),
         name: "Test Agent".to_string(),

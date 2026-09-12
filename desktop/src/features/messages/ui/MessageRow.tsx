@@ -14,6 +14,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import { MessageAuthorWithIndicators } from "@/features/messages/ui/MessageAuthorWithIndicators";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -33,6 +34,7 @@ import {
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
+import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -57,11 +59,8 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { getAgentAddressMentionPubkeys } from "@/features/messages/lib/agentAddressMention.mjs";
-import { getVisibleAgentAddressPubkeys } from "@/features/messages/lib/getVisibleAgentAddressPubkeys";
+import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
-import { MessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
-
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 export type ThreadDepthGuideAction = {
@@ -217,6 +216,19 @@ export const MessageRow = React.memo(
     } = useReactionHandler(message, onToggleReaction);
     const { openReminder, activeReminderEventIds } = useRemindLater();
     const hasActiveReminder = activeReminderEventIds.has(message.id);
+    // The hover/focus action rail is absolutely positioned over the row, so it
+    // takes no layout space of its own. Measure its rendered footprint and
+    // reserve it in the message-header row (see `headerNode`) so a long author
+    // name ellipsizes before the rail instead of painting underneath it. The
+    // reservation is unconditional — the rail appears on hover AND
+    // focus-within, and padding must not reflow the header mid-interaction.
+    const articleRef = React.useRef<HTMLElement | null>(null);
+    const actionRailMeasureRef = useMeasuredCssVariable({
+      cssVariable: "--message-action-rail-width",
+      dimension: "inline",
+      resetValue: "0px",
+      targetRef: articleRef,
+    });
     const handleRemindLater = React.useCallback(
       (msg: TimelineMessage) => {
         openReminder({
@@ -241,8 +253,8 @@ export const MessageRow = React.memo(
       [currentPubkey, onSendToChannel, profiles],
     );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
-      () => resolveMentionProps(message.tags, profiles),
-      [profiles, message.tags],
+      () => resolveMentionProps(message.tags, profiles, message.body),
+      [profiles, message.tags, message.body],
     );
     // "Is this pubkey an agent" = the community-scoped baseline every surface
     // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
@@ -278,20 +290,14 @@ export const MessageRow = React.memo(
       }
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
-    const addressedAgentPubkeys = React.useMemo(() => {
-      return getVisibleAgentAddressPubkeys(
-        message.body,
-        getAgentAddressMentionPubkeys(message.tags).filter(isKnownAgentPubkey),
-        mentionPubkeysByName,
-      );
-    }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
-    const agentAddressPrefix =
-      addressedAgentPubkeys.length > 0 ? (
-        <MessageAgentAddressPrefix
-          profiles={profiles}
-          pubkeys={addressedAgentPubkeys}
-        />
-      ) : undefined;
+    const agentAddressPrefix = useMessageAgentAddressPrefix({
+      profiles,
+      body: message.body,
+      tags: message.tags,
+      mentionNames,
+      mentionPubkeysByName,
+      isKnownAgentPubkey,
+    });
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
@@ -574,6 +580,7 @@ export const MessageRow = React.memo(
       >
         <MessageActionBar
           channelId={channelId}
+          ref={actionRailMeasureRef}
           isFollowingThread={isFollowingThread}
           isUnread={isUnread}
           message={message}
@@ -596,6 +603,7 @@ export const MessageRow = React.memo(
               : undefined
           }
           onUnfollowThread={onUnfollowThread}
+          profiles={profiles}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}
         />
@@ -647,20 +655,18 @@ export const MessageRow = React.memo(
       ) : null;
 
     const headerNode = isDisplayedAsContinuation ? null : (
-      <MessageHeaderRow>
+      // pe reserves the measured action-rail footprint (0px until measured) so
+      // header content ends before the rail's left edge in every rail state.
+      <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)]">
         {message.pubkey ? (
-          <UserProfilePopover
+          <MessageAuthorWithIndicators
+            authorName={message.author}
+            ownerPubkey={message.ownerPubkey}
             pubkey={message.pubkey}
             role={profilePopoverRole}
-            botIdenticonValue={message.author}
           >
-            <button
-              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              {authorNode}
-            </button>
-          </UserProfilePopover>
+            {authorNode}
+          </MessageAuthorWithIndicators>
         ) : (
           authorNode
         )}
@@ -904,6 +910,7 @@ export const MessageRow = React.memo(
           data-message-id={message.id}
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
+          ref={articleRef}
         >
           {isThreadReplyLayout ? (
             <>

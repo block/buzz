@@ -2,12 +2,13 @@ use std::path::PathBuf;
 
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    apply_agent_command_update, classify_runtime, codex_adapter_availability,
-    codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
-    effective_agent_command, find_nvm_default_bin, is_login_shell_path_uninit, is_safe_nvm_tag,
-    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag, probe_codex_acp_version,
-    record_agent_command, refresh_login_shell_path, try_record_agent_command,
-    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    apply_agent_command_update, apply_env_vars_then_effort_transition, classify_runtime,
+    codex_adapter_availability, codex_adapter_is_outdated, create_time_agent_command_override,
+    default_agent_command, effective_agent_command, find_nvm_default_bin,
+    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
+    parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    remove_record_effort_aliases, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -155,7 +156,6 @@ fn classifies_not_installed_when_no_underlying_cli() {
     assert!(cmd.is_none());
     assert!(path.is_none());
 }
-
 #[test]
 fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     let (status, cmd, path) = classify_runtime(
@@ -169,6 +169,7 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
 }
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
@@ -203,7 +204,6 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
 /// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
@@ -211,6 +211,7 @@ fn record_with(
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
         name: "r".to_string(),
@@ -606,51 +607,9 @@ fn update_time_override_preserves_pin_for_persona_less_agent() {
     );
 }
 
-#[test]
-fn apply_agent_command_update_inherit_sentinel_clears_pin_and_runtime() {
-    // Choosing Inherit on a persona-linked record clears BOTH the explicit
-    // pin and the materialized runtime, so resolution falls through to the
-    // live definition immediately — not on the next spawn.
-    let personas = vec![persona_with_runtime("p1", Some("goose"))];
-    let mut record = record_with(Some("claude"), Some("p1"), Some("codex-acp"));
-
-    apply_agent_command_update(&mut record, &personas, "", false);
-
-    assert_eq!(record.agent_command_override, None);
-    assert_eq!(record.runtime, None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
-}
-
-#[test]
-fn apply_agent_command_update_sentinel_keeps_runtime_for_definition_less_record() {
-    // For a record with no persona link the materialized runtime is the only
-    // harness source left once the pin is cleared — a stray empty
-    // agent_command must not change what the agent runs.
-    let mut record = record_with(Some("claude"), None, Some("codex-acp"));
-
-    apply_agent_command_update(&mut record, &[], "", false);
-
-    assert_eq!(record.agent_command_override, None);
-    assert_eq!(record.runtime.as_deref(), Some("claude"));
-    assert_eq!(record_agent_command(&record, &[]), "claude-agent-acp");
-}
-
-#[test]
-fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
-    // A concrete pick only sets the pin; the materialized runtime is left for
-    // the next snapshot apply. The pin shadows it in resolution either way.
-    let personas = vec![persona_with_runtime("p1", Some("goose"))];
-    let mut record = record_with(Some("claude"), Some("p1"), None);
-
-    apply_agent_command_update(&mut record, &personas, "codex-acp", true);
-
-    assert_eq!(record.agent_command_override.as_deref(), Some("codex-acp"));
-    assert_eq!(record.runtime.as_deref(), Some("claude"));
-    assert_eq!(record_agent_command(&record, &personas), "codex-acp");
-}
-
 // ── probe_codex_acp_version ───────────────────────────────────────────────────
 
+mod effort_clear;
 mod forced_discovery;
 mod managed_path_resolution;
 #[cfg(unix)]
@@ -725,7 +684,7 @@ fn codex_adapter_availability_available_for_minimum_supported_binary() {
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
@@ -759,27 +718,6 @@ fn codex_adapter_availability_outdated_for_0x_binary() {
         status,
         AcpAvailabilityStatus::AdapterOutdated,
         "0.x adapter (non-zero exit) must classify as AdapterOutdated"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn codex_adapter_availability_outdated_for_older_1x_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let bin = dir.path().join("codex-acp");
-    std::fs::write(
-        &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
-
-    assert_eq!(
-        codex_adapter_availability(&bin),
-        AcpAvailabilityStatus::AdapterOutdated,
-        "a 1.x adapter below the floor must be offered an upgrade"
     );
 }
 

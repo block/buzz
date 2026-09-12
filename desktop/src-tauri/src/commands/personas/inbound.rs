@@ -131,6 +131,7 @@ pub async fn reconcile_inbound_persona_event(
                 cached_binary_path.as_deref(),
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|error| {
@@ -696,6 +697,7 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.respond_to = inbound.respond_to;
             local.respond_to_allowlist = inbound.respond_to_allowlist;
             local.parallelism = inbound.parallelism;
+            local.session_policy = inbound.session_policy;
             local.shared = inbound.shared;
             local.updated_at = inbound.updated_at;
         }

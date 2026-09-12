@@ -2387,6 +2387,63 @@ mod idle_pool_sleep_tests {
     }
 }
 
+/// Oldest a caller-supplied replay floor may reach back from startup. Bounds
+/// the stale-event burst when a spawn request sat around (e.g. the desktop
+/// slept between the send and this spawn actually running).
+const REPLAY_FLOOR_MAX_AGE_SECS: u64 = 15 * 60;
+
+/// Resolve the startup watermark from process-start time and an optional
+/// replay floor (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`).
+///
+/// A publish-first mention send publishes the triggering message BEFORE this
+/// harness spawns, so the watermark must reach back to the send timestamp for
+/// the first REQ (`since = watermark − 5s`) to replay that message. Floors
+/// older than [`REPLAY_FLOOR_MAX_AGE_SECS`] clamp to that bound; floors in
+/// the future clamp to `now` (a skewed sender must not push the watermark
+/// forward past startup and re-open the blind spot the watermark closes).
+fn startup_watermark_with_floor(now_unix: u64, replay_floor: Option<u64>) -> u64 {
+    match replay_floor {
+        Some(floor) => floor.clamp(now_unix.saturating_sub(REPLAY_FLOOR_MAX_AGE_SECS), now_unix),
+        None => now_unix,
+    }
+}
+
+#[cfg(test)]
+mod replay_floor_tests {
+    use super::{startup_watermark_with_floor, REPLAY_FLOOR_MAX_AGE_SECS};
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn no_floor_keeps_startup_time() {
+        assert_eq!(startup_watermark_with_floor(NOW, None), NOW);
+    }
+
+    #[test]
+    fn recent_floor_moves_watermark_back_to_the_send_timestamp() {
+        // The publish-first case: message sent 4s before the harness booted.
+        assert_eq!(startup_watermark_with_floor(NOW, Some(NOW - 4)), NOW - 4);
+    }
+
+    #[test]
+    fn stale_floor_clamps_to_the_max_age_bound() {
+        assert_eq!(
+            startup_watermark_with_floor(NOW, Some(NOW - REPLAY_FLOOR_MAX_AGE_SECS - 1)),
+            NOW - REPLAY_FLOOR_MAX_AGE_SECS
+        );
+    }
+
+    #[test]
+    fn future_floor_is_ignored() {
+        assert_eq!(startup_watermark_with_floor(NOW, Some(NOW + 60)), NOW);
+    }
+
+    #[test]
+    fn early_epoch_now_does_not_underflow() {
+        assert_eq!(startup_watermark_with_floor(10, Some(0)), 0);
+    }
+}
+
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
     tokio_main()
@@ -2484,10 +2541,24 @@ async fn tokio_main() -> Result<()> {
     // the initial subscribe_since for channels discovered at startup. The Subscribe
     // handler falls back to subscribe_since when last_seen is None, closing the
     // blind spot between "agents ready" and "first REQ sent".
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    //
+    // A publish-first mention send passes the triggering message's send
+    // timestamp as a replay floor (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`):
+    // the message is already on the relay when this process spawns, so the
+    // watermark must reach back to it for the first REQ to replay it — however
+    // long the spawn took.
+    let now_unix: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let startup_watermark = startup_watermark_with_floor(now_unix, config.replay_floor_unix);
+    if let Some(floor) = config.replay_floor_unix {
+        tracing::info!(
+            floor,
+            startup_watermark,
+            "applying replay floor to startup watermark"
+        );
+    }
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -2905,6 +2976,7 @@ async fn tokio_main() -> Result<()> {
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
+        HoldDeadline,
     }
 
     loop {
@@ -2978,9 +3050,13 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3030,14 +3106,20 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (scope, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-            {
+            for (scope, thread_tags) in dispatch_pending(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &mut last_activity,
+                observer.as_ref(),
+            ) {
                 typing_channels.insert(scope, thread_tags);
             }
         }
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
+        pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
+        let hold_deadline = pool.next_hold_deadline(pool::HOLD_BUSY_OWNER_TIMEOUT);
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
@@ -3080,6 +3162,9 @@ async fn tokio_main() -> Result<()> {
                         _ => std::future::pending().await,
                     }
                 } => None,
+                _ = pool::AgentPool::wait_for_hold_deadline(hold_deadline), if pool_ready => {
+                    Some(PoolEvent::HoldDeadline)
+                },
                 Some(Err(error)) = wake_tasks.join_next(), if !wake_tasks.is_empty() => {
                     if let Some(attempt) = pool_lifecycle.waking_attempt() {
                         let message = format!("pool wake task failed: {error}");
@@ -3470,7 +3555,7 @@ async fn tokio_main() -> Result<()> {
                             );
                             if pool_ready {
                                 for (scope, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, observer.as_ref())
                                 {
                                     typing_channels.insert(scope, thread_tags);
                                 }
@@ -3570,7 +3655,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, observer.as_ref())
                         {
                             typing_channels.insert(scope, thread_tags);
                         }
@@ -3671,9 +3756,13 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3696,9 +3785,13 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3850,9 +3943,13 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (scope, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
                     typing_channels.insert(scope, thread_tags);
                 }
             }
@@ -3878,9 +3975,13 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (scope, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (scope, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            observer.as_ref(),
+                        ) {
                             typing_channels.insert(scope, thread_tags);
                         }
                     }
@@ -3895,6 +3996,21 @@ async fn tokio_main() -> Result<()> {
                             Some(&error),
                         );
                     }
+                }
+            }
+            Some(PoolEvent::HoldDeadline) => {
+                // A held thread must make progress even when every unrelated
+                // relay/timer source is quiet. The deadline is derived from
+                // the pool's first-held stamp, so this dispatch observes
+                // `ForkAfterHold` and claims an idle worker immediately.
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
+                    typing_channels.insert(scope, thread_tags);
                 }
             }
             None => {} // relay/heartbeat/shutdown branches handled inline above
@@ -4269,6 +4385,7 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    observer: Option<&observer::ObserverHandle>,
 ) -> Vec<(scope::SessionScope, ThreadTags)> {
     // Keyed by the exact session scope, not the channel: two threads dispatching
     // concurrently in one channel get distinct typing entries so completing one
@@ -4277,9 +4394,13 @@ fn dispatch_pending(
     // Batches held back this cycle because the worker that owns their thread's
     // session is busy. They stay flushed-out of the queue (in-flight) until we
     // release them at the end so `flush_next` cannot re-pick them mid-loop;
-    // releasing requeues them so the next dispatch (when the owner returns)
-    // reuses that exact session instead of forking a duplicate.
+    // releasing requeues them so the next dispatch (when the owner returns, or
+    // once the bounded hold expires) reuses that exact session or forks a fresh
+    // one instead of starving.
     let mut held: Vec<FlushBatch> = Vec::new();
+    // One clock read for the whole cycle so every batch's bounded-hold window is
+    // measured against the same instant.
+    let now = tokio::time::Instant::now();
     loop {
         let batch = match queue.flush_next() {
             Some(b) => b,
@@ -4287,18 +4408,48 @@ fn dispatch_pending(
         };
         let channel_id = batch.channel_id;
         let scope = batch.scope.clone();
-        // Authoritative affinity: if the worker that owns this thread's session
-        // is checked out (busy on another turn), hold the batch rather than let
-        // an idle worker open a second session for the same thread.
-        if pool.should_hold_for_busy_owner(&scope) {
-            tracing::debug!(
-                channel = %channel_id,
-                scope = %scope.telemetry_label(),
-                "holding batch — session owner busy; awaiting its return to avoid duplicate session"
-            );
-            held.push(batch);
-            continue;
-        }
+        // Authoritative affinity, variant-gated and bounded: only a `Thread`
+        // scope whose session owner is checked out (busy on another turn) is
+        // held, and only until `HOLD_BUSY_OWNER_TIMEOUT` elapses. `Conversation`
+        // scopes never hold — a busy owner there forks onto another idle worker,
+        // so an active channel cannot starve a sibling channel on a shared
+        // worker. A held thread that outwaits the window forks a fresh session
+        // rather than starve behind an unbounded turn.
+        let forked_after_hold = match pool.hold_decision(&scope, now, pool::HOLD_BUSY_OWNER_TIMEOUT)
+        {
+            pool::HoldDecision::Hold {
+                held_for,
+                owner_index,
+            } => {
+                tracing::info!(
+                    channel = %channel_id,
+                    scope = %scope.telemetry_label(),
+                    owner_index,
+                    held_for_secs = held_for.as_secs_f64(),
+                    "busy-owner hold — thread session owner busy; awaiting its return"
+                );
+                if let Some(observer) = observer {
+                    observer.emit(
+                        "busy_owner_hold",
+                        None,
+                        &observer::context_for(Some(channel_id), None, None),
+                        serde_json::json!({
+                            "scope": scope.telemetry_label(),
+                            "ownerIndex": owner_index,
+                            "heldForSecs": held_for.as_secs_f64(),
+                            "timeoutSecs": pool::HOLD_BUSY_OWNER_TIMEOUT.as_secs_f64(),
+                        }),
+                    );
+                }
+                held.push(batch);
+                continue;
+            }
+            pool::HoldDecision::ForkAfterHold {
+                held_for,
+                owner_index,
+            } => Some((held_for, owner_index)),
+            pool::HoldDecision::Dispatch => None,
+        };
         let typing_scope = batch
             .events
             .last()
@@ -4318,6 +4469,32 @@ fn dispatch_pending(
                 break;
             }
         };
+        // Consume a bounded hold only after a worker was actually claimed.
+        // If every slot is checked out, the expired stamp remains sticky and
+        // the worker-return event retries immediately instead of waiting for a
+        // fresh timeout window.
+        pool.clear_hold(&scope);
+        if let Some((held_for, owner_index)) = forked_after_hold {
+            tracing::warn!(
+                channel = %channel_id,
+                scope = %scope.telemetry_label(),
+                owner_index,
+                held_for_secs = held_for.as_secs_f64(),
+                "busy-owner hold expired — forking fresh session on an idle worker"
+            );
+            if let Some(observer) = observer {
+                observer.emit(
+                    "busy_owner_hold_forked",
+                    None,
+                    &observer::context_for(Some(channel_id), None, None),
+                    serde_json::json!({
+                        "scope": scope.telemetry_label(),
+                        "ownerIndex": owner_index,
+                        "heldForSecs": held_for.as_secs_f64(),
+                    }),
+                );
+            }
+        }
         tracing::debug!(agent = agent.index, channel = %channel_id, scope = %scope.telemetry_label(), affinity_hit, "agent_claimed");
 
         let recoverable_batch = match ctx.dedup_mode {
@@ -4348,6 +4525,14 @@ fn dispatch_pending(
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
 
+        // Assign ownership before moving the worker into the task. If this is
+        // a bounded-hold fork, the new generation immediately invalidates the
+        // prior busy worker's copy when that worker eventually returns.
+        let owner_generation = pool.record_scope_owner(scope.clone(), agent.index);
+        agent
+            .state
+            .set_scope_owner_generation(scope.clone(), owner_generation);
+
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
@@ -4374,9 +4559,6 @@ fn dispatch_pending(
                 successful_steer_deliveries: HashSet::new(),
             },
         );
-        // Record this worker as the scope's session owner so a later dispatch
-        // while it is busy holds instead of forking a duplicate session.
-        pool.record_scope_owner(scope.clone(), agent_index);
         dispatched_channels.push((scope, typing_scope));
         *last_activity = tokio::time::Instant::now();
     }
@@ -4568,6 +4750,23 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(acp::AcpError::AgentError { code: -32002, message })
+                    if message.contains("model not found")
+            ) {
+                // Retrying the same missing model cannot repair its configuration.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — model not found"
+                );
+                let content = "⚠️ I couldn't process the last request: the configured model \
+                    wasn't found at the provider's endpoint. Open agent settings, select a \
+                    different model from the dropdown, and save your changes. Restart the agent \
+                    to apply the new configuration, then re-send your request."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -5057,6 +5256,9 @@ mod agent_draft_prompt_tests {
     #[test]
     fn shared_base_prompt_teaches_portable_agent_drafts() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.starts_with(
+            "You are an agent operating inside Buzz — a Nostr-based messaging platform for human-agent collaboration.\nBuzz is a desktop and mobile collaboration app organized around channels, conversations, and shared work."
+        ));
         assert!(prompt.contains("buzz agents draft-create"));
         assert!(prompt.contains("ask for at most two things"));
         assert!(prompt.contains("what it should do day-to-day"));
@@ -6046,12 +6248,110 @@ mod owner_control_command_tests {
         // A brand-new thread with no recorded owner is never held.
         assert!(!pool.should_hold_for_busy_owner(&thread_scope(ch, &"d".repeat(64))));
 
-        // Channel-wide session invalidation prunes the directory so a stale
-        // owner can never strand a held batch.
+        // The bounded hold decision stamps A's first-held time, then forks once
+        // the window elapses rather than starving behind the busy owner.
+        let now = tokio::time::Instant::now();
+        assert!(
+            matches!(
+                pool.hold_decision(&ta, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+                pool::HoldDecision::Hold { .. }
+            ),
+            "busy owner within window => hold"
+        );
+        assert!(pool.held_since_contains(&ta), "hold stamps first-held time");
+        assert!(
+            matches!(
+                pool.hold_decision(
+                    &ta,
+                    now + pool::HOLD_BUSY_OWNER_TIMEOUT,
+                    pool::HOLD_BUSY_OWNER_TIMEOUT
+                ),
+                pool::HoldDecision::ForkAfterHold { .. }
+            ),
+            "elapsed window => fork on an idle worker"
+        );
+        assert!(
+            pool.held_since_contains(&ta),
+            "expired hold stays sticky until an idle worker is claimed"
+        );
+        pool.clear_hold(&ta);
+
+        // A conversation scope never holds even with a busy recorded owner —
+        // this is the cross-channel head-of-line-blocking regression guard.
+        let cs = scope::SessionScope::Conversation { channel_id: ch };
+        pool.record_scope_owner(cs.clone(), 0);
+        assert_eq!(
+            pool.hold_decision(&cs, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+            pool::HoldDecision::Dispatch,
+            "conversation scope forks a busy owner rather than holding"
+        );
+
+        // Re-stamp A's hold so channel invalidation has an entry to prune.
+        assert!(matches!(
+            pool.hold_decision(&ta, now, pool::HOLD_BUSY_OWNER_TIMEOUT),
+            pool::HoldDecision::Hold { .. }
+        ));
+        assert!(pool.held_since_contains(&ta));
+
+        // Channel-wide session invalidation prunes the owner directory and the
+        // hold stamps so a stale owner can never strand a held batch.
         pool.invalidate_channel_sessions(ch);
         assert!(
             !pool.should_hold_for_busy_owner(&ta),
             "owner directory pruned on channel invalidation"
+        );
+        assert!(
+            !pool.held_since_contains(&ta),
+            "hold stamps pruned on channel invalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_cap_eviction_prunes_orphaned_hold_deadline() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let held_scope = thread_scope(channel_id, &"a".repeat(64));
+        let surviving_scope = thread_scope(channel_id, &"b".repeat(64));
+
+        pool.record_scope_owner(held_scope.clone(), 0);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 0, surviving_scope.clone(), tx);
+        assert!(matches!(
+            pool.hold_decision(
+                &held_scope,
+                tokio::time::Instant::now(),
+                pool::HOLD_BUSY_OWNER_TIMEOUT
+            ),
+            pool::HoldDecision::Hold { .. }
+        ));
+
+        let oldest = std::time::Instant::now() - Duration::from_secs(1);
+        queue.push(queue::QueuedEvent {
+            channel_id,
+            scope: held_scope.clone(),
+            event: make_event(KIND_STREAM_MESSAGE, "held", None),
+            received_at: oldest,
+            prompt_tag: "test".into(),
+        });
+        for i in 0..500 {
+            queue.push(queue::QueuedEvent {
+                channel_id,
+                scope: surviving_scope.clone(),
+                event: make_event(KIND_STREAM_MESSAGE, &format!("new-{i}"), None),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "test".into(),
+            });
+        }
+
+        assert!(
+            !queue.has_pending_scope(&held_scope),
+            "aggregate cap evicts the globally oldest scope"
+        );
+        pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
+        assert!(
+            !pool.held_since_contains(&held_scope),
+            "evicted scope cannot leave an immediately-ready deadline behind"
         );
     }
 
@@ -8862,6 +9162,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -9087,6 +9388,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -9133,6 +9435,15 @@ mod error_outcome_emission_tests {
         }
     }
 
+    fn bind_agent_scope_owner(
+        pool: &mut AgentPool,
+        agent: &mut OwnedAgent,
+        scope: scope::SessionScope,
+    ) {
+        let generation = pool.record_scope_owner(scope.clone(), agent.index);
+        agent.state.set_scope_owner_generation(scope, generation);
+    }
+
     #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
@@ -9148,6 +9459,11 @@ mod error_outcome_emission_tests {
         );
 
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(
+            &mut pool,
+            &mut agent,
+            scope::SessionScope::Conversation { channel_id },
+        );
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
@@ -9223,6 +9539,11 @@ mod error_outcome_emission_tests {
         );
 
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(
+            &mut pool,
+            &mut agent,
+            scope::SessionScope::Conversation { channel_id },
+        );
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
@@ -10460,6 +10781,7 @@ mod error_outcome_emission_tests {
             .sessions
             .insert(session_scope.clone(), "healthy-session".into());
         let mut pool = AgentPool::from_slots(vec![None]);
+        bind_agent_scope_owner(&mut pool, &mut agent, session_scope.clone());
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
             task_id,
@@ -10674,12 +10996,25 @@ mod error_outcome_emission_tests {
         );
     }
 
-    /// A non-auth application error (e.g. usage credits) must still follow the
-    /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
-    async fn non_auth_application_error_is_requeued() {
-        let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+    async fn model_not_found_posts_recovery_notice_without_retrying() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
             .sign_with_keys(&keys)
             .unwrap();
         let channel_id = uuid::Uuid::new_v4();
@@ -10695,10 +11030,173 @@ mod error_outcome_emission_tests {
             cancel_reason: None,
         };
 
-        // Usage-credits error — AgentError but NOT an auth error.
-        let usage_error = acp::AcpError::AgentError {
+        let raw_error = r#"llm model not found: (gpt-6-astra) 404 Not Found: {"error_code":"NOT_FOUND","message":"'gpt-6-astra' does not exist."}"#;
+        let model_error = AcpError::AgentError {
+            code: -32002,
+            message: raw_error.to_string(),
+        };
+        let expected_error = model_error.to_string();
+        let observer = ObserverHandle::in_process();
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(model_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            Some(&rest),
+        );
+
+        // The batch must not be requeued: pending_channels returns 0.
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "model-not-found must stop immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(channel_id),
+            0,
+            "model-not-found must stop immediately — no events should be pending"
+        );
+
+        assert!(
+            pool.agents_mut()[0].is_some(),
+            "healthy process remains reusable"
+        );
+        assert!(respawn_tasks.is_empty());
+        let errors: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "turn_error")
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].payload["code"], -32002);
+        assert_eq!(errors[0].payload["error"], expected_error);
+
+        // Capture the real signed notice sent by handle_prompt_result, without a live relay.
+        let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "POST /events HTTP/1.1\r\n");
+            let mut content_length = None;
+            for _ in 0..64 {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let size = content_length.expect("request Content-Length");
+            assert!(size < 65536);
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        })
+        .await
+        .expect("failure notice must be posted on the first failure");
+        notice.verify().unwrap();
+        assert_eq!(notice.pubkey, rest.keys.public_key());
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert_eq!(
+            notice.content,
+            "⚠️ I couldn't process the last request: the configured model wasn't found at the provider's endpoint. Open agent settings, select a different model from the dropdown, and save your changes. Restart the agent to apply the new configuration, then re-send your request."
+        );
+        let tags = serde_json::to_value(&notice.tags).unwrap();
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+    }
+
+    /// A non-auth application error (e.g. usage credits) must still follow the
+    /// standard requeue path so today's behavior is unchanged.
+    #[tokio::test]
+    async fn non_auth_application_error_is_requeued() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
             code: -32000,
             message: "Usage credits required for 1M context".to_string(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn non_model_resource_not_found_is_requeued() {
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32002,
+            message: "Resource not found: session no longer exists".to_string(),
+        })
+        .await;
+    }
+
+    async fn assert_application_error_is_requeued(error: acp::AcpError) {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let agent = dummy_agent(0).await;
@@ -10732,7 +11230,7 @@ mod error_outcome_emission_tests {
             agent,
             source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
             turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(usage_error),
+            outcome: PromptOutcome::Error(error),
             batch: Some(batch),
         };
         handle_prompt_result(

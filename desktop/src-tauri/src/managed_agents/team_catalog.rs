@@ -145,6 +145,12 @@ pub struct TeamCatalogMember {
     /// Clamped to 1..=32 at projection time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// ACP conversation boundary for instances created from this member.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::managed_agents::AcpSessionPolicy::is_channel"
+    )]
+    pub session_policy: crate::managed_agents::AcpSessionPolicy,
     /// Reuse hint: the built-in slug this member was installed from.
     ///
     /// Present only for built-in members. A recipient may substitute its own
@@ -304,6 +310,7 @@ fn member_projection(record: &AgentDefinition) -> TeamCatalogMember {
         name_pool: record.name_pool.clone(),
         respond_to: sanitized_respond_to(record),
         parallelism: record.parallelism.map(|value| value.clamp(1, 32)),
+        session_policy: record.session_policy,
         builtin_slug: None,
         projection_hash: None,
     }

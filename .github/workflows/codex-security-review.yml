@@ -222,7 +222,7 @@ jobs:
       contents: read
     env:
       CODEX_MODEL: gpt-5.6-sol
-      CODEX_REASONING_EFFORT: max
+      CODEX_REASONING_EFFORT: high
       CODEX_REVIEW_API_KEY_PRESENT: ${{ secrets.CODEX_REVIEW_API_KEY != '' }}
       REVIEW_CONTEXT: review-context
       REVIEW_REPOSITORY: review-target

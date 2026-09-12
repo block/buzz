@@ -24,7 +24,9 @@ pub async fn insert_mentions(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let connection =
+        observability::acquire_writer(pool, observability::WriterOperation::EventWrite).await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
     tx.commit().await?;
     Ok(())
@@ -425,6 +427,26 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
+/// Bounded outcome of the Postgres portion of a relay readiness check.
+///
+/// The variants deliberately separate waiting for a pooled connection from
+/// executing the health query. Callers may safely use the variant names as
+/// low-cardinality metric labels; detailed SQLx errors remain in logs rather
+/// than becoming labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbReadinessOutcome {
+    /// A writer-pool connection was acquired and `SELECT 1` succeeded.
+    Success,
+    /// No writer-pool connection became available before the readiness deadline.
+    PoolTimeout,
+    /// The writer pool returned a non-timeout acquisition error.
+    PoolError,
+    /// A connection was acquired, but `SELECT 1` exceeded the readiness deadline.
+    QueryTimeout,
+    /// A connection was acquired, but `SELECT 1` returned an error.
+    QueryError,
+}
+
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
@@ -667,25 +689,43 @@ impl Db {
             return;
         };
         let aurora_identity = self.reader_aurora_identity.clone();
-        tokio::spawn(async move {
-            match observability::acquire(&read_pool, observability::PoolRole::Reader).await {
-                Ok(mut conn) => {
-                    tracing::info!("read replica reachable at boot");
-                    match replica_fence::reader_supports_aurora_identity(&mut conn).await {
-                        Ok(supported) => {
-                            let _ = aurora_identity.set(supported);
-                        }
-                        Err(e) => tracing::debug!(
-                            error = %e,
-                            "aurora identity boot prime failed; first routed read will probe"
-                        ),
+        tokio::spawn(Self::read_pool_boot_ping_once(read_pool, aurora_identity));
+    }
+
+    async fn read_pool_boot_ping_once(
+        read_pool: PgPool,
+        aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    ) {
+        match observability::acquire_reader_with_legacy_metrics(
+            &read_pool,
+            observability::ReaderOperation::Bootstrap,
+        )
+        .await
+        {
+            Ok(mut conn) => {
+                tracing::info!("read replica reachable at boot");
+                match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+                    Ok(supported) => {
+                        let _ = aurora_identity.set(supported);
                     }
+                    Err(e) => tracing::debug!(
+                        error = %e,
+                        "aurora identity boot prime failed; first routed read will probe"
+                    ),
                 }
-                Err(e) => tracing::warn!(
-                    "read replica unreachable at boot; serving all-writer until it recovers: {e}"
-                ),
             }
-        });
+            Err(e) => tracing::warn!(
+                "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_pool_boot_ping_for_tests(&self) {
+        let Some(read_pool) = self.read_pool.clone() else {
+            return;
+        };
+        Self::read_pool_boot_ping_once(read_pool, self.reader_aurora_identity.clone()).await;
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
@@ -751,13 +791,23 @@ impl Db {
         if self.read_pool.is_none() {
             return Ok(false);
         }
-        replica_fence::verify_floor_guard_catalog(&self.pool).await?;
-        replica_fence::verify_floor_guard_behavior(&self.pool).await?;
+        self.verify_replica_fence_at_boot().await?;
         tokio::spawn(replica_fence::run_probe(
             self.pool.clone(),
             std::sync::Arc::clone(&self.fence),
         ));
         Ok(true)
+    }
+
+    /// Verify replica-fence catalog shape and behavior through attributed
+    /// writer/bootstrap acquisitions without starting the recurring probe.
+    pub(crate) async fn verify_replica_fence_at_boot(&self) -> Result<()> {
+        let mut connection =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::Bootstrap)
+                .await?;
+        replica_fence::verify_floor_guard_catalog(&mut *connection).await?;
+        drop(connection);
+        replica_fence::verify_floor_guard_behavior(&self.pool).await
     }
 
     /// The pool for lag-tolerant reads: the read replica when configured,
@@ -797,6 +847,7 @@ impl Db {
     async fn proved_reader(
         &self,
         read_pool: &PgPool,
+        operation: observability::ReaderOperation,
     ) -> std::result::Result<
         (
             sqlx::Transaction<'static, sqlx::Postgres>,
@@ -810,7 +861,9 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn = match observability::acquire(read_pool, observability::PoolRole::Reader).await {
+        let conn = match observability::acquire_reader_with_legacy_metrics(read_pool, operation)
+            .await
+        {
             Ok(conn) => conn,
             Err(sqlx::Error::PoolTimedOut) => {
                 tracing::warn!("reader pool acquire timed out; routing to writer");
@@ -931,9 +984,62 @@ impl Db {
         migration::run_migrations(&self.pool).await
     }
 
-    /// Returns `true` if the database is reachable (used by readiness probes).
+    /// Returns `true` if the database is reachable.
     pub async fn ping(&self) -> bool {
-        sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+        let Ok(mut connection) =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::Readiness)
+                .await
+        else {
+            return false;
+        };
+        sqlx::query("SELECT 1")
+            .execute(&mut *connection)
+            .await
+            .is_ok()
+    }
+
+    /// Checks writer-pool acquisition and query execution against one deadline.
+    ///
+    /// Unlike [`Self::ping`], this preserves whether readiness was blocked while
+    /// borrowing a connection or failed after a connection had been acquired.
+    /// The query runs on the already-acquired connection so the two phases
+    /// cannot be collapsed into a second implicit pool acquisition.
+    pub async fn readiness_check(&self, deadline: tokio::time::Instant) -> DbReadinessOutcome {
+        self.readiness_check_sql(deadline, "SELECT 1").await
+    }
+
+    /// Production-bound seam for classifying failures after pool acquisition.
+    /// Tests vary only the SQL so timeout/error/cancellation paths execute the
+    /// same acquisition and classification code as [`Self::readiness_check`].
+    async fn readiness_check_sql(
+        &self,
+        deadline: tokio::time::Instant,
+        query: &'static str,
+    ) -> DbReadinessOutcome {
+        let mut connection = match observability::acquire_writer_until(
+            &self.pool,
+            observability::WriterOperation::Readiness,
+            deadline,
+        )
+        .await
+        {
+            Err(sqlx::Error::PoolTimedOut) => return DbReadinessOutcome::PoolTimeout,
+            Err(error) => {
+                tracing::debug!(error = %error, "Postgres readiness pool acquisition failed");
+                return DbReadinessOutcome::PoolError;
+            }
+            Ok(connection) => connection,
+        };
+
+        match tokio::time::timeout_at(deadline, sqlx::query(query).execute(&mut *connection)).await
+        {
+            Err(_) => DbReadinessOutcome::QueryTimeout,
+            Ok(Err(error)) => {
+                tracing::debug!(error = %error, "Postgres readiness query failed");
+                DbReadinessOutcome::QueryError
+            }
+            Ok(Ok(_)) => DbReadinessOutcome::Success,
+        }
     }
 
     /// Returns pool utilisation stats for metrics emission.
@@ -947,6 +1053,15 @@ impl Db {
             idle: self.pool.num_idle() as u32,
             max: self.max_connections,
         }
+    }
+
+    /// Refresh all expected operation-specific waiter gauges, including zero.
+    ///
+    /// The relay pool sampler calls this periodically so an exporter idle
+    /// timeout cannot make a healthy zero indistinguishable from missing
+    /// telemetry.
+    pub fn refresh_pool_waiter_metrics(&self) {
+        observability::refresh_pool_waiters(self.read_pool.is_some());
     }
 
     /// Pool utilisation stats for the read-replica pool, when configured.
@@ -969,12 +1084,27 @@ impl Db {
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
     /// The transaction holds an owned pool handle, not a borrow.
-    pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        let connection =
-            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
+    pub async fn begin_event_write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let connection = observability::acquire_writer_with_legacy_metrics(
+            &self.pool,
+            observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::Transaction::begin(connection, None)
             .await
             .map_err(Into::into)
+    }
+
+    /// Begin an event-write transaction through the pre-operation API name.
+    ///
+    /// New callers should use [`Self::begin_event_write_transaction`] so the
+    /// semantic intent is explicit. This alias preserves the crate's public
+    /// API while emitting the same operation-aware and compatibility metrics.
+    #[deprecated(note = "use Db::begin_event_write_transaction")]
+    pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        self.begin_event_write_transaction().await
     }
 
     /// Insert an event while holding and validating an admitted serving-write
@@ -999,7 +1129,10 @@ impl Db {
             return Err(DbError::EphemeralEventRejected(kind_u16));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let connection =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
+                .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         self.deletion_store()
             .guard_transaction_with_serving_lease(&mut tx, lease)
             .await?;
@@ -1027,6 +1160,7 @@ impl Db {
         &self,
         path: &'static str,
         predicate: RoutePredicate,
+        operation: observability::ReaderOperation,
     ) -> RouteDecision {
         let Some(read_pool) = &self.read_pool else {
             Self::record_route(path, "writer", "disabled");
@@ -1069,7 +1203,7 @@ impl Db {
             Self::record_route(path, "writer", reason);
             return RouteDecision::Writer;
         }
-        match self.proved_reader(read_pool).await {
+        match self.proved_reader(read_pool, operation).await {
             Ok((tx, entry)) => {
                 // Re-evaluate against the entry the session actually proved
                 // (it may be older than the shared newest).
@@ -1112,4 +1246,5 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests;
+#[path = "tests.rs"]
+mod postgres_tests;

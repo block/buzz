@@ -2345,6 +2345,154 @@ async fn add_member_with_role_ws(
     (ok.accepted, ok.message)
 }
 
+/// Submit a self-targeted NIP-29 departure and return the relay's exact OK
+/// frame payload. kind:9001 carries a self `p` tag; kind:9022 does not.
+async fn self_departure_ws(url: &str, channel_id: &str, actor: &Keys, kind: u16) -> (bool, String) {
+    let h_tag = Tag::parse(["h", channel_id]).unwrap();
+    let event = match kind {
+        9001 => EventBuilder::new(Kind::Custom(kind), "")
+            .allow_self_tagging()
+            .tags([
+                h_tag,
+                Tag::parse(["p", &actor.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(actor)
+            .expect("sign kind:9001 self-removal"),
+        9022 => EventBuilder::new(Kind::Custom(kind), "")
+            .tags([h_tag])
+            .sign_with_keys(actor)
+            .expect("sign kind:9022 leave request"),
+        _ => panic!("unsupported self-departure kind: {kind}"),
+    };
+
+    let mut client = BuzzTestClient::connect(url, actor)
+        .await
+        .expect("connect departure actor");
+    let ok = client.send_event(event).await.expect("send self-departure");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+async fn promote_co_owner(url: &str, channel_id: &str, owner: &Keys, co_owner: &Keys) {
+    let mut client = BuzzTestClient::connect(url, owner)
+        .await
+        .expect("connect channel owner");
+    let result = add_member_with_role_ws(
+        &mut client,
+        channel_id,
+        &co_owner.public_key().to_hex(),
+        "owner",
+        owner,
+    )
+    .await;
+    client.disconnect().await.ok();
+    assert_eq!(result, (true, String::new()), "promote co-owner OK frame");
+    assert_eq!(
+        member_role(url, owner, channel_id, &co_owner.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("owner"),
+        "the setup must leave a second active owner"
+    );
+}
+
+/// Binds kind:9001's production `validate_admin_event` call to the WebSocket
+/// OK frame. The DB applier has a different rejection message, so this exact
+/// historical result can only come from the pre-storage relay validator.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9001_sole_owner_rejected() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &owner, 9001).await;
+
+    assert_eq!(
+        result,
+        (false, "invalid: cannot remove the last owner".to_string())
+    );
+}
+
+/// An open channel lets the nonmember event reach the per-kind validator; a
+/// private channel would be rejected earlier by the generic membership gate.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9001_nonmember_rejected() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let nonmember = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &nonmember, 9001).await;
+
+    assert_eq!(
+        result,
+        (false, "invalid: actor is not an active member".to_string())
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9001_co_owner_allowed() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let co_owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+    promote_co_owner(&url, &channel_id, &owner, &co_owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &co_owner, 9001).await;
+
+    assert_eq!(result, (true, String::new()));
+}
+
+/// Binds kind:9022's distinct production `validate_admin_event` call to the
+/// same historical WebSocket rejection contract as self-removal.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9022_sole_owner_rejected() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &owner, 9022).await;
+
+    assert_eq!(
+        result,
+        (false, "invalid: cannot remove the last owner".to_string())
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9022_nonmember_rejected() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let nonmember = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &nonmember, 9022).await;
+
+    assert_eq!(
+        result,
+        (false, "invalid: actor is not an active member".to_string())
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_kind_9022_co_owner_allowed() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let co_owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+    promote_co_owner(&url, &channel_id, &owner, &co_owner).await;
+
+    let result = self_departure_ws(&url, &channel_id, &co_owner, 9022).await;
+
+    assert_eq!(result, (true, String::new()));
+}
+
 /// Any active member can add any ordinary role to a private channel.
 #[tokio::test]
 #[ignore]

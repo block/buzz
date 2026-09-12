@@ -60,12 +60,10 @@ function resetAll(startMs = 0) {
   resetRateLimitGate();
 }
 
-test("production CLOSED handler rejects history once and clears its timeout", () => {
+test("production CLOSED handler rejects non-rate-limited history immediately and clears its timeout", () => {
   const originalWindow = globalThis.window;
   const clearedTimeouts = [];
   globalThis.window = {
-    // Provide both setTimeout (needed by activateRateLimit in the F1 fix) and
-    // clearTimeout (the existing assertion target).
     setTimeout: (_fn, _ms) => 0,
     clearTimeout: (timeout) => clearedTimeouts.push(timeout),
   };
@@ -76,10 +74,12 @@ test("production CLOSED handler rejects history once and clears its timeout", ()
         "history-1",
         {
           mode: "history",
+          filter: { kinds: [0], authors: ["pubkey-1"], limit: 10 },
           events: [],
           resolve: () => assert.fail("CLOSED must not resolve history"),
           reject: (error) => errors.push(error),
           timeout: 42,
+          timeoutMs: 25_000,
         },
       ],
     ]);
@@ -88,21 +88,199 @@ test("production CLOSED handler rejects history once and clears its timeout", ()
       subId: "history-1",
       sendReq: () => Promise.resolve(),
     };
-    handleRelayClosed({
-      ...input,
-      message: "rate-limited: too many concurrent requests",
-    });
+    // Non-rate-limited CLOSED should reject immediately.
+    handleRelayClosed({ ...input, message: "error: database unavailable" });
     handleRelayClosed({ ...input, message: "late CLOSED" });
     assert.equal(subscriptions.has("history-1"), false);
     assert.deepEqual(clearedTimeouts, [42]);
     assert.equal(errors.length, 1);
-    assert.equal(
-      errors[0].message,
-      "rate-limited: too many concurrent requests",
-    );
+    assert.equal(errors[0].message, "error: database unavailable");
   } finally {
     globalThis.window = originalWindow;
   }
+});
+
+test("rate-limited history CLOSED schedules retry instead of rejecting immediately", () => {
+  resetAll(0);
+  const errors = [];
+  const reqsSent = [];
+  const subscriptions = new Map([
+    [
+      "history-rl",
+      {
+        mode: "history",
+        filter: { kinds: [0], authors: ["pubkey-1"], limit: 10 },
+        events: [],
+        resolve: () => assert.fail("must not resolve before retry"),
+        reject: (error) => errors.push(error),
+        timeout: 99,
+        timeoutMs: 25_000,
+      },
+    ],
+  ]);
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-rl",
+    message: "rate-limited: quota exceeded; retry in 5s",
+    sendReq: (id, filter) => {
+      reqsSent.push({ id, filter });
+      return Promise.resolve();
+    },
+  });
+  // Subscription should NOT have been rejected immediately.
+  assert.equal(
+    errors.length,
+    0,
+    "must not reject immediately on first attempt",
+  );
+  // Original subId evicted, a new one registered.
+  assert.equal(subscriptions.has("history-rl"), false);
+  // No retry fired yet at t=0.
+  assert.equal(reqsSent.length, 0, "retry must not fire before delay");
+  // Fire the retry timer (hint=5s → delayMs=5000).
+  tickTo(5_001);
+  assert.equal(
+    reqsSent.length,
+    1,
+    "retry REQ must fire after rate-limit window",
+  );
+});
+
+test("rate-limited history CLOSED exhausts 3 retries then rejects permanently", () => {
+  resetAll(0);
+  const errors = [];
+  const reqsSent = [];
+  const filter = { kinds: [0], authors: ["pk"], limit: 1 };
+  const subscription = {
+    mode: "history",
+    filter,
+    events: [],
+    resolve: () => assert.fail("must not resolve"),
+    reject: (error) => errors.push(error),
+    timeout: 0,
+    timeoutMs: 25_000,
+  };
+  const subscriptions = new Map([["history-rl", subscription]]);
+  const sendReq = (id, _filter) => {
+    reqsSent.push(id);
+    return Promise.resolve();
+  };
+
+  // Simulate 3 rate-limited CLOSEDs (exhausts the attempt budget).
+  for (let i = 0; i < 3; i++) {
+    // The current live subId rotates on each retry; find it.
+    const currentSubId = [...subscriptions.keys()].find((k) =>
+      k.startsWith("history"),
+    );
+    assert.ok(currentSubId, `must have a live history sub on attempt ${i}`);
+    handleRelayClosed({
+      subscriptions,
+      subId: currentSubId,
+      message: "rate-limited: quota exceeded; retry in 1s",
+      sendReq,
+    });
+    assert.equal(
+      errors.length,
+      0,
+      `must not reject before attempt ${i + 1} fires`,
+    );
+    tickTo((i + 1) * 1_001);
+    assert.equal(reqsSent.length, i + 1, `sendReq call ${i + 1} must fire`);
+  }
+
+  // 4th CLOSED — attempt budget exhausted → permanent reject.
+  const currentSubId = [...subscriptions.keys()].find((k) =>
+    k.startsWith("history"),
+  );
+  assert.ok(
+    currentSubId,
+    "must still have a live history sub before last CLOSED",
+  );
+  handleRelayClosed({
+    subscriptions,
+    subId: currentSubId,
+    message: "rate-limited: quota exceeded; retry in 1s",
+    sendReq,
+  });
+  assert.equal(errors.length, 1, "must reject after 3 failed retries");
+  assert.equal(subscriptions.size, 0, "must evict sub after permanent reject");
+});
+
+test("rate-limited history retry op-timeout sends CLOSE and rejects without leaking the sub", () => {
+  // Regression for: retry-path op-timeout deleted the sub and rejected but
+  // never sent CLOSE for the rotated subId — leaving the relay holding a slot
+  // against its per-connection cap.
+  //
+  // Also validates the late-EOSE non-regression: once the sub is evicted and
+  // CLOSE sent, a late EOSE cannot double-resolve the promise because
+  // handleSubscriptionEose guards on subscriptions.has(subId).
+  resetAll(0);
+  const errors = [];
+  const closedSubIds = [];
+  const filter = { kinds: [9], "#h": ["ch-close"], limit: 50 };
+  const subscription = {
+    mode: "history",
+    filter,
+    events: [],
+    resolve: () => assert.fail("must not resolve"),
+    reject: (error) => errors.push(error),
+    timeout: 0,
+    timeoutMs: 5_000,
+  };
+  const subscriptions = new Map([["history-close", subscription]]);
+
+  // Trigger a rate-limited CLOSED — subscription rotates to a new subId.
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-close",
+    message: "rate-limited: quota exceeded; retry in 1s",
+    sendReq: () => Promise.resolve(),
+    closeSubscription: async (id) => {
+      closedSubIds.push(id);
+    },
+  });
+  assert.equal(errors.length, 0, "must not reject before delay fires");
+
+  // Find the rotated subId.
+  const newSubId = [...subscriptions.keys()].find((k) =>
+    k.startsWith("history"),
+  );
+  assert.ok(newSubId, "rotated sub must be registered");
+  assert.notEqual(newSubId, "history-close", "sub must have been rotated");
+
+  // The retry-delay timer fires: sendReq runs and arms a new op-timeout.
+  tickTo(1_001);
+  assert.equal(errors.length, 0, "still must not reject immediately after REQ");
+
+  // The op-timeout fires (delay + timeoutMs = 1001 + 5000 = 6001 ms).
+  tickTo(6_002);
+  assert.equal(
+    errors.length,
+    1,
+    "must reject after op-timeout on the retried sub",
+  );
+  assert.ok(
+    closedSubIds.includes(newSubId),
+    `CLOSE must be sent for the rotated sub ${newSubId} (got: ${JSON.stringify(closedSubIds)})`,
+  );
+  assert.equal(
+    subscriptions.has(newSubId),
+    false,
+    "rotated sub must be evicted after op-timeout",
+  );
+
+  // Late-EOSE non-regression: arriving after eviction must be a no-op.
+  const prevErrors = errors.length;
+  handleSubscriptionEose({
+    subscriptions,
+    subId: newSubId,
+    closeSubscription: async () => {},
+  });
+  assert.equal(
+    errors.length,
+    prevErrors,
+    "late EOSE after eviction must not alter error state",
+  );
 });
 
 test("rate-limited history CLOSED arms the shared gate for concurrent ops", () => {
@@ -112,10 +290,12 @@ test("rate-limited history CLOSED arms the shared gate for concurrent ops", () =
       "history-1",
       {
         mode: "history",
+        filter: { kinds: [0], authors: ["pubkey-1"], limit: 10 },
         events: [],
         resolve: () => {},
         reject: () => {},
         timeout: 0,
+        timeoutMs: 25_000,
       },
     ],
   ]);
@@ -142,10 +322,12 @@ test("non-rate-limited history CLOSED does not arm the gate", () => {
       "history-2",
       {
         mode: "history",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
         events: [],
         resolve: () => {},
         reject: () => {},
         timeout: 0,
+        timeoutMs: 25_000,
       },
     ],
   ]);
@@ -173,10 +355,12 @@ test("gate armed by rate-limited history CLOSED defers the next REQ until expiry
       "history-gate",
       {
         mode: "history",
+        filter: { kinds: [9], "#h": ["ch-gate"], limit: 50 },
         events: [],
         resolve: () => {},
         reject: () => {},
         timeout: 0,
+        timeoutMs: 25_000,
       },
     ],
   ]);
@@ -484,6 +668,89 @@ test("terminal CLOSED deletes subscription and does not retry", () => {
   );
   tickTo(10_000);
   assert.equal(firedAt.length, 0, "terminal CLOSED must not retry");
+});
+
+// ── Test: rejecting closeSubscription does not produce an unhandled rejection ─
+//
+// Load-bearing for the `.catch(() => {})` guard on the op-timeout CLOSE send.
+//
+// When the IPC/socket call inside closeSubscription throws (e.g. the connection
+// was already torn down), the rejection must be swallowed — the history promise
+// is already being rejected by the line below the CLOSE send. Without the catch,
+// a Node/browser unhandled-rejection event fires and surfaces as a test failure.
+
+test("rejecting closeSubscription on op-timeout does not produce an unhandled rejection", async () => {
+  resetAll(0);
+  const errors = [];
+  const filter = { kinds: [9], "#h": ["ch-reject"], limit: 50 };
+  const subscription = {
+    mode: "history",
+    filter,
+    events: [],
+    resolve: () => assert.fail("must not resolve"),
+    reject: (error) => errors.push(error),
+    timeout: 0,
+    timeoutMs: 5_000,
+  };
+  const subscriptions = new Map([["history-reject", subscription]]);
+
+  // closeSubscription that rejects — simulates a broken socket.
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-reject",
+    message: "rate-limited: quota exceeded; retry in 1s",
+    sendReq: () => Promise.resolve(),
+    closeSubscription: async () => {
+      throw new Error("socket already closed");
+    },
+  });
+
+  // Fire the retry delay and op-timeout.
+  tickTo(1_001);
+  tickTo(6_002);
+
+  // Let any async promise chains settle.
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // The history promise must have been rejected exactly once despite the
+  // closeSubscription rejection — no unhandled rejection from the CLOSE send.
+  assert.equal(
+    errors.length,
+    1,
+    "history promise must be rejected exactly once; the CLOSE rejection is swallowed",
+  );
+  assert.ok(
+    errors[0].message.includes("Relay closed"),
+    `rejection must be the history error, not the CLOSE error (got: ${errors[0].message})`,
+  );
+});
+
+// ── Test: CLOSE wiring at the production call site ────────────────────────────
+//
+// Falsifiable guard: asserts that relayClientSession.ts passes closeSubscription
+// to handleRelayClosed. Removing the wiring line makes this test promptly red —
+// closing the gap where the helper behavioral test passes without the actual
+// production CLOSE being sent.
+
+test("relayClientSession wires closeSubscription into handleRelayClosed", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("./relayClientSession.ts", import.meta.url),
+    "utf8",
+  );
+  // The handleRelayClosed call must pass a closeSubscription callback.
+  assert.match(
+    source,
+    /handleRelayClosed\(\{[^}]*closeSubscription[^}]*\}\)/,
+    "relayClientSession.ts must pass closeSubscription to handleRelayClosed",
+  );
+  // The callback must reach this.closeSubscription so it sends a real CLOSE.
+  assert.match(
+    source,
+    /closeSubscription:\s*\([^)]+\)\s*=>\s*this\.closeSubscription\(/,
+    "closeSubscription callback must delegate to this.closeSubscription()",
+  );
 });
 
 // ── Teardown ──────────────────────────────────────────────────────────────────

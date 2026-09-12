@@ -1,6 +1,6 @@
 //! Import-side helpers for `buzz-agent-snapshot v1`.
 //!
-//! Extracted from `snapshot.rs` to keep that file under the 1000-line gate.
+//! Extracted from `snapshot.rs` to keep that file under the 1500-line gate.
 //! The Tauri commands here (`preview_agent_snapshot_import`,
 //! `confirm_agent_snapshot_import`) are re-exported from `snapshot.rs` and
 //! registered in `lib.rs` through the same `personas::` path as the export
@@ -585,6 +585,7 @@ pub async fn confirm_agent_snapshot_import(
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
+            session_policy: snapshot.definition.session_policy,
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -622,6 +623,7 @@ pub async fn confirm_agent_snapshot_import(
             max_turn_duration_seconds: snapshot.definition.max_turn_duration_seconds,
             parallelism: minted_parallelism
                 .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+            session_policy: snapshot.definition.session_policy,
             system_prompt: snapshot.definition.system_prompt.clone(),
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),

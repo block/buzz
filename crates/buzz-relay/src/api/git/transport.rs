@@ -247,7 +247,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 /// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
 /// `handlers::auth`: banning a human must also revoke their agents, or the ban
 /// is bypassable by cloning and pushing through an agent key.
-async fn deny_banned_git_principal(
+pub(super) async fn deny_banned_git_principal(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
@@ -362,7 +362,7 @@ fn git_expected_url(
 /// repo root — but the *name* validation stays because owner/repo are
 /// still used as object-store key components via `manifest::pointer_key`.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
+pub(super) fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
     // Owner must be exactly 64 lowercase hex chars.
     if owner.len() != 64
         || !owner
@@ -483,13 +483,13 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
 /// — so the remediation body leaks nothing, and only the author can rebind
 /// (kind:30617 is keyed by `(author, d)`). A *broken* binding stays generic
 /// even for the author: ambiguity fails closed.
-async fn authorize_git_read(
+pub(super) async fn authorize_git_read(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     caller: &nostr::PublicKey,
     owner_hex: &str,
     repo_name: &str,
-) -> Result<(), Response> {
+) -> Result<nostr::Event, Response> {
     fn denied() -> Response {
         (StatusCode::NOT_FOUND, "repository not found").into_response()
     }
@@ -552,7 +552,7 @@ async fn authorize_git_read(
         .get_member_role(community, channel_id, &caller.to_bytes())
         .await
     {
-        Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
+        Ok(role) if read_role_allows(role.as_deref()) => Ok(repo_event.event),
         Ok(_) => Err(denied()),
         Err(e) => {
             error!(repo = %repo_name, error = %e, "git read gate: role lookup failed (deny)");
@@ -2118,6 +2118,7 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .merge(super::settings::router())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2435,8 +2436,6 @@ mod track_c_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2533,8 +2532,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
         let (state, pool) = finalize_test_state().await;
         let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());
@@ -2626,8 +2623,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2666,6 +2661,26 @@ mod track_c_tests {
             .expect("serving lease released on failure"));
         drop(state);
         pool.close().await;
+    }
+
+    mod external_infra_minio_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+            super::repo_announcement_holds_serving_lease_until_pointer_is_seeded().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
+            super::finalize_push_holds_serving_lease_through_post_cas_publication().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
+            super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
+        }
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -3180,7 +3195,7 @@ mod track_c_tests {
 }
 
 #[cfg(test)]
-mod sec005_read_gate_tests {
+mod sec005_postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -3291,7 +3306,7 @@ mod sec005_read_gate_tests {
     /// can assert on the exact bytes a git client would see. A blind
     /// `.is_err()` cannot distinguish the generic 404 from the remediation
     /// 404 — and that distinction IS the security property.
-    async fn denial_parts(result: Result<(), Response>) -> (StatusCode, String) {
+    async fn denial_parts<T: std::fmt::Debug>(result: Result<T, Response>) -> (StatusCode, String) {
         let response = result.expect_err("expected a denial");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)

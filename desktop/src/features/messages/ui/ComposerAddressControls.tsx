@@ -1,4 +1,5 @@
-import { ArrowUp, AtSign, X } from "lucide-react";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { ArrowUp, AtSign, Square, X } from "lucide-react";
 import {
   AnimatePresence,
   motion,
@@ -180,11 +181,7 @@ export function ComposerMentionButton({
           <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
               <button
-                aria-label={
-                  hasAgents
-                    ? "Manage automatic agent mentions"
-                    : "Mention someone"
-                }
+                aria-label={hasAgents ? "Manage mentions" : "Mention someone"}
                 className={cn(
                   "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
                   showActiveChrome
@@ -205,9 +202,7 @@ export function ComposerMentionButton({
               </button>
             </TooltipTrigger>
             <TooltipContent>
-              {hasAgents
-                ? "Manage automatic agent mentions"
-                : "Mention someone"}
+              {hasAgents ? "Manage mentions" : "Mention someone"}
             </TooltipContent>
           </Tooltip>
           <AnimatePresence
@@ -234,7 +229,7 @@ export function ComposerMentionButton({
                     <Tooltip disableHoverableContent key={agent.pubkey}>
                       <TooltipTrigger asChild>
                         <motion.button
-                          aria-label={`Don't automatically mention ${agent.displayName} in this conversation`}
+                          aria-label={`Don't automatically mention ${agent.displayName} in this thread`}
                           animate={{ opacity: 1, scale: 1 }}
                           className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                           data-testid={`composer-address-lock-remove-${agent.pubkey}`}
@@ -276,7 +271,7 @@ export function ComposerMentionButton({
                       </TooltipTrigger>
                       <TooltipContent>
                         Don't automatically mention {agent.displayName} in this
-                        conversation
+                        thread <AgentManagementMarker pubkey={agent.pubkey} />
                       </TooltipContent>
                     </Tooltip>
                   ))}
@@ -319,20 +314,32 @@ export function ComposerMentionButton({
 
 export function ComposerSendButton({
   isSending,
+  onFinishVoiceNote,
   sendDisabled,
 }: {
   isSending: boolean;
+  onFinishVoiceNote?: () => void;
   sendDisabled: boolean;
 }) {
+  const isFinishingVoiceNote = onFinishVoiceNote != null;
   return (
     <button
-      aria-label={isSending ? "Sending" : "Send message"}
+      aria-label={
+        isFinishingVoiceNote
+          ? "Finish voice note"
+          : isSending
+            ? "Sending"
+            : "Send message"
+      }
       className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-      data-testid="send-message"
+      data-testid={isFinishingVoiceNote ? "finish-voice-note" : "send-message"}
       disabled={sendDisabled || isSending}
-      type="submit"
+      onClick={onFinishVoiceNote}
+      type={isFinishingVoiceNote ? "button" : "submit"}
     >
-      {isSending ? (
+      {isFinishingVoiceNote ? (
+        <Square aria-hidden className="h-3.5 w-3.5 fill-current" />
+      ) : isSending ? (
         <SendSpinner />
       ) : (
         <ArrowUp aria-hidden className="h-4 w-4" />

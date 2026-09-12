@@ -20,7 +20,7 @@ import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchTex
 import { useSearchMenuKeyboardNavigation } from "@/features/search/ui/useSearchMenuKeyboardNavigation";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import {
@@ -29,8 +29,6 @@ import {
 } from "@/shared/ui/mentionChip";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
-
 type TopbarSearchProps = {
   channelLabels?: Record<string, string>;
   channels: Channel[];
@@ -70,19 +68,6 @@ type SearchHitContextLabel = {
   channelLabel: string | null;
   text: string;
 };
-
-function truncateResultText(content: string, maxLength = 96) {
-  const trimmed = content.trim();
-  if (trimmed.length === 0) {
-    return "No message body.";
-  }
-  const kept = truncateByCharacters(trimmed, maxLength);
-  if (kept.length === trimmed.length) {
-    return trimmed;
-  }
-  return `${truncateByCharacters(trimmed, maxLength - 3).trimEnd()}...`;
-}
-
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
   if (diff < 60) {
@@ -149,7 +134,7 @@ function getUserDisplayName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
