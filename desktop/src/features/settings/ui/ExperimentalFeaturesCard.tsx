@@ -2,6 +2,7 @@ import { setAgentManagedProfiles } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
+import { Mike49AuditFixturePanel } from "./Mike49AuditFixturePanel";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
@@ -61,6 +62,8 @@ export function ExperimentalFeaturesCard() {
           <FeatureRow feature={f} key={f.id} />
         ))}
       </SettingsOptionGroup>
+
+      <Mike49AuditFixturePanel />
     </section>
   );
 }

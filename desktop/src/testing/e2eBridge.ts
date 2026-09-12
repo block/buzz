@@ -220,6 +220,10 @@ type E2eConfig = {
     projectRepoSnapshotError?: string;
     /** Delay remote repository snapshots so project loading UI is observable. */
     projectRepoSnapshotDelayMs?: number;
+    /** Delay the MIKE-49 fixture audit command so its loading state is observable. */
+    mike49AuditDelayMs?: number;
+    /** Make the MIKE-49 fixture audit command reject with this fixed error code (see `Mike49AuditError`). */
+    mike49AuditError?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -12841,6 +12845,97 @@ export function maybeInstallE2eTauriMocks() {
         // e2e runs headless with no OS idle API; the presence hook falls back
         // to in-app activity tracking.
         return null;
+      case "mike49_run_fixture_audit": {
+        // MIKE-49 checkpoint 1: exercises the real click -> invoke ->
+        // render path for `desktop/src/features/settings/ui/
+        // Mike49AuditFixturePanel.tsx` against a mock IPC response shaped
+        // exactly like `Mike49AuditReport` (`shared/api/mike49Audit.ts`).
+        // The real, fixture-only Rust command this mirrors never touches
+        // AppState/archive/native_relay_client -- see
+        // `desktop-tauri/src/commands/mike49_audit/`; this mock does not
+        // re-prove that Rust logic (covered by that crate's own tests),
+        // only that the frontend wires up loading/success/error states to
+        // an actual Tauri IPC round trip, not just a mocked React prop.
+        if (activeConfig?.mock?.mike49AuditDelayMs) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, activeConfig.mock?.mike49AuditDelayMs),
+          );
+        }
+        if (activeConfig?.mock?.mike49AuditError) {
+          throw new Error(activeConfig.mock.mike49AuditError);
+        }
+        return {
+          simulated: true,
+          dataSource: "in_memory_fixture",
+          records: [
+            {
+              scenario: "accepted_record",
+              result: "verified",
+              verifyErrorCode: null,
+              observeOutcomeCode: "accepted",
+              eventId:
+                "1111111111111111111111111111111111111111111111111111111111111111",
+              signer:
+                "2222222222222222222222222222222222222222222222222222222222222222",
+              sessionId: "sess-1",
+              turnId: "turn-1",
+              turnSeq: 3,
+              harness: "claude-code",
+              model: "claude-sonnet-5",
+              stopReason: "end_turn",
+              tokens: {
+                turnInputTokens: 100,
+                turnOutputTokens: 50,
+                turnTotalTokens: 150,
+                cumulativeInputTokens: 100,
+                cumulativeOutputTokens: 50,
+                cumulativeTotalTokens: 150,
+                deltaReliable: true,
+              },
+              cost: {
+                turnCostUsd: 0.01,
+                cumulativeCostUsd: 0.01,
+                note: "harness estimate, never a billed charge",
+              },
+            },
+            {
+              scenario: "wrong_recipient_verify_error",
+              result: "verify_error",
+              verifyErrorCode: "wrong_recipient",
+              observeOutcomeCode: null,
+              eventId:
+                "3333333333333333333333333333333333333333333333333333333333333333",
+              signer: null,
+              sessionId: null,
+              turnId: null,
+              turnSeq: null,
+              harness: null,
+              model: null,
+              stopReason: null,
+              tokens: null,
+              cost: null,
+            },
+          ],
+          pagination: {
+            eventsExamined: 2,
+            stopReason: "page_cap_reached",
+            localTraversalComplete: false,
+            pageLimit: 2,
+            maxPagesPerCall: 1,
+            note: "local_traversal_complete only means this run's own fixture page source had nothing further to return -- it is never proof a real relay published nothing more; this command never queries a real relay at all",
+          },
+          emptySourceProbe: {
+            eventsExamined: 0,
+            stopReason: "exhausted",
+            note: "a genuinely empty in-memory fixture page source: 0 events, exhausted on the first page fetch -- distinct from a capped/incomplete result, which has more data behind it",
+          },
+          sanitizer: {
+            blockedCount: 0,
+            blockedByKind: { record: 0, pagination: 0, empty_source_probe: 0 },
+            droppedFieldCount: 0,
+          },
+        };
+      }
       case "get_git_identity":
         // Matches the "Thomas P" author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.
