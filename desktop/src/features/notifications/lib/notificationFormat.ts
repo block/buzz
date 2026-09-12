@@ -1,3 +1,8 @@
+import {
+  countCharacters,
+  truncateByCharacters,
+} from "@/shared/lib/truncateByCharacters";
+
 const NOTIFICATION_BODY_MAX_LENGTH = 140;
 
 /**
@@ -29,8 +34,8 @@ export function truncateNotificationBody(
 ): string {
   const trimmed = content.trim();
   if (trimmed.length === 0) return fallback;
-  if (trimmed.length <= NOTIFICATION_BODY_MAX_LENGTH) return trimmed;
-  return `${trimmed.slice(0, NOTIFICATION_BODY_MAX_LENGTH - 3).trimEnd()}...`;
+  if (countCharacters(trimmed) <= NOTIFICATION_BODY_MAX_LENGTH) return trimmed;
+  return `${truncateByCharacters(trimmed, NOTIFICATION_BODY_MAX_LENGTH - 3).trimEnd()}...`;
 }
 
 /**

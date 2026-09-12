@@ -60,6 +60,7 @@ import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 export type ThreadDepthGuideAction = {
@@ -233,7 +234,7 @@ export const MessageRow = React.memo(
         openReminder({
           eventId: msg.id,
           channelId: channelId ?? "",
-          preview: msg.body.slice(0, 100),
+          preview: truncateByCharacters(msg.body, 100),
           authorPubkey: msg.pubkey ?? "",
         });
       },

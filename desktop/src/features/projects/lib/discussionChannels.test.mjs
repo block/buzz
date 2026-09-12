@@ -170,3 +170,20 @@ test("discussionSnippet truncates long content on an ellipsis", () => {
   assert.ok(snippet.length <= 400);
   assert.ok(snippet.endsWith("…"));
 });
+
+test("a discussion snippet never ends on half a surrogate pair", () => {
+  const content = `${"x".repeat(398)}🎉 trailing words past the limit`;
+  const snippet = discussionSnippet(content);
+  const body = snippet.slice(0, -1);
+  const lastUnit = body.charCodeAt(body.length - 1);
+  assert.ok(
+    lastUnit < 0xd800 || lastUnit > 0xdbff,
+    `ends on a lone high surrogate: ${JSON.stringify(snippet.slice(-3))}`,
+  );
+});
+
+test("an emoji-heavy snippet is not falsely ellipsised", () => {
+  // 300 characters, 600 code units — under the 400-character limit.
+  const content = "🎉".repeat(300);
+  assert.equal(discussionSnippet(content), content);
+});

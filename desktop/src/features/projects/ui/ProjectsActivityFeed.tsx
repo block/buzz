@@ -36,6 +36,7 @@ import {
   PROJECT_EVENT_VISUALS,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 
 type ActivityKind = ProjectEventKind;
 
@@ -101,7 +102,10 @@ const ACTIVITY_LIMIT = 30;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 
 function contentPreview(content: string) {
-  return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
+  return truncateByCharacters(
+    markdownToPlainText(content).replace(/\s+/g, " ").trim(),
+    280,
+  );
 }
 
 function buildActivityItems({
