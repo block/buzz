@@ -1,0 +1,170 @@
+{
+  "revision": "78618804ec86a014524ad7d1fb55928e8f5c3edf",
+  "sources": [
+    "desktop/src-tauri/src/managed_agents/discovery/catalog.rs",
+    "desktop/src-tauri/src/managed_agents/discovery/presets.rs"
+  ],
+  "codexMinimum": [
+    1,
+    10,
+    0
+  ],
+  "managedNodeVersion": "v24.18.0",
+  "runtimes": [
+    {
+      "id": "goose",
+      "label": "Goose",
+      "commands": [
+        "goose"
+      ],
+      "underlyingCli": "goose",
+      "modelEnv": "GOOSE_MODEL",
+      "providerEnv": "GOOSE_PROVIDER",
+      "effortEnv": "GOOSE_THINKING_EFFORT"
+    },
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "commands": [
+        "claude-agent-acp",
+        "claude-code-acp"
+      ],
+      "underlyingCli": "claude",
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "commands": [
+        "codex-acp"
+      ],
+      "underlyingCli": "codex",
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "buzz-agent",
+      "label": "Buzz Agent",
+      "commands": [
+        "buzz-agent"
+      ],
+      "underlyingCli": null,
+      "modelEnv": "BUZZ_AGENT_MODEL",
+      "providerEnv": "BUZZ_AGENT_PROVIDER",
+      "effortEnv": "BUZZ_AGENT_THINKING_EFFORT"
+    },
+    {
+      "id": "pi",
+      "label": "Pi",
+      "commands": [
+        "buzz-pi-acp"
+      ],
+      "underlyingCli": "pi",
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "devin",
+      "label": "Devin",
+      "commands": [
+        "devin"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor",
+      "commands": [
+        "cursor-agent"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "omp",
+      "label": "Oh My Pi",
+      "commands": [
+        "omp"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "grok",
+      "label": "Grok Build",
+      "commands": [
+        "grok"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode",
+      "commands": [
+        "opencode"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi Code",
+      "commands": [
+        "kimi"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "amp",
+      "label": "Amp",
+      "commands": [
+        "amp-acp"
+      ],
+      "underlyingCli": "amp",
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "hermes",
+      "label": "Hermes Agent",
+      "commands": [
+        "hermes-acp"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    },
+    {
+      "id": "openclaw",
+      "label": "OpenClaw",
+      "commands": [
+        "openclaw"
+      ],
+      "underlyingCli": null,
+      "modelEnv": null,
+      "providerEnv": null,
+      "effortEnv": null
+    }
+  ]
+}

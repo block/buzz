@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { buzzProviderEnvironment, type BuzzProvider } from './buzz-provider.ts';
 import { validateCustom, type CustomAcp } from './custom-acp.ts';
 import { CODEX_ADAPTER, codexEnvironment, codexModels, type CodexSetup } from './codex.ts';
@@ -94,8 +95,7 @@ export class AgentSession {
   constructor(input: AgentLaunch, timeoutMs = 30_000) {
     this.timeoutMs = timeoutMs;
     this.prepared = prepareAgent(input);
-    const { plan, env } = this.prepared;
-    this.owned = spawnOwned(plan.executable, plan.args, plan.workspace, env);
+    this.owned = spawnAgent(this.prepared);
     this.child = this.owned.child;
     void this.owned.ready.catch(() => this.fail('Harness executable unavailable'));
     this.child.on('message', () => { if (this.owned.exited) this.fail('Harness exited'); });
@@ -237,4 +237,18 @@ export class AgentSession {
       return { session: this.session, model, responseHash: hash(this.response), stopReason: 'end_turn', source: 'external-acp-session', executableHash: this.prepared.executableHash };
     } finally { this.prompting = false; this.response = ''; }
   }
+}
+
+/** Both probe and conversation launch use this actual transport boundary. Public
+ * preparation hashes retain the original executable/provider, not ephemeral ports.
+ * The supervisor owns wrapper, harness and native helpers as one process group. */
+export function spawnAgent(prepared: ReturnType<typeof prepareAgent>, extra: Record<string, string> = {}) {
+  const { plan } = prepared;
+  const env = { ...prepared.env, ...extra };
+  if (plan.buzzProvider?.provider === 'databricks_v2' && plan.buzzProvider.credential) {
+    delete env.DATABRICKS_TOKEN;
+    env.BEEHIVE_DATABRICKS_RUNTIME = JSON.stringify({ host: plan.buzzProvider.baseUrl, key: plan.buzzProvider.credential, model: plan.model });
+    return spawnOwned(process.execPath, [fileURLToPath(new URL('./databricks-runtime-child.ts', import.meta.url)), plan.executable, ...plan.args], plan.workspace, env);
+  }
+  return spawnOwned(plan.executable, plan.args, plan.workspace, env);
 }

@@ -1,9 +1,10 @@
+import { validateRuntimeEffort } from './runtime-effort.ts';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { ProviderReference } from './settings.ts';
 
 /** Local immutable Buzz Agent provider contracts, pinned config.rs:631–691,922–960. */
-export type BuzzProvider = { provider: 'anthropic' | 'openai-compat' | 'openrouter' | 'databricks_v2'; apiKeyFile?: string; credential?: ProviderReference; auth?: 'token' | 'external-oauth'; baseUrl: string; models: string[]; wire?: 'auto' | 'chat' | 'responses' };
+export type BuzzProvider = { provider: 'anthropic' | 'openai-compat' | 'openrouter' | 'databricks_v2'; apiKeyFile?: string; credential?: ProviderReference; auth?: 'token' | 'external-oauth'; baseUrl: string; models: string[]; effort?: string; wire?: 'auto' | 'chat' | 'responses' };
 const contracts = {
   databricks_v2: { key: 'DATABRICKS_TOKEN', url: 'DATABRICKS_HOST' },
   anthropic: { key: 'ANTHROPIC_API_KEY', url: 'ANTHROPIC_BASE_URL' },
@@ -12,7 +13,8 @@ const contracts = {
 } as const;
 /** Validate without reading credentials, contacting endpoints or initiating login. */
 export function validateBuzzProvider(value: BuzzProvider): void {
-  if (!value || !Object.hasOwn(contracts, value.provider) || Object.keys(value).some(k => !['provider', 'apiKeyFile', 'credential', 'baseUrl', 'models', 'wire', 'auth'].includes(k)) || !Array.isArray(value.models) || !value.models.length || value.models.length > 100 || value.models.some(m => typeof m !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(m))) throw Error('Invalid local Buzz Agent provider/key-file/models binding');
+  if (!value || !Object.hasOwn(contracts, value.provider) || Object.keys(value).some(k => !['provider', 'apiKeyFile', 'credential', 'baseUrl', 'models', 'wire', 'auth', 'effort'].includes(k)) || !Array.isArray(value.models) || !value.models.length || value.models.length > 100 || value.models.some(m => typeof m !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(m))) throw Error('Invalid local Buzz Agent provider/key-file/models binding');
+  for (const model of value.models) validateRuntimeEffort(value.provider, model, value.effort);
   if (value.provider === 'databricks_v2' ? !['token', 'external-oauth'].includes(value.auth ?? '') : value.auth !== undefined) throw Error('Unsupported provider authentication contract');
   if (value.credential) {
     if (!['openai-compat','databricks_v2'].includes(value.provider) || value.apiKeyFile !== undefined || (value.provider === 'databricks_v2' ? value.auth !== 'token' : value.auth !== undefined) || value.credential.service !== 'beehive' || !/^provider:[0-9a-f-]{36}$/.test(value.credential.account)) throw Error('Invalid OS provider binding');
@@ -27,7 +29,7 @@ export function validateBuzzProvider(value: BuzzProvider): void {
 export function buzzProviderEnvironment(value: BuzzProvider, home: string, configDirectory: string, model: string, resolvedKey?: string): Record<string, string> {
   validateBuzzProvider(value);
   if (!value.models.includes(model)) throw Error('Unsupported Buzz Agent model');
-  const base = { PATH: '/usr/bin:/bin', HOME: home, BUZZ_AGENT_CONFIG_DIR: configDirectory, BUZZ_AGENT_PROVIDER: value.provider, BUZZ_AGENT_MODEL: model };
+  const base = { PATH: '/usr/bin:/bin', HOME: home, BUZZ_AGENT_CONFIG_DIR: configDirectory, BUZZ_AGENT_PROVIDER: value.provider, BUZZ_AGENT_MODEL: model, ...(value.effort === undefined ? {} : { BUZZ_AGENT_THINKING_EFFORT: value.effort }) };
   if (value.auth === 'external-oauth') return { ...base, DATABRICKS_HOST: new URL(value.baseUrl).origin }; // Native owner alone reads/refreshes OAuth after explicit launch.
   const apiKeyFile = value.apiKeyFile!;
   let key: string;

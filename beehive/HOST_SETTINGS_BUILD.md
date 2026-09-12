@@ -1,6 +1,6 @@
 # Host settings implementation checkpoint
 
-This is an **incomplete candidate**, not the complete authorized prototype. No install or publication was performed. Capability/discovery and final delivery work remain required before calling the owner request complete. Databricks setup/catalog/preflight is now implemented as described below; continuous in-run OAuth refresh remains a limitation.
+This is an **incomplete candidate**, not the complete authorized prototype. No install or publication was performed. Runtime integration now includes in-run Databricks refresh, Desktop-backed detection and model-specific Buzz Agent effort. Final combined validation, relay integration and delivery remain required. Earlier chronological limitations below are superseded by the runtime integration section at the end.
 
 ## Implemented
 
@@ -87,3 +87,55 @@ This is a bounded continuation handoff, not a genuine external/toolchain blocker
 - Pinned Node 24.15.0 strict typecheck and 15 focused tests passed. Databricks Save/Start test reaches the actual host launch and ACP consumer with exact provider/host/model/bearer while prior active state remains unchanged, using an explicitly injected credential provider and synthetic ACP executable. Cancellation/late completion/public-secret exclusion covered. No combined Beehive rerun or reassessment of the two previously recorded suite failures.
 - Installed smoke loader now explicitly blocks the new native path. No real environment Databricks host, tokens, Keychain entries, retained OAuth state, browser login, production provider or installed harness was inspected/executed.
 - This supersedes only earlier Databricks-unimplemented statements. The larger owner request and delivery are not complete. The helper package must be incorporated into subsequent exports; continuous refresh inside an already-running stock harness remains unsupported.
+
+
+## Runtime integration 43ed57d2
+
+- `spawnAgent` is now the common actual ACP-probe/conversation-harness spawn
+  boundary. OS-backed Databricks bindings use a run-owned Node wrapper/proxy;
+  native Rust remains the OAuth/custody owner. Each request re-enters the exact
+  workspace/reference token source, including expiry refresh, without restarting
+  the host/agent. Only an isolated per-run capability reaches the model harness;
+  the relay runtime no longer receives the Databricks bearer. Stop aborts requests
+  and helpers inside the existing supervised process group. Upstream 401/403 is
+  latched, no redirect/workspace fallback, no new auth authority or token files.
+- Current-main Desktop Rust catalog/preset data is exported as checked public JSON,
+  including Pi `buzz-pi-acp` + underlying `pi`, separate adapter/CLI availability,
+  Codex strict >=1.10.0 metadata probe, bundled/managed/PATH/login-shell/common/nvm
+  lookup. Probes are bounded, output-capped and owned; no auth/status probes.
+  Unix-only Beehive discovery uses login-shell PATH rather than shell aliases or
+  functions; no Desktop Tauri IPC or credential/config reading is implied.
+- The Add runtime picker shows installed/missing/incompatible adapters explicitly.
+  This catalog's supported OS-backed provider combinations remain **Buzz Agent ×
+  OpenAI/Databricks v2**. Other detected adapters are visibly unavailable for this
+  provider catalog, not falsely offered universal credentials or effort. Existing
+  Goose/Claude/Codex native-auth CLI setup paths remain intact; Pi execution/provider
+  integration is not newly implemented.
+- Effort comes from the packaged canonical model-capability manifest and exact/
+  boundary-aware family precedence. Unknown custom models and UC FQNs omit the
+  picker (no invented fallback effort). Inherit omits the variable. Explicit
+  supported effort persists in the immutable runtime/provider binding, is checked
+  again at launch, and reaches `BUZZ_AGENT_THINKING_EFFORT` in the actual harness.
+  Save/adoption affects only new authorized runs; active snapshots remain unchanged.
+- Installed-smoke loader explicitly blocks the new discovery/auth-runtime seams.
+  No real Keychain, browser, provider, relay, profile, installed harness or existing
+  host lifecycle was used. Native source/binary unchanged; reuse a7e21caa evidence
+  and packaged helper. Exports must now include **src JSON files**, not just TS.
+
+Evidence: `/Users/loganj/.buzz/artifacts/beehive-runtime-integration-43ed57d2/`.
+Final focused integration: **25/25** (`focused-final.log`), including actual wrapper
+single-run expiry/refresh/revocation and relay-transport bearer exclusion.
+Bun 1.4.2 renderer: 2/2. Node 24.15.0 typecheck passes. The first renderer invocation
+used a filter instead of an explicit path (no tests ran); corrected invocation is
+saved separately. Initial broker/conversation invocation used repository-root CWD,
+while these fixtures require package CWD (`resolve('test/...')`); both reported
+process exit from nonexistent fixture paths. Correct package-CWD run: 3/3, unchanged
+assertions/deadlines. These invocation errors do **not** explain the historical
+4eada whole-suite timeout/missing-receipt failures. No combined suite was rerun.
+
+Both old failing stimuli now pass through the shared `spawnAgent` function, but
+lack `buzzProvider` and therefore retain identical legacy executable/args/env and
+never enter the new proxy. Shared launch/ownership remains touched; Larry must
+assess the final combined suite after relay integration, not waive older failures.
+No push/install/publication. Capability-specific non-Buzz provider integration and
+live-account readiness are not claimed by this component.

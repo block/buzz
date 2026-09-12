@@ -35,6 +35,10 @@ export function prepareConversationBinding(input: ConversationSetup, agent: Agen
   // fixed shim argv uses the installed runtime's historical comma transport.
   if (prepared.plan.args.some(a => a.includes('\0'))) throw Error('ACP arguments cannot contain NUL');
   if (input.authTag !== undefined && (typeof input.authTag !== 'string' || input.authTag.length > 16384 || !input.authTag.length)) throw Error('Invalid local owner attestation');
+  const providerEnv = { ...prepared.env };
+  // The relay transport/shim never needs the OS-backed Databricks bearer.
+  // The actual model consumer obtains a run-local capability in spawnAgent.
+  if (agent.buzzProvider?.provider === 'databricks_v2' && agent.buzzProvider.credential) delete providerEnv.DATABRICKS_TOKEN;
   return Object.freeze({
     replyTool: input.replyTool ? prepareReplyTool(input.replyTool) : undefined,
     executable: input.executable,
@@ -45,7 +49,7 @@ export function prepareConversationBinding(input: ConversationSetup, agent: Agen
     relay: url.href,
     agentExecutableHash: prepared.executableHash,
     // Authoritative identity/transport applied after provider env; no arbitrary env input.
-    env: Object.freeze<Record<string, string>>({ ...prepared.env,
+    env: Object.freeze<Record<string, string>>({ ...providerEnv,
       BUZZ_RELAY_URL: url.href,
       BUZZ_ACP_AGENT_OWNER: owner,
       ...(input.authTag === undefined ? {} : { BUZZ_AUTH_TAG: input.authTag }),

@@ -5,7 +5,7 @@ import { agentNsec } from './settings-credentials.ts';
 import { publicKey } from './protocol.ts';
 import { fetchAgentProfile } from './agent-profile.ts';
 import { serviceStatus, startService, stopService, type ServiceStatus } from './host-service.ts';
-import { detectBuzzAgent } from './settings-models.ts';
+import { discoverHarnesses, type DetectedHarness } from './harness-discovery.ts';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { managerCredential } from './manager-credential.ts';
@@ -19,7 +19,7 @@ import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
 
 export type ManagerRequest = { id: number; action: string; values?: Record<string, string>; target?: string; revision?: number };
 export type ManagerItem = { id: string; label: string; detail: string; evidence?: string; disabled?: Record<string, string> };
-export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string; settings?: Settings; service?: ServiceStatus; hostRelay?: string; profilePreview?: RegisteredAgent; models?: string[]; runtimeExecutable?: string; databricksHost?: string };
+export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string; settings?: Settings; service?: ServiceStatus; hostRelay?: string; profilePreview?: RegisteredAgent; models?: string[]; runtimeExecutable?: string; harnesses?: DetectedHarness[]; databricksHost?: string };
 const short = (s: string) => s.length > 22 ? `${s.slice(0,8)}…${s.slice(-6)}` : s;
 
 /** Final plain display text thrown by this boundary; never rewrapped or retranslated. */
@@ -136,6 +136,7 @@ export class ManagerController {
   private profilePreview?: RegisteredAgent;
   private models?: string[];
   private runtimeExecutable?: string;
+  private harnesses?: DetectedHarness[];
   private databricksHost?: string;
   private lastId = 0;
   private status = 'Local Host does not require owner sign-in. Quitting or signing out does not stop hosts or agents.';
@@ -195,7 +196,7 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
     try { routing = readControllerConfig(this.ownerDirectory); } catch { /* Invalid retained routing is refused by sign-in; never reset here. */ }
     let settings: Settings | undefined, hostRelay: string | undefined;
     try { settings = readSettings(this.hostDirectory); if (existsSync(join(this.hostDirectory,'host-identity.json'))) hostRelay = readHostIdentityPublic(this.hostDirectory).pairing.relay; } catch { /* Existing error row remains actionable; never reset settings. */ }
-    return { settings, service: this.service, hostRelay, profilePreview: this.profilePreview, models: this.models, runtimeExecutable: this.runtimeExecutable, databricksHost: this.databricksHost, local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
+    return { settings, service: this.service, hostRelay, profilePreview: this.profilePreview, models: this.models, runtimeExecutable: this.runtimeExecutable, harnesses: this.harnesses, databricksHost: this.databricksHost, local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
   }
 
   private fresh(m: Message) { return Boolean(this.client?.connected && Date.now() - Number(m.body.observedAt) <= 6000); }
@@ -237,15 +238,18 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
       } else if (request.action === 'add-openai') {
         await this.credential({ action: 'add-openai', directory: this.hostDirectory, name: v.name, secret: v.secret },abort.signal); check(); this.status = 'Provider saved. No agent was started.';
       } else if (request.action === 'runtime-form') {
-        this.runtimeExecutable = detectBuzzAgent(); this.models = undefined; this.status = this.runtimeExecutable ? 'Buzz Agent found. Model access is not yet verified.' : 'Buzz Agent was not found on PATH. No installed harness was run.';
+        this.runtimeExecutable = undefined; this.harnesses = undefined; this.models = undefined;
+        const harnesses = await discoverHarnesses(abort.signal); check(); this.harnesses = harnesses;
+        this.runtimeExecutable = this.harnesses.find(h => h.id === 'buzz-agent' && h.providers.length)?.executable; this.models = undefined;
+        this.status = this.harnesses.map(h => `${h.label}: ${h.reason}`).join(' · ');
       } else if (request.action === 'models') {
         this.models = undefined;
         const provider = readSettings(this.hostDirectory).providers.find(p => p.id === v.provider);
         const result = provider?.type === 'databricks_v2' ? await databricksNative({ action: 'models',host:provider.endpoint,key:provider.key },abort.signal) : await this.credential({ action: 'models', directory: this.hostDirectory, provider: v.provider },abort.signal); check(); this.models = result.models; this.status = 'Model list loaded. Custom model is also available.';
       } else if (request.action === 'add-runtime') {
-        if (!this.runtimeExecutable) throw plain('No supported executable found.');
+        if (!this.runtimeExecutable || (v.harness ?? 'buzz-agent') !== 'buzz-agent') throw plain('No supported executable found.');
         const previous = readSettings(this.hostDirectory);
-        saveSettings(this.hostDirectory,{ ...previous, runtimes: [...previous.runtimes,{ id: settingsId(), name: v.name ?? '', harness: 'buzz-agent', executable: this.runtimeExecutable, providerId: v.provider ?? '', model: v.model ?? '' }] },previous.revision);
+        saveSettings(this.hostDirectory,{ ...previous, runtimes: [...previous.runtimes,{ id: settingsId(), name: v.name ?? '', harness: 'buzz-agent', executable: this.runtimeExecutable, providerId: v.provider ?? '', model: v.model ?? '', ...(v.effort ? { effort: v.effort } : {}) }] },previous.revision);
         this.status = 'Runtime saved for new runs. Running agents did not change. Host loading is reported separately.';
       } else if (request.action === 'host-start') {
         this.service = await startService(this.hostDirectory); check(); this.status = 'Host running. Registration and settings do not start agents.';

@@ -1,3 +1,4 @@
+import { validateRuntimeEffort } from './runtime-effort.ts';
 import { databricksHost } from './databricks.ts';
 import { existsSync, mkdirSync, rmdirSync, lstatSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
@@ -10,7 +11,7 @@ export type RegisteredAgent = { publicKey: string; key: CredentialReference; pro
 /** Each provider version owns an exact immutable OS credential entry. */
 export type ProviderReference = { service: 'beehive'; account: string };
 export type SavedProvider = { id: string; name: string; type: 'openai' | 'databricks_v2'; endpoint: string; key: ProviderReference };
-export type SavedRuntime = { id: string; name: string; harness: 'buzz-agent'; executable: string; providerId: string; model: string };
+export type SavedRuntime = { id: string; name: string; harness: 'buzz-agent'; executable: string; providerId: string; model: string; effort?: string };
 export type Settings = { version: 1; revision: number; agents: RegisteredAgent[]; providers: SavedProvider[]; runtimes: SavedRuntime[] };
 const path = (directory: string) => join(directory, 'settings.json');
 const label = (s: unknown) => typeof s === 'string' && s.length > 0 && s.length <= 128 && !/[\x00-\x1f\x7f]/.test(s);
@@ -26,12 +27,13 @@ export function validateSettings(value: Settings): Settings {
   }
   for (const p of value.providers) if (!label(p.name) || !label(p.id) || !['openai','databricks_v2'].includes(p.type) || (p.type === 'openai' ? p.endpoint !== 'https://api.openai.com/v1' : databricksHost(p.endpoint) !== p.endpoint) || p.key?.service !== 'beehive' || !/^provider:[0-9a-f-]{36}$/.test(p.key.account)) throw Error('Invalid saved provider');
   for (const r of value.runtimes) if (!label(r.id) || !label(r.name) || r.harness !== 'buzz-agent' || !isAbsolute(r.executable) || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(r.model) || !value.providers.some(p => p.id === r.providerId)) throw Error('Invalid saved runtime');
+  for (const r of value.runtimes) validateRuntimeEffort(value.providers.find(p => p.id === r.providerId)!.type, r.model, r.effort);
   // Reject unknown fields, including accidental secret-bearing input.
   const fields = (o: object, allowed: string[]) => { if (Object.keys(o).some(k => !allowed.includes(k))) throw Error('Unexpected settings field'); };
   fields(value, ['version','revision','agents','providers','runtimes']);
   for (const a of value.agents) { fields(a, ['publicKey','key','profile','profileState']); if (a.profile) fields(a.profile, ['relay','name','picture','about']); }
   for (const p of value.providers) { fields(p, ['id','name','type','endpoint','key']); fields(p.key, ['service','account']); }
-  for (const r of value.runtimes) fields(r, ['id','name','harness','executable','providerId','model']);
+  for (const r of value.runtimes) fields(r, ['id','name','harness','executable','providerId','model','effort']);
   return structuredClone(value);
 }
 /** Absent settings means an empty catalog, never reconstructed credentials. */

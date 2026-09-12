@@ -21,7 +21,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     result = { sessionId, modelId: mode === 'wrong-model' ? 'other-model' : selected };
   } else if (m.method === 'session/prompt') {
     if (selected !== process.env.BUZZ_AGENT_MODEL || m.params.sessionId !== sessionId || (mode !== 'databricks-os' && process.env.DATABRICKS_TOKEN) || process.env.BUZZ_PRIVATE_KEY || process.env.BUZZ_AGENT_PROVIDER !== (mode === 'openai' ? 'openai-compat' : 'databricks_v2')) process.exit(8);
-    if (mode === 'databricks-os' && (process.env.DATABRICKS_TOKEN !== 'synthetic-provider-key' || process.env.DATABRICKS_HOST !== 'https://fixture.example')) process.exit(8);
+    if (mode === 'databricks-os' && (!/^http:\/\/127\.0\.0\.1:\d+$/.test(process.env.DATABRICKS_HOST ?? '') || !/^[0-9a-f]{64}$/.test(process.env.DATABRICKS_TOKEN ?? '') || process.env.BEEHIVE_DATABRICKS_RUNTIME !== undefined)) process.exit(8);
     if (mode === 'openai' && process.env.OPENAI_COMPAT_API_KEY !== 'synthetic-provider-key') process.exit(8);
     if (mode === 'delayed') { writeFileSync('prompt-started', '1'); await delay(4000); }
     const update = { jsonrpc: '2.0', method: 'session/update', params: { sessionId: mode === 'wrong-session' ? 'other-session' : sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture greeting, not live model proof.' } } } };

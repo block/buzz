@@ -49,12 +49,25 @@ The binary is built for arm64; other platform custody/export is not implemented.
   after awaited close. Node deadlines: login 180s, models/token 20s; cancellation
   sends TERM, then KILL after 250ms, and awaits close before settling.
 * Model listing and Start preflight are headless and can refresh, never opening
-  the browser. Launch passes the refreshed access token through the existing
-  private `DATABRICKS_TOKEN` harness environment and the exact workspace/model.
-  **A running stock buzz-agent receives a static access token**: long-lived
-  in-process refresh after that token expires is not provided by this bridge.
-  An explicit new Start/Restart obtains a refreshed token. This is a known
-  remaining limitation, not continuous token-source integration in the harness.
+  the browser. For catalog OS-backed Databricks runtimes, `spawnAgent` now starts
+  the run-owned Node `databricks-runtime-child.ts` wrapper. The stock harness
+  retains `databricks_v2` and its native wire routing, but receives an ephemeral
+  loopback endpoint and random per-run bearer capability, not the provider token.
+  Each model/catalog request calls this unchanged native helper's `token` action
+  against the immutable real workspace/reference. Native expiry/refresh/verified
+  rotation therefore serves an ongoing run without restarting the agent.
+* The proxy admits only canonical v2 catalog/model paths and the selected model;
+  no redirects or arbitrary upstream hosts. OAuth/network failures fail closed;
+  upstream 401/403 latches rejection for that run (explicit sign-in/new run may be
+  needed). It does not implement a parallel forced-refresh OAuth engine. Native
+  refresh is expiry-based; a server-side early rejection is not silently retried
+  with another provider/workspace. No streaming extension is claimed: current
+  canonical Buzz Agent requests/responses are non-streaming.
+* Wrapper, harness and native helpers belong to the existing supervised process
+  group. Stop fences responses, aborts fetch/helpers, awaits close, and retains
+  the supervisor's existing TERM/KILL/absence verification. Legacy external-OAuth
+  and explicit token-file bindings are unchanged; only OS-backed catalog bindings
+  use the adapter. No helper binary change/rebuild is needed for this integration.
 * Cancellation may follow an OS write. It cannot undo grant rotation or pretend
   rollback; no cancelled operation commits a new public provider. Recovery refs
   remain. Browser windows owned by the OS may remain open; helper/listener do not.
@@ -62,3 +75,14 @@ The binary is built for arm64; other platform custody/export is not implemented.
 Tests explicitly substitute native/browser/OS custody with synthetic seams.
 `manager-installed-loader.ts` blocks this new native path in future install
 smokes. Fresh HOME alone is not credential or browser isolation.
+
+## Export additions for runtime integration
+
+Include every `beehive/src/*.ts` **and `beehive/src/*.json`** in the Node/Bun
+package, especially both runtime adapter modules, `harness-contract.json` and
+`model-capabilities.json`. The latter is a byte-identical packaged copy of
+`scripts/model-capabilities.json`, checked by tests. Regenerate the harness
+contract explicitly with `python3 beehive/tools/export-harnesses.py <reviewed-SHA>`
+from the repository root; its current source is Desktop main
+`78618804ec86a014524ad7d1fb55928e8f5c3edf`. Keep the existing helper binary in
+`bin/beehive-databricks`; do not build/install anything at runtime.

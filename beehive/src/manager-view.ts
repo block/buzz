@@ -1,3 +1,4 @@
+import { runtimeForm } from './runtime-form.ts';
 import { createCliRenderer } from '@opentui/core';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -86,19 +87,7 @@ function render() {
       if (await screen.confirm(`Save provider ${name}? No agent will start.`)) await request('add-openai',{ name, secret });
       secret = '';
     } },
-    { label: 'Add runtime', run: async () => {
-      await request('runtime-form'); if (!snapshot.runtimeExecutable) return;
-      const harness = await screen.choose('Supported harness',['Buzz Agent']); if (!harness) return;
-      const providers = snapshot.settings?.providers ?? [];
-      if (!providers.length) { screen.notice('Add a provider first.'); return; }
-      const choice = await screen.choose('Provider',providers.map(p => `${p.name} · ${p.id}`)); if (!choice) return;
-      const provider = providers.find(p => choice === `${p.name} · ${p.id}`)!;
-      await request('models',{ provider: provider.id });
-      const choiceModel = await screen.choose(snapshot.models ? 'Model' : 'Model listing unavailable · Custom model allowed',[...(snapshot.models ?? []),'Custom model']); if (!choiceModel) return;
-      const model = choiceModel === 'Custom model' ? await screen.input('Exact model ID. Custom does not verify provider access.') : choiceModel; if (!model) return;
-      const name = await screen.input('Runtime name',model); if (!name) return;
-      if (await screen.confirm(`Save ${name}?\nBuzz Agent · ${provider.name} · ${model}\nEffort control is unavailable in this candidate.\nSaved for new runs. Running agents do not change.`)) await request('add-runtime',{ name, model, provider: provider.id });
-    } },
+    { label: 'Add runtime', run: () => runtimeForm(screen, () => snapshot, request) },
     { label: 'Start', disabled: snapshot.service?.state === 'unknown' ? 'Host ownership is unknown. No process will be adopted.' : undefined, run: async () => {
       if (!configured) { await routing('configure'); return; }
       if (await screen.confirm('Start the local host service? It keeps running when you quit. The OS may ask for key access. This does not start an agent.')) await request('host-start');

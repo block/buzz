@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
-import { prepareAgent, type AgentLaunch, type Evidence } from './acp.ts';
+import { prepareAgent, spawnAgent, type AgentLaunch, type Evidence } from './acp.ts';
 import { ReplyTool } from './reply-tool.ts';
 import { prepareConversation, type ConversationSetup } from './conversation.ts';
 
@@ -137,10 +137,9 @@ export class ConversationSession {
       if (!hello || hello.capability !== this.capability || !Number.isSafeInteger(hello.pid) || hello.pid! <= 1 || this.harnesses.length >= 8) { socket.destroy(); return; }
       this.shimPids.add(hello.pid!);
       authenticated = true; clearTimeout(timer);
-      const { plan, env } = this.prepared;
       // No data supplied by a shim can alter argv, workspace, identity or env.
-      harness = spawnOwned(plan.executable, plan.args, plan.workspace, {
-        ...env, BUZZ_PRIVATE_KEY: this.plan.env.BUZZ_PRIVATE_KEY,
+      harness = spawnAgent(this.prepared, {
+        BUZZ_PRIVATE_KEY: this.plan.env.BUZZ_PRIVATE_KEY,
         BUZZ_RELAY_URL: this.plan.env.BUZZ_RELAY_URL,
         ...(this.plan.env.BUZZ_AUTH_TAG ? { BUZZ_AUTH_TAG: this.plan.env.BUZZ_AUTH_TAG } : {}),
       });

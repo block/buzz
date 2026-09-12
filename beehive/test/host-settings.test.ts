@@ -88,15 +88,16 @@ for (const providerType of ['openai','databricks_v2'] as const) test(`${provider
   if (providerType === 'openai') addOpenAI(root,'Fixture','synthetic',{ read: () => stored, create(_r,v) { stored = v; } });
   else await addDatabricks(root,'Fixture','https://fixture.example',new AbortController().signal,async () => ({ok:true}));
   const prior = readSettings(root), id = settingsId();
+  const model = providerType === 'openai' ? 'gpt-5' : 'databricks-gpt-5-4';
   const executable = join(root,'fixture-buzz-agent');
-  writeFileSync(executable,`#!/bin/sh\nexec '${process.execPath}' '${fileURLToPath(new URL('./acp-fixture.ts',import.meta.url))}' ${providerType === 'openai' ? 'openai' : 'databricks-os'}\n`,{mode:0o700});
-  saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: 'buzz-agent', executable, providerId: prior.providers[0]!.id, model: 'custom-future' }] },prior.revision);
+  writeFileSync(executable,`#!/bin/sh\n[ \"$BUZZ_AGENT_THINKING_EFFORT\" = high ] || exit 9\nexec '${process.execPath}' '${fileURLToPath(new URL('./acp-fixture.ts',import.meta.url))}' ${providerType === 'openai' ? 'openai' : 'databricks-os'}\n`,{mode:0o700});
+  saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: 'buzz-agent', executable, providerId: prior.providers[0]!.id, model, effort: 'high' }] },prior.revision);
   await wait(() => running.settingsRevision === 2);
   await wait(() => reports.some(m => m.type === 'inventory' && (m.body.harnessSetups as any[]).some(r => r.id === `runtime:${id}`)));
   const inventory = reports.filter(m => m.type === 'inventory').at(-1)!;
   assert.deepEqual(inventory.body.actualRun,active);
   const binding = (inventory.body.harnessSetups as any[]).find(r => r.id === `runtime:${id}`);
-  const save = message('save',hostKey,publicKey(agent),inventory.revision,{ model: 'custom-future', workspace: root, profile: 'default', harnessSetup: { id: binding.id, fingerprint: binding.fingerprint } });
+  const save = message('save',hostKey,publicKey(agent),inventory.revision,{ model, workspace: root, profile: 'default', harnessSetup: { id: binding.id, fingerprint: binding.fingerprint } });
   receive(save); await wait(() => reports.some(m => m.body.operation === save.id));
   assert.equal(reports.find(m => m.body.operation === save.id)?.body.result,'saved; running configuration unchanged');
   assert.deepEqual(reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun,active);
@@ -106,7 +107,7 @@ for (const providerType of ['openai','databricks_v2'] as const) test(`${provider
   assert.equal(stopped.body.phase,'stopped');
   const nextStart = message('start',hostKey,publicKey(agent),stopped.revision); receive(nextStart); await wait(() => reports.some(m => m.body.operation === nextStart.id));
   assert.equal(reports.find(m => m.body.operation === nextStart.id)?.body.result,'accepted');
-  assert.equal((reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun as any).selection.model,'custom-future');
+  assert.equal((reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun as any).selection.model,model);
   assert.equal(providerReads,1);
   assert.ok(!JSON.stringify(reports).includes('synthetic-provider-key'));
   assert.ok(!readFileSync(join(root,'journal.json'),'utf8').includes('synthetic-provider-key'));
