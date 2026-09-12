@@ -72,6 +72,30 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Reject content that contains a NUL byte (`0x00`).
+///
+/// Rust strings and JSON can represent NUL, so this validator is not a Rust-
+/// level guard. It is a defense for NUL bytes that reach the `buzz` process
+/// through paths other than `--content` argv on Windows: stdin, file, paste,
+/// or non-Windows argv where the byte survives. On Windows, a NUL inside
+/// `--content` is dropped by the OS command-line boundary before `buzz.exe`
+/// starts, so this validator cannot detect that class of truncation — the
+/// actionable workaround there is to send the message body through stdin
+/// using a PowerShell literal here-string (`@'...'@`) so backtick escapes
+/// do not expand to NUL.
+pub fn validate_no_nul_bytes(content: &str) -> Result<(), CliError> {
+    if let Some(idx) = content.bytes().position(|b| b == 0) {
+        return Err(CliError::Usage(format!(
+            "content contains a NUL byte (0x00) at byte offset {idx}, \
+             which can cause silent truncation on some transports — \
+             remove the NUL byte. On Windows, pipe the body through stdin \
+             using a PowerShell literal here-string (single-quoted) to avoid \
+             backtick expansion"
+        )));
+    }
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -274,6 +298,62 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    // --- validate_no_nul_bytes ---
+
+    #[test]
+    fn validate_no_nul_bytes_accepts_normal_content() {
+        assert!(validate_no_nul_bytes("hello world").is_ok());
+        assert!(validate_no_nul_bytes("unicode: café ☕ — em dash").is_ok());
+        assert!(validate_no_nul_bytes("").is_ok());
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_embedded_nul_with_offset() {
+        let content = "before\0after";
+        let err = validate_no_nul_bytes(content).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("NUL"), "error must mention NUL: {msg}");
+        assert!(
+            msg.contains("byte offset 6"),
+            "error must name the byte offset of the NUL: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_leading_nul() {
+        let err = validate_no_nul_bytes("\0hello").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(err.to_string().contains("byte offset 0"));
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_rejects_trailing_nul() {
+        let err = validate_no_nul_bytes("hello\0").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_error_names_stdin_workaround() {
+        // The error must steer the operator toward stdin as a workaround,
+        // not toward --content argv (which the OS command line truncates).
+        let err = validate_no_nul_bytes("hello\0world").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("stdin"), "error should mention stdin: {msg}");
+    }
+
+    #[test]
+    fn validate_no_nul_bytes_uses_byte_index_not_char_index() {
+        // 'é' is 2 UTF-8 bytes; an embedded NUL after it should report
+        // byte offset 2 (not char offset 1).
+        let content = "é\0x";
+        let err = validate_no_nul_bytes(content).unwrap_err();
+        assert!(
+            err.to_string().contains("byte offset 2"),
+            "expected byte offset 2, got: {err}"
+        );
     }
 
     // --- percent_encode ---

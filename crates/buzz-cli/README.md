@@ -32,6 +32,13 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
+
+# On Windows, pass the body through stdin with a PowerShell literal
+# here-string so backtick escapes (e.g. `0) do not expand to NUL and
+# silently truncate the message before buzz.exe starts:
+#   @'
+#   ...content with `backticks` and $variables -- preserved literally.
+#   '@ | buzz messages send --channel <uuid> --content -
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
