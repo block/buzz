@@ -375,52 +375,114 @@ fn parse_channel_deep_link_rejects_malformed_forms() {
 
 #[test]
 fn parse_message_deep_link_extracts_required_params() {
-    let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
+    let url = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
     let payload = parse_message_deep_link(&url).expect("required params present");
-    assert_eq!(payload["channelId"], "abc");
-    assert_eq!(payload["messageId"], "xyz");
+    assert_eq!(payload["channelId"], "580ca78b-9dae-46f3-8854-bd671853ba32");
+    assert_eq!(
+        payload["messageId"],
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
     assert!(payload["threadRootId"].is_null());
 }
 
 #[test]
 fn parse_message_deep_link_accepts_buzz_scheme() {
-    let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
+    let url = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
     let payload = parse_message_deep_link(&url).expect("required params present");
-    assert_eq!(payload["channelId"], "abc");
-    assert_eq!(payload["messageId"], "xyz");
+    assert_eq!(payload["channelId"], "580ca78b-9dae-46f3-8854-bd671853ba32");
+    assert_eq!(
+        payload["messageId"],
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
 }
 
 #[test]
 fn parse_message_deep_link_includes_thread_root() {
-    let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=root1").unwrap();
+    let url = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&thread=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
     let payload = parse_message_deep_link(&url).expect("required params present");
-    assert_eq!(payload["threadRootId"], "root1");
+    assert_eq!(
+        payload["threadRootId"],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
 }
 
 #[test]
 fn parse_message_deep_link_rejects_missing_id() {
-    let url = Url::parse("buzz://message?channel=abc").unwrap();
+    let url = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32").unwrap();
     assert!(parse_message_deep_link(&url).is_none());
 }
 
 #[test]
 fn parse_message_deep_link_rejects_empty_channel() {
     // Regression: `channel=&id=foo` previously produced channelId: "".
-    let url = Url::parse("buzz://message?channel=&id=foo").unwrap();
+    let url = Url::parse("buzz://message?channel=&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
     assert!(parse_message_deep_link(&url).is_none());
 }
 
 #[test]
 fn parse_message_deep_link_rejects_empty_id() {
-    let url = Url::parse("buzz://message?channel=abc&id=").unwrap();
+    let url =
+        Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=").unwrap();
     assert!(parse_message_deep_link(&url).is_none());
 }
 
 #[test]
 fn parse_message_deep_link_treats_empty_thread_as_absent() {
-    let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
+    let url = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&thread=").unwrap();
     let payload = parse_message_deep_link(&url).expect("required params present");
     assert!(payload["threadRootId"].is_null());
+}
+
+#[test]
+fn parse_message_deep_link_validates_the_shapes_its_neighbours_validate() {
+    // `parse_channel_deep_link` already refuses these exact values in the path
+    // form of the same two identifiers, so accepting them here handed the
+    // frontend a payload it could never route.
+    for raw in [
+        "buzz://message?channel=not-a-uuid&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=xyz",
+        "buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&thread=root1",
+    ] {
+        assert!(
+            parse_message_deep_link(&Url::parse(raw).unwrap()).is_none(),
+            "must reject {raw}"
+        );
+    }
+    // Hex is canonicalised, matching the channel parser.
+    let upper = Url::parse("buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+    assert_eq!(
+        parse_message_deep_link(&upper).expect("valid")["messageId"],
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+}
+
+#[test]
+fn parse_message_deep_link_rejects_a_repeated_param() {
+    // The loop used to keep the last value while the in-app parser keeps the
+    // first, so one URL routed two ways depending on where it was opened.
+    for raw in [
+        "buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&channel=11111111-1111-4111-8111-111111111111",
+        "buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&thread=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&thread=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ] {
+        assert!(
+            parse_message_deep_link(&Url::parse(raw).unwrap()).is_none(),
+            "must reject {raw}"
+        );
+    }
+}
+
+#[test]
+fn parse_join_deep_link_rejects_a_repeated_param() {
+    for raw in [
+        "buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc&code=evil",
+        "buzz://join?relay=wss%3A%2F%2Frelay.example&relay=wss%3A%2F%2Fevil.example&code=abc",
+    ] {
+        assert!(
+            parse_join_deep_link(&Url::parse(raw).unwrap()).is_none(),
+            "must reject {raw}"
+        );
+    }
 }
 
 #[test]
@@ -603,4 +665,69 @@ fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
     let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
     let payload = parse_nostr_bind_deep_link(&url).unwrap();
     assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
+}
+
+/// An optional parameter is still covered by the one-value-per-param policy.
+/// Reading a repetition as "not supplied" let the link through with the field
+/// silently dropped, which is the ambiguity this policy exists to remove.
+#[test]
+fn optional_params_reject_a_repetition_rather_than_reading_it_as_absent() {
+    let join = Url::parse(
+        "buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc&policy_receipt=a&policy_receipt=b",
+    )
+    .unwrap();
+    assert!(
+        parse_join_deep_link(&join).is_none(),
+        "a repeated policy_receipt must reject the join, not join without it"
+    );
+
+    let add_community = Url::parse(
+        "buzz://add-community?relay=wss%3A%2F%2Facme.example&name=Acme&name=Evil%20Corp",
+    )
+    .unwrap();
+    assert!(
+        parse_add_community_deep_link(&add_community).is_none(),
+        "a repeated name must reject the link, not add the community unnamed"
+    );
+}
+
+/// Nostr-bind is the most security-sensitive link the app parses, and its
+/// required fields used to read the *first* value while every other family had
+/// moved to the single policy.
+#[test]
+fn parse_nostr_bind_deep_link_rejects_a_repeated_required_param() {
+    for (param, extra) in [
+        ("origin", "origin=https%3A%2F%2Fevil.example"),
+        (
+            "challenge_id",
+            "challenge_id=11111111-1111-4111-8111-111111111111",
+        ),
+        ("verification_code", "verification_code=999999"),
+        ("audience", "audience=buzz%3Aevil"),
+        ("return", "return=browser_fragment_v1"),
+    ] {
+        let url = Url::parse(&format!("{}&{extra}", valid_nostr_bind_url())).unwrap();
+        assert_eq!(
+            parse_nostr_bind_deep_link(&url).unwrap_err(),
+            format!("repeated {param}"),
+            "a repeated {param} must be named as such"
+        );
+    }
+}
+
+/// The callback is validated against `origin` only when it is present, so
+/// reading a repeated `callback_url` as absent would hand back a bind payload
+/// carrying a callback that never met `validate_nostr_bind_callback_url`.
+#[test]
+fn parse_nostr_bind_deep_link_rejects_a_repeated_callback_url() {
+    let url = Url::parse(&format!(
+        "{}&callback_url=https%3A%2F%2Fexample.com%2Fbuzz&callback_url=https%3A%2F%2Fevil.example%2Fbuzz",
+        valid_nostr_bind_url()
+    ))
+    .unwrap();
+
+    assert_eq!(
+        parse_nostr_bind_deep_link(&url).unwrap_err(),
+        "repeated callback_url"
+    );
 }
