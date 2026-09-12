@@ -6,6 +6,7 @@ import {
   LockKeyhole,
   MessageCircle,
   RefreshCw,
+  TriangleAlert,
 } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -26,6 +27,7 @@ const UNAVAILABLE_ICONS = {
   access: LockKeyhole,
   unbound: LockKeyhole,
   network: CloudOff,
+  path: TriangleAlert,
   ref: GitBranch,
   unknown: CircleAlert,
 } satisfies Record<ProjectRepoUnavailableReason, typeof CircleAlert>;

@@ -276,6 +276,11 @@ function RepositoryUnavailableIndicator({
       description: "The Buzz git service could not be reached.",
       label: "Unreachable",
     },
+    path: {
+      description:
+        "The repository contains paths longer than the local filesystem allows.",
+      label: "Path too long",
+    },
     ref: {
       description: "The advertised branch is missing from the git remote.",
       label: "Branch missing",
