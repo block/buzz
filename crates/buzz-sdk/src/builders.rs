@@ -2275,12 +2275,16 @@ pub fn build_project(
         )));
     }
 
-    // Channel UUID validation
-    if let Some(ch) = channel {
-        uuid::Uuid::parse_str(ch).map_err(|_| {
-            SdkError::InvalidInput(format!("buzz-channel must be a valid UUID (got {ch:?})"))
-        })?;
-    }
+    // Channel UUID validation + hyphenated canonicalize (same as git PR channel_id).
+    let channel = match channel {
+        Some(ch) => {
+            let id = uuid::Uuid::parse_str(ch).map_err(|_| {
+                SdkError::InvalidInput(format!("buzz-channel must be a valid UUID (got {ch:?})"))
+            })?;
+            Some(id.hyphenated().to_string())
+        }
+        None => None,
+    };
 
     // Visibility enum validation
     if let Some(vis) = visibility {
@@ -2308,7 +2312,7 @@ pub fn build_project(
             Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))?,
         );
     }
-    if let Some(ch) = channel {
+    if let Some(ref ch) = channel {
         tags.push(tag(&["buzz-channel", ch])?);
     }
     if let Some(vis) = visibility {
@@ -4373,6 +4377,20 @@ mod tests {
             let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
             assert!(matches!(err, SdkError::InvalidInput(_)));
         }
+    }
+
+    #[test]
+    fn build_project_canonicalizes_buzz_channel() {
+        let slug = "demo";
+        let ch = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE";
+        let ev = sign(
+            build_project(slug, None, None, &[], Some(ch), Some("listed")).unwrap(),
+        );
+        assert!(has_tag(
+            &ev,
+            "buzz-channel",
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        ));
     }
 
     #[test]
