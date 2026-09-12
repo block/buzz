@@ -238,6 +238,10 @@ pub struct TurnUsage {
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
+    /// Input-side context used by the last successful model request this turn.
+    pub context_used_tokens: Option<u64>,
+    /// Context-window capacity paired with `context_used_tokens`.
+    pub context_limit_tokens: Option<u64>,
     /// Billing identity for this turn, as received from the publisher.
     /// `None` when the publisher omitted it (unrecognised endpoint, mixed
     /// identities, old harness). Per-turn only — not session-cumulative.
@@ -391,6 +395,8 @@ impl StandardUsageTracker {
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         })
     }
@@ -729,6 +735,12 @@ impl UsageTracker {
                 // Already poisoned: stays poisoned regardless of this notification.
                 poisoned @ Some(None) => poisoned,
             };
+            let (context_used_tokens, context_limit_tokens) =
+                if payload.used > 0 && payload.context_limit > 0 {
+                    (Some(payload.used), Some(payload.context_limit))
+                } else {
+                    (None, None)
+                };
             self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
                 turn_seq,
@@ -746,6 +758,8 @@ impl UsageTracker {
                 cumulative_cache_read_tokens: current_cached_input,
                 cumulative_cache_write_tokens: current_cache_write,
                 model: payload.model.clone(),
+                context_used_tokens,
+                context_limit_tokens,
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
@@ -1007,6 +1021,29 @@ mod tests {
             model: None,
             pricing_identity: None,
         }
+    }
+
+    // ── Context-window snapshot threading ───────────────────────────────────
+
+    #[test]
+    fn context_snapshot_is_last_write_wins_and_invalid_pair_means_unknown() {
+        let mut tracker = UsageTracker::default();
+        tracker.seed_zero_baseline("sess-context");
+        tracker.begin_turn("sess-context");
+
+        let mut first = payload(100, 20, None);
+        first.used = 90;
+        first.context_limit = 200_000;
+        tracker.record("sess-context", &first);
+
+        let mut final_snapshot = payload(180, 40, None);
+        final_snapshot.used = 210_000;
+        final_snapshot.context_limit = 0;
+        tracker.record("sess-context", &final_snapshot);
+
+        let usage = tracker.take().expect("turn usage");
+        assert_eq!(usage.context_used_tokens, None);
+        assert_eq!(usage.context_limit_tokens, None);
     }
 
     // ── Turn scoping: setup notifications must not pollute the first real turn ─
@@ -1988,6 +2025,8 @@ mod tests {
             cumulative_cache_read_tokens: None, // harness did not report the field
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
 
@@ -2029,6 +2068,8 @@ mod tests {
             cumulative_cache_read_tokens: Some(600),
             cumulative_cache_write_tokens: None,
             model: None,
+            context_used_tokens: None,
+            context_limit_tokens: None,
             pricing_identity: None,
         };
 

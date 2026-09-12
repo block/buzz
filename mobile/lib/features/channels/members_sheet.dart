@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/agent_usage/agent_usage_indicator.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -229,15 +230,37 @@ class _MemberTile extends ConsumerWidget {
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
+    final isAgent = member.isBot || profile?.isAgent == true;
+
+    final avatar = _MemberAvatar(
+      avatarUrl: profile?.avatarUrl,
+      initial: initial,
+      isAgent: isAgent,
+    );
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: _MemberAvatar(
-        avatarUrl: profile?.avatarUrl,
-        initial: initial,
-        isAgent: member.isBot || profile?.isAgent == true,
+      leading: isAgent
+          ? AgentUsageIndicator(
+              agentPubkey: member.pubkey,
+              agentLabel: label,
+              channelId: channelId,
+              child: avatar,
+            )
+          : avatar,
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+          if (isAgent) ...[
+            const SizedBox(width: Grid.half),
+            AgentUsagePercentText(
+              agentPubkey: member.pubkey,
+              channelId: channelId,
+            ),
+          ],
+        ],
       ),
-      title: Text(label),
       subtitle: isWorking
           ? Row(
               mainAxisSize: MainAxisSize.min,

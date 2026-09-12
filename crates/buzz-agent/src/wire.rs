@@ -305,13 +305,57 @@ pub fn usage_update_payload(
     model: &str,
     pricing_identity: Option<&crate::types::PricingIdentity>,
 ) -> Value {
+    usage_update_payload_with_context(UsageUpdateSnapshot {
+        accumulated_input_tokens,
+        accumulated_output_tokens,
+        accumulated_cached_input_tokens,
+        accumulated_cache_write_tokens,
+        accumulated_total,
+        model,
+        pricing_identity,
+        context_used_tokens: Some(
+            accumulated_input_tokens
+                .unwrap_or(0)
+                .saturating_add(accumulated_output_tokens.unwrap_or(0)),
+        ),
+        context_limit_tokens: None,
+    })
+}
+
+/// Named usage values prevent cumulative counters and point-in-time context
+/// values from being interchanged at call sites.
+pub struct UsageUpdateSnapshot<'a> {
+    pub accumulated_input_tokens: Option<u64>,
+    pub accumulated_output_tokens: Option<u64>,
+    pub accumulated_cached_input_tokens: Option<u64>,
+    pub accumulated_cache_write_tokens: Option<u64>,
+    pub accumulated_total: crate::types::TurnTotalState,
+    pub model: &'a str,
+    pub pricing_identity: Option<&'a crate::types::PricingIdentity>,
+    pub context_used_tokens: Option<u64>,
+    pub context_limit_tokens: Option<u64>,
+}
+
+/// Build a usage update with a point-in-time context-window snapshot.
+pub fn usage_update_payload_with_context(snapshot: UsageUpdateSnapshot<'_>) -> Value {
+    let UsageUpdateSnapshot {
+        accumulated_input_tokens,
+        accumulated_output_tokens,
+        accumulated_cached_input_tokens,
+        accumulated_cache_write_tokens,
+        accumulated_total,
+        model,
+        pricing_identity,
+        context_used_tokens,
+        context_limit_tokens,
+    } = snapshot;
     let mut update = json!({
         "sessionUpdate": "usage_update",
         // used: total tokens as a context-usage proxy; saturate when either
         // side is absent or poisoned (display-only, ACP treats it as dead code).
         // contextLimit: 0 (buzz-agent has no context limit tracking).
-        "used": accumulated_input_tokens.unwrap_or(0).saturating_add(accumulated_output_tokens.unwrap_or(0)),
-        "contextLimit": 0u64,
+        "used": context_used_tokens.unwrap_or(0),
+        "contextLimit": context_limit_tokens.unwrap_or(0),
         "model": model,
     });
     // accumulatedInputTokens / accumulatedOutputTokens: omitted (never null,
@@ -534,14 +578,14 @@ mod tests {
     /// `pricingIdentity` object with camelCase keys, and it MUST NOT be null.
     #[test]
     fn usage_update_payload_includes_pricing_identity_when_proven() {
-        let pi = make_pi("api.anthropic.com", "claude-opus-4-5");
+        let pi = make_pi("api.provider.example", "model-alpha");
         let payload = usage_update_payload(
             Some(1000),
             Some(200),
             None,
             None,
             crate::types::TurnTotalState::Unseen,
-            "claude-opus-4-5",
+            "model-alpha",
             Some(&pi),
         );
 
@@ -550,10 +594,30 @@ mod tests {
             !pi_wire.is_null(),
             "pricingIdentity must be present when identity is proven"
         );
-        assert_eq!(pi_wire["authority"], serde_json::json!("api.anthropic.com"));
-        assert_eq!(pi_wire["model"], serde_json::json!("claude-opus-4-5"));
+        assert_eq!(
+            pi_wire["authority"],
+            serde_json::json!("api.provider.example")
+        );
+        assert_eq!(pi_wire["model"], serde_json::json!("model-alpha"));
         // cacheClass absent when None (skip_serializing_if)
         assert!(pi_wire.get("cacheClass").is_none() || pi_wire["cacheClass"].is_null());
+    }
+
+    #[test]
+    fn usage_update_payload_with_context_uses_last_request_snapshot() {
+        let payload = usage_update_payload_with_context(UsageUpdateSnapshot {
+            accumulated_input_tokens: Some(50_000),
+            accumulated_output_tokens: Some(2_000),
+            accumulated_cached_input_tokens: None,
+            accumulated_cache_write_tokens: None,
+            accumulated_total: crate::types::TurnTotalState::Unseen,
+            model: "model-alpha",
+            pricing_identity: None,
+            context_used_tokens: Some(42_000),
+            context_limit_tokens: Some(200_000),
+        });
+        assert_eq!(payload["used"], serde_json::json!(42_000));
+        assert_eq!(payload["contextLimit"], serde_json::json!(200_000));
     }
 
     /// When `pricing_identity` is `None` (unproven: custom endpoint, mixed

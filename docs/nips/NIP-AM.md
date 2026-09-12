@@ -81,6 +81,7 @@ The `content` field decrypts to a UTF-8 JSON object:
   "harness":   "goose",                  // REQUIRED: harness identifier
   "model":     "claude-sonnet-4-5",      // model id, or null if unknown
   "channelId": "<channel_uuid>" | null,
+  "threadRootId": "<64-char event id>",   // omit outside a thread-scoped session
   "sessionId": "<session_id>"  | null,   // REQUIRED when "cumulative" is present
   "turnId":    "<turn_id>"     | null,
   "turnSeq":   17 | null,                // REQUIRED when "cumulative" is present
@@ -110,6 +111,19 @@ The `content` field decrypts to a UTF-8 JSON object:
   // "turn" object unreliable for this event.
   "deltaReliable": true,
 
+  // Point-in-time context snapshot from the last successful model request in
+  // this turn. Omit unknown/zero values. This is not cumulative usage.
+  "contextUsedTokens": 15392,
+  "contextLimitTokens": 272000,
+
+  // Optional encrypted provider-account quota gauges. A producer may publish
+  // whichever windows its authenticated provider exposes. No credential or
+  // bearer token may be included.
+  "accountUsageWindows": [
+    { "label": "Session", "usedPercent": 12.5, "resetAt": "2026-07-02T01:00:00Z" },
+    { "label": "Weekly",  "usedPercent": 41.0, "resetAt": "2026-07-07T00:00:00Z" }
+  ],
+
   // Billing identity, present only when the publisher can prove applicability
   // from the actual endpoint (official provider API) and the actually-requested
   // model for the usage represented. Omit this field when applicability cannot
@@ -132,6 +146,22 @@ The `content` field decrypts to a UTF-8 JSON object:
 nullable, except as constrained below: `pricingIdentity` is optional but not
 nullable (omit it entirely rather than set it to null). Consumers MUST ignore
 unknown fields (forward compatibility).
+
+`harness` MUST be non-empty and at most 128 UTF-8 bytes. Optional model,
+channel, session, turn, pricing-model, pricing-cache-class identifiers MUST be
+non-empty when present and at most 256 UTF-8 bytes. `threadRootId`, when
+present, requires `channelId` and MUST be exactly 64 lowercase hexadecimal
+characters.
+
+`contextUsedTokens` and `contextLimitTokens` describe the input-side context
+of the final successful provider request in the turn. Publishers MUST report
+both as a pair of positive integers, or omit both when either value is unknown
+or zero. `contextUsedTokens` MAY exceed the
+limit; consumers clamp progress bars but retain the reported values.
+`accountUsageWindows` is a last-write-wins display snapshot scoped to the
+publishing agent account. Each `usedPercent` MUST be finite and non-negative;
+`resetAt`, when present, is RFC 3339. A payload contains at most 64 windows;
+each provider-facing label MUST be non-empty and at most 128 UTF-8 bytes.
 
 ### Ordering and delta recomputation
 
@@ -216,11 +246,34 @@ unlabeled total.
 
 ## Publisher Behavior
 
-- Publish exactly one event per completed turn, at turn completion, including
-  turns that end in cancellation or error when usage was observed.
-- Do NOT publish an event for a turn with no observed usage (all counters
-  unknown); an all-null metric carries no information.
+A publisher can be embedded in a local ACP harness or run next to a remote
+cloud agent. How it obtains provider quotas is implementation-specific; both
+producer paths use the same event kind, tags, encryption, validation, and
+payload fields. The event MUST be signed by the agent named by the `agent` tag.
+A separate quota collector therefore publishes through the agent identity; it
+MUST NOT substitute its own identity or expose provider credentials.
+
+- Publish one turn metric at turn completion, including turns that end in
+  cancellation or error when usage was observed.
+- A publisher MAY also emit a quota-only snapshot when
+  `accountUsageWindows` changes, or as a low-frequency heartbeat. Quota-only
+  snapshots omit unknown turn and context counters rather than inventing
+  values. They remain agent-account snapshots, not billing records.
+- Do NOT publish an event with no observed turn usage and no context or account
+  snapshot fields; such an event carries no information.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
+
+Quota collection and turn instrumentation MAY run in separate processes, but
+partial events from both paths are expected to be merged by consumers per
+agent. The newest valid context pair (`contextUsedTokens` together with
+`contextLimitTokens`) remains available when a newer quota-only event omits it;
+the newest non-empty `accountUsageWindows` array replaces the older array.
+Context pairs are scoped by the exact (`channelId`, `threadRootId`) tuple:
+channel- or thread-specific UI MUST NOT display a context pair from another
+scope. `accountUsageWindows` remains agent-account scoped and MAY be combined
+with an exact scoped context pair. An omitted `threadRootId` identifies the
+channel root and MUST NOT match a thread-scoped pair. Consumers MUST NOT merge
+snapshots across different agent pubkeys.
 
 ## Relay Behavior
 
@@ -262,6 +315,14 @@ parse. Clients SHOULD deduplicate by event id. For within-session ordering,
 clients MUST use `(sessionId, turnSeq)` from the decrypted payload as
 described above; `created_at` is suitable only for coarse time-window
 queries.
+
+Clients MUST bound retained agent and scope state and SHOULD accept metrics
+only for agents known through authenticated local configuration or channel
+membership. A bounded initial subscription is not sufficient for field-wise
+snapshot reconstruction: clients SHOULD page owner- and author-scoped history
+backward until the requested context/quota fields are found or the archive is
+exhausted, with implementation-defined work limits to resist malicious relay
+histories.
 
 ## Relationship to Other NIPs
 

@@ -292,22 +292,27 @@ impl RunCtx<'_> {
         let write_total = base
             .cache_write_tokens
             .merge_session(*self.turn_cache_write_tokens);
-        let payload = wire::usage_update_payload(
-            base.input_tokens
+        let payload = wire::usage_update_payload_with_context(wire::UsageUpdateSnapshot {
+            accumulated_input_tokens: base
+                .input_tokens
                 .merge_session(*self.turn_input_tokens)
                 .exact_value(),
-            base.output_tokens
+            accumulated_output_tokens: base
+                .output_tokens
                 .merge_session(*self.turn_output_tokens)
                 .exact_value(),
-            cached_total.exact_value(),
-            write_total.exact_value(),
-            base.total_state.merge_session(*self.turn_total_state),
-            self.effective_model,
+            accumulated_cached_input_tokens: cached_total.exact_value(),
+            accumulated_cache_write_tokens: write_total.exact_value(),
+            accumulated_total: base.total_state.merge_session(*self.turn_total_state),
+            model: self.effective_model,
             // Extract the proven identity if this turn is consistent so far.
-            self.turn_pricing_identity
+            pricing_identity: self
+                .turn_pricing_identity
                 .as_ref()
                 .and_then(|inner| inner.as_ref()),
-        );
+            context_used_tokens: *self.last_request_input_tokens,
+            context_limit_tokens: Some(self.cfg.max_context_tokens),
+        });
         wire::send(
             self.wire,
             wire::goose_session_update(self.session_id, payload),

@@ -46,6 +46,21 @@ fn insert_archived_event(
     .unwrap();
 }
 
+fn insert_metric_candidate(
+    conn: &Connection,
+    identity: &str,
+    relay: &str,
+    agent: &str,
+    id: &str,
+    timestamp: &str,
+) {
+    let json = valid_payload_json(id, 1, timestamp);
+    insert_archived_event(conn, identity, relay, id, 44200, agent, 100, &json, 200);
+    store::upsert_event_scope(conn, identity, relay, id, "owner_p", identity, 200).unwrap();
+    let row = AgentMetricIndexRow::from_payload(&json, id, agent, 100, 200);
+    insert_metric_index_row(conn, identity, relay, &row).unwrap();
+}
+
 // ── u64 sortable encoding ────────────────────────────────────────────────────
 
 #[test]
@@ -364,6 +379,63 @@ fn has_archived_evidence_ignores_bucket_boundaries() {
     );
     insert_metric_index_row(&conn, "id", "relay", &old_row).unwrap();
     assert!(has_archived_evidence(&conn, "id", "relay", "agentX").unwrap());
+}
+
+#[test]
+fn latest_payload_candidates_filter_in_sql_and_bound_each_agent() {
+    let conn = in_memory();
+    let target = format!("{:064x}", 1);
+    let other = format!("{:064x}", 2);
+    for i in 0..10 {
+        insert_metric_candidate(
+            &conn,
+            "id",
+            "relay",
+            &target,
+            &format!("target-{i:02}"),
+            "2026-07-01T00:00:00Z",
+        );
+    }
+    insert_metric_candidate(
+        &conn,
+        "id",
+        "relay",
+        &other,
+        "other",
+        "2026-07-01T00:00:00Z",
+    );
+
+    let filter = std::collections::HashSet::from([target.clone()]);
+    let loaded =
+        load_latest_metric_payload_candidates(&conn, "id", "relay", Some(&filter)).unwrap();
+
+    assert_eq!(loaded.len(), MAX_LATEST_CANDIDATES_PER_AGENT as usize);
+    assert!(loaded
+        .iter()
+        .all(|candidate| candidate.agent_pubkey == target));
+}
+
+#[test]
+fn latest_payload_candidates_bound_unfiltered_agent_count() {
+    let conn = in_memory();
+    for i in 0..=MAX_LATEST_SNAPSHOT_AGENTS {
+        let agent = format!("{i:064x}");
+        insert_metric_candidate(
+            &conn,
+            "id",
+            "relay",
+            &agent,
+            &format!("event-{i:02}"),
+            "2026-07-01T00:00:00Z",
+        );
+    }
+
+    let loaded = load_latest_metric_payload_candidates(&conn, "id", "relay", None).unwrap();
+    let agents: std::collections::HashSet<_> = loaded
+        .iter()
+        .map(|candidate| candidate.agent_pubkey.as_str())
+        .collect();
+    assert_eq!(agents.len(), MAX_LATEST_SNAPSHOT_AGENTS);
 }
 
 // ── Backfill ──────────────────────────────────────────────────────────────────
