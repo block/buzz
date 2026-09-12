@@ -276,6 +276,30 @@ fn pending_owner_mark_uses_signer_captured_before_identity_swap() {
     assert!(!state.is_pending_owned_channel(&post_swap_pubkey, "chan-1"));
 }
 
+
+#[test]
+fn signing_and_relay_scope_survives_interleaved_workspace_mutation() {
+    // Regression for the create_channel cross-community write Carl flagged:
+    // reading keys then relay under separate unlocked calls can mix tenants
+    // when `apply_workspace` lands between them. The helper locks both before
+    // returning either value.
+    let state = crate::app_state::build_app_state();
+    let expected_pubkey = state.signing_keys().expect("signable").public_key().to_hex();
+    let expected_relay = crate::relay::relay_api_base_url_with_override(&state);
+
+    let (keys, relay) = state.signing_and_relay_scope().expect("scope");
+    assert_eq!(keys.public_key().to_hex(), expected_pubkey);
+    assert_eq!(relay, expected_relay);
+
+    // Mutating after the snapshot must leave the captured pair unchanged.
+    *state.relay_url_override.lock().expect("lock relay") =
+        Some("wss://other.example/".to_string());
+    *state.keys.lock().expect("lock keys") = Keys::generate();
+    assert_eq!(keys.public_key().to_hex(), expected_pubkey);
+    assert_eq!(relay, expected_relay);
+}
+
+
 #[test]
 fn starter_channel_uuid_is_stable_and_scoped() {
     let first = starter_channel_uuid("https://relay-a.example", "general");
