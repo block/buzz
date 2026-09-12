@@ -380,6 +380,88 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
+/// Validate that every hunk header in `diff_text` carries proper line ranges
+/// (`-N,M +N,M`, `-N +N,M`, `-N,M +N`, or `-N +N`).
+///
+/// `diffy::Patch::from_str` accepts a bare `@@` (no ranges) and parses it as
+/// zero hunks, which lets `apply` silently succeed as a no-op. For memory
+/// edits that meant publishing a real engram event for a write that did not
+/// happen — see issue #6099. Every other malformed patch shape I tried
+/// (empty stdin, mismatched context) is already correctly rejected; this is
+/// the one form that slipped between the existing guards, so we close the
+/// gap explicitly here.
+///
+/// Returns `Ok(())` on every well-formed header, `Err(message)` on the
+/// first malformed one (the error message includes the offending line so
+/// the operator can locate it).
+fn validate_hunk_headers(diff_text: &str) -> Result<(), String> {
+    for line in diff_text.lines() {
+        if !line.starts_with("@@") {
+            continue;
+        }
+        // Strip the leading "@@" and the optional trailing " @@ heading".
+        // After that the body must be "-<num>[,<num>] +<num>[,<num>]",
+        // possibly surrounded by whitespace.
+        let body = &line[2..];
+        let body = match body.find(" @@") {
+            Some(idx) => &body[..idx],
+            None => body,
+        };
+        let body = body.trim();
+        if !hunk_header_body_is_well_formed(body) {
+            return Err(format!(
+                "malformed hunk header `{line}`: each hunk must declare \
+                 line ranges like `@@ -N,M +N,M @@` \
+                 (regenerate with `diff -u`)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Returns true iff `body` matches `-<digits>[,<digits>] +<digits>[,<digits>]`
+/// (each pair of digits optional after the first number of each side).
+/// Whitespace is permitted between tokens. Anything else — bare `@@`,
+/// `@@ foo`, `@@ -1,3`, `@@ 1,3 +1,4`, `@@ -1,3 +-4` — is rejected.
+fn hunk_header_body_is_well_formed(body: &str) -> bool {
+    let body = body.trim_start();
+    let Some(after_dash) = body.strip_prefix('-') else {
+        return false;
+    };
+    let (old_start, after_dash) = take_ascii_digits(after_dash);
+    if old_start.is_empty() {
+        return false;
+    }
+    let after_dash = after_dash.strip_prefix(',').unwrap_or(after_dash);
+    let (old_len, after_dash) = take_ascii_digits(after_dash);
+    let _ = old_len; // empty `old_len` is fine (git default is 1 line)
+    let after_dash = after_dash.trim_start();
+    let Some(after_plus) = after_dash.strip_prefix('+') else {
+        return false;
+    };
+    let (new_start, after_plus) = take_ascii_digits(after_plus);
+    if new_start.is_empty() {
+        return false;
+    }
+    let after_plus = after_plus.strip_prefix(',').unwrap_or(after_plus);
+    let (new_len, after_plus) = take_ascii_digits(after_plus);
+    let _ = new_len;
+    // Anything left after the second range is whitespace only — if not, the
+    // body had unexpected tokens (e.g. `@@ -1,3 +1,4 garbage`).
+    after_plus.trim().is_empty()
+}
+
+/// Consumes a run of ASCII digits from the front of `s` and returns
+/// (digits, rest). Returns ("", s) if `s` does not begin with a digit.
+fn take_ascii_digits(s: &str) -> (&str, &str) {
+    let end = s
+        .as_bytes()
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(s.len());
+    s.split_at(end)
+}
+
 /// Verify that each hunk's preimage lines (Context + Delete) match the
 /// current value byte-for-byte starting at the line number the hunk declares.
 ///
@@ -622,6 +704,14 @@ pub async fn cmd_patch(
              a memory slug is a single virtual file"
         )));
     }
+
+    // Reject malformed hunk headers (e.g. a bare `@@` with no line ranges).
+    // diffy::Patch::from_str accepts these and parses them as zero hunks,
+    // which would let `apply` silently succeed as a no-op and publish a
+    // spurious engram event — see issue #6099.
+    validate_hunk_headers(&diff_text).map_err(|msg| {
+        CliError::Usage(format!("malformed unified diff: {msg}"))
+    })?;
 
     let patch = diffy::Patch::from_str(&diff_text)
         .map_err(|e| CliError::Usage(format!("malformed unified diff: {e}")))?;
@@ -1041,5 +1131,66 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    // The bare-`@@` slip — `diffy::Patch::from_str` accepts a hunk header
+    // with no line ranges and parses it as zero hunks, which would let
+    // `apply` silently succeed as a no-op. Pin the rejection so a future
+    // diffy upgrade that loosens the parser doesn't reopen the hole.
+    #[test]
+    fn validate_hunk_headers_accepts_well_formed() {
+        let patch = "--- a/x\n+++ b/x\n@@ -1,4 +1,5 @@\n a\n+INS\n b\n c\n d\n";
+        assert!(validate_hunk_headers(patch).is_ok());
+
+        // git extended variants without commas.
+        let patch = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+        assert!(validate_hunk_headers(patch).is_ok());
+
+        // Pure-insertion into an empty file.
+        let patch = "--- a/x\n+++ b/x\n@@ -0,0 +1,5 @@\n+INS1\n+INS2\n";
+        assert!(validate_hunk_headers(patch).is_ok());
+
+        // Multi-hunk patch.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -10,3 +10,3 @@\n j\n-k\n+K\n l\n";
+        assert!(validate_hunk_headers(patch).is_ok());
+    }
+
+    #[test]
+    fn validate_hunk_headers_rejects_bare_at_at() {
+        // The reported bug: `@@` with no ranges parses as 0 hunks and lets
+        // `apply` succeed as a silent no-op.
+        let patch = "--- a/x\n+++ b/x\n@@\n alpha\n bravo\n+ECHO\n charlie\n delta\n";
+        let err = validate_hunk_headers(patch).unwrap_err();
+        assert!(err.contains("@@"), "got: {err}");
+        assert!(err.contains("line ranges"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_hunk_headers_rejects_partial_ranges() {
+        // Only one side has a range.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,3\n a\n-b\n";
+        assert!(validate_hunk_headers(patch).is_err());
+
+        // No leading minus at all.
+        let patch = "--- a/x\n+++ b/x\n@@ 1,3 +1,4 @@\n a\n";
+        assert!(validate_hunk_headers(patch).is_err());
+
+        // Trailing junk after the new range.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,3 +1,4 garbage\n a\n";
+        assert!(validate_hunk_headers(patch).is_err());
+
+        // Empty new-range number.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,3 + @@\n a\n";
+        assert!(validate_hunk_headers(patch).is_err());
+    }
+
+    #[test]
+    fn validate_hunk_headers_ignores_unrelated_at_signs() {
+        // A line that mentions `@@` but is not a hunk header (e.g. a context
+        // line that happens to start with two at-signs) must not trip the
+        // validator. Unified diff grammar doesn't allow such a context line,
+        // but the validator should still be a precise scanner, not a panic.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-@@\n+at\n";
+        assert!(validate_hunk_headers(patch).is_ok());
     }
 }
