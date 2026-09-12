@@ -524,6 +524,7 @@ pub(super) async fn authorize_setup_listener_event(
             owner_cache,
             channel_info,
             rest_client,
+            None,
         )
         .await
 }
