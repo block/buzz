@@ -1410,7 +1410,7 @@ void main() {
       final session = RelaySessionNotifier(rateLimitGate: gate);
       session.debugAttachSocketForTest(_RecordingRelaySocket());
 
-      final publish = session.publish(_event());
+      final publish = session.publish(_event(), lease: session.captureLease());
       session.debugHandleMessage([
         'OK',
         'event-1',
@@ -1446,7 +1446,10 @@ void main() {
       final session = RelaySessionNotifier(rateLimitGate: gate);
       session.debugAttachSocketForTest(socket);
 
-      final firstPublish = session.publish(_event(id: 'event-a'));
+      final firstPublish = session.publish(
+        _event(id: 'event-a'),
+        lease: session.captureLease(),
+      );
       session.debugHandleMessage([
         'OK',
         'event-a',
@@ -1457,6 +1460,7 @@ void main() {
 
       var secondSettled = false;
       final secondPublish = session.publish(
+        lease: session.captureLease(),
         _event(id: 'event-b'),
         timeout: Duration.zero,
       );
@@ -1505,7 +1509,10 @@ void main() {
       session.debugAttachSocketForTest(socket);
       gate.activate(4);
 
-      final publish = session.publish(_event(id: 'event-b'));
+      final publish = session.publish(
+        _event(id: 'event-b'),
+        lease: session.captureLease(),
+      );
       session.debugSupersedeConnection();
       gateTimers.single.fire();
 
@@ -1519,7 +1526,7 @@ void main() {
     final session = RelaySessionNotifier(rateLimitGate: gate);
     session.debugAttachSocketForTest(_RecordingRelaySocket());
 
-    final publish = session.publish(_event());
+    final publish = session.publish(_event(), lease: session.captureLease());
     session.debugHandleMessage([
       'OK',
       'event-1',

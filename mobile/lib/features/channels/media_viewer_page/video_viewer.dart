@@ -1,5 +1,11 @@
 part of '../media_viewer_page.dart';
 
+/// Android supports authenticated range requests; other platforms use a file.
+/// Overridable so widget tests can exercise the actual streaming path.
+final mediaVideoStreamingSupportedProvider = Provider<bool>(
+  (ref) => Platform.isAndroid,
+);
+
 class MediaVideoViewerPage extends HookConsumerWidget {
   final String videoUrl;
   final String? posterUrl;
@@ -52,14 +58,20 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         // keep Android on its streaming path. iOS uses the authenticated local
         // copy below because AVPlayer can drop those headers after the first
         // request.
-        if (Platform.isAndroid) {
+        if (ref.read(mediaVideoStreamingSupportedProvider)) {
           VideoPlayerController? streamingController;
           try {
+            final headers = await auth.headersFor(videoUrl);
+            if (disposed) return;
             streamingController = VideoPlayerController.networkUrl(
               uri,
-              httpHeaders: await auth.headersFor(videoUrl),
+              httpHeaders: headers,
             );
             await streamingController.initialize();
+            if (disposed) {
+              await streamingController.dispose();
+              return;
+            }
             await streamingController.play();
             if (disposed) {
               await streamingController.dispose();
@@ -71,20 +83,24 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             if (streamingController != null) {
               await streamingController.dispose();
             }
+            if (disposed) return;
             // Fall through to the authenticated local-file path only when the
             // streaming controller cannot initialize.
           }
         }
 
+        VideoPlayerController? localController;
         try {
           final client = ref.read(mediaHttpClientProvider);
+          final headers = await auth.headersFor(videoUrl);
+          if (disposed) return;
           final requestAbort = Completer<void>();
           downloadRequestAbort.value = requestAbort;
           final request = http.AbortableStreamedRequest(
             'GET',
             uri,
             abortTrigger: requestAbort.future,
-          )..headers.addAll(await auth.headersFor(videoUrl));
+          )..headers.addAll(headers);
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);
@@ -145,8 +161,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             return;
           }
 
-          final localController = VideoPlayerController.file(file);
+          localController = VideoPlayerController.file(file);
           await localController.initialize();
+          if (disposed) {
+            await localController.dispose();
+            await deleteVideoFile();
+            return;
+          }
           await localController.play();
           if (disposed) {
             await localController.dispose();
@@ -155,6 +176,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           }
           controller.value = localController;
         } catch (loadError) {
+          await localController?.dispose();
           if (!disposed) error.value = loadError.toString();
         }
       }

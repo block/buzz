@@ -73,6 +73,24 @@ class _BufferedEvent {
   _BufferedEvent(this.subId, this.event);
 }
 
+/// Immutable authority to finish work only in its originating session scope.
+/// Capture before awaiting signing/authentication, never after it completes.
+final class RelaySessionLease {
+  final RelaySessionNotifier _session;
+  final Object _scope;
+
+  RelaySessionLease._(this._session, this._scope);
+
+  /// Throws [RelaySessionSupersededError] if the originating scope retired.
+  void ensureCurrent() => _session._checkLease(this);
+}
+
+/// An operation was cancelled because its originating relay scope retired.
+class RelaySessionSupersededError extends StateError {
+  RelaySessionSupersededError()
+    : super('Relay operation cancelled: originating session scope superseded');
+}
+
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
     http.Client? httpClient,
@@ -125,6 +143,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  Object _scope = Object();
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
@@ -310,12 +329,31 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _unsubscribe(subId);
   }
 
+  /// Capture the scope before starting asynchronous event construction.
+  /// Ordinary reconnects retain it; dependency rebuilds and disposal retire it.
+  RelaySessionLease captureLease() {
+    if (_disposed) throw RelaySessionSupersededError();
+    return RelaySessionLease._(this, _scope);
+  }
+
+  void _checkLease(RelaySessionLease lease) {
+    if (_disposed ||
+        !identical(lease._session, this) ||
+        !identical(lease._scope, _scope)) {
+      throw RelaySessionSupersededError();
+    }
+  }
+
+  /// Publish using the scope captured before signing, including after gate waits.
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    _checkLease(lease);
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
+    _checkLease(lease);
     if (!_isActiveConnection(generation) || !_socketConnected) {
       throw StateError('Relay session is not connected');
     }
@@ -338,11 +376,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       timeout: timer,
     );
 
+    // No await or consumer callback between the lease check and the socket's
+    // synchronous sink.add: scope replacement cannot interleave with this write.
     _socket?.send(['EVENT', event.toJson()]);
     return completer.future;
   }
 
-  void sendRaw(List<dynamic> payload) {
+  /// Fire-and-forget send in the scope captured before asynchronous signing.
+  void sendRaw(List<dynamic> payload, {required RelaySessionLease lease}) {
+    _checkLease(lease);
     _socket?.send(payload);
   }
 
@@ -960,6 +1002,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _scope = Object();
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();

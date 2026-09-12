@@ -27,6 +27,7 @@ final class _Session extends RelaySessionNotifier {
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
+    required RelaySessionLease lease,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     published = event;

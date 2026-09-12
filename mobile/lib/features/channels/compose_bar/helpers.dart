@@ -394,6 +394,8 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
+    final session = ref.read(relaySessionProvider.notifier);
+    final lease = session.captureLease();
     final event = await signEvent(
       kind: EventKind.typingIndicator,
       content: '',
@@ -402,8 +404,7 @@ void _sendTypingIndicator(
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
-    final session = ref.read(relaySessionProvider.notifier);
-    session.sendRaw(['EVENT', event.toMap()]);
+    session.sendRaw(['EVENT', event.toMap()], lease: lease);
   } catch (_) {
     // Fire-and-forget — typing indicator failure is non-fatal.
   }

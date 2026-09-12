@@ -96,6 +96,8 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     }
 
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+    final session = ref.read(relaySessionProvider.notifier);
+    final lease = session.captureLease();
     final event = await signEvent(
       kind: EventKind.userStatus,
       content: trimmed,
@@ -103,8 +105,8 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
       signer: LocalEventSigner(privkeyHex),
     );
 
-    final session = ref.read(relaySessionProvider.notifier);
-    await session.publish(NostrEvent.fromJson(event.toMap()));
+    await session.publish(NostrEvent.fromJson(event.toMap()), lease: lease);
+    lease.ensureCurrent();
 
     // Optimistic update: update own state immediately.
     final newStatus = (trimmed.isNotEmpty || emoji.isNotEmpty)

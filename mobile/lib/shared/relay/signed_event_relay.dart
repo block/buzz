@@ -9,8 +9,14 @@ import 'relay_session.dart';
 import 'relay_socket.dart';
 
 /// Signs and submits Nostr events through the relay WebSocket connection.
+///
+/// Bound to the session scope at construction. Recreate after a dependency
+/// rebuild. Signing completions in retired scopes throw
+/// [RelaySessionSupersededError] without invoking [submit]'s callback or
+/// publishing into the replacement scope.
 class SignedEventRelay {
   final RelaySessionNotifier _session;
+  final RelaySessionLease _lease;
   final String? _nsec;
   final EventSigner? _signer;
 
@@ -18,6 +24,7 @@ class SignedEventRelay {
     required RelaySessionNotifier session,
     required String? nsec,
   }) : _session = session,
+       _lease = session.captureLease(),
        _nsec = nsec,
        _signer = null;
 
@@ -26,6 +33,7 @@ class SignedEventRelay {
     required RelaySessionNotifier session,
     required EventSigner signer,
   }) : _session = session,
+       _lease = session.captureLease(),
        _signer = signer,
        _nsec = null;
 
@@ -49,6 +57,7 @@ class SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
   }) async {
+    _lease.ensureCurrent();
     final EventSigner signer;
     if (_signer case final supplied?) {
       signer = supplied;
@@ -71,8 +80,9 @@ class SignedEventRelay {
     );
 
     final nostrEvent = NostrEvent.fromJson(event.toMap());
+    _lease.ensureCurrent();
     onSigned?.call(nostrEvent);
-    return _session.publish(nostrEvent);
+    return _session.publish(nostrEvent, lease: _lease);
   }
 }
 
