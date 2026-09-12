@@ -165,7 +165,7 @@ pub async fn run(
     };
     let shell_arg = shell_flag(&bash);
     let mut cmd = Command::new(&bash);
-    cmd.arg(shell_arg).arg(&p.command);
+    cmd.arg(shell_arg).arg(shell_command(&bash, &p.command));
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
     // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
@@ -344,6 +344,25 @@ fn shell_flag(shell: &Path) -> &'static str {
         Some("cmd") => "/C",
         Some("powershell" | "pwsh") => "-Command",
         _ => "-c",
+    }
+}
+
+fn is_powershell(shell: &Path) -> bool {
+    matches!(
+        shell
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("powershell" | "pwsh")
+    )
+}
+
+fn shell_command(shell: &Path, command: &str) -> String {
+    if is_powershell(shell) {
+        format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); {command}")
+    } else {
+        command.to_string()
     }
 }
 
@@ -1010,6 +1029,20 @@ mod tests {
         assert_eq!(effective_timeout_ms(Some(1_200_000)), 1_200_000);
         assert_eq!(effective_timeout_ms(Some(1_200_001)), 1_200_000);
         assert_eq!(effective_timeout_ms(Some(u64::MAX)), 1_200_000);
+    }
+
+    #[test]
+    fn powershell_commands_configure_utf8_native_pipe_encoding() {
+        let powershell = Path::new("powershell.exe");
+        assert!(is_powershell(powershell));
+        assert_eq!(
+            shell_command(powershell, "Get-Content message.txt | buzz messages send ..."),
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-Content message.txt | buzz messages send ..."
+        );
+        assert_eq!(
+            shell_command(Path::new("bash.exe"), "echo hello"),
+            "echo hello"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
