@@ -464,6 +464,20 @@ export function ChannelScreen({
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
     [editTargetId, timelineMessages],
   );
+  const hasAuxiliaryPanel = [
+    effectiveOpenThreadHeadId,
+    openAgentSessionPubkey,
+    profilePanelPubkey,
+    channelManagementOpen,
+    issuesPanel.open,
+  ].some(Boolean);
+  const isNarrowPanelViewport =
+    channelContentWidthPx > 0 &&
+    channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
+  const isSinglePanelView =
+    isNarrowPanelViewport &&
+    activeChannel?.channelType !== "forum" &&
+    hasAuxiliaryPanel;
   const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
   const {
     handleCancelEdit,
@@ -487,7 +501,7 @@ export function ChannelScreen({
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
     markRevealedRepliesRead,
-    onBeforeOpenThread: issuesPanel.close,
+    onBeforeOpenThread: isSinglePanelView ? issuesPanel.close : undefined,
     profiles: messageProfiles,
     recordThreadInteraction,
     openThreadHeadId: effectiveOpenThreadHeadId,
@@ -671,13 +685,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-  const hasAuxiliaryPanel = [
-    effectiveOpenThreadHeadId,
-    openAgentSessionPubkey,
-    profilePanelPubkey,
-    channelManagementOpen,
-    issuesPanel.open,
-  ].some(Boolean);
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
   const displayedThreadMessages = threadPanelData.visibleReplies;
@@ -688,13 +695,6 @@ export function ChannelScreen({
   const shouldShowThreadSkeleton = Boolean(
     effectiveOpenThreadHeadId && activeChannel && !displayedThreadHeadMessage,
   );
-  const isNarrowPanelViewport =
-    channelContentWidthPx > 0 &&
-    channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
-  const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&

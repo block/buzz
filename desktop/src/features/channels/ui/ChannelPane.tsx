@@ -474,6 +474,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
+    !issuesPanelOpen &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer,
@@ -535,15 +536,82 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
     );
-  const threadHeaderLeading = useSplitAuxiliaryPane ? (
-    <ThreadViewModeToggle onChange={changeThreadViewMode} />
-  ) : undefined;
+  const threadHeaderLeading =
+    useSplitAuxiliaryPane && !issuesPanelOpen ? (
+      <ThreadViewModeToggle onChange={changeThreadViewMode} />
+    ) : undefined;
   const threadLayoutProps = getThreadPanelLayout({
     headerLeading: threadHeaderLeading,
     isFocusDrawer: useFocusThreadDrawer,
     isSinglePanelView,
     useSplitAuxiliaryPane,
   });
+  const threadPanel = threadHeadMessage ? (
+    <MessageThreadPanel
+      channel={activeChannel}
+      channelId={activeChannel?.id ?? null}
+      channelName={activeChannel?.name ?? "channel"}
+      currentPubkey={currentPubkey}
+      disabled={isComposerDisabled}
+      editTarget={threadEditTarget}
+      firstUnreadReplyId={threadFirstUnreadReplyId}
+      huddleMemberPubkeys={huddleMemberPubkeys}
+      huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+      isHuddleTranscript={isHuddleTranscript}
+      isFollowingThread={isFollowingThread}
+      isMessageUnreadById={isMessageUnreadById}
+      isSending={isSending}
+      {...threadLayoutProps}
+      autoSendDraftKey={autoSendDraftKey}
+      onAutoSubmitComplete={handleAutoSubmitComplete}
+      onCancelEdit={onCancelEdit}
+      onCancelReply={onCancelThreadReply}
+      onClose={onCloseThread}
+      onDelete={onDelete}
+      onEdit={onEdit}
+      onEditLastOwnMessage={handleEditLastOwnThreadMessage}
+      onEditSave={onEditSave}
+      onFollowThread={onFollowThread}
+      onMarkUnread={onMarkUnread}
+      onMarkRead={onMarkRead}
+      onExpandReplies={onExpandThreadReplies}
+      onSelectReplyTarget={onSelectThreadReplyTarget}
+      onSend={onSendThreadReply}
+      onSendToChannel={isComposerDisabled ? undefined : onSendToChannel}
+      onScrollTargetResolved={() => resolveScrollTarget()}
+      onScrollTargetSettled={resolveScrollTarget}
+      onToggleReaction={onToggleReaction}
+      onUnfollowThread={onUnfollowThread}
+      profiles={profiles}
+      replyTargetMessage={threadReplyTargetMessage}
+      scrollTargetHighlights={!layoutScrollTargetId}
+      scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+      threadHead={threadHeadMessage}
+      videoReviewPresentation={threadVideoReviewPresentation}
+      widthPx={threadPanelWidthPx}
+      threadReplies={threadMessages}
+      threadRepliesPending={threadMessagesPending}
+      threadUnreadCount={threadUnreadCounts?.get(threadHeadMessage.id)}
+      threadReplyUnreadCounts={threadReplyUnreadCounts}
+      threadTypingPubkeys={threadTypingPubkeys}
+      activityAccessoryVisible={hasThreadComposerBotActivity}
+      composerToolbarExtraActions={threadContextRing}
+      activityAccessoryContent={
+        !issuesPanelOpen && hasThreadComposerBotActivity ? (
+          <BotActivityComposerAction
+            agents={activityAgents}
+            channelId={activeChannel?.id ?? null}
+            conversationRoot={openThreadHeadId}
+            onOpenAgentSession={onOpenAgentSession}
+            openAgentSessionPubkey={openAgentSessionPubkey}
+            profiles={profiles}
+            workingBotPubkeys={threadComposerBotTypingPubkeys}
+            variant="inline"
+          />
+        ) : null
+      }
+    />
+  ) : null;
   const timelineReplyHandler =
     activeChannel?.archivedAt || isHuddleTranscript ? undefined : onOpenThread;
   return (
@@ -786,69 +854,11 @@ export const ChannelPane = React.memo(function ChannelPane({
        */}
       <AnimatePresence onExitComplete={markExitComplete}>
         {useSplitAuxiliaryPane &&
-        threadHeadMessage &&
+        threadPanel &&
         issuesPanelOpen &&
         activeChannel ? (
           <>
-            {(() => {
-              const panel = (
-                <MessageThreadPanel
-                  channel={activeChannel}
-                  channelId={activeChannel?.id ?? null}
-                  channelName={activeChannel?.name ?? "channel"}
-                  currentPubkey={currentPubkey}
-                  disabled={isComposerDisabled}
-                  editTarget={threadEditTarget}
-                  firstUnreadReplyId={threadFirstUnreadReplyId}
-                  huddleMemberPubkeys={huddleMemberPubkeys}
-                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                  isHuddleTranscript={isHuddleTranscript}
-                  isFollowingThread={isFollowingThread}
-                  isMessageUnreadById={isMessageUnreadById}
-                  isSending={isSending}
-                  {...threadLayoutProps}
-                  autoSendDraftKey={autoSendDraftKey}
-                  onAutoSubmitComplete={handleAutoSubmitComplete}
-                  onCancelEdit={onCancelEdit}
-                  onCancelReply={onCancelThreadReply}
-                  onClose={onCloseThread}
-                  onDelete={onDelete}
-                  onEdit={onEdit}
-                  onEditLastOwnMessage={handleEditLastOwnThreadMessage}
-                  onEditSave={onEditSave}
-                  onFollowThread={onFollowThread}
-                  onMarkUnread={onMarkUnread}
-                  onMarkRead={onMarkRead}
-                  onExpandReplies={onExpandThreadReplies}
-                  onSelectReplyTarget={onSelectThreadReplyTarget}
-                  onSend={onSendThreadReply}
-                  onSendToChannel={
-                    isComposerDisabled ? undefined : onSendToChannel
-                  }
-                  onScrollTargetResolved={() => resolveScrollTarget()}
-                  onScrollTargetSettled={resolveScrollTarget}
-                  onToggleReaction={onToggleReaction}
-                  onUnfollowThread={onUnfollowThread}
-                  profiles={profiles}
-                  replyTargetMessage={threadReplyTargetMessage}
-                  scrollTargetHighlights={!layoutScrollTargetId}
-                  scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
-                  threadHead={threadHeadMessage}
-                  videoReviewPresentation={threadVideoReviewPresentation}
-                  widthPx={threadPanelWidthPx}
-                  threadReplies={threadMessages}
-                  threadRepliesPending={threadMessagesPending}
-                  threadUnreadCount={threadUnreadCounts?.get(
-                    threadHeadMessage.id,
-                  )}
-                  threadReplyUnreadCounts={threadReplyUnreadCounts}
-                  threadTypingPubkeys={threadTypingPubkeys}
-                  activityAccessoryVisible={hasThreadComposerBotActivity}
-                  composerToolbarExtraActions={threadContextRing}
-                />
-              );
-              return wrapThreadPanel(panel);
-            })()}
+            {wrapThreadPanel(threadPanel)}
             <ChannelIssuesAuxiliaryPanel
               activeChannel={activeChannel}
               canResetWidth={canResetThreadPanelWidth}
@@ -887,80 +897,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             useSplitAuxiliaryPane={useSplitAuxiliaryPane}
             transparentChrome={hasSplitAuxiliaryPane}
           />
-        ) : threadHeadMessage ? (
-          (() => {
-            const panel = (
-              <MessageThreadPanel
-                channel={activeChannel}
-                channelId={activeChannel?.id ?? null}
-                channelName={activeChannel?.name ?? "channel"}
-                currentPubkey={currentPubkey}
-                disabled={isComposerDisabled}
-                editTarget={threadEditTarget}
-                firstUnreadReplyId={threadFirstUnreadReplyId}
-                huddleMemberPubkeys={huddleMemberPubkeys}
-                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                isHuddleTranscript={isHuddleTranscript}
-                isFollowingThread={isFollowingThread}
-                isMessageUnreadById={isMessageUnreadById}
-                isSending={isSending}
-                {...threadLayoutProps}
-                autoSendDraftKey={autoSendDraftKey}
-                onAutoSubmitComplete={handleAutoSubmitComplete}
-                onCancelEdit={onCancelEdit}
-                onCancelReply={onCancelThreadReply}
-                onClose={onCloseThread}
-                onDelete={onDelete}
-                onEdit={onEdit}
-                onEditLastOwnMessage={handleEditLastOwnThreadMessage}
-                onEditSave={onEditSave}
-                onFollowThread={onFollowThread}
-                onMarkUnread={onMarkUnread}
-                onMarkRead={onMarkRead}
-                onExpandReplies={onExpandThreadReplies}
-                onSelectReplyTarget={onSelectThreadReplyTarget}
-                onSend={onSendThreadReply}
-                onSendToChannel={
-                  isComposerDisabled ? undefined : onSendToChannel
-                }
-                onScrollTargetResolved={() => resolveScrollTarget()}
-                onScrollTargetSettled={resolveScrollTarget}
-                onToggleReaction={onToggleReaction}
-                onUnfollowThread={onUnfollowThread}
-                profiles={profiles}
-                replyTargetMessage={threadReplyTargetMessage}
-                scrollTargetHighlights={!layoutScrollTargetId}
-                scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
-                threadHead={threadHeadMessage}
-                videoReviewPresentation={threadVideoReviewPresentation}
-                widthPx={threadPanelWidthPx}
-                threadReplies={threadMessages}
-                threadRepliesPending={threadMessagesPending}
-                threadUnreadCount={threadUnreadCounts?.get(
-                  threadHeadMessage.id,
-                )}
-                threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
-                activityAccessoryVisible={hasThreadComposerBotActivity}
-                composerToolbarExtraActions={threadContextRing}
-                activityAccessoryContent={
-                  hasThreadComposerBotActivity ? (
-                    <BotActivityComposerAction
-                      agents={activityAgents}
-                      channelId={activeChannel?.id ?? null}
-                      conversationRoot={openThreadHeadId}
-                      onOpenAgentSession={onOpenAgentSession}
-                      openAgentSessionPubkey={openAgentSessionPubkey}
-                      profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
-                      variant="inline"
-                    />
-                  ) : null
-                }
-              />
-            );
-            return wrapThreadPanel(panel);
-          })()
+        ) : threadPanel ? (
+          wrapThreadPanel(threadPanel)
         ) : shouldShowThreadSkeleton ? (
           (() => {
             if (isHuddleTranscript) {

@@ -23,6 +23,62 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
+async function openGeneralChannelWithReply(
+  page: import("@playwright/test").Page,
+) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(
+    ({ parentEventId, pubkey }) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Issue context reply",
+        parentEventId,
+        pubkey,
+      }),
+    {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+}
+
+async function expectChannelThreadIssuesColumns(
+  page: import("@playwright/test").Page,
+) {
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const issuesPanel = page.getByTestId("channel-issues-auxiliary-pane");
+  await expect(threadPanel).toBeVisible();
+  await expect(issuesPanel).toBeVisible();
+  await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
+
+  const [channelBox, threadBox, issuesBox] = await Promise.all([
+    page.getByTestId("channel-drop-zone").boundingBox(),
+    threadPanel.boundingBox(),
+    issuesPanel.boundingBox(),
+  ]);
+  expect(channelBox).not.toBeNull();
+  expect(threadBox).not.toBeNull();
+  expect(issuesBox).not.toBeNull();
+  expect(channelBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(
+    threadBox?.x ?? Number.NEGATIVE_INFINITY,
+  );
+  expect(threadBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(
+    issuesBox?.x ?? Number.NEGATIVE_INFINITY,
+  );
+}
+
 test("issue comments keep technical evidence collapsed and surface human actions", async ({
   page,
 }) => {
@@ -115,33 +171,9 @@ test("channel issue detail has a back path to the scoped issue list", async ({
 test("channel issues preserve an open thread and create in the linked repository", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
-  await page.getByTestId("channel-general").click();
-
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-            channelName: "general",
-          }) ?? false,
-      ),
-    )
-    .toBe(true);
-  await page.evaluate(
-    ({ parentEventId, pubkey }) =>
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
-        content: "Issue context reply",
-        parentEventId,
-        pubkey,
-      }),
-    {
-      parentEventId: "mock-general-welcome",
-      pubkey: TEST_IDENTITIES.alice.pubkey,
-    },
-  );
+  await openGeneralChannelWithReply(page);
 
   await page.getByTestId("message-thread-summary").first().click();
   const threadPanel = page.getByTestId("message-thread-panel");
@@ -149,8 +181,7 @@ test("channel issues preserve an open thread and create in the linked repository
 
   await page.getByTestId("channel-issues-trigger").click();
   const issuesPanel = page.getByTestId("channel-issues-auxiliary-pane");
-  await expect(issuesPanel).toBeVisible();
-  await expect(threadPanel).toBeVisible();
+  await expectChannelThreadIssuesColumns(page);
 
   await issuesPanel.getByRole("button", { name: "Create issue" }).click();
   const dialog = page.getByRole("dialog", { name: "Create an issue" });
@@ -171,6 +202,32 @@ test("channel issues preserve an open thread and create in the linked repository
   await issuesPanel.getByRole("button", { name: "Close issues" }).click();
   await expect(issuesPanel).toHaveCount(0);
   await expect(threadPanel).toBeVisible();
+
+  await threadPanel.getByRole("button", { name: "Close panel" }).click();
+  await expect(threadPanel).toHaveCount(0);
+});
+
+test("opening a thread preserves channel issues and restores focus mode afterward", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.channels.threadViewMode", "focus");
+  });
+  await installMockBridge(page);
+  await openGeneralChannelWithReply(page);
+
+  await page.getByTestId("channel-issues-trigger").click();
+  const issuesPanel = page.getByTestId("channel-issues-auxiliary-pane");
+  await expect(issuesPanel).toBeVisible();
+
+  await page.getByTestId("message-thread-summary").first().click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expectChannelThreadIssuesColumns(page);
+
+  await issuesPanel.getByRole("button", { name: "Close issues" }).click();
+  await expect(issuesPanel).toHaveCount(0);
+  await expect(page.getByTestId("focus-thread-drawer")).toBeVisible();
 
   await threadPanel.getByRole("button", { name: "Close panel" }).click();
   await expect(threadPanel).toHaveCount(0);
