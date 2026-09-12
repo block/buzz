@@ -1,3 +1,4 @@
+import { runtimeBindings } from '../src/settings-runtime.ts';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { addDatabricks } from '../src/databricks.ts';
@@ -77,8 +78,7 @@ test('OpenAI verifies store before public commit; listing is bounded and custom 
 for (const providerType of ['openai','databricks_v2','codex-openai'] as const) test(`${providerType} saved runtime reaches host Save/new Start while the prior active run remains immutable`, async t => {
   const root = fixture(t), owner = newKey(), agent = newKey(), hostKey = publicKey(newKey());
   const codex = providerType === 'codex-openai';
-  const home = codex ? join(root,'service-home') : root, config = codex ? join(root,'agent-config') : root;
-  if (codex) { mkdirSync(home); mkdirSync(config); }
+  const home = root, config = root;
   const setup: Setup = { host: hostKey, ownerSecret: owner, agentSecret: agent, runner: realpathSync(process.execPath), args: ['-e','setInterval(()=>{},1000)'], workspace: root, serviceHome: home, configDirectory: config, mode: 'fixture' };
   provision(root,setup,createGenesis(publicKey(owner),publicKey(agent),hostKey));
   let receive: (m: Message) => void = () => {}; const reports: Message[] = [];
@@ -116,6 +116,8 @@ await import(${JSON.stringify(new URL('./conversation-harness-fixture.ts',import
 `,{mode:0o700});
   }
   saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: codex ? 'codex' : 'buzz-agent', executable, providerId: prior.providers[0]!.id, model, ...(codex ? {cli:realpathSync(process.execPath)} : {effort:'high'}) }] },prior.revision);
+  const projected = runtimeBindings(setup,readSettings(root))[`runtime:${id}`]!;
+  if (codex) { assert.notEqual(projected.serviceHome,root); assert.equal(existsSync(projected.serviceHome!),false); }
   await wait(() => running.settingsRevision === 2);
   await wait(() => reports.some(m => m.type === 'inventory' && (m.body.harnessSetups as any[]).some(r => r.id === `runtime:${id}`)));
   const inventory = reports.filter(m => m.type === 'inventory').at(-1)!;
@@ -125,6 +127,7 @@ await import(${JSON.stringify(new URL('./conversation-harness-fixture.ts',import
   receive(save); await wait(() => reports.some(m => m.body.operation === save.id));
   assert.equal(reports.find(m => m.body.operation === save.id)?.body.result,'saved; running configuration unchanged');
   assert.deepEqual(reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun,active);
+  if (codex) assert.equal(existsSync(projected.serviceHome!),false,'Save is configuration-only');
   const current = reports.filter(m => m.type === 'inventory').at(-1)!;
   const stop = message('stop',hostKey,publicKey(agent),current.revision); receive(stop); await wait(() => reports.some(m => m.body.operation === stop.id));
   const stopped = reports.filter(m => m.type === 'inventory').at(-1)!;
@@ -139,6 +142,10 @@ await import(${JSON.stringify(new URL('./conversation-harness-fixture.ts',import
   const invalid = { ...readSettings(root), revision: 3, runtimes: [] }; writePrivate(join(root,'settings.json'),invalid);
   await sleep(2100); assert.equal(running.settingsRevision,2,'invalid replacement retains effective catalog');
   await running.close();
+  if (codex) {
+    assert.equal(existsSync(projected.serviceHome!),true,'Stop retains managed state');
+    assert.equal(existsSync(projected.configDirectory!),true);
+  }
 });
 
 test('oversized projected inventory retains loaded catalog and serializable reports, including on reopen', async t => {

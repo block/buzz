@@ -1,3 +1,4 @@
+import { prepareCodexHome } from './codex-home.ts';
 import { PI_ADAPTER, piEnvironment, piConfigEvidence } from './pi.ts';
 import { fileURLToPath } from 'node:url';
 import { buzzProviderEnvironment, type BuzzProvider } from './buzz-provider.ts';
@@ -28,6 +29,7 @@ const identifier = (v: unknown): string => {
 /** Validate and snapshot local launch settings. No ambient provider credentials inherited. */
 export function prepareAgent(input: AgentLaunch) {
   const plan = Object.freeze({ ...input, args: Object.freeze([...input.args]) });
+  if (plan.harness === 'codex' && plan.codex?.managedHome) prepareCodexHome(plan.codex.managedHome, plan.home, plan.configDirectory);
   for (const p of [plan.executable, plan.workspace, plan.home, plan.configDirectory]) {
     if (!isAbsolute(p) || realpathSync(p) !== p) throw Error('Harness setup requires canonical absolute paths');
   }

@@ -152,13 +152,12 @@ offered (Desktop agentConfigCore owns it via model ID). No new native code or
 proxy routes. Legacy explicit Codex key-file bindings remain separate; an OS
 binding cannot fall back to a file.
 
-This does NOT complete the requested non-Buzz matrix. Pi execution/provider
-integration and non-Buzz Databricks integration are still absent. Claude remains
+This historical slice did not complete the requested non-Buzz matrix. Pi was
+subsequently completed below; Codex/Claude Databricks remain absent. Claude remains
 provider-locked in the cited Desktop catalog; Claude × OpenAI is not offered.
-Do not publish this as BUILD IT ALL complete. Current source inspection did not
-establish a Desktop-owned Pi/Codex/Claude Databricks launch adapter; implementing
-such transport still requires the actual adapter protocol/config contract, not
-merely sending BUZZ_AGENT_PROVIDER to an unrelated process.
+Do not publish this as BUILD IT ALL complete. The remaining Codex/Claude
+Databricks transport must use the actual adapter protocol/config contract, not
+merely send BUZZ_AGENT_PROVIDER to an unrelated process.
 
 Evidence for this continuation, final suite and remaining work:
 `/Users/loganj/.buzz/artifacts/beehive-adapter-integration-9b0f8958/INTEGRATION_RESULT.md`.
@@ -189,3 +188,35 @@ seams (`pi-isolation-loader.mjs`), fake external ACP executables and loopback
 provider servers, not installed harnesses or real OS stores. Targeted cases live
 in `pi-host.test.ts`, `pi-conversation.test.ts`, and `pi.test.ts`. This slice does
 not claim completion of Codex/Claude or erase prior combined-suite failures.
+
+
+## Codex ordinary base-slot isolation (7156d988; partial continuation)
+
+The fixture-only atomic manager PID marker fix is integrated as `4b338d337`.
+No production cancellation behavior, assertion or deadline changed.
+
+Saved Codex/OpenAI runtimes now work when an ordinary base slot has equal
+serviceHome/configDirectory. Pure catalog projection binds new distinct managed
+HOME/CODEX_HOME paths to installation host, owner, public slot and immutable
+runtime ID. Explicit Start preparation provisions only that owner-only subtree,
+with a checked exact ownership marker, canonical directories and symlink refusal.
+Catalog and Save do not create directories. No unrelated HOME/config/credential
+is imported, removed or retargeted. Existing distinct explicit bindings retain
+exact paths/fingerprints; Stop never deletes managed session state. Codex's
+existing broker still refuses session/load and session/resume; this does not add
+native resume support or discard state that future authorized resume may need.
+
+`codex-home.test.ts` covers public-only slot projection, stable reopen mapping,
+slot/runtime separation, retained session files, legacy paths and foreign/partial/
+symlink refusal. The existing real host settings -> catalog -> Save -> Start ->
+external fake Codex adapter -> loopback provider journey now uses ordinary equal
+base directories and asserts no directory before Start and retention after Stop.
+Codex protocol/model/auth/descendant negatives remain unchanged.
+
+Targeted validation: host-settings 8/8; codex-home + codex + manager-controller
+17/17; direct pinned Node 24.15.0 typecheck PASS. No global suite or integrated UI
+rerun: Codex/Databricks and Claude/Databricks are still unimplemented, not proven
+incompatible. Claude/OpenAI remains provider-locked/unsupported. Native/helper
+unchanged; reuse existing artifact/hash and package instructions. This is not the
+final BUILD IT ALL candidate. Full result and surviving logs:
+`/Users/loganj/.buzz/artifacts/beehive-provider-final-7156d988/FINAL_HOST_SETTINGS_RESULT.md`.

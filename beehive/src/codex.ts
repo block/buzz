@@ -1,3 +1,4 @@
+import { codexHomePaths, type ManagedCodexHome } from './codex-home.ts';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import type { ProviderReference } from './settings.ts';
 import { dirname, isAbsolute } from 'node:path';
@@ -5,9 +6,10 @@ import { dirname, isAbsolute } from 'node:path';
 /** Pinned Buzz 051c3a2 pool.rs:295–320: Codex native systemPrompt requires protocol 2. */
 export const CODEX_ADAPTER = 'codex-acp';
 /** Local-only Codex API-key binding. ChatGPT subscription login caches and custom providers are not inferred. */
-export type CodexSetup = { cli: string; apiKeyFile?: string; credential?: ProviderReference; models: string[] };
+export type CodexSetup = { cli: string; managedHome?: ManagedCodexHome; apiKeyFile?: string; credential?: ProviderReference; models: string[] };
 /** Validate private inputs without reading a credential during offline setup. */
 export function validateCodex(value: CodexSetup): void {
+  if (value?.managedHome) { codexHomePaths(value.managedHome); if (!value.credential) throw Error('Managed Codex home requires saved provider binding'); }
   if (!value || !isAbsolute(value.cli) || (value.credential ? value.apiKeyFile !== undefined || value.credential.service !== 'beehive' || !/^provider:[0-9a-f-]{36}$/.test(value.credential.account) : typeof value.apiKeyFile !== 'string' || !isAbsolute(value.apiKeyFile)) || !Array.isArray(value.models) || !value.models.length || value.models.length > 100 || value.models.some(m => typeof m !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(m))) throw Error('Invalid local Codex CLI/key-file/models binding');
 }
 /** Build a closed service-user env. A local key is a prerequisite, NOT authentication proof. */

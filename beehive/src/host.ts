@@ -633,7 +633,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
     const applySettings = (candidate: typeof effectiveSettings) => {
       if (candidate.revision < effectiveSettings.revision) throw Error('Settings revision regressed');
       for (const collection of ['agents','providers','runtimes'] as const) for (const row of effectiveSettings[collection]) if (!candidate[collection].some(n => JSON.stringify(n) === JSON.stringify(row))) throw Error('Retained settings changed');
-      const additions = entries.map(entry => runtimeBindings(entry.setup,candidate));
+      const additions = entries.map(entry => runtimeBindings(entry.setup,candidate,entry.agent));
       // All slots must fit before mutating ANY effective binding map/revision.
       for (const [index, entry] of entries.entries()) slots.get(entry.agent)!.validateBindings({ ...entry.bindings, ...additions[index] });
       for (const [index, entry] of entries.entries()) Object.assign(entry.bindings,additions[index]);
@@ -649,7 +649,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         const current = (await installationSlotsAsync(directory, credentials, readSignal)).find(e => e.agent === entry.agent);
         readSignal.throwIfAborted();
         if (!current) throw Error('Key removed');
-        const value = current.bindings[id] ?? runtimeBindings(current.setup,effectiveSettings)[id];
+        const value = current.bindings[id] ?? runtimeBindings(current.setup,effectiveSettings,current.agent)[id];
         if (!value) throw Error('Binding removed');
         if (current.retiredBindings?.[id]) throw Error('Binding retired');
         return value;
