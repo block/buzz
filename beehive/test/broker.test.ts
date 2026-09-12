@@ -28,7 +28,7 @@ test('broker enforces model, completion health, cancellation and owned teardown 
       const r = await result;
       if (['ok', 'optional-ok', 'optional-reject'].includes(mode)) {
         if (mode === 'optional-reject') assert.equal(readFileSync(join(dir, 'config-error-forwarded'), 'utf8'), 'yes');
-        assert.ok('value' in r); assert.equal(r.value.session, 'conversation-session');
+        assert.ok('value' in r, `${mode}: ${'error' in r ? String(r.error) : 'missing evidence'}`); assert.equal(r.value.session, 'conversation-session');
         for (let i = 0; i < 40 && !existsSync(join(dir, 'reverse-rpc')); i++) await delay(20);
         assert.equal(readFileSync(join(dir, 'reverse-rpc'), 'utf8'), 'ok');
       } else assert.ok('error' in r, `${mode} must not commit evidence`);

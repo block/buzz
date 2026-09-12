@@ -1,6 +1,6 @@
 import { finalizeEvent, generateSecretKey, getPublicKey, getEventHash, verifyEvent, type Event } from 'nostr-tools/pure';
 import { v2 } from 'nostr-tools/nip44';
-import { fields, object, parseMessage, type Message } from './protocol.ts';
+import { fields, object, parseMessage, serializeManagement, MANAGEMENT_WIRE_BYTES, type Message } from './protocol.ts';
 
 const domain = 'beehive-management-v1';
 /** Authenticated inner message; never infer the sender from the ephemeral outer key. */
@@ -10,8 +10,7 @@ export type AuthenticatedMessage = { sender: string; message: Message };
  * operation identity remains Message.id, NOT the rumor, seal, or wrap event id.
  */
 export function wrapManagement(message: Message, secret: Uint8Array, recipient: string, now = Math.floor(Date.now() / 1000)): Event {
-  const content = JSON.stringify(parseMessage(message));
-  if (Buffer.byteLength(content) > 32768) throw Error('Management message exceeds bounded wire size');
+  const content = serializeManagement(message);
   const rumor = { kind: 14, pubkey: getPublicKey(secret), created_at: now, tags: [['p', recipient], ['subject', domain]], content };
   const seal = finalizeEvent({ kind: 13, created_at: now, tags: [], content: v2.encrypt(JSON.stringify({ ...rumor, id: getEventHash(rumor) }), v2.utils.getConversationKey(secret, recipient)) }, secret);
   const ephemeral = generateSecretKey();
@@ -32,7 +31,7 @@ export function unwrapManagement(value: unknown, secret: Uint8Array): Authentica
   if (seal.tags.length) throw Error('Unexpected seal tags');
   const rumor = object(JSON.parse(v2.decrypt(seal.content, v2.utils.getConversationKey(secret, seal.pubkey))));
   fields(rumor, ['id', 'pubkey', 'created_at', 'kind', 'tags', 'content']);
-  if (rumor.pubkey !== seal.pubkey || rumor.kind !== 14 || typeof rumor.content !== 'string' || Buffer.byteLength(rumor.content) > 32768 || JSON.stringify(rumor.tags) !== JSON.stringify([['p', recipient], ['subject', domain]]) || rumor.id !== getEventHash(rumor as unknown as Event)) throw Error('Invalid management rumor');
+  if (rumor.pubkey !== seal.pubkey || rumor.kind !== 14 || typeof rumor.content !== 'string' || Buffer.byteLength(rumor.content) > MANAGEMENT_WIRE_BYTES || JSON.stringify(rumor.tags) !== JSON.stringify([['p', recipient], ['subject', domain]]) || rumor.id !== getEventHash(rumor as unknown as Event)) throw Error('Invalid management rumor');
   return { sender: seal.pubkey, message: parseMessage(JSON.parse(rumor.content)) };
 }
 /** Tracer authority boundary. Host-to-host Move traffic is intentionally denied until

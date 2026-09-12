@@ -28,6 +28,14 @@ export function parseMessage(value: unknown): Message {
   object(m.body);
   return m as Message;
 }
+/** Plaintext ceiling shared by the diagnostic and NIP-59 transports. */
+export const MANAGEMENT_WIRE_BYTES = 32768;
+/** Serialize exactly what transports carry; optional reserve is for adoption headroom. */
+export function serializeManagement(value: Message, reserveBytes = 0): string {
+  const content = JSON.stringify(parseMessage(value));
+  if (!Number.isSafeInteger(reserveBytes) || reserveBytes < 0 || Buffer.byteLength(content) + reserveBytes > MANAGEMENT_WIRE_BYTES) throw Error('Management message exceeds bounded wire size');
+  return content;
+}
 export function digest(value: string): Buffer { return createHash('sha256').update(value).digest(); }
 export function publicKey(secret: string): string { return Buffer.from(schnorr.getPublicKey(secret)).toString('hex'); }
 export function newKey(): string { return Buffer.from(schnorr.utils.randomPrivateKey()).toString('hex'); }
@@ -35,12 +43,11 @@ function bytes(e: Omit<Envelope, 'signature'>): string { return JSON.stringify([
 function encryptionKey(secret: string): Buffer { return digest(`beehive-private-v1:${secret}`); }
 /** Encrypt before relay publication; the relay only receives the owner's public key. */
 export function seal(message: Message, secret: string): Envelope {
-  parseMessage(message);
-  if (Buffer.byteLength(JSON.stringify(message)) > 32768) throw Error('Management message exceeds bounded wire size');
+  const content = serializeManagement(message);
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(secret), nonce);
   cipher.setAAD(Buffer.from('beehive-private-v1'));
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(message)), cipher.final()]).toString('hex');
+  const ciphertext = Buffer.concat([cipher.update(content), cipher.final()]).toString('hex');
   const e = { v: 1 as const, owner: publicKey(secret), nonce: nonce.toString('hex'), ciphertext, tag: cipher.getAuthTag().toString('hex') };
   return { ...e, signature: Buffer.from(schnorr.sign(digest(bytes(e)), secret)).toString('hex') };
 }
@@ -51,7 +58,7 @@ export function verifyEnvelope(value: unknown, owner: string): Envelope {
   for (const [key, length] of [['nonce',24],['tag',32],['signature',128]] as const) {
     if (typeof e[key] !== 'string' || e[key].length !== length || !/^[0-9a-f]+$/.test(e[key])) throw Error('Invalid envelope');
   }
-  if (typeof e.ciphertext !== 'string' || e.ciphertext.length > 65536 || !/^(?:[0-9a-f]{2})+$/.test(e.ciphertext)) throw Error('Invalid ciphertext');
+  if (typeof e.ciphertext !== 'string' || e.ciphertext.length > MANAGEMENT_WIRE_BYTES * 2 || !/^(?:[0-9a-f]{2})+$/.test(e.ciphertext)) throw Error('Invalid ciphertext');
   const envelope = e as Envelope;
   if (!schnorr.verify(envelope.signature, digest(bytes(envelope)), owner)) throw Error('Invalid signature');
   return envelope;

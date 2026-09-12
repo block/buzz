@@ -1,3 +1,4 @@
+import { wrapManagement, unwrapManagement } from '../src/nostr-codec.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { registerAgent, agentNsec, addOpenAI } from '../src/settings-credentials
 import { readSettings, saveSettings, settingsId } from '../src/settings.ts';
 import { profileFromEvents } from '../src/agent-profile.ts';
 import { isolatedFileCredentials } from './isolated-file-credentials.ts';
-import { newKey, publicKey, message, type Message } from '../src/protocol.ts';
+import { newKey, publicKey, message, serializeManagement, seal, open, type Message } from '../src/protocol.ts';
 import { openAIModels } from '../src/settings-models.ts';
 import { host, provision, type Setup, bindingFingerprint } from '../src/host.ts';
 import { createGenesis } from '../src/assignment.ts';
@@ -109,4 +110,51 @@ test('saved runtime reaches host Save/new Start while the prior active run remai
   const invalid = { ...readSettings(root), revision: 3, runtimes: [] }; writePrivate(join(root,'settings.json'),invalid);
   await sleep(2100); assert.equal(running.settingsRevision,2,'invalid replacement retains effective catalog');
   await running.close();
+});
+
+test('oversized projected inventory retains loaded catalog and serializable reports, including on reopen', async t => {
+  const root = fixture(t), owner = newKey(), agent = newKey(), hostKey = publicKey(newKey());
+  // Long real paths repeat in each wire row; 100 short public records are not a wire budget.
+  const setup: Setup = { host: hostKey, ownerSecret: owner, agentSecret: agent, runner: realpathSync(process.execPath), args: [], workspace: root, allowedWorkspaces: [root, ...Array.from({length: 12}, (_, i) => join(root, `workspace-${i}-` + 'x'.repeat(120)))], serviceHome: root, configDirectory: root, mode: 'fixture' };
+  provision(root,setup,createGenesis(publicKey(owner),publicKey(agent),hostKey));
+  const reports: Message[] = [];
+  const transport = { binding: {host: hostKey, owner: publicKey(owner)}, validate() {}, connect() { return { ready: Promise.resolve(), send(m: Message) { serializeManagement(m); reports.push(m); }, close() {} }; } };
+  const running = await host(root,'ws://127.0.0.1',undefined,transport);
+  t.after(() => running.close());
+  let stored: string | null = null;
+  addOpenAI(root,'Fixture','synthetic',{read: () => stored, create(_r,v) { stored = v; }});
+  const prior = readSettings(root);
+  const row = {id: settingsId(), name: 'Fitting', harness: 'buzz-agent' as const, executable: realpathSync(process.execPath), providerId: prior.providers[0]!.id, model: 'm'.repeat(200)};
+  saveSettings(root,{...prior, runtimes: [row]},prior.revision);
+  await wait(() => running.settingsRevision === 2);
+  const fitting = reports.filter(m => m.type === 'inventory').at(-1)!;
+  assert.equal((fitting.body.harnessSetups as unknown[]).length,2);
+  // Both production codecs accept the actual fitting inventory.
+  assert.deepEqual(open(seal(fitting,owner),owner),JSON.parse(serializeManagement(fitting)));
+  assert.deepEqual(unwrapManagement(wrapManagement(fitting,Buffer.from(owner,'hex'),publicKey(agent)),Buffer.from(agent,'hex')).message,JSON.parse(serializeManagement(fitting)));
+  const saved = readSettings(root);
+  saveSettings(root,{...saved,runtimes: [...saved.runtimes,...Array.from({length: 18}, () => ({...row,id:settingsId()}))]},saved.revision);
+  assert.equal(readSettings(root).revision,3,'public save is retained, not falsely reported loaded');
+  const before = reports.length;
+  await sleep(2100);
+  assert.equal(running.settingsRevision,2);
+  assert.ok(reports.length > before,'prior inventory continues to publish');
+  assert.deepEqual(reports.filter(m => m.type === 'inventory').at(-1)!.body.harnessSetups,fitting.body.harnessSetups);
+  await running.close();
+  await assert.rejects(host(root,'ws://127.0.0.1',undefined,transport),/bounded wire size/);
+  assert.equal(existsSync(join(root,'host.lock')),false,'failed startup releases only its own lock');
+});
+
+test('shared management serializer preserves the exact UTF-8 wire limit for both producers', () => {
+  const secret = newKey(), recipient = newKey();
+  const m = message('inventory',publicKey(secret),publicKey(recipient),0,{ padding: '' });
+  const overhead = Buffer.byteLength(JSON.stringify(m));
+  m.body.padding = 'a'.repeat(32768-overhead);
+  assert.equal(Buffer.byteLength(serializeManagement(m)),32768);
+  assert.deepEqual(open(seal(m,secret),secret),m);
+  assert.deepEqual(unwrapManagement(wrapManagement(m,Buffer.from(secret,'hex'),publicKey(recipient)),Buffer.from(recipient,'hex')).message,m);
+  m.body.padding += 'é';
+  assert.throws(() => serializeManagement(m),/bounded wire size/);
+  assert.throws(() => seal(m,secret),/bounded wire size/);
+  assert.throws(() => wrapManagement(m,Buffer.from(secret,'hex'),publicKey(recipient)),/bounded wire size/);
 });

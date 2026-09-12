@@ -18,7 +18,7 @@ import { hash, semanticHash, selection, sameSelection, sameLaunchSelection, move
 import { installationSlotsAsync } from './slots.ts';
 import { validateGenesis, type Genesis } from './assignment.ts';
 import { connect, validateRelayURL } from './client.ts';
-import { digest, fields, message, object, publicKey, text, type Message } from './protocol.ts';
+import { digest, fields, serializeManagement, message, object, publicKey, text, type Message } from './protocol.ts';
 import { readPrivate, writePrivate } from './storage.ts';
 import { ConversationSession } from './broker.ts';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
@@ -140,12 +140,12 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
   let owned: OwnedProcess | ConversationSession | undefined;
   let acp: AgentSession | ConversationSession | undefined;
   let catalog: Catalog | { state: 'not-probed' | 'failed'; authentication: 'unverified' } = { state: 'not-probed', authentication: 'unverified' };
-  function inventory() {
-    const candidate = bindings[state.selected.harnessSetup?.id ?? setupId];
+  function inventory(projectedBindings = bindings) {
+    const candidate = projectedBindings[state.selected.harnessSetup?.id ?? setupId];
     const nextSetup = !retiredBindings[state.selected.harnessSetup?.id ?? setupId] && candidate && (!state.selected.harnessSetup || state.selected.harnessSetup.fingerprint === bindingFingerprint(candidate)) ? candidate : undefined;
     return message('inventory',setup.host,agent,state.revision, {
       defaultHarnessSetup: setupId,
-      harnessSetups: Object.entries(bindings).map(([id, value]) => ({ id, availability: retiredBindings[id] ? 'retired' : value.mode === 'diagnostic-acp' ? 'diagnostic-only' : 'available', ...(value.custom ? { label: value.custom.label, contract: value.custom.contract, authentication: 'unverified', ...(value.mode === 'diagnostic-acp' ? { reason: diagnosticReason } : {}) } : {}), fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
+      harnessSetups: Object.entries(projectedBindings).map(([id, value]) => ({ id, availability: retiredBindings[id] ? 'retired' : value.mode === 'diagnostic-acp' ? 'diagnostic-only' : 'available', ...(value.custom ? { label: value.custom.label, contract: value.custom.contract, authentication: 'unverified', ...(value.mode === 'diagnostic-acp' ? { reason: diagnosticReason } : {}) } : {}), fingerprint: bindingFingerprint(value), kind: value.mode, models: setupModels(value), workspaces: value.allowedWorkspaces ?? [value.workspace] })),
       configurations: configurations(state.configurations, state.selected),
       runHistory: Object.values(state.runs ?? {}).slice(-8).map(run => ({ run: run.run, configuration: run.selection.configuration, harnessSetup: run.harnessSetup, model: run.selection.model, workspace: run.selection.workspace, appliedInstructions: run.appliedInstructions, preparedInputHash: run.preparedInputHash })),
       move: state.move ? 'destination preflight pending; source still assigned' : undefined, assignmentChain: state.assignment.chain ?? [], assignedHost: state.assignment.assignedHost, genesis: state.assignment.genesis, executionAuthority: state.assignment.assignedHost === setup.host, phase: state.phase, selectedNext: state.selected, actualRun: state.actual,
@@ -575,7 +575,13 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     Object.defineProperty(state.operations,m.id,{ value: { fingerprint, reply }, enumerable: true, configurable: true, writable: true });
     state.outbox.push(reply); save(); publish(reply); publish(inventory());
   }
-  return { agent, receive, replay, heartbeat() {
+  return { agent, receive, replay, validateBindings(projected: Record<string, Setup>) {
+    // Check the real inventory, including retained state and duplicated selected
+    // models/workspaces, not a row-count estimate. Reserve 8 KiB (the existing
+    // configuration budget) for subsequent lifecycle/selection growth. Both
+    // transports still enforce the exact 32 KiB ceiling at every publication.
+    serializeManagement(inventory(projected), 8192);
+  }, heartbeat() {
     if (owned && (owned.exited || acp?.healthy === false) && state.phase === 'running') { state.phase = 'quarantined'; save(); }
     publish(inventory());
   }, async close() {
@@ -624,10 +630,11 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
       if (candidate.revision < effectiveSettings.revision) throw Error('Settings revision regressed');
       for (const collection of ['agents','providers','runtimes'] as const) for (const row of effectiveSettings[collection]) if (!candidate[collection].some(n => JSON.stringify(n) === JSON.stringify(row))) throw Error('Retained settings changed');
       const additions = entries.map(entry => runtimeBindings(entry.setup,candidate));
+      // All slots must fit before mutating ANY effective binding map/revision.
+      for (const [index, entry] of entries.entries()) slots.get(entry.agent)!.validateBindings({ ...entry.bindings, ...additions[index] });
       for (const [index, entry] of entries.entries()) Object.assign(entry.bindings,additions[index]);
       effectiveSettings = candidate;
     };
-    applySettings(effectiveSettings);
     reloadSettings = () => {
       try { const candidate = readSettings(directory); if (candidate.revision !== effectiveSettings.revision) applySettings(candidate); }
       catch { /* Saved invalid settings remain on disk for repair; prior effective catalog is retained. */ }
@@ -667,6 +674,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         function hostKeyForMetadata() { return transport?.binding.host ?? entry.setup.host; }
       }, url, providerRead));
     }
+    applySettings(effectiveSettings);
     const setup = entries[0]?.setup;
     const hostKey = transport?.binding.host ?? setup!.host;
     // Every slot is hydrated before dialing. Initial WS history may arrive in the

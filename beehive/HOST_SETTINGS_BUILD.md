@@ -39,3 +39,42 @@ External evidence: `/Users/loganj/.buzz/artifacts/beehive-host-settings-build-fb
 ## Publication/package boundary
 
 Do not claim installed/delivered/live credentials verified. Only task files should be committed on `feat/beehive-opentui-57f9c8fa`; no push/PR/merge/default branch or process mutation. Continue missing functionality and narrow credential/process review before delivery. Export exact accepted commit including all new `beehive/src/*.ts`; use the existing package-local lock/runtime recipe. Each eventual occupied `opentui-current` is replaced with one current export, preserving settings/evidence/processes and no retained rollback copy. Installed synthetic smoke must use the extended loader, not fresh HOME alone.
+
+## Continuation 0394e318 (still incomplete; do not publish)
+
+Recovered 78f0c373 without restarting its implementation. This continuation adds:
+
+- Shared `protocol.ts::serializeManagement` / `MANAGEMENT_WIRE_BYTES` for both encrypted transports. The wire ceiling remains exactly 32768 UTF-8 plaintext bytes; diagnostic envelope and NIP-59 consumers use that same constant.
+- `host.ts` validates each **actual projected slot inventory** before changing any binding map or loaded revision, at startup and heartbeat adoption. The inventory includes retained assignment/configurations/history/actual run and repeated model/workspace fields. Adoption reserves 8192 bytes (the existing configuration budget) below the wire ceiling. Oversized saved catalogs remain public saved revisions, not loaded revisions; prior reports continue. Startup with an oversized retained catalog refuses and releases its own lock after successful teardown.
+- Real long-workspace/200-character-model regression: a fitting catalog round-trips through both codecs, a 19-runtime catalog is saved but not adopted, prior inventory remains unchanged and publishable, and reopen refuses it. Exact-limit/multibyte-overflow tests exercise both producers.
+- Synthetic authenticated service fixture: unauthenticated Stop does not invoke teardown; concurrent verified Stops share one failed teardown promise; subsequent Stop/status remain Unknown; reservations/host lock remain; duplicate Start refuses. No process/key deletion is authorized by failure.
+- Broker assertion now reports mode plus underlying verification error, without changing its checks or 2000 ms deadline.
+
+### Seven-point delivery status
+
+1. **Registration/UI:** preserved prior implementation and evidence; unchanged here.
+2. **Databricks v2:** NOT completed. No native helper, OS-token custody/refresh or model bridge was built. Bounded source check confirmed `crates/buzz-agent/src/auth.rs::PkceOAuthTokenSource::new_with_http_timeout` immediately derives/reads its file cache and `save` writes it. A Beehive-only custody seam at that owner is necessary; passing a fresh directory is not OS token storage. Do not run the existing helper as a substitute. No helper packaging recipe can be claimed until a working helper exists. Existing normal build owner is `cargo build --release -p buzz-agent` with pinned Rust 1.95.0; future bridge must use an isolated target output and include the built helper in export.
+3. **Harness discovery:** still Buzz Agent PATH-only; Desktop-equivalent adapter/CLI/version rules remain required. Prior-art plan has exact source owners and current Pi correction. No discovery rewrite made.
+4. **Models/effort:** existing OpenAI listing/custom model retained; Databricks models and supported harness-specific effort selection/launch propagation remain required. No new end-to-end Databricks/effort evidence.
+5. **Relay:** URL/actual connection state retained; optional metadata name capture still missing. No network fetch added.
+6. **Wire:** pre-adoption actual representation gate and shared producer/consumer ceiling added and tested. Residual: 8 KiB reserve is conservative headroom, NOT proof that arbitrarily growing assignment/run history fits forever. It also applies to legacy startup inventories; unusually large existing inventories can now refuse startup even if below 32 KiB. Assess this compatibility boundary before release. Existing send failure handling does not constitute a future-lifecycle fit proof.
+7. **Lifecycle/failures:** new service teardown/unauthorized-stop coverage passes. Broader credential helper late-completion/cancellation/failure matrix remains incomplete. Existing active-run immutability fixture still passes.
+
+### Validation and failure assessment
+
+Artifacts: `/Users/loganj/.buzz/artifacts/beehive-host-settings-continuation-0394e318/`.
+
+- Node 24.15.0 direct TypeScript `--noEmit`: passed (`typecheck-final.log`).
+- Focused host settings: 6/6 (`settings-fixed.log`). Original test failure retained in `settings.log`: JSON round-trip omits an undefined `move` property; fixture now compares serialized representation, not an in-memory undefined key.
+- Service: 3/3 (`service-failures.log`).
+- Broker diagnostic run: 1/1, all existing modes (`broker-diagnostic.log`).
+- One complete final touched-package suite: **159 passed, 2 failed, 19 skipped**, 180 tests, 32.063s (`full-suite.log`). NOT green. No full-suite rerun, deadline inflation, serialization or assertion weakening.
+- Broker now identifies failing `ok` stimulus: `Conversation response timed out; check relay admission and local sign-in`. Actual delta inspection from 4bdb5f09 to 78f0c373 found no `broker.ts` diff; `acp.ts` adds resolvedProviderKey only under `if (plan.buzzProvider)`. This fixture has no buzzProvider and takes the legacy Databricks environment path. Thus this stimulus does not exercise the new provider-key launch branch. It still exercises shared supervisor/broker ownership; a targeted pass is not a root-cause diagnosis or release waiver.
+- Additional final-suite failure: `conversation.test.ts:52`, first Start at line 75 received no management receipt within the existing polling bound. It uses the same synthetic legacy Databricks/conversation path, no buzzProvider. Causality is unestablished; no contention explanation is asserted and no flake-repair campaign was started.
+- Reuse prior unchanged Bun renderer and synthetic PTY evidence; no new UI smoke claimed.
+
+### Narrow review authority owners / remaining risk
+
+Credential authority: `credential-store.ts`, `native-credentials.ts`, `credential-helper.ts`, `manager-credential.ts`, `settings-credentials.ts`, `manager-credential-child.ts`; native OAuth authority will be `crates/buzz-agent/src/auth.rs`, not Desktop cache access. Process authority: `host-service.ts` exact capability/nonce/HMAC, `host.ts` loaded revision/Stop fences, `owned.ts`, `broker.ts`, `acp.ts`. Wire authority: `protocol.ts`, `nostr-codec.ts`, `host.ts::applySettings` and slot `validateBindings`.
+
+This is a bounded continuation handoff, not a genuine external/toolchain blocker and not completion of BUILD IT ALL. Native auth/discovery/effort/relay work remains unexhausted. No push/install/package publication, native build, real credential access, real relay/provider request, browser login, installed harness execution or existing host control. Both installed packages remain at the previously reported 4bdb5f09; they were not inspected or mutated here.
