@@ -113,8 +113,17 @@ fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
 
 /// Fetch listed kind:30621 heads whose `buzz-channel` is `channel`.
 fn project_tags_match_channel<'a>(tags: impl IntoIterator<Item = &'a Tag>, channel: &str) -> bool {
-    tags.into_iter()
-        .any(|tag| tag_name(tag) == Some("buzz-channel") && tag_value(tag) == Some(channel))
+    tags.into_iter().any(|tag| {
+        tag_name(tag) == Some("buzz-channel")
+            && tag_value(tag).is_some_and(|value| channel_ids_equal(value, channel))
+    })
+}
+
+fn channel_ids_equal(a: &str, b: &str) -> bool {
+    match (uuid::Uuid::parse_str(a), uuid::Uuid::parse_str(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => a == b,
+    }
 }
 
 pub(crate) const PROJECT_QUERY_EVENT_BOUND: u32 = 10_000;
@@ -131,9 +140,10 @@ async fn fetch_projects_for_channel_bounded(
     channel: &str,
     max_events: u32,
 ) -> Result<Vec<Event>, CliError> {
+    let channel = crate::validate::canonicalize_uuid(channel)?;
     let filter = serde_json::json!({
         "kinds": [KIND_PROJECT],
-        "#buzz-channel": [channel],
+        "#buzz-channel": [&channel],
     });
     let events: Vec<Event> = client
         .query_all_bounded(filter, max_events)
@@ -146,7 +156,7 @@ async fn fetch_projects_for_channel_bounded(
         .collect::<Result<_, _>>()?;
     Ok(events
         .into_iter()
-        .filter(|event| project_tags_match_channel(event.tags.iter(), channel))
+        .filter(|event| project_tags_match_channel(event.tags.iter(), &channel))
         .collect())
 }
 
@@ -396,9 +406,10 @@ pub async fn cmd_create(
     }
 
     // Validate optional metadata (early, before any network call).
-    if let Some(ch) = channel {
-        crate::validate::validate_uuid(ch)?;
-    }
+    let channel = match channel {
+        Some(ch) => Some(crate::validate::canonicalize_uuid(ch)?),
+        None => None,
+    };
     if let Some(vis) = visibility {
         validate_visibility(vis)?;
     }
@@ -417,7 +428,7 @@ pub async fn cmd_create(
             "project {slug:?} already exists; use 'buzz projects update' to modify it"
         )));
     }
-    if let Some(channel) = channel {
+    if let Some(ref channel) = channel {
         if let Some(existing) = fetch_projects_for_channel(client, channel)
             .await?
             .into_iter()
@@ -434,7 +445,7 @@ pub async fn cmd_create(
     }
 
     if members.is_empty() {
-        let home = channel.ok_or_else(|| {
+        let home = channel.as_deref().ok_or_else(|| {
             CliError::Usage(
                 "pass --channel to create a default repository, or --repo to attach an existing one"
                     .into(),
@@ -445,7 +456,7 @@ pub async fn cmd_create(
     }
 
     // ── Build via Layer B (enforces all writer policy) ────────────────────
-    let builder = build_project(slug, name, description, &members, channel, visibility)
+    let builder = build_project(slug, name, description, &members, channel.as_deref(), visibility)
         .map_err(|e| CliError::Usage(e.to_string()))?;
 
     // Slugs wider than the link charset stay linkless rather than emitting a
@@ -619,9 +630,10 @@ pub async fn cmd_update(
     }
 
     validate_project_slug(slug)?;
-    if let Some(ch) = channel {
-        crate::validate::validate_uuid(ch)?;
-    }
+    let channel = match channel {
+        Some(ch) => Some(crate::validate::canonicalize_uuid(ch)?),
+        None => None,
+    };
     if let Some(vis) = visibility {
         validate_visibility(vis)?;
     }
@@ -669,7 +681,7 @@ pub async fn cmd_update(
     if let Some(d) = description {
         tags.push(make_tag(&["description", d])?);
     }
-    if let Some(ch) = channel {
+    if let Some(ref ch) = channel {
         tags.push(make_tag(&["buzz-channel", ch])?);
     }
     if let Some(vis) = visibility {

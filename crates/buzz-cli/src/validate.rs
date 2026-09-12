@@ -19,6 +19,11 @@ pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
     uuid::Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid UUID: {e}")))
 }
 
+/// Parse a UUID and return its hyphenated lowercase form for tags and filters.
+pub fn canonicalize_uuid(s: &str) -> Result<String, CliError> {
+    Ok(parse_uuid(s)?.hyphenated().to_string())
+}
+
 /// Validate UUID string. Returns CliError::Usage on failure.
 pub fn validate_uuid(s: &str) -> Result<(), CliError> {
     uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage(format!("invalid UUID: {s}")))?;
@@ -412,6 +417,12 @@ mod tests {
     #[test]
     fn parse_uuid_valid() {
         assert!(super::parse_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn canonicalize_uuid_lowercases_and_hyphenates() {
+        let out = super::canonicalize_uuid("550E8400E29B41D4A716446655440000").unwrap();
+        assert_eq!(out, "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]
