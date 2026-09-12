@@ -515,6 +515,29 @@ fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Whether a record carries a well-formed identity that could be addressed.
+///
+/// This is a defensive check on the renderer, not the fix for any reported
+/// symptom: `load_managed_agents` already drops rows with an empty pubkey
+/// before regeneration reaches here — in the unified store an empty pubkey is
+/// what marks a key-less agent *definition*, which `load_agent_definitions`
+/// selects on. Keeping the check means a future caller that hands over raw
+/// store rows cannot publish an address that goes nowhere, and requiring a
+/// 64-character hex identity rather than merely a non-empty string means a
+/// truncated or garbage value is caught with it.
+fn is_addressable(agent: &ManagedAgentRecord) -> bool {
+    let pubkey = agent.pubkey.trim();
+    !agent.name.trim().is_empty()
+        && pubkey.len() == 64
+        && pubkey.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The key a `@mention` resolves on: names are matched case-insensitively and
+/// without surrounding whitespace.
+fn address_key(agent: &ManagedAgentRecord) -> String {
+    agent.name.trim().to_lowercase()
+}
+
 /// True iff the relay has archived this instance's identity. Membership is
 /// tested against the relay's `kind:13535` snapshot (lowercased hex); an empty
 /// set (relay unreachable) fails open — see [`regenerate_nest_context`].
@@ -530,20 +553,39 @@ pub fn render_dynamic_section(
 ) -> String {
     // Every managed agent is eligible on every community — `relay_url` is a
     // legacy creation-era field that `effective_agent_relay_url()` deliberately
-    // ignores, and snapshot-imported records store it empty by design. The only
-    // roster filter is identity-archive.
-    let live: Vec<&ManagedAgentRecord> = agents
+    // ignores, and snapshot-imported records store it empty by design. Archive
+    // drops retired identities; the addressability guard drops malformed rows
+    // a future raw-store caller might pass.
+    let agents: Vec<&ManagedAgentRecord> = agents
         .iter()
         .filter(|a| !is_archived(a, archived))
+        .filter(|agent| is_addressable(agent))
         .collect();
-    let active_agents = if live.is_empty() {
+
+    // Creating an agent under an existing name mints a new keypair instead of
+    // reusing the one already bound to that name, so a registry can hold four
+    // `Coder` rows with four different pubkeys (#5786). Rendered plainly, that
+    // is four identical `@Coder` addresses: an agent reading AGENTS.md is told
+    // to address a name that resolves to none of them in particular.
+    //
+    // The rows stay. They are distinct identities and collapsing them would
+    // hide agents that really are deployed. What changes is the address cell,
+    // which now says the name is ambiguous and carries the pubkey prefix that
+    // tells the duplicates apart.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for agent in &agents {
+        *name_counts.entry(address_key(agent)).or_insert(0) += 1;
+    }
+
+    let active_agents = if agents.is_empty() {
         "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
             .to_string()
     } else {
         let mut table =
             "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"
                 .to_string();
-        for agent in live {
+        for agent in agents {
             let role = agent
                 .persona_id
                 .as_deref()
@@ -552,7 +594,16 @@ pub fn render_dynamic_section(
                 .unwrap_or("—");
             let name = escape_md_cell(&agent.name);
             let role_escaped = escape_md_cell(role);
-            table.push_str(&format!("\n| {name} | {role_escaped} | @{name} |"));
+            let sharing = name_counts.get(&address_key(agent)).copied().unwrap_or(1);
+            let address = if sharing > 1 {
+                let short = &agent.pubkey.trim()[..8];
+                format!(
+                    "@{name} — ambiguous: {sharing} agents share this name (this one is {short}…)"
+                )
+            } else {
+                format!("@{name}")
+            };
+            table.push_str(&format!("\n| {name} | {role_escaped} | {address} |"));
         }
         table
     };
