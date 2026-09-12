@@ -9,7 +9,9 @@ import { message, publicKey, type Message } from './protocol.ts';
 export function privateHostTransport(configuration: HostPairing | HostRegistration, secret: string) {
   const retained = { request: hostPairing('request' in configuration ? configuration.request : configuration) };
   if (publicKey(secret) !== retained.request.host) throw Error('Wrong infrastructure signer');
+  let connected = false;
   return {
+    get connected() { return connected; },
     availability: () => message('availability', retained.request.host, '', 0, { configuration: retained.request, observedAt: Date.now() }),
     binding: { host: retained.request.host, owner: retained.request.owner },
     validate(url: string) {
@@ -21,11 +23,11 @@ export function privateHostTransport(configuration: HostPairing | HostRegistrati
         const m = input.message;
         if (input.sender !== retained.request.owner || m.host !== retained.request.host || !['metadata', 'inspect', 'save', 'start', 'restart', 'stop'].includes(m.type)) return;
         receive(m);
-      }, () => {}); // Existing durable host outbox survives; no automatic launch retry.
+      }, () => { connected = false; }); // Existing durable host outbox survives; no automatic launch retry.
       return {
         // Availability must be accepted before host() can announce online.
-        ready: wire.ready.then(() => wire.publish(message('availability', retained.request.host, '', 0, { configuration: retained.request, observedAt: Date.now() }), retained.request.owner)).catch(error => { wire.close(); throw error; }),
-        close: () => wire.close(),
+        ready: wire.ready.then(() => wire.publish(message('availability', retained.request.host, '', 0, { configuration: retained.request, observedAt: Date.now() }), retained.request.owner)).then(() => { connected = true; }).catch(error => { connected = false; wire.close(); throw error; }),
+        close: () => { connected = false; wire.close(); },
         send(m: Message) {
           if (m.host !== retained.request.host || !['availability', 'inventory', 'receipt'].includes(m.type)) throw Error('Invalid private host report');
           void wire.publish(m, retained.request.owner).catch(() => {}); // Host outbox/heartbeat retains retry state.

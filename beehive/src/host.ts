@@ -1,3 +1,6 @@
+import { readSettings } from './settings.ts';
+import { runtimeBindings } from './settings-runtime.ts';
+import { managerCredential } from './manager-credential.ts';
 import { publicMetadata, metadataRevision, metadataAuthorization, publishPublicMetadata } from './public-metadata.ts';
 import { readCredentialManifest } from './credential-slots.ts';
 import { systemCredentials, type CredentialBackend } from './credential-store.ts';
@@ -117,7 +120,7 @@ export function loadSlotState(setup: Setup, path: string, agent: string): State 
   return state;
 }
 /** Hosts consult durable assignment, never key presence or relay inventory, for authority. */
-function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}, privateSnapshots = false, metadataCustody?: (signal: AbortSignal) => Promise<{ secret: string; relay: string; authTag: string }>, managementRelay?: string) {
+function slot(setup: Setup, path: string, agent: string, currentSetup: (id: string, signal: AbortSignal) => Promise<Setup>, publish: (m: Message) => void, profiles: Profiles, setupId: string, bindings: Record<string, Setup>, retiredBindings: Record<string, string> = {}, privateSnapshots = false, metadataCustody?: (signal: AbortSignal) => Promise<{ secret: string; relay: string; authTag: string }>, managementRelay?: string, providerRead = managerCredential) {
   // Optional execution credential: a public-only slot (local key copy deliberately
   // removed) has none. There is no shadow identity and no reconstruction; execution
   // paths must load it explicitly and fail closed when absent.
@@ -237,7 +240,17 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     } finally { if (credentialRead === controller) credentialRead = undefined; }
     accessSync(setup.runner, constants.X_OK);
     if (realpathSync(selected.workspace) !== selected.workspace || !statSync(selected.workspace).isDirectory()) throw Error('Workspace changed');
-    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
+    let resolvedProviderKey: string | undefined;
+    if (setup.buzzProvider?.credential) {
+      const controller = new AbortController(); credentialRead = controller;
+      try {
+        const result = await providerRead({ action: 'provider-read', key: setup.buzzProvider.credential }, controller.signal);
+        controller.signal.throwIfAborted();
+        if (closing || retracting(revision) || state.revision !== revision || hash(state.assignment) !== assignment || hash(state.selected) !== selectionBefore) throw Error('Provider admission invalidated');
+        resolvedProviderKey = result.secret; result.secret = undefined;
+      } finally { if (credentialRead === controller) credentialRead = undefined; }
+    }
+    const launch: AgentLaunch | undefined = setup.mode === 'fixture' ? undefined : { ...(resolvedProviderKey ? { resolvedProviderKey } : {}), executable: setup.runner, args: setup.args, workspace: selected.workspace, home: text(setup.serviceHome), configDirectory: text(setup.configDirectory), ...(setup.buzzProvider ? { buzzProvider: setup.buzzProvider } : {}), databricksHost: setup.mode === 'buzz-agent-api-key' || setup.mode === 'goose' || setup.mode === 'claude' || setup.mode === 'codex' ? '' : text(setup.databricksHost), ...(setup.mode === 'codex' ? { harness: 'codex' as const, codex: setup.codex } : {}), ...(setup.mode === 'claude' ? { harness: 'claude' as const, claude: setup.claude } : {}), ...(setup.mode === 'goose' ? { harness: 'goose' as const, provider: setup.gooseProvider, ...(setup.custom ? { custom: setup.custom } : {}) } : {}), model: selected.model, ...(selected.behavior ? { instructions: selected.behavior.instructions } : {}) };
     const prepared = launch ? prepareAgent(launch) : undefined;
     const conversation = setup.conversation && launch ? prepareConversation(setup.conversation, launch, executionSecret, state.binding.owner) : undefined;
     // Local hashes only; no setup or secret values leave the host. Include existing
@@ -580,13 +593,15 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
 }
 
 /** One installation owns every slot, lock and management transport. */
-export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { availability?(): Message; binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }, credentials: CredentialBackend = systemCredentials) {
+export async function host(directory: string, url: string, signal?: AbortSignal, transport?: { availability?(): Message; binding: { host: string; owner: string }; validate(url: string): void; connect(url: string, secret: string, receive: (m: Message) => void, recovered?: () => void): { ready: Promise<void>; send(m: Message): void; close(): void } }, credentials: CredentialBackend = systemCredentials, providerRead = managerCredential) {
   signal?.throwIfAborted();
   (transport?.validate ?? validateRelayURL)(url);
+  let effectiveSettings = readSettings(directory);
   const lock = join(directory, 'host.lock');
   mkdirSync(lock, { mode: 0o700 }); // Never infer ownership from a recovered PID.
   let client: { ready: Promise<void>; send(m: Message): void; close(): void } | undefined;
   let initialized = false;
+  let reloadSettings = () => {};
   const slots = new Map<string, ReturnType<typeof slot>>();
   const profiles = new Profiles();
   const publish = (m: Message) => { try { client?.send(m); } catch { /* Slot outbox survives transport loss. */ } };
@@ -605,13 +620,25 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
     const entries = transport && !existsSync(join(directory, 'setup.json')) ? [] : await installationSlotsAsync(directory, credentials, signal);
     signal?.throwIfAborted();
     signal?.addEventListener('abort', abort, { once: true });
+    const applySettings = (candidate: typeof effectiveSettings) => {
+      if (candidate.revision < effectiveSettings.revision) throw Error('Settings revision regressed');
+      for (const collection of ['agents','providers','runtimes'] as const) for (const row of effectiveSettings[collection]) if (!candidate[collection].some(n => JSON.stringify(n) === JSON.stringify(row))) throw Error('Retained settings changed');
+      const additions = entries.map(entry => runtimeBindings(entry.setup,candidate));
+      for (const [index, entry] of entries.entries()) Object.assign(entry.bindings,additions[index]);
+      effectiveSettings = candidate;
+    };
+    applySettings(effectiveSettings);
+    reloadSettings = () => {
+      try { const candidate = readSettings(directory); if (candidate.revision !== effectiveSettings.revision) applySettings(candidate); }
+      catch { /* Saved invalid settings remain on disk for repair; prior effective catalog is retained. */ }
+    };
     for (const entry of entries) {
       if (transport && (entry.setup.host !== transport.binding.host || setupOwner(entry.setup) !== transport.binding.owner)) throw Error('Private transport differs from retained host/agent authority');
       slots.set(entry.agent, slot(entry.setup, entry.path, entry.agent, async (id, readSignal) => {
         const current = (await installationSlotsAsync(directory, credentials, readSignal)).find(e => e.agent === entry.agent);
         readSignal.throwIfAborted();
         if (!current) throw Error('Key removed');
-        const value = current.bindings[id];
+        const value = current.bindings[id] ?? runtimeBindings(current.setup,effectiveSettings)[id];
         if (!value) throw Error('Binding removed');
         if (current.retiredBindings?.[id]) throw Error('Binding retired');
         return value;
@@ -638,7 +665,7 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
         if (!current || current.host !== entry.setup.host || setupOwner(current) !== setupOwner(entry.setup) || !current.agentSecret || !current.conversation?.authTag || current.conversation.relay !== url) throw Error('Existing agent key/owner association/relay required');
         return { secret: current.agentSecret, relay: current.conversation.relay, authTag: current.conversation.authTag };
         function hostKeyForMetadata() { return transport?.binding.host ?? entry.setup.host; }
-      }, url));
+      }, url, providerRead));
     }
     const setup = entries[0]?.setup;
     const hostKey = transport?.binding.host ?? setup!.host;
@@ -664,8 +691,8 @@ export async function host(directory: string, url: string, signal?: AbortSignal,
   initialized = true;
   if (transport?.availability) publish(transport.availability());
   for (const s of slots.values()) s.replay();
-  heartbeat = setInterval(() => { if (transport?.availability) publish(transport.availability()); for (const s of slots.values()) s.heartbeat(); }, 2000);
-  return { agent: [...slots.keys()][0], agents: [...slots.keys()], close() {
+  heartbeat = setInterval(() => { reloadSettings(); if (transport?.availability) publish(transport.availability()); for (const s of slots.values()) s.heartbeat(); }, 2000);
+  return { agent: [...slots.keys()][0], agents: [...slots.keys()], get settingsRevision() { return effectiveSettings.revision; }, close() {
     signal?.removeEventListener('abort', abort);
     return close();
   } };

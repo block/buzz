@@ -39,13 +39,13 @@ test('manager config save is real/keyless owner routing; retained configuration 
     await f.controller.request({ id: 1, action: 'configure', values: { owner, relay: 'wss://example.invalid' } });
     assert.ok(existsSync(join(f.home,'.beehive','host','host-identity.json')));
     assert.match(f.snapshot.status,/saved/);
-    assert.match(f.snapshot.local[0]!.detail, /Host service: not checked/);
+    assert.match(f.snapshot.local[0]!.detail, /Host configured/);
     assert.ok(!f.snapshot.local[0]!.detail.includes('{'));
-    assert.match(f.snapshot.local[0]!.evidence!, /nonce/);
+    assert.equal(f.snapshot.local[0]!.evidence, undefined);
     assert.equal(f.backend.read(credentialReference('owner',owner)),null);
     await f.controller.request({ id: 2, action: 'configure', values: { owner, relay: 'wss://other.invalid' } });
     assert.match(f.snapshot.status,/already exists/);
-    assert.match(f.snapshot.local[0]!.detail,/example.invalid/);
+    assert.equal(f.snapshot.hostRelay,'wss://example.invalid');
     await f.controller.request({ id: 3, action: 'draft', values: { name: 'Working', instructions: 'First line\nSecond line' } });
     assert.equal(profileDrafts(join(f.home,'.beehive','owner')).list()[0]!.value.instructions,'First line\nSecond line');
   } finally { f.cleanup(); }

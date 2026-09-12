@@ -1,10 +1,15 @@
 import { existsSync } from 'node:fs';
+import { readSettings, saveSettings, settingsId, type Settings, type RegisteredAgent } from './settings.ts';
+import { agentNsec } from './settings-credentials.ts';
+import { publicKey } from './protocol.ts';
+import { fetchAgentProfile } from './agent-profile.ts';
+import { serviceStatus, startService, stopService, type ServiceStatus } from './host-service.ts';
+import { detectBuzzAgent } from './settings-models.ts';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { fork } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { managerCredential } from './manager-credential.ts';
+export { managerCredential } from './manager-credential.ts';
 import { readHostIdentityPublic } from './host-identity.ts';
-import { installationPublicSlots } from './slots.ts';
 import { createControllerConfig, readControllerConfig } from './controller-config.ts';
 import { ownerPublicInput } from './host-setup.ts';
 import { managementClient } from './intents.ts';
@@ -13,7 +18,7 @@ import { profileDrafts, editProfileDraft } from './profile-drafts.ts';
 
 export type ManagerRequest = { id: number; action: string; values?: Record<string, string>; target?: string; revision?: number };
 export type ManagerItem = { id: string; label: string; detail: string; evidence?: string; disabled?: Record<string, string> };
-export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string };
+export type ManagerSnapshot = { local: ManagerItem[]; agents: (ManagerItem & { revision: number; configurations: string[] })[]; routing?: { owner: string; relay: string }; owner?: string; status: string; settings?: Settings; service?: ServiceStatus; hostRelay?: string; profilePreview?: RegisteredAgent; models?: string[]; runtimeExecutable?: string; databricksHost?: string };
 const short = (s: string) => s.length > 22 ? `${s.slice(0,8)}…${s.slice(-6)}` : s;
 
 /** Final plain display text thrown by this boundary; never rewrapped or retranslated. */
@@ -115,31 +120,6 @@ const describe = (v: unknown, labels: Record<string, string> = {}, path = ''): s
   }).join('\n');
 };
 
-/** One bounded Node helper per explicit credential operation. Completion waits for exit.
- * Cancellation cannot undo OS persistence; callers must inspect before retrying. */
-export function managerCredential(input: object, signal: AbortSignal, helper = new URL('./manager-credential-child.ts', import.meta.url)): Promise<any> {
-  signal.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const child = fork(fileURLToPath(helper), [], {
-      execPath: process.execPath, execArgv: [], silent: true,
-      env: { PATH: '/usr/bin:/bin', ...(process.env.HOME ? { HOME: process.env.HOME } : {}) },
-    });
-    let result: any; let failed = false;
-    const cancel = () => { failed = true; child.kill('SIGKILL'); };
-    const timer = setTimeout(cancel, 10000);
-    signal.addEventListener('abort', cancel, { once: true });
-    child.stdout?.resume(); child.stderr?.resume();
-    child.once('error', () => { failed = true; });
-    child.once('message', value => { result = value; });
-    child.once('close', code => {
-      clearTimeout(timer); signal.removeEventListener('abort', cancel);
-      if (code !== 0 || failed || signal.aborted || !result?.ok) reject(plain('Could not complete key access. It may have been cancelled, timed out, denied, or unavailable. The key may not match. Changes may already be saved. Inspect before you try again. No key was reset or saved as plain text.'));
-      else resolve(result);
-    });
-    child.send(input, error => { if (error) cancel(); });
-  });
-}
-
 /** Domain controller stays on Node. Existing management intent journal owns remote
  * operation identity, CAS, receipts, reconnect and unknown outcomes. */
 export class ManagerController {
@@ -150,6 +130,12 @@ export class ManagerController {
   private generation = 0;
   private active?: AbortController;
   private closed = false;
+  private service: ServiceStatus = { state: 'unknown' };
+  private probing = false;
+  private profilePreview?: RegisteredAgent;
+  private models?: string[];
+  private runtimeExecutable?: string;
+  private databricksHost?: string;
   private lastId = 0;
   private status = 'Local Host does not require owner sign-in. Quitting or signing out does not stop hosts or agents.';
   readonly home: string;
@@ -167,19 +153,7 @@ export class ManagerController {
     try {
       if (existsSync(join(this.hostDirectory, 'host-identity.json'))) {
         const identity = readHostIdentityPublic(this.hostDirectory);
-        local.push({ id: 'host', label: identity.pairing.label, evidence: JSON.stringify(identity.pairing, null, 2), detail: `${identity.pairing.label}
-Configuration: saved
-Relay: ${identity.pairing.relay}
-Owner: ${short(identity.pairing.owner)}
-Host service: not checked
-
-Host configuration alone does not permit an agent to start.
-
-Open Actions to add an agent from prepared files.
-Quit before you run:
-beehive host --owner-present
-Host start and local setup forms are unavailable.` });
-        if (existsSync(join(this.hostDirectory, 'setup.json'))) for (const slot of installationPublicSlots(this.hostDirectory)) local.push({ id: slot.agent, label: slot.agent, detail: `Local agent record. This is not current run status.\nAgent ${slot.agent}\nLocal setups: ${Object.keys(slot.bindings).join(', ')}` });
+        local.push({ id: 'host', label: identity.pairing.label, detail: 'Host configured. Agent registration is not execution authority.' });
       } else local.push({ id: 'missing', label: 'Configure this computer', detail: 'No local host configuration. Save the owner’s public key and relay URL. Beehive creates a host identity in the secure credential store. No owner sign-in is needed. This does not create an agent or start a host.' });
     } catch (error) { local.push({ id: 'error', label: 'Saved configuration needs attention', detail: (error instanceof Error ? backendMessages[error.message] ?? `Could not read saved configuration: ${error.message}` : `Could not read saved configuration: ${String(error)}`) + '\nSaved data has not been reset.' }); }
     const agents: ManagerSnapshot['agents'] = [...this.inventory].map(([id, m]) => {
@@ -218,11 +192,20 @@ If the result is unknown, check operation results before you submit again.
 A Stop result is not a recent host report that confirms the agent is stopped.` });
     let routing: ReturnType<typeof readControllerConfig>;
     try { routing = readControllerConfig(this.ownerDirectory); } catch { /* Invalid retained routing is refused by sign-in; never reset here. */ }
-    return { local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
+    let settings: Settings | undefined, hostRelay: string | undefined;
+    try { settings = readSettings(this.hostDirectory); if (existsSync(join(this.hostDirectory,'host-identity.json'))) hostRelay = readHostIdentityPublic(this.hostDirectory).pairing.relay; } catch { /* Existing error row remains actionable; never reset settings. */ }
+    return { settings, service: this.service, hostRelay, profilePreview: this.profilePreview, models: this.models, runtimeExecutable: this.runtimeExecutable, databricksHost: this.databricksHost, local, agents, routing: routing ? { owner: routing.owner, relay: routing.relay } : undefined, owner: this.owner, status: this.status };
   }
 
   private fresh(m: Message) { return Boolean(this.client?.connected && Date.now() - Number(m.body.observedAt) <= 6000); }
-  refresh() { if (!this.closed) this.changed(this.snapshot()); }
+  refresh() {
+    if (this.closed) return;
+    this.changed(this.snapshot());
+    if (!this.probing) {
+      this.probing = true;
+      void serviceStatus(this.hostDirectory).then(status => { this.service = status; if (!this.closed) this.changed(this.snapshot()); }).finally(() => { this.probing = false; });
+    }
+  }
   cancel() { this.generation++; this.active?.abort(); }
   close() { this.closed = true; this.cancel(); this.client?.close(); this.client = undefined; this.owner = undefined; }
   async request(request: ManagerRequest) {
@@ -233,7 +216,39 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
     const check = () => { abort.signal.throwIfAborted(); if (this.closed || generation !== this.generation) throw plain('Stopped waiting. Changes may already be saved or submitted. Inspect before you try again.'); };
     const v = request.values ?? {};
     try {
-      if (request.action === 'configure') {
+      if (request.action === 'profile-preview') {
+        const identity = readHostIdentityPublic(this.hostDirectory);
+        const key = publicKey(agentNsec(v.secret ?? ''));
+        this.profilePreview = undefined;
+        const profile = await fetchAgentProfile(identity.pairing.relay,key,abort.signal); check();
+        this.profilePreview = { publicKey: key, key: { service: 'beehive', role: 'agent', publicKey: key }, ...profile };
+        this.status = profile.profileState === 'found' ? 'Signed public profile found.' : profile.profileState === 'none' ? 'No profile found. You can register with the public key.' : 'Profile lookup unavailable. You can register without a profile.';
+      } else if (request.action === 'register-agent') {
+        const key = publicKey(agentNsec(v.secret ?? ''));
+        if (this.profilePreview?.publicKey !== key) throw plain('Confirm the public key first.');
+        const { profile, profileState } = this.profilePreview;
+        await this.credential({ action: 'register-agent', directory: this.hostDirectory, secret: v.secret, profile: { profile, profileState } },abort.signal); check();
+        this.profilePreview = undefined; this.status = 'Agent registered. Not assigned or started.';
+      } else if (request.action === 'provider-form') {
+        this.databricksHost = process.env.DATABRICKS_HOST ?? ''; this.status = 'Provider credentials stay in Beehive’s OS store.';
+      } else if (request.action === 'add-openai') {
+        await this.credential({ action: 'add-openai', directory: this.hostDirectory, name: v.name, secret: v.secret },abort.signal); check(); this.status = 'Provider saved. No agent was started.';
+      } else if (request.action === 'runtime-form') {
+        this.runtimeExecutable = detectBuzzAgent(); this.models = undefined; this.status = this.runtimeExecutable ? 'Buzz Agent found. Model access is not yet verified.' : 'Buzz Agent was not found on PATH. No installed harness was run.';
+      } else if (request.action === 'models') {
+        this.models = undefined;
+        const result = await this.credential({ action: 'models', directory: this.hostDirectory, provider: v.provider },abort.signal); check(); this.models = result.models; this.status = 'Model list loaded. Custom model is also available.';
+      } else if (request.action === 'add-runtime') {
+        if (!this.runtimeExecutable) throw plain('No supported executable found.');
+        const previous = readSettings(this.hostDirectory);
+        saveSettings(this.hostDirectory,{ ...previous, runtimes: [...previous.runtimes,{ id: settingsId(), name: v.name ?? '', harness: 'buzz-agent', executable: this.runtimeExecutable, providerId: v.provider ?? '', model: v.model ?? '' }] },previous.revision);
+        this.status = 'Runtime saved for new runs. Running agents did not change. Host loading is reported separately.';
+      } else if (request.action === 'host-start') {
+        this.service = await startService(this.hostDirectory); check(); this.status = 'Host running. Registration and settings do not start agents.';
+      } else if (request.action === 'host-stop') {
+        if (!v.instance) throw plain('A verified host instance is required.');
+        this.service = await stopService(this.hostDirectory,v.instance); check(); this.status = this.service.state === 'stopped' ? 'Host stopped. Owned teardown completed.' : 'Host teardown is unconfirmed. Status unknown.';
+      } else if (request.action === 'configure') {
         const owner = ownerPublicInput(v.owner ?? '');
         if (!/^(wss|ws):\/\//.test(v.relay ?? '')) throw plain('Enter a relay URL that starts with ws:// or wss://.');
         await this.credential({ action: 'configure', directory: this.hostDirectory, label: hostname().slice(0,128), owner, relay: v.relay }, abort.signal);

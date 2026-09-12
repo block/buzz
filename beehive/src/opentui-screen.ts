@@ -36,8 +36,8 @@ export class OpenTuiScreen {
 
   /** Persistent ordinary-key legend, separate from status. Never function-key first.
    * The compact form keeps every affordance named at the 40-column narrow floor. */
-  private static readonly hintsWide = '? Help · a Actions · i Inspect · o Status · q Quit';
-  private static readonly hintsNarrow = '? a Actions i Inspect o Status q Quit';
+  private static readonly hintsWide = 'Tab: Next · Arrows: Select · Enter: Open · ? Help · q Quit';
+  private static readonly hintsNarrow = 'Tab Next · Enter Open · ? Help · q Quit';
 
   constructor(readonly renderer: CliRenderer) {
     this.root = new BoxRenderable(renderer, { width: '100%', height: '100%', flexDirection: 'column', backgroundColor: bg });
@@ -60,8 +60,8 @@ export class OpenTuiScreen {
     body.add(this.scroll);
     this.detail = new TextRenderable(renderer, { fg, width: '100%', content: 'No items.', selectable: false });
     this.scroll.add(this.detail);
-    this.actions = new SelectRenderable(renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, height: 2, showDescription: false, showSelectionIndicator: true, options: [{name: 'Actions (a)', description: ''}, {name: 'Inspect (i)', description: ''}], onMouseDown: event => { this.focusIndex = 2; this.actions.focus(); this.actions.setSelectedIndex(Math.max(0, Math.min(1, event.y - this.actions.y))); this.actions.selectCurrent(); } });
-    this.root.add(this.actions);
+    this.actions = new SelectRenderable(renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, height: 10, showDescription: false, showSelectionIndicator: true, options: [], onMouseDown: event => { this.focusIndex = 2; this.actions.focus(); this.actions.setSelectedIndex(Math.max(0, Math.min(this.commands.length - 1, event.y - this.actions.y))); this.actions.selectCurrent(); } });
+    this.scroll.add(this.actions);
     this.status = new TextRenderable(renderer, { fg, height: 2, onMouseDown: () => this.outcome() });
     this.root.add(this.status);
     this.footer = new TextRenderable(renderer, { fg, height: 1, content: OpenTuiScreen.hintsWide });
@@ -72,7 +72,7 @@ export class OpenTuiScreen {
       const row = this.rows[index]; this.detail.content = clean(row?.detail ?? 'No items.'); this.scroll.scrollTo(0);
       this.focusStyle(); if (row) this.onSelect(row.id);
     });
-    this.actions.on('itemSelected', (index: number) => { if (index === 0) this.drawer(); else this.inspect(); });
+    this.actions.on('itemSelected', (index: number) => { void this.run(index); });
     this.list.on('itemSelected', () => { if (this.narrow) { this.drilled = true; this.resize(); this.focusIndex = 1; this.scroll.focus(); } });
     renderer.keyInput.on('keypress', key => this.key(key));
     renderer.keyInput.on('paste', event => {
@@ -88,7 +88,7 @@ export class OpenTuiScreen {
 
   private focusStyle() {
     this.listFrame.title = `${this.list.focused ? '[List]' : 'List'} · ${this.list.getSelectedIndex() + 1}/${this.rows.length}`;
-    this.scroll.title = `${this.scroll.focused ? '[Details]' : 'Details'}${this.narrow ? ' · Esc back' : ''}`;
+    this.scroll.title = this.scope === 0 ? 'Host settings' : 'Agent controls';
     for (const widget of [this.list, this.actions]) { widget.selectedBackgroundColor = widget.focused ? fg : bg; widget.selectedTextColor = widget.focused ? bg : fg; }
   }
   private narrow = false;
@@ -97,16 +97,20 @@ export class OpenTuiScreen {
   private lastNotice = '';
   onCancel: () => void = () => {};
   setPending(value: boolean) { this.pending = value; }
+  private formWidth() { return this.scope === 0 ? Math.max(20, this.renderer.width - this.listFrame.width - 2) : Math.min(72, this.renderer.width - 4); }
+  private formLeft() { return this.scope === 0 ? this.listFrame.width : Math.floor((this.renderer.width - this.formWidth()) / 2); }
   private resize() {
-    if (this.overlay && this.modal) { this.overlay.width = Math.min(72, this.renderer.width - 4); this.overlay.left = Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2); this.overlay.height = this.compactOverlay ? Math.min(14, this.renderer.height - 4) : this.renderer.height - 4; }
+    if (this.overlay && this.modal) { this.overlay.width = this.formWidth(); this.overlay.left = this.formLeft(); this.overlay.height = this.compactOverlay ? Math.min(14, this.renderer.height - 4) : this.renderer.height - 4; }
     this.small.visible = this.renderer.width < 40 || this.renderer.height < 16;
-    this.narrow = this.renderer.width < 88 || this.renderer.height < 24;
+    this.narrow = this.scope !== 0 && (this.renderer.width < 88 || this.renderer.height < 24);
     this.listFrame.visible = !this.narrow || !this.drilled;
     this.scroll.visible = !this.narrow || this.drilled;
-    this.listFrame.width = this.narrow ? '100%' : Math.min(32, Math.max(24, Math.floor(this.renderer.width * .28)));
-    this.scroll.title = this.narrow ? '[Details] · Esc back' : 'Details';
-    this.footer.content = this.renderer.width >= 52 ? OpenTuiScreen.hintsWide : OpenTuiScreen.hintsNarrow;
+    this.listFrame.width = this.narrow ? '100%' : Math.min(32, Math.max(14, Math.floor(this.renderer.width * .28)));
+    this.scroll.title = this.scope === 0 ? 'Host settings' : 'Agent controls';
+    this.footer.content = this.relayFooter + '\n' + (this.renderer.width >= 70 ? OpenTuiScreen.hintsWide : OpenTuiScreen.hintsNarrow); this.footer.height = 2;
   }
+  private relayFooter = 'Relay: Not configured · disconnected';
+  setRelay(url?: string, state = 'unknown') { this.relayFooter = url ? `Relay: ${clean(url)} · ${state}` : 'Relay: Not configured · disconnected'; this.resize(); }
   private heading() { this.header.content = `BEEHIVE ${this.scope === 0 ? '[Local Host]' : 'Local Host'} | ${this.scope === 1 ? '[Agents]' : 'Agents'}\n${this.scope === 0 ? 'This computer · no owner sign-in needed' : 'Owner · ' + clean(this.owner)}`; }
   setOwner(publicSuffix?: string) { this.owner = publicSuffix ? `${publicSuffix} · signed in · key saved here` : 'signed out'; this.heading(); }
   private switchScope(scope: number) {
@@ -123,18 +127,18 @@ export class OpenTuiScreen {
     // above, so these never intercept text in public, secret or multiline inputs.
     if (!key.ctrl && !key.meta) {
       if (key.name === '?') { key.preventDefault(); this.help(); return; }
-      if (key.name === 'a') { key.preventDefault(); this.drawer(); return; }
-      if (key.name === 'i') { key.preventDefault(); this.inspect(); return; }
+      if (key.name === 'a') { key.preventDefault(); this.focusIndex = 2; this.actions.focus(); return; }
+      if (key.name === 'i' && this.scope !== 0) { key.preventDefault(); this.inspect(); return; }
       if (key.name === 'o') { key.preventDefault(); this.outcome(); return; }
       if (key.name === 'q') { key.preventDefault(); this.close(); return; }
     }
     // Legacy compatibility aliases only; the advertised map above uses ordinary keys.
-    if (key.name === 'f2') { key.preventDefault(); this.drawer(); return; }
-    if (key.name === 'f3') { key.preventDefault(); this.inspect(); return; }
+    if (key.name === 'f2') { key.preventDefault(); this.actions.focus(); return; }
+    if (key.name === 'f3' && this.scope !== 0) { key.preventDefault(); this.inspect(); return; }
     if (key.name === 'f4') { key.preventDefault(); this.outcome(); return; }
     if (this.focusIndex === 0 && ['home','end','pageup','pagedown'].includes(key.name)) { key.preventDefault(); this.navigate(this.list, key.name); }
     if (key.name === 'left' || key.name === 'right') { key.preventDefault(); this.switchScope(1 - this.scope); }
-    if (key.name === 'tab') { key.preventDefault(); this.focusIndex = (this.focusIndex + (key.shift ? 2 : 1)) % 3; if (this.narrow && this.focusIndex === (this.drilled ? 0 : 1)) this.focusIndex = (this.focusIndex + (key.shift ? 2 : 1)) % 3; [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); this.focusStyle(); }
+    if (key.name === 'tab') { key.preventDefault(); this.focusIndex = this.focusIndex === 0 ? 2 : 0; [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); this.focusStyle(); }
     if (key.name === 'f1') { key.preventDefault(); this.help(); }
   }
   private async run(index: number, captured?: ManagerAction) {
@@ -150,6 +154,10 @@ export class OpenTuiScreen {
     if (this.closed) return;
     const prior = selected ?? this.rows[this.list.getSelectedIndex()]?.id;
     this.rows = rows; this.commands = actions;
+    this.detail.visible = this.scope !== 0;
+    const commandOptions = actions.map(a => ({ name: clean(a.label + (a.disabled ? ' — unavailable' : '')), description: '' }));
+    if (JSON.stringify(this.actions.options) !== JSON.stringify(commandOptions)) this.actions.options = commandOptions;
+    this.actions.height = Math.max(5,actions.length);
     const options = rows.map(row => ({ name: clean(row.label), description: '', value: row.id }));
     if (JSON.stringify(this.list.options) !== JSON.stringify(options)) this.list.options = options;
     const index = Math.max(0, rows.findIndex(row => row.id === prior));
@@ -162,7 +170,7 @@ export class OpenTuiScreen {
   choose(title: string, names: string[]): Promise<string | undefined> {
     if (this.modal || !names.length) return Promise.resolve(undefined);
     return new Promise(resolve => {
-      const box = new BoxRenderable(this.renderer, { position: 'absolute', top: 2, left: Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2), width: Math.min(72, this.renderer.width - 4), height: this.renderer.height - 4, border: true, title: title + ' · Esc cancel', backgroundColor: bg });
+      const box = new BoxRenderable(this.renderer, { position: 'absolute', top: 2, left: this.formLeft(), width: this.formWidth(), height: this.renderer.height - 4, border: true, title: title + ' · Esc cancel', backgroundColor: bg });
       const list = new SelectRenderable(this.renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, width: '100%', height: '100%', showDescription: false, showSelectionIndicator: true, options: names.map(name => ({ name: clean(name), description: '' })) });
       this.overlay = box; this.compactOverlay = false; this.renderer.root.add(box); box.add(list); list.focus();
       const finish = (name?: string) => { this.modal = undefined; box.destroyRecursively(); this.actions.focus(); resolve(name); };
@@ -174,38 +182,20 @@ export class OpenTuiScreen {
     const n = list.options.length, current = list.getSelectedIndex();
     list.setSelectedIndex(Math.max(0, Math.min(n - 1, key === 'home' ? 0 : key === 'end' ? n - 1 : current + (key === 'pageup' ? -1 : 1) * Math.max(1, list.height))));
   }
-  inspect() { const row = this.rows[this.list.getSelectedIndex()]; this.read('Technical details', row?.evidence ?? 'No technical details for this item.'); }
+  inspect() { if (this.scope === 0) return; const row = this.rows[this.list.getSelectedIndex()]; this.read('Technical details', row?.evidence ?? 'No technical details for this item.'); }
   private outcome() { this.read('Status · latest message', this.lastNotice || 'No status message yet.'); }
-  private help() { this.read('Help', '? Help · a Actions · i Inspect · o Status · q Quit\nLeft/Right: switch Local Host and Agents.\nTab/Shift-Tab: switch panes.\nArrows, PgUp/PgDn, Home/End or wheel: scroll.\nEnter: open details or an action.\nEsc: cancel waiting first, then close or go back.\nq or Ctrl-Q: quit. Hosts and agents keep running.\nUse arrows and Enter in scrolled lists. Mouse selection is unavailable.\nShortcuts do not run while you edit a field.\nQuit before you use a foreground CLI command.\nRestart and publication forms are unavailable.'); }
+  private help() { this.read('Help', 'Tab: switch list and controls. Arrows: select. Enter: open.\nLeft/Right: switch Host settings and remote Agents.\nEsc: cancel or back. q or Ctrl-C: quit. The host keeps running.\nHost Start and Stop control this computer’s service, not an agent.\nAgent execution still requires authenticated management authority.\nShortcuts do not run while you edit fields.'); }
   private read(title: string, content: string) {
     if (this.modal || this.closed) return;
-    const box = new ScrollBoxRenderable(this.renderer, { position: 'absolute', top: 2, left: Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2), width: Math.min(72, this.renderer.width - 4), height: this.renderer.height - 4, border: true, title: title + ' · Esc close', backgroundColor: bg, scrollY: true });
+    const box = new ScrollBoxRenderable(this.renderer, { position: 'absolute', top: 2, left: this.formLeft(), width: this.formWidth(), height: this.renderer.height - 4, border: true, title: title + ' · Esc close', backgroundColor: bg, scrollY: true });
     this.overlay = box; this.compactOverlay = false; this.renderer.root.add(box); box.add(new TextRenderable(this.renderer, { fg, content: clean(content), width: '100%', selectable: true })); box.focus();
     const cancel = () => { this.modal = undefined; box.destroyRecursively(); [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); };
     this.modal = { cancel, paste: () => {}, key: key => { if (key.name === 'escape') { key.preventDefault(); cancel(); } } };
   }
-  private drawer() {
-    if (this.modal || this.closed) return;
-    const commands = this.commands.slice();
-    const box = new BoxRenderable(this.renderer, { position: 'absolute', top: 2, left: Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2), width: Math.min(72, this.renderer.width - 4), height: this.renderer.height - 4, border: true, title: '[Actions] · Esc close', backgroundColor: bg, flexDirection: 'column', padding: 1 });
-    this.overlay = box; this.compactOverlay = false; this.renderer.root.add(box);
-    box.add(new TextRenderable(this.renderer, { fg, content: clean(this.rows[this.list.getSelectedIndex()]?.label ?? 'No selection'), height: 2 }));
-    const reason = new TextRenderable(this.renderer, { fg, height: 4 });
-    const list = new SelectRenderable(this.renderer, { backgroundColor: bg, textColor: fg, focusedBackgroundColor: bg, focusedTextColor: fg, selectedBackgroundColor: fg, selectedTextColor: bg, flexGrow: 1, showDescription: false, showSelectionIndicator: true, showScrollIndicator: true, options: commands.map(a => ({ name: clean((a.disabled || this.pending ? '(unavailable) ' : '') + a.label), description: '' })), onMouseScroll: event => { if (event.scroll?.direction === 'up') list.moveUp(); else if (event.scroll?.direction === 'down') list.moveDown(); }, onMouseDown: () => this.notice('Use arrows, then Enter. Mouse selection is unavailable. No request was sent.') });
-    box.add(list); box.add(reason); list.focus();
-    const explain = () => { reason.content = this.pending ? 'Working… Esc stops waiting. Remote work or saved changes may already be complete. Inspect before you try again.' : clean(commands[list.getSelectedIndex()]?.disabled || 'Enter opens · Esc closes · arrows/PgDn scroll'); };
-    explain(); list.on('selectionChanged', explain);
-    const cancel = () => { this.modal = undefined; box.destroyRecursively(); [this.list, this.scroll, this.actions][this.focusIndex]!.focus(); };
-    list.on('itemSelected', (i: number) => { if (this.pending || commands[i]?.disabled) { explain(); return; } cancel(); void this.run(i, commands[i]); });
-    this.modal = { cancel, paste: () => {}, key: key => { if (key.name === 'escape') { key.preventDefault(); cancel(); } else if (['home','end','pageup','pagedown'].includes(key.name)) { key.preventDefault(); this.navigate(list, key.name); } } };
-  }
-
-  /** Secret bytes never enter an Input/Textarea, history, selection or text buffer.
-   * Single-use modal storage is cleared on every settlement, including quit. */
   input(label: string, value = '', secret = false, multiline = false, validate?: (value: string) => string, back?: (value: string) => void): Promise<string | undefined> {
     if (this.closed || this.modal) return Promise.resolve(undefined);
     return new Promise(resolve => {
-      const box = new BoxRenderable(this.renderer, { position: 'absolute', top: 2, left: Math.floor((this.renderer.width - Math.min(72, this.renderer.width - 4)) / 2), width: Math.min(72, this.renderer.width - 4), height: multiline ? this.renderer.height - 4 : Math.min(this.renderer.height - 4, 14), border: true, backgroundColor: bg, flexDirection: 'column', padding: 1, title: secret ? 'Hidden key input' : multiline ? 'Private draft · Ctrl-S saves' : clean(label.split('\n')[0]!).slice(0, 45) });
+      const box = new BoxRenderable(this.renderer, { position: 'absolute', top: 2, left: this.formLeft(), width: this.formWidth(), height: multiline ? this.renderer.height - 4 : Math.min(this.renderer.height - 4, 14), border: true, backgroundColor: bg, flexDirection: 'column', padding: 1, title: secret ? 'Hidden key input' : multiline ? 'Private draft · Ctrl-S saves' : clean(label.split('\n')[0]!).slice(0, 45) });
       this.overlay = box; this.compactOverlay = false; this.renderer.root.add(box);
       this.compactOverlay = !multiline;
       const prompt = new ScrollBoxRenderable(this.renderer, { width: '100%', flexGrow: multiline ? 0 : 1, height: multiline ? 3 : undefined, scrollY: true });

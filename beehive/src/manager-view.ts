@@ -50,26 +50,58 @@ function eligibility(action: string) {
 }
 function render() {
   screen.setOwner(snapshot.owner?.slice(-12));
-  const rows = scope === 0 ? snapshot.local : snapshot.agents;
+  const hostRows = [
+    { id: 'agents', label: 'Agents', detail: '' }, ...(snapshot.settings?.agents ?? []).map(a => ({ id: a.publicKey, label: a.profile?.name ?? a.publicKey, detail: '' })),
+    { id: 'providers', label: 'Providers', detail: '' }, ...(snapshot.settings?.providers ?? []).map(p => ({ id: p.id, label: p.name, detail: '' })),
+    { id: 'runtimes', label: 'Runtimes', detail: '' }, ...(snapshot.settings?.runtimes ?? []).map(r => ({ id: r.id, label: r.name, detail: '' })),
+  ];
+  const rows = scope === 0 ? hostRows : snapshot.agents;
   if (selected === 'empty') selected = '';
   if (!selected || (scope === 0 && selected === 'missing' && rows.some(r => r.id === 'host'))) selected = rows[0]?.id ?? '';
   const vanished = !!selected && !rows.some(row => row.id === selected);
+  screen.setRelay(snapshot.hostRelay ?? snapshot.routing?.relay, snapshot.service?.relay ?? 'unknown');
+  const configured = snapshot.local.some(r => r.id === 'host');
   const actions: ManagerAction[] = scope === 0 ? [
-    snapshot.local.some(r => r.id === 'host') ? { label: 'Inspect host configuration', run: () => screen.inspect() } : { label: 'Configure this computer', disabled: snapshot.local.some(r => r.id === 'error') ? 'Saved configuration needs attention. It has not been reset.' : undefined, run: () => routing('configure') },
-    { label: 'Add agent from prepared files', disabled: snapshot.local.some(r => r.id === 'host') ? undefined : 'Configure this computer first.', run: async () => {
-      const binding = await screen.input('Local setup file (binding JSON). Enter its full path. The file must not contain host or agent identity fields.'); if (binding === undefined) return;
-      const genesis = await screen.input('Agent authorization file (genesis JSON). Enter its full path. The file must be authorized by the owner.'); if (genesis === undefined) return;
-      const secret = await screen.input('Agent private key (64 hex characters). It must match the agent. Saved in this host’s secure credential store. Do not enter the owner key.', '', true); if (secret === undefined) return;
-      if (!await screen.confirm('Add a stopped agent to this new local installation? Existing or incomplete installations cannot be reset here. The system may ask for permission.')) return;
-      await request('provision', { binding, genesis, secret });
+    { label: 'Register agent', run: async () => {
+      if (!configured) { await routing('configure'); return; }
+      let secret = await screen.input('Register agent\nAgent nsec private key. Hidden. Saved only in Beehive’s OS credential store.', '', true);
+      if (secret === undefined) return;
+      await request('profile-preview', { secret });
+      const preview = snapshot.profilePreview;
+      if (!preview) { secret = ''; return; }
+      if (await screen.confirm(`Register agent\n${preview.profile?.name ?? 'Name unavailable'}\n${preview.publicKey}\n${preview.profileState === 'unavailable' ? 'Relay unavailable. Register without a profile?' : preview.profileState === 'none' ? 'No profile found.' : preview.profile?.about ?? ''}\nThis does not authorize or start an agent. Save?`)) await request('register-agent',{ secret });
+      secret = '';
     } },
-    { label: 'Refresh local details', run: () => request('refresh') },
-    { label: 'New private instructions draft…', run: async () => {
-      const name = await screen.input('Private instructions · 1 of 2\nDraft name', '', false, false, v => v.trim() ? '' : 'Enter a draft name.'); if (name === undefined) return;
-      const instructions = await screen.input(`Private instructions · 2 of 2\nDraft: ${name}\nSaved only on this computer. Not published or used by an agent. Do not enter passwords or keys.`, '', false, true, v => v.trim() ? '' : 'Enter instructions.'); if (instructions === undefined) return;
-      await request('draft', { name, instructions });
+    { label: 'Add provider', run: async () => {
+      await request('provider-form');
+      const type = await screen.choose('Add provider',['OpenAI','Databricks v2']); if (!type) return;
+      if (type === 'Databricks v2') { await screen.input('Databricks workspace URL',snapshot.databricksHost ?? ''); screen.notice('Databricks browser PKCE is not available in this candidate. No credentials were read or saved.'); return; }
+      const name = await screen.input('Provider name','OpenAI'); if (!name) return;
+      let secret = await screen.input('OpenAI API key. Hidden. Saved in Beehive’s OS credential store.','',true); if (!secret) return;
+      if (await screen.confirm(`Save provider ${name}? No agent will start.`)) await request('add-openai',{ name, secret });
+      secret = '';
     } },
-    { label: 'Host setup commands', run: () => screen.notice('These forms are unavailable. Use the CLI:\nbeehive local-setup ~/.beehive/host\nbeehive provision-agent\nbeehive host --owner-present\nQuit Beehive before you use a foreground CLI command.') },
+    { label: 'Add runtime', run: async () => {
+      await request('runtime-form'); if (!snapshot.runtimeExecutable) return;
+      const harness = await screen.choose('Supported harness',['Buzz Agent']); if (!harness) return;
+      const providers = snapshot.settings?.providers ?? [];
+      if (!providers.length) { screen.notice('Add a provider first.'); return; }
+      const choice = await screen.choose('Provider',providers.map(p => `${p.name} · ${p.id}`)); if (!choice) return;
+      const provider = providers.find(p => choice === `${p.name} · ${p.id}`)!;
+      await request('models',{ provider: provider.id });
+      const choiceModel = await screen.choose(snapshot.models ? 'Model' : 'Model listing unavailable · Custom model allowed',[...(snapshot.models ?? []),'Custom model']); if (!choiceModel) return;
+      const model = choiceModel === 'Custom model' ? await screen.input('Exact model ID. Custom does not verify provider access.') : choiceModel; if (!model) return;
+      const name = await screen.input('Runtime name',model); if (!name) return;
+      if (await screen.confirm(`Save ${name}?\nBuzz Agent · ${provider.name} · ${model}\nEffort control is unavailable in this candidate.\nSaved for new runs. Running agents do not change.`)) await request('add-runtime',{ name, model, provider: provider.id });
+    } },
+    { label: 'Start', disabled: snapshot.service?.state === 'unknown' ? 'Host ownership is unknown. No process will be adopted.' : undefined, run: async () => {
+      if (!configured) { await routing('configure'); return; }
+      if (await screen.confirm('Start the local host service? It keeps running when you quit. The OS may ask for key access. This does not start an agent.')) await request('host-start');
+    } },
+    { label: 'Stop', disabled: snapshot.service?.state !== 'running' ? 'A verified running host instance is required.' : undefined, run: async () => {
+      const instance = snapshot.service?.instance; if (!instance) return;
+      if (await screen.confirm('Stop this host and its running agents?')) await request('host-stop',{ instance });
+    } },
   ] : snapshot.owner ? [
     { label: 'Choose configuration…', disabled: eligibility('select-config'), run: async () => {
       const row = snapshot.agents.find(r => r.id === selected); if (!row) return;
@@ -91,9 +123,10 @@ function render() {
     { label: 'Import matching owner key and sign in', run: () => routing('signin', true) },
   ];
   if (scope === 1 && !snapshot.owner) actions.push({ label: 'New private instructions draft…', run: async () => { const name = await screen.input('Private instructions · 1 of 2\nDraft name', '', false, false, v => v.trim() ? '' : 'Enter a draft name.'); if (name === undefined) return; const instructions = await screen.input(`Private instructions · 2 of 2\nDraft: ${name}\nSaved only on this computer. Not published or used by an agent. Do not enter passwords or keys.`, '', false, true, v => v.trim() ? '' : 'Enter instructions.'); if (instructions !== undefined) await request('draft', { name, instructions }); } });
-  actions.push({ label: 'Quit Beehive', run: () => screen.close() });
-  screen.show(vanished ? [{ id: selected, label: 'Selection no longer available', detail: 'This item is no longer available. Select a current item. No operation will use a replacement item.' }, ...rows] : scope === 0 ? snapshot.local : snapshot.agents.length ? snapshot.agents : [{ id: 'empty', label: snapshot.owner ? 'No host reports yet' : 'Owner sign-in required', detail: 'Sign in as owner to manage agents. This list uses private host reports, not a separate agent directory. An empty list or an offline host does not mean agents are stopped. Local Host and local drafts do not require sign-in.' }], actions, selected);
-  if (lastStatus !== snapshot.status) { lastStatus = snapshot.status; screen.notice(snapshot.status); }
+  if (scope !== 0) actions.push({ label: 'Quit Beehive', run: () => screen.close() });
+  screen.show(vanished ? [{ id: selected, label: 'Selection no longer available', detail: 'This item is no longer available. Select a current item. No operation will use a replacement item.' }, ...rows] : scope === 0 ? hostRows : snapshot.agents.length ? snapshot.agents : [{ id: 'empty', label: snapshot.owner ? 'No host reports yet' : 'Owner sign-in required', detail: 'Sign in as owner to manage agents. This list uses private host reports, not a separate agent directory. An empty list or an offline host does not mean agents are stopped. Local Host and local drafts do not require sign-in.' }], actions, selected);
+  const notice = scope === 0 ? `Host: ${snapshot.service?.state ?? 'unknown'} · Saved: ${snapshot.settings?.revision ?? 0} · Loaded: ${snapshot.service?.revision ?? 'not confirmed'}\n${snapshot.status}` : snapshot.status;
+  if (lastStatus !== notice) { lastStatus = notice; screen.notice(notice); }
 }
 screen.onScope = value => { scope = value; selected = ''; render(); };
 screen.onSelect = id => { if (selected !== id) { selected = id; render(); } };

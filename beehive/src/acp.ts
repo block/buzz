@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { spawnOwned, type OwnedProcess } from './owned.ts';
 
 /** Host-prepared launch: executable/provider binding stays local; instructions are a validated public snapshot. Never accept remote env/argv. */
-export type AgentLaunch = Readonly<{ buzzProvider?: BuzzProvider; custom?: CustomAcp; executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
+export type AgentLaunch = Readonly<{ resolvedProviderKey?: string; buzzProvider?: BuzzProvider; custom?: CustomAcp; executable: string; args: readonly string[]; workspace: string; home: string; configDirectory: string; databricksHost: string; harness?: 'goose' | 'claude' | 'codex'; codex?: CodexSetup; claude?: ClaudeSetup; provider?: string; model: string; instructions?: string }>;
 /** ACP catalogs can be fallback data; even a nonempty result is NOT auth evidence. */
 export type Catalog = { state: 'reported' | 'empty' | 'filtered'; models: string[]; authentication: 'unverified' };
 /** Same child/session acknowledgement plus completed text response, not provider attestation. */
@@ -52,7 +52,7 @@ export function prepareAgent(input: AgentLaunch) {
   }
   if (plan.buzzProvider) {
     if (plan.args.length || plan.harness || plan.databricksHost) throw Error('Mixed Buzz Agent provider launch contract');
-    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ ...buzzProviderEnvironment(plan.buzzProvider, plan.home, plan.configDirectory, plan.model), ...(plan.instructions === undefined ? {} : { BUZZ_AGENT_SYSTEM_PROMPT: plan.instructions }) }) });
+    return Object.freeze({ plan, executableHash: hash(readFileSync(plan.executable)), env: Object.freeze<Record<string, string>>({ ...buzzProviderEnvironment(plan.buzzProvider, plan.home, plan.configDirectory, plan.model, plan.resolvedProviderKey), ...(plan.instructions === undefined ? {} : { BUZZ_AGENT_SYSTEM_PROMPT: plan.instructions }) }) });
   }
   const url = new URL(plan.databricksHost);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Error('Databricks workspace must be an HTTPS origin');
