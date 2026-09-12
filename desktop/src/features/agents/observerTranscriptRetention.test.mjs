@@ -23,6 +23,7 @@ import { beforeEach, describe, it } from "node:test";
 
 import {
   getAgentObserverSnapshot,
+  getAgentSessionConfigs,
   getAgentTranscript,
   resetAgentObserverStore,
   subscribeAgentObserverStore,
@@ -415,4 +416,40 @@ describe("live observer journal — in-order append fast path ordering/dedup", (
       "in-order fast-path appends derive the same transcript as a replay",
     );
   });
+});
+
+it("native session config remains available after its transcript frame is evicted", () => {
+  resetAgentObserverStore();
+  syncAgentObserverEvents(AGENT_PUBKEY, [
+    {
+      ...makeEvent(0),
+      kind: "session_config_captured",
+      payload: {
+        liveEffortSwitching: true,
+        effortSessionToken: "fbf7259f-74df-4859-8b53-c0d8b77fb21e",
+        configOptions: [
+          {
+            category: "thought_level",
+            type: "select",
+            currentValue: "high",
+            options: [{ value: "high" }],
+          },
+        ],
+      },
+    },
+  ]);
+  fillSequential(MAX_OBSERVER_EVENTS + 1);
+  assert.equal(
+    getAgentObserverSnapshot(AGENT_PUBKEY).events.some(
+      (e) => e.kind === "session_config_captured",
+    ),
+    false,
+  );
+  assert.equal(
+    getAgentSessionConfigs(AGENT_PUBKEY)[0].payload.configOptions[0]
+      .currentValue,
+    "high",
+  );
+  resetAgentObserverStore();
+  assert.deepEqual(getAgentSessionConfigs(AGENT_PUBKEY), []);
 });
