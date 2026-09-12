@@ -8,6 +8,7 @@ import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import type { Channel } from "@/shared/api/types";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
@@ -70,7 +71,10 @@ export function ForumView({
     selectedPostId,
   );
 
-  const posts = postsQuery.data?.posts ?? [];
+  const posts = React.useMemo(
+    () => (postsQuery.data ?? []).flatMap((page) => page.posts),
+    [postsQuery.data],
+  );
 
   // Collect all pubkeys from posts and thread for profile resolution.
   // Mentioned pubkeys (`p`/`mention` tags) must be included too: mention
@@ -260,6 +264,21 @@ export function ForumView({
             scrollRef={postsScrollRef}
           />
         )}
+
+        {posts.length > 0 && postsQuery.hasNextPage ? (
+          <div className="flex justify-center px-4 pb-6">
+            <Button
+              disabled={postsQuery.isFetchingNextPage}
+              onClick={() => void postsQuery.fetchNextPage()}
+              size="sm"
+              variant="outline"
+            >
+              {postsQuery.isFetchingNextPage
+                ? "Loading older posts..."
+                : "Load older posts"}
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
