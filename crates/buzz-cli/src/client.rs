@@ -37,7 +37,11 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+///
+/// `filename` is the original file name. Buzz Desktop reads it to label the
+/// download on a generic-file card, so omitting it leaves non-media
+/// attachments with only the opaque blob hash to show the recipient.
+pub fn build_imeta_tag(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -45,6 +49,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
         format!("x {}", d.sha256),
         format!("size {}", d.size),
     ];
+    if let Some(name) = filename.map(str::trim).filter(|n| !n.is_empty()) {
+        tag.push(format!("filename {name}"));
+    }
     if let Some(ref dim) = d.dim {
         tag.push(format!("dim {dim}"));
     }
@@ -67,6 +74,19 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    // Documents and archives. The relay's `/upload` route already sniffs these
+    // onto its generic-file path (`buzz-media::validation`, deny-list only) and
+    // serves them as downloads, so refusing them here made the CLI stricter than
+    // the server and blocked agents from attaching any non-image artifact.
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.ms-excel",
+    "application/msword",
+    "text/csv",
+    "text/plain",
+    "application/zip",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -1755,6 +1775,50 @@ mod retry_policy_tests {
         let addr: SocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), counter)
+    }
+
+    use super::{build_imeta_tag, BlobDescriptor, ALLOWED_MIMES};
+
+    #[test]
+    fn imeta_carries_filename_for_download_labels() {
+        let desc = BlobDescriptor {
+            url: "https://relay.example/blob/abc".into(),
+            sha256: "abc".into(),
+            size: 42,
+            mime_type: "application/pdf".into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        let tag = build_imeta_tag(&desc, Some("quote.pdf"));
+        assert!(
+            tag.contains(&"filename quote.pdf".to_string()),
+            "imeta must carry the original filename so the client can label the download \
+             instead of showing the blob hash: {tag:?}"
+        );
+
+        // No filename available: the tag stays well-formed with no empty entry.
+        let bare = build_imeta_tag(&desc, None);
+        assert!(
+            !bare.iter().any(|part| part.starts_with("filename")),
+            "absent filename must not emit an empty entry: {bare:?}"
+        );
+    }
+
+    #[test]
+    fn documents_are_uploadable() {
+        // The relay's generic-file path accepts these; refusing them here made the
+        // CLI stricter than the server it talks to.
+        for mime in [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/csv",
+            "application/zip",
+        ] {
+            assert!(ALLOWED_MIMES.contains(&mime), "{mime} must be uploadable");
+        }
     }
 
     fn test_client(base_url: &str) -> BuzzClient {
