@@ -30,6 +30,16 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1_500;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
+/// Default `buzz-acp models` session-handshake timeout (initialize + session/new).
+///
+/// Sized above the observed healthy Gemini ACP handshake (~12s) that the legacy
+/// hard 10s window false-negatived. Override via `--timeout-secs` /
+/// `BUZZ_ACP_MODELS_TIMEOUT`.
+pub(crate) const DEFAULT_MODELS_TIMEOUT_SECS: u64 = 90;
+
+/// Hard ceiling for `buzz-acp models` handshake timeout (10 minutes).
+pub(crate) const MAX_MODELS_TIMEOUT_SECS: u64 = 600;
+
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
@@ -188,6 +198,25 @@ pub struct ModelsArgs {
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
+
+    /// Session handshake timeout in seconds (initialize + session/new).
+    ///
+    /// Default is 90s so slower ACP runtimes (e.g. Gemini ~12s) are not
+    /// false-negatived by the legacy hard 10s window. Bounded failure is
+    /// retained: the probe still exits non-zero on timeout.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_MODELS_TIMEOUT",
+        default_value_t = DEFAULT_MODELS_TIMEOUT_SECS
+    )]
+    pub timeout_secs: u64,
+
+    /// Optional real prompt after model discovery (diagnostic path).
+    ///
+    /// When set, runs `session/prompt` on the same session and reports the
+    /// stop reason. Used to verify end-to-end ACP health beyond listing models.
+    #[arg(long)]
+    pub prompt: Option<String>,
 }
 
 /// Shared agent-spawn flags for lightweight local ACP helper subcommands.
