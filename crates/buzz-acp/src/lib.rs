@@ -5304,6 +5304,15 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_routes_channels_only_from_explicit_project_intent() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("mean a regular standalone channel (`buzz channels create`)"));
+        assert!(prompt.contains("only when the human explicitly asks"));
+        assert!(prompt.contains("Never infer project linkage from the current channel"));
+        assert!(!prompt.contains("channel that should belong to the current project"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
