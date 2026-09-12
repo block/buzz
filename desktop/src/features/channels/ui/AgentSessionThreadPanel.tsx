@@ -517,6 +517,10 @@ export function AgentSessionThreadPanel({
         <div ref={contentRef}>
           <ManagedAgentSessionPanel
             agent={agent}
+            archivePaging={{
+              fetchOlder: fetchOlderArchived,
+              hasOlder: hasOlderArchived,
+            }}
             channelId={sessionChannelId}
             className="border-0 bg-transparent px-0 py-2 shadow-none"
             emptyDescription={

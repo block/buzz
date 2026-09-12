@@ -7,8 +7,10 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -35,8 +37,15 @@ import { shorten } from "./agentSessionUtils";
 import {
   useObserverEvents,
   useArchivedChannelEvents,
+  useLoadArchivedObserverEvents,
 } from "./useObserverEvents";
 import { buildTranscriptState } from "./agentSessionTranscript";
+import { AgentActivityPanel } from "../activity/AgentActivityPanel";
+
+export type ArchivePagingHandle = {
+  fetchOlder: () => Promise<unknown>;
+  hasOlder: boolean;
+};
 
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name"> & {
@@ -57,6 +66,12 @@ type ManagedAgentSessionPanelProps = {
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
   transcriptOverride?: TranscriptItem[];
+  /**
+   * External archive pager (e.g. the thread panel's scroll-driven pager).
+   * When omitted, this panel runs its own paging hook so non-thread surfaces
+   * (profile tabs) still hydrate archived history.
+   */
+  archivePaging?: ArchivePagingHandle;
 };
 
 export function ManagedAgentSessionPanel({
@@ -75,8 +90,22 @@ export function ManagedAgentSessionPanel({
   profiles,
   rawEventsOverride,
   transcriptOverride,
+  archivePaging,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = agent.status === "running" || agent.status === "deployed";
+
+  // Hydration parity: surfaces without their own archive pager (profile
+  // tabs) get one here, so archived history renders on every mount surface.
+  // Thread-panel mounts pass their scroll-driven pager in via archivePaging
+  // and this hook stays disabled (enabled=false → no queries fire).
+  const ownPaging = useLoadArchivedObserverEvents(
+    archivePaging === undefined && Boolean(channelId),
+    archivePaging === undefined ? (channelId ?? null) : null,
+  );
+  const effectivePaging: ArchivePagingHandle = archivePaging ?? {
+    fetchOlder: ownPaging.fetchOlderArchived,
+    hasOlder: ownPaging.hasOlderArchived,
+  };
   // Always read from the store — archived frames are ingested regardless of
   // live status and must be renderable for idle agents with channel history.
   // The `hasObserver` flag still gates the relay subscription (via the
@@ -128,6 +157,12 @@ export function ManagedAgentSessionPanel({
     [displayEvents],
   );
 
+  // Preview feature: file activity map derived from the same
+  // combined observer window the transcript reads. The working signal (scoped
+  // to this panel's channel) is the canonical "live" flag.
+  const activityPanelEnabled = useFeatureEnabled("agentActivityPanel");
+  const { working: agentWorking } = useAgentWorking(agent.pubkey, channelId);
+
   return (
     <section
       className={cn(
@@ -143,6 +178,18 @@ export function ManagedAgentSessionPanel({
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
           latestSessionId={latestSessionId}
+        />
+      ) : null}
+
+      {activityPanelEnabled ? (
+        <AgentActivityPanel
+          agentPubkey={agent.pubkey}
+          agentName={agent.name}
+          className="mt-3"
+          frames={combinedEvents}
+          hasOlderHistory={effectivePaging.hasOlder}
+          isLive={agentWorking}
+          onLoadOlder={effectivePaging.fetchOlder}
         />
       ) : null}
 
