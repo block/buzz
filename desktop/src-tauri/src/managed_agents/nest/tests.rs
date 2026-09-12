@@ -443,6 +443,609 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ephemeral_exe_roots_always_include_tmp_and_process_temp_dir() {
+    let roots = ephemeral_exe_roots();
+    assert!(
+        roots.iter().any(|root| root == Path::new("/tmp")),
+        "literal /tmp must be treated as ephemeral even when TMPDIR points elsewhere: {roots:?}"
+    );
+    assert!(
+        roots.contains(&std::env::temp_dir()),
+        "the process temp dir must be treated as ephemeral: {roots:?}"
+    );
+}
+
+/// A planted AppImage layout: an ephemeral bundled CLI (the extract), a durable
+/// CLI, the link directory, and the roots that count as ephemeral for the test.
+#[cfg(unix)]
+struct AppImageLayout {
+    exe_parent: PathBuf,
+    durable_bin: PathBuf,
+    local_bin: PathBuf,
+    ephemeral_roots: Vec<PathBuf>,
+}
+
+#[cfg(unix)]
+fn plant_appimage_layout(tmp: &Path, extract_name: &str) -> AppImageLayout {
+    let ephemeral = tmp.join("ephemeral");
+    let exe_parent = ephemeral.join(extract_name).join("usr/bin");
+    fs::create_dir_all(&exe_parent).unwrap();
+    fs::write(exe_parent.join("buzz"), "appimage binary").unwrap();
+
+    let durable_dir = tmp.join("local/lib/buzz-0.5.14");
+    fs::create_dir_all(&durable_dir).unwrap();
+    let durable_bin = durable_dir.join("buzz");
+    fs::write(&durable_bin, "durable binary").unwrap();
+
+    let local_bin = tmp.join("local/bin");
+    fs::create_dir_all(&local_bin).unwrap();
+
+    AppImageLayout {
+        exe_parent,
+        durable_bin,
+        local_bin,
+        ephemeral_roots: vec![ephemeral],
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_keeps_durable_link_when_bundle_is_ephemeral() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = plant_appimage_layout(tmp.path(), "appimage_extracted_abc123");
+    let link = layout.local_bin.join(cli_link_name(false));
+    std::os::unix::fs::symlink(&layout.durable_bin, &link).unwrap();
+
+    ensure_cli_symlink_in(
+        &layout.exe_parent,
+        &layout.local_bin,
+        cli_link_name(false),
+        &layout.ephemeral_roots,
+    )
+    .unwrap();
+
+    // Retargeting at the extract would dangle once tmpfs is cleared on reboot.
+    assert_eq!(fs::read_link(&link).unwrap(), layout.durable_bin);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_creates_link_for_ephemeral_bundle_when_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = plant_appimage_layout(tmp.path(), "appimage_extracted_abc123");
+    let link = layout.local_bin.join(cli_link_name(false));
+
+    ensure_cli_symlink_in(
+        &layout.exe_parent,
+        &layout.local_bin,
+        cli_link_name(false),
+        &layout.ephemeral_roots,
+    )
+    .unwrap();
+
+    // Nothing durable to protect — an AppImage-only machine still gets the link.
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        layout.exe_parent.join("buzz")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_refreshes_link_when_bundle_is_durable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = vec![tmp.path().join("ephemeral")];
+
+    let exe_parent = tmp.path().join("Applications/Buzz.app/Contents/MacOS");
+    fs::create_dir_all(&exe_parent).unwrap();
+    fs::write(exe_parent.join("buzz"), "binary").unwrap();
+
+    let old_bundle = tmp.path().join("old/Buzz.app/Contents/MacOS");
+    fs::create_dir_all(&old_bundle).unwrap();
+    fs::write(old_bundle.join("buzz"), "binary").unwrap();
+
+    let local_bin = tmp.path().join("local/bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let link = local_bin.join(cli_link_name(false));
+    std::os::unix::fs::symlink(old_bundle.join("buzz"), &link).unwrap();
+
+    ensure_cli_symlink_in(&exe_parent, &local_bin, cli_link_name(false), &roots).unwrap();
+
+    // Durable installs keep refreshing on boot so a moved bundle is picked up.
+    assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_leaves_regular_file_alone_for_ephemeral_bundle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = plant_appimage_layout(tmp.path(), "appimage_extracted_abc123");
+    let link = layout.local_bin.join(cli_link_name(false));
+    fs::write(&link, "user-compiled binary").unwrap();
+
+    ensure_cli_symlink_in(
+        &layout.exe_parent,
+        &layout.local_bin,
+        cli_link_name(false),
+        &layout.ephemeral_roots,
+    )
+    .unwrap();
+
+    assert_eq!(fs::read_to_string(&link).unwrap(), "user-compiled binary");
+}
+
+#[cfg(unix)]
+#[test]
+fn keeps_durable_relative_cli_symlink_when_bundled_cli_is_ephemeral() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ephemeral = tmp.path().join("ephemeral");
+    let roots = vec![ephemeral.clone()];
+
+    let extract = ephemeral.join(".mount_Buzz42/usr/bin");
+    fs::create_dir_all(&extract).unwrap();
+    let buzz_bin = extract.join("buzz");
+    fs::write(&buzz_bin, "binary").unwrap();
+
+    let durable = tmp.path().join("local/lib");
+    fs::create_dir_all(&durable).unwrap();
+    fs::write(durable.join("buzz"), "binary").unwrap();
+
+    let local_bin = tmp.path().join("local/bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let link = local_bin.join(cli_link_name(false));
+    // Relative targets resolve against the link's own directory.
+    std::os::unix::fs::symlink("../lib/buzz", &link).unwrap();
+
+    assert!(!should_retarget_cli_symlink(&buzz_bin, &link, &roots));
+}
+
+#[cfg(unix)]
+#[test]
+fn retargets_dangling_cli_symlink_when_bundled_cli_is_ephemeral() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = plant_appimage_layout(tmp.path(), "appimage_extracted_abc123");
+    let link = layout.local_bin.join(cli_link_name(false));
+    std::os::unix::fs::symlink(tmp.path().join("gone/buzz"), &link).unwrap();
+
+    assert!(should_retarget_cli_symlink(
+        &layout.exe_parent.join("buzz"),
+        &link,
+        &layout.ephemeral_roots
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn retargets_stale_ephemeral_cli_symlink_when_bundled_cli_is_ephemeral() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = plant_appimage_layout(tmp.path(), "appimage_extracted_new");
+
+    let stale_extract = tmp.path().join("ephemeral/appimage_extracted_old/usr/bin");
+    fs::create_dir_all(&stale_extract).unwrap();
+    fs::write(stale_extract.join("buzz"), "binary").unwrap();
+
+    let link = layout.local_bin.join(cli_link_name(false));
+    std::os::unix::fs::symlink(stale_extract.join("buzz"), &link).unwrap();
+
+    // Both are ephemeral: keep refreshing so the link names this boot's extract.
+    assert!(should_retarget_cli_symlink(
+        &layout.exe_parent.join("buzz"),
+        &link,
+        &layout.ephemeral_roots
+    ));
+}
+
+fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
+        id: id.to_string(),
+        display_name: display_name.to_string(),
+        avatar_url: None,
+        system_prompt: String::new(),
+        runtime: None,
+        model: None,
+        provider: None,
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        env_vars: std::collections::BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
+    ManagedAgentRecord {
+        pubkey: String::new(),
+        name: name.to_string(),
+        persona_id: persona_id.map(|s| s.to_string()),
+        private_key_nsec: String::new(),
+        auth_tag: None,
+        relay_url: String::new(),
+        avatar_url: None,
+        acp_command: String::new(),
+        agent_command: String::new(),
+        agent_command_override: None,
+        agent_args: vec![],
+        mcp_command: String::new(),
+        turn_timeout_seconds: 0,
+        idle_timeout_seconds: None,
+        max_turn_duration_seconds: None,
+        parallelism: 1,
+        system_prompt: None,
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        start_on_app_launch: false,
+        auto_restart_on_config_change: true,
+        runtime_pid: None,
+        backend: BackendKind::default(),
+        backend_agent_id: None,
+        provider_policy_pending: false,
+        provider_binary_path: None,
+        team_id: None,
+        persona_team_dir: None,
+        persona_name_in_team: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        last_started_at: None,
+        last_stopped_at: None,
+        last_exit_code: None,
+        last_error: None,
+        last_error_code: None,
+        respond_to: RespondTo::default(),
+        respond_to_allowlist: vec![],
+        env_vars: std::collections::BTreeMap::new(),
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
+        is_active: true,
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
+        relay_mesh: None,
+    }
+}
+
+#[test]
+fn test_render_dynamic_section_with_agents() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let agents = vec![make_agent("Kit", Some("p1"))];
+    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    assert!(output.contains("| Kit | Builder | @Kit |"));
+    assert!(output.contains("| Name | Persona | How to address |"));
+    assert!(output.contains("## Workspace"));
+}
+
+#[test]
+fn test_render_dynamic_section_empty() {
+    let output = render_dynamic_section(&[], &[], "ws://example.com:3000");
+    assert!(output.contains("No agents deployed yet"));
+}
+
+#[test]
+fn test_render_dynamic_section_agent_no_persona() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let agents = vec![make_agent("Scout", Some("nonexistent"))];
+    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    assert!(output.contains("| Scout | — | @Scout |"));
+}
+
+#[test]
+fn test_upsert_managed_section_with_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(
+            &file,
+            "# Header\n\nsome content\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nold section\n<!-- END BUZZ MANAGED -->\n\nafter\n",
+        )
+        .unwrap();
+
+    upsert_managed_section(&file, "new section").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+    assert!(result.contains("<!-- BEGIN BUZZ MANAGED"));
+    assert!(result.contains("<!-- END BUZZ MANAGED -->"));
+    assert!(result.contains("new section"));
+    assert!(!result.contains("old section"));
+    assert!(result.contains("# Header"));
+    assert!(result.contains("some content"));
+    assert!(result.contains("after"));
+}
+
+#[test]
+fn test_upsert_managed_section_without_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(&file, "# Header\n\nexisting content\n").unwrap();
+
+    upsert_managed_section(&file, "injected section").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+    assert!(result.contains("# Header"));
+    assert!(result.contains("existing content"));
+    assert!(result.contains("<!-- BEGIN BUZZ MANAGED"));
+    assert!(result.contains("<!-- END BUZZ MANAGED -->"));
+    assert!(result.contains("injected section"));
+    let begin_pos = result.find("<!-- BEGIN BUZZ MANAGED").unwrap();
+    let header_pos = result.find("# Header").unwrap();
+    assert!(
+        header_pos < begin_pos,
+        "original content should precede the managed section"
+    );
+}
+
+#[test]
+fn test_upsert_managed_section_no_tmp_leftover() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(&file, "# Header\n").unwrap();
+
+    upsert_managed_section(&file, "content").unwrap();
+
+    // Verify no stray temp files in the directory
+    let entries: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "only AGENTS.md should remain, no temp files"
+    );
+    assert_eq!(entries[0].file_name(), "AGENTS.md");
+}
+
+#[test]
+fn test_upsert_end_before_begin() {
+    // An END marker that precedes a BEGIN marker forms no valid ordered pair.
+    // find_managed_markers returns None (BEGIN found, but no END after it),
+    // so the orphan BEGIN line is stripped and a new block is appended.
+    // The stray END line and content between END and BEGIN remain in the file
+    // because strip_orphan_begin_marker only removes the BEGIN line itself.
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(
+            &file,
+            "# Header\n\n<!-- END BUZZ MANAGED -->\nsome middle content\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nold section\n",
+        )
+        .unwrap();
+
+    upsert_managed_section(&file, "new section").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+
+    assert!(result.contains("# Header"), "original header must survive");
+    assert!(
+        result.contains("new section"),
+        "new content must be present"
+    );
+    assert!(
+        result.contains("some middle content"),
+        "content between markers must survive"
+    );
+
+    // Exactly one BEGIN marker in the output (the orphan was stripped, new one appended).
+    assert_eq!(
+        result.matches(BEGIN_MARKER).count(),
+        1,
+        "exactly one BEGIN marker after orphan cleanup"
+    );
+
+    // The single BEGIN marker must have a matching END marker after it.
+    let begin_pos = result
+        .find(BEGIN_MARKER)
+        .expect("BEGIN marker must be present");
+    let end_pos = result[begin_pos..].find(END_MARKER).map(|p| begin_pos + p);
+    assert!(
+        end_pos.is_some(),
+        "an END marker must appear after the appended BEGIN marker"
+    );
+}
+
+#[test]
+fn test_upsert_begin_only_no_end() {
+    // A file with BEGIN but no END has an orphan marker.
+    // find_managed_markers returns None (no END found after BEGIN),
+    // so strip_orphan_begin_marker removes the BEGIN line.
+    // Content that followed the orphan BEGIN is preserved (only the marker line is stripped,
+    // not the body that came after it).
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(
+            &file,
+            "# Header\n\nsome content\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\norphaned section without end marker\n",
+        )
+        .unwrap();
+
+    upsert_managed_section(&file, "fresh section").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+
+    assert!(result.contains("# Header"), "original header must survive");
+    assert!(
+        result.contains("some content"),
+        "original body must survive"
+    );
+    assert!(
+        result.contains("fresh section"),
+        "new content must be present"
+    );
+
+    let begin_pos = result
+        .find(BEGIN_MARKER)
+        .expect("BEGIN marker must be present");
+    let end_pos = result.find(END_MARKER).expect("END marker must be present");
+    assert!(
+        begin_pos < end_pos,
+        "the appended BEGIN marker must precede the appended END marker"
+    );
+
+    // Exactly one BEGIN marker after orphan cleanup.
+    assert_eq!(
+        result.matches(BEGIN_MARKER).count(),
+        1,
+        "exactly one BEGIN marker after orphan cleanup"
+    );
+}
+
+#[test]
+fn test_upsert_duplicate_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(
+            &file,
+            "# Header\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nfirst block\n<!-- END BUZZ MANAGED -->\n\nbetween blocks\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nsecond block\n<!-- END BUZZ MANAGED -->\n",
+        )
+        .unwrap();
+
+    upsert_managed_section(&file, "replaced").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+
+    assert!(
+        result.contains("replaced"),
+        "replacement content must be present"
+    );
+    assert!(
+        !result.contains("first block"),
+        "first block must be replaced"
+    );
+    assert!(
+        result.contains("second block"),
+        "second pair content must survive"
+    );
+    assert!(
+        result.contains("between blocks"),
+        "text between pairs must survive"
+    );
+}
+
+#[test]
+fn test_upsert_marker_in_code_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    // Indented by 4 spaces — not at column 0, so should NOT match as a real marker.
+    fs::write(
+        &file,
+        "# Header\n\n    <!-- BEGIN BUZZ MANAGED — some indented marker -->\n\nReal content here\n",
+    )
+    .unwrap();
+
+    upsert_managed_section(&file, "appended content").unwrap();
+
+    let result = fs::read_to_string(&file).unwrap();
+
+    assert!(
+        result.contains("    <!-- BEGIN BUZZ MANAGED — some indented marker -->"),
+        "indented marker inside code block must be preserved verbatim"
+    );
+    assert!(
+        result.contains("appended content"),
+        "new content must be appended"
+    );
+    assert!(
+        result.contains("Real content here"),
+        "existing body must survive"
+    );
+
+    // The real markers appended at the end must be at line-start (column 0).
+    let begin_pos = result
+        .find("<!-- BEGIN BUZZ MANAGED — regenerated")
+        .expect("regenerated BEGIN marker must be present");
+    assert!(
+        begin_pos == 0 || result.as_bytes()[begin_pos - 1] == b'\n',
+        "appended BEGIN marker must be at line start"
+    );
+}
+
+#[test]
+fn test_render_pipe_in_agent_name() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let agents = vec![make_agent("Kit|Pro", Some("p1"))];
+    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+
+    assert!(
+        output.contains("Kit\\|Pro"),
+        "pipe in agent name must be escaped as \\|"
+    );
+    // An unescaped bare `|` immediately adjacent to "Kit|Pro" would break table parsing.
+    assert!(
+        !output.contains("| Kit|Pro |"),
+        "unescaped pipe in agent name must not appear as a cell boundary"
+    );
+
+    // The row must start and end with `|` and the escaped name and address must appear.
+    let kit_row = output
+        .lines()
+        .find(|l| l.contains("Kit\\|Pro"))
+        .expect("Kit\\|Pro row must be present");
+    assert!(kit_row.starts_with('|'), "row must start with |");
+    assert!(kit_row.ends_with('|'), "row must end with |");
+    assert!(
+        kit_row.contains("@Kit\\|Pro"),
+        "address cell must use escaped name"
+    );
+}
+
+#[test]
+fn test_render_newline_in_persona_name() {
+    let personas = vec![make_persona("p1", "Builder\nExpert")];
+    let agents = vec![make_agent("Scout", Some("p1"))];
+    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+
+    assert!(
+        output.contains("Builder Expert"),
+        "newline in persona display_name must be replaced with a space"
+    );
+
+    // The table row for Scout must be a single line (no embedded newline).
+    let scout_row = output
+        .lines()
+        .find(|l| l.contains("Scout"))
+        .expect("Scout row must be present");
+    assert!(
+        scout_row.contains("Builder Expert"),
+        "persona name with newline replaced by space must appear on the Scout row"
+    );
+}
+
+#[test]
+fn test_upsert_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("AGENTS.md");
+    fs::write(
+            &file,
+            "# Header\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nexisting section\n<!-- END BUZZ MANAGED -->\n",
+        )
+        .unwrap();
+
+    upsert_managed_section(&file, "same content").unwrap();
+    let after_first = fs::read_to_string(&file).unwrap();
+
+    upsert_managed_section(&file, "same content").unwrap();
+    let after_second = fs::read_to_string(&file).unwrap();
+
+    assert_eq!(
+        after_first, after_second,
+        "upsert must be idempotent: second call must not alter the file"
+    );
+}
+
 #[test]
 fn refresh_agents_md_writes_version_file() {
     let tmp = tempfile::tempdir().unwrap();
