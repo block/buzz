@@ -2182,35 +2182,35 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
     result.get("models").cloned()
 }
 
-
-/// Match a catalog model id against a desired model string.
-///
-/// Exact (case-sensitive) wins; otherwise case-insensitive equality; otherwise
-/// a unique alias hit where `desired` appears as a hyphen-delimited segment of
-/// the catalog id (so `sonnet` matches `claude-sonnet-4-20250514` but not an
-/// ambiguous pair of sonnet variants).
+/// Match exact IDs or a bare moving family and its single bracket qualifier.
+/// Full IDs and two differently qualified IDs must remain exact.
 fn model_id_matches(candidate: &str, desired: &str) -> MatchKind {
     if candidate == desired {
         return MatchKind::Exact;
     }
-    if candidate.eq_ignore_ascii_case(desired) {
-        return MatchKind::CaseInsensitive;
-    }
-    let c = candidate.to_ascii_lowercase();
-    let d = desired.to_ascii_lowercase();
-    if d.len() >= 3 {
-        let padded = format!("-{c}-");
-        if padded.contains(&format!("-{d}-")) {
-            return MatchKind::Alias;
+    fn qualified_family(id: &str) -> Option<&str> {
+        let (family, qualifier) = id.split_once('[')?;
+        let qualifier = qualifier.strip_suffix(']')?;
+        if matches!(family, "opus" | "fable" | "sonnet" | "haiku")
+            && !qualifier.is_empty()
+            && !qualifier.contains(['[', ']'])
+        {
+            Some(family)
+        } else {
+            None
         }
     }
-    MatchKind::None
+    if qualified_family(candidate) == Some(desired) || qualified_family(desired) == Some(candidate)
+    {
+        MatchKind::Alias
+    } else {
+        MatchKind::None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchKind {
     Exact,
-    CaseInsensitive,
     Alias,
     None,
 }
@@ -2219,27 +2219,20 @@ fn pick_matching_model_id<'a>(
     candidates: impl IntoIterator<Item = &'a str>,
     desired: &str,
 ) -> Option<String> {
-    let mut exact = None;
-    let mut case_insensitive = None;
     let mut aliases = Vec::new();
     for candidate in candidates {
         match model_id_matches(candidate, desired) {
-            MatchKind::Exact => exact = Some(candidate.to_string()),
-            MatchKind::CaseInsensitive if case_insensitive.is_none() => {
-                case_insensitive = Some(candidate.to_string());
-            }
+            MatchKind::Exact => return Some(candidate.to_string()),
             MatchKind::Alias => aliases.push(candidate.to_string()),
-            _ => {}
+            MatchKind::None => {}
         }
     }
-    exact.or(case_insensitive).or_else(|| {
-        if aliases.len() == 1 {
-            aliases.pop()
-        } else {
-            None
-        }
-    })
-
+    if aliases.len() == 1 {
+        aliases.pop()
+    } else {
+        None
+    }
+}
 
 /// Extract the `configId` for the `thought_level` category option from a
 /// `session/new` result, if the adapter advertised one.
@@ -2261,7 +2254,6 @@ pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<Str
         }
     }
     None
-
 }
 
 /// Match a desired model ID against a fresh `session/new` response.
@@ -2275,7 +2267,7 @@ pub fn resolve_model_switch_method(
     desired_model: &str,
 ) -> Option<ModelSwitchMethod> {
     // 1. Search stable configOptions for a "model"-category entry whose
-    //    options contain a value matching desired_model (exact / ci / alias).
+    //    options contain a value matching desired_model (exact or moving-family compatibility).
     for config_opt in extract_model_config_options(session_new_result) {
         // Adapters disagree on the key: the ACP spec says `configId`, but
         // claude-agent-acp emits `id`. Accept both; the set request always
@@ -2971,41 +2963,84 @@ mod tests {
     }
 
     #[test]
-    fn resolve_matches_short_alias_to_unique_catalog_id() {
-        // BUZZ_ACP_MODEL=sonnet should resolve against full Anthropic ids (#2265).
-        let result = serde_json::json!({
-            "configOptions": [{
-                "configId": "model",
-                "category": "model",
-                "options": [
-                    { "value": "claude-sonnet-4-20250514", "displayName": "Sonnet 4" },
-                    { "value": "claude-opus-4-20250514", "displayName": "Opus 4" }
-                ]
-            }]
-        });
-        let method = super::resolve_model_switch_method(&result, "sonnet");
-        assert_eq!(
-            method,
-            Some(super::ModelSwitchMethod::ConfigOption {
-                config_id: "model".to_string(),
-                option_value: "claude-sonnet-4-20250514".to_string(),
-            })
-        );
+    fn moving_family_matches_preserve_advertised_values_in_both_catalogs() {
+        for family in ["opus", "fable", "sonnet", "haiku"] {
+            let qualified = format!("{family}[1m]");
+            for (candidate, desired) in [(family, qualified.as_str()), (qualified.as_str(), family)]
+            {
+                let result = serde_json::json!({
+                    "configOptions": [{"configId": "model", "category": "model",
+                        "options": [{"value": candidate}]}]
+                });
+                assert_eq!(
+                    super::resolve_model_switch_method(&result, desired),
+                    Some(super::ModelSwitchMethod::ConfigOption {
+                        config_id: "model".to_string(),
+                        option_value: candidate.to_string(),
+                    })
+                );
+                assert!(super::model_in_catalog(
+                    &super::extract_model_config_options(&result),
+                    None,
+                    desired
+                ));
+
+                let result = serde_json::json!({
+                    "models": {"availableModels": [{"modelId": candidate}]}
+                });
+                assert_eq!(
+                    super::resolve_model_switch_method(&result, desired),
+                    Some(super::ModelSwitchMethod::SetModel {
+                        model_id: candidate.to_string()
+                    })
+                );
+                assert!(super::model_in_catalog(&[], result.get("models"), desired));
+            }
+        }
     }
 
     #[test]
-    fn resolve_refuses_ambiguous_alias() {
-        let result = serde_json::json!({
-            "configOptions": [{
-                "configId": "model",
-                "category": "model",
-                "options": [
-                    { "value": "claude-sonnet-4-20250514" },
-                    { "value": "claude-sonnet-3-7-20250219" }
-                ]
-            }]
-        });
-        assert!(super::resolve_model_switch_method(&result, "sonnet").is_none());
+    fn model_aliases_reject_pinned_case_and_qualified_variant_changes() {
+        for (candidate, desired) in [
+            ("claude-opus-4-20250514", "opus"),
+            ("opus", "claude-opus-4-20250514"),
+            ("composer-2.5[fast=true]", "composer-2.5[fast=false]"),
+            ("composer-2.5[fast=true]", "composer-2.5"),
+            ("opus[1m]", "opus[fast=true]"),
+            ("Opus", "opus"),
+            ("OPUS[1m]", "opus"),
+            ("opus[1m][fast=true]", "opus"),
+            ("opus[]", "opus"),
+        ] {
+            let result = serde_json::json!({
+                "configOptions": [{"configId": "model", "category": "model",
+                    "options": [{"value": candidate}]}],
+                "models": {"availableModels": [{"modelId": candidate}]}
+            });
+            assert!(
+                super::resolve_model_switch_method(&result, desired).is_none(),
+                "{candidate} must not match {desired}"
+            );
+            assert!(!super::model_in_catalog(
+                &super::extract_model_config_options(&result),
+                result.get("models"),
+                desired
+            ));
+            assert!(super::resolve_model_switch_method(&result, candidate).is_some());
+        }
+    }
+
+    #[test]
+    fn model_aliases_prefer_exact_and_reject_ambiguous_qualifiers() {
+        assert_eq!(
+            super::pick_matching_model_id(["opus[1m]", "opus"], "opus"),
+            Some("opus".to_string())
+        );
+        assert_eq!(
+            super::pick_matching_model_id(["opus", "opus[1m]"], "opus[1m]"),
+            Some("opus[1m]".to_string())
+        );
+        assert!(super::pick_matching_model_id(["opus[1m]", "opus[fast=true]"], "opus").is_none());
     }
 
     #[test]
