@@ -604,3 +604,34 @@ fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
     let payload = parse_nostr_bind_deep_link(&url).unwrap();
     assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
 }
+
+#[test]
+fn parse_nostr_bind_deep_link_accepts_optional_run402_result_acknowledgement() {
+    let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fbuzz-human-adoption-results%2Fv1").unwrap();
+    let payload = parse_nostr_bind_deep_link(&url).unwrap();
+
+    assert_eq!(
+        payload.result_protocol.as_deref(),
+        Some("run402_adoption_result_v1")
+    );
+    assert_eq!(
+        payload.result_url.as_deref(),
+        Some("https://api.run402.com/buzz-human-adoption-results/v1")
+    );
+}
+
+#[test]
+fn parse_nostr_bind_deep_link_ignores_unknown_or_unsafe_result_extensions() {
+    for suffix in [
+        "&result_protocol=future_result_v2&result_url=https%3A%2F%2Fapi.run402.com%2Fresult",
+        "&result_protocol=run402_adoption_result_v1&result_url=http%3A%2F%2Fapi.run402.com%2Fresult",
+        "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fuser%3Apass%40api.run402.com%2Fresult",
+        "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fresult%3Ftoken%3Dsecret",
+        "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fresult%23fragment",
+    ] {
+        let base = "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz";
+        let payload = parse_nostr_bind_deep_link(&Url::parse(&format!("{base}{suffix}")).unwrap()).unwrap();
+        assert_eq!(payload.result_protocol, None);
+        assert_eq!(payload.result_url, None);
+    }
+}

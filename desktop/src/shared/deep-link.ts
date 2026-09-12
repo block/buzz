@@ -47,6 +47,8 @@ export type NostrBindDeepLinkPayload = {
   expiresAt: string;
   returnMode: "clipboard" | "browser_fragment_v1";
   callbackUrl?: string;
+  resultProtocol?: "run402_adoption_result_v1";
+  resultUrl?: string;
 };
 
 /**

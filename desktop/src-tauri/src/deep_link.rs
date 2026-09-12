@@ -511,7 +511,11 @@ struct NostrBindDeepLinkPayload {
     expires_at: String,
     return_mode: String,
     callback_url: Option<String>,
+    result_protocol: Option<String>,
+    result_url: Option<String>,
 }
+
+const RUN402_ADOPTION_RESULT_PROTOCOL: &str = "run402_adoption_result_v1";
 
 fn non_empty_param(url: &Url, name: &str) -> Result<String, String> {
     url.query_pairs()
@@ -550,6 +554,18 @@ fn validate_nostr_bind_callback_url(callback_url: &str, origin: &str) -> Result<
     Ok(())
 }
 
+fn is_structurally_safe_result_url(result_url: &str) -> bool {
+    let Ok(result_url) = Url::parse(result_url) else {
+        return false;
+    };
+    result_url.scheme() == "https"
+        && result_url.host_str().is_some()
+        && result_url.username().is_empty()
+        && result_url.password().is_none()
+        && result_url.query().is_none()
+        && result_url.fragment().is_none()
+}
+
 fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, String> {
     let challenge_id = non_empty_param(url, "challenge_id")?;
     let nonce = non_empty_param(url, "nonce")?;
@@ -562,6 +578,8 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     let expires_at = non_empty_param(url, "expires_at")?;
     let return_mode = non_empty_param(url, "return")?;
     let callback_url = optional_non_empty_param(url, "callback_url");
+    let requested_result_protocol = optional_non_empty_param(url, "result_protocol");
+    let requested_result_url = optional_non_empty_param(url, "result_url");
 
     nostr_bind::validate_challenge_id(&challenge_id)?;
     nostr_bind::validate_nonce(&nonce)?;
@@ -583,6 +601,24 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
         validate_nostr_bind_callback_url(callback_url, &origin)?;
     }
 
+    // Result acknowledgement is an optional extension. Unknown or malformed
+    // extensions preserve the legacy manual flow instead of rejecting an
+    // otherwise valid identity approval.
+    let (result_protocol, result_url) = match (
+        requested_result_protocol.as_deref(),
+        requested_result_url.as_deref(),
+    ) {
+        (Some(RUN402_ADOPTION_RESULT_PROTOCOL), Some(result_url))
+            if is_structurally_safe_result_url(result_url) =>
+        {
+            (
+                Some(RUN402_ADOPTION_RESULT_PROTOCOL.to_owned()),
+                Some(result_url.to_owned()),
+            )
+        }
+        _ => (None, None),
+    };
+
     Ok(NostrBindDeepLinkPayload {
         challenge_id,
         nonce,
@@ -595,6 +631,8 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
         expires_at,
         return_mode,
         callback_url,
+        result_protocol,
+        result_url,
     })
 }
 
@@ -607,7 +645,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("buzz-desktop: invalid deep link URL {url_str:?}: {e}");
+            eprintln!("buzz-desktop: invalid deep link URL: {e}");
             return;
         }
     };
@@ -709,7 +747,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 let _ = app.emit("deep-link-nostr-bind", payload);
             }
             Err(error) => {
-                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
+                // Do not print the deep link: it contains the signed-attempt
+                // challenge material and may contain an issuer result URL.
+                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}");
             }
         },
         Some(action) => {
