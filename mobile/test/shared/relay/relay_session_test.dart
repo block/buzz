@@ -135,6 +135,8 @@ void main() {
     expect(clients.single.closed, isTrue);
 
     final nextQuery = session.queryRelay(const []);
+    // Signing is asynchronous; wait for the request to reach the transport.
+    await Future<void>.delayed(Duration.zero);
     expect(clients, hasLength(2));
     clients.last.complete(http.Response('[]', 200));
 
@@ -172,13 +174,19 @@ void main() {
         const [],
         timeout: const Duration(milliseconds: 10),
       );
+      final timeoutAssertion = expectLater(
+        timedOutQuery,
+        throwsA(isA<TimeoutException>()),
+      );
       final peerQuery = session.queryRelay(const []);
+      await Future<void>.delayed(Duration.zero);
       expect(clients.single.requestCount, 2);
 
-      await expectLater(timedOutQuery, throwsA(isA<TimeoutException>()));
+      await timeoutAssertion;
       expect(clients.single.closed, isFalse);
 
       final nextQuery = session.queryRelay(const []);
+      await Future<void>.delayed(Duration.zero);
       expect(clients, hasLength(2));
       clients.first.complete(1, http.Response('[]', 200));
       expect(await peerQuery, isEmpty);

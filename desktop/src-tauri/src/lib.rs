@@ -8,6 +8,7 @@ mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
+mod event_signing;
 mod event_sync;
 mod events;
 mod huddle;

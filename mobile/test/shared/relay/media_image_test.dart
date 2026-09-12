@@ -32,36 +32,66 @@ void main() {
   });
 
   group('MediaGetAuthService memoization', () {
-    test('repeated calls return byte-identical headers', () {
+    test('concurrent calls share one header refresh', () async {
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      final headers = await Future.wait([
+        auth.headersFor(_mediaUrl),
+        auth.headersFor(_mediaUrl),
+      ]);
+      expect(headers.first, isNotEmpty);
+      expect(identical(headers.first, headers.last), isTrue);
+    });
+
+    test('concurrent failed refreshes are retried, not cached', () async {
+      var attempts = 0;
+      final auth = _auth(
+        nsec: 'not-an-nsec',
+        now: () {
+          attempts++;
+          return DateTime.utc(2026);
+        },
+      );
+      final headers = await Future.wait([
+        auth.headersFor(_mediaUrl),
+        auth.headersFor(_mediaUrl),
+      ]);
+      expect(headers, everyElement(isEmpty));
+      expect(attempts, 2);
+    });
+
+    test('repeated calls return byte-identical headers', () async {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
-      final first = auth.headersFor(_mediaUrl);
-      final second = auth.headersFor(_mediaUrl);
+      final first = await auth.headersFor(_mediaUrl);
+      final second = await auth.headersFor(_mediaUrl);
       expect(first, isNotEmpty);
       expect(identical(first, second), isTrue);
     });
 
-    test('re-signs only at the refresh margin before expiry', () {
+    test('re-signs only at the refresh margin before expiry', () async {
       final nsec = nostr.Keys.generate().nsec;
       var current = DateTime.utc(2026, 7, 21, 12);
       final auth = _auth(nsec: nsec, now: () => current);
 
-      final first = auth.headersFor(_mediaUrl);
+      final first = await auth.headersFor(_mediaUrl);
       // 600s lifetime - 60s margin = re-sign boundary at +540s.
       current = current.add(const Duration(seconds: 539));
-      expect(identical(auth.headersFor(_mediaUrl), first), isTrue);
+      expect(identical(await auth.headersFor(_mediaUrl), first), isTrue);
 
       current = current.add(const Duration(seconds: 2));
-      final refreshed = auth.headersFor(_mediaUrl);
+      final refreshed = await auth.headersFor(_mediaUrl);
       expect(identical(refreshed, first), isFalse);
       expect(refreshed['Authorization'], isNot(first['Authorization']));
     });
 
-    test('non-relay URLs get no headers even with a key', () {
+    test('non-relay URLs get no headers even with a key', () async {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
-      expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
-      expect(auth.headersFor('$_relayBase/not-media/abc.png'), isEmpty);
+      expect(
+        await auth.headersFor('https://elsewhere.com/media/abc.png'),
+        isEmpty,
+      );
+      expect(await auth.headersFor('$_relayBase/not-media/abc.png'), isEmpty);
     });
   });
 

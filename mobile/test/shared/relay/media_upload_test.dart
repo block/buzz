@@ -268,7 +268,7 @@ void main() {
   });
 
   group('MediaGetAuthService', () {
-    test('signs relay media get requests with a server-scoped token', () {
+    test('signs relay media get requests with a server-scoped token', () async {
       final keychain = nostr.Keys.generate();
       final service = MediaGetAuthService(
         baseUrl: 'https://Relay.Example:443',
@@ -276,7 +276,7 @@ void main() {
         now: () => DateTime.fromMillisecondsSinceEpoch(1700000000000),
       );
 
-      final headers = service.headersFor(
+      final headers = await service.headersFor(
         'https://relay.example:443/media/${'a' * 64}.jpg',
       );
 
@@ -295,59 +295,69 @@ void main() {
       expect(authEvent['tags'], contains(equals(['expiration', '1700000600'])));
     });
 
-    test('does not sign non-relay or non-media URLs', () {
+    test('does not sign non-relay or non-media URLs', () async {
       final service = MediaGetAuthService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
       );
 
       expect(
-        service.headersFor('https://evil.example/media/${'a' * 64}.jpg'),
-        isEmpty,
-      );
-      expect(service.headersFor('https://relay.example/avatar.png'), isEmpty);
-    });
-
-    test('normalizes default ports and rejects path-prefix lookalikes', () {
-      final service = MediaGetAuthService(
-        baseUrl: 'https://Relay.Example:443',
-        nsec: nostr.Keys.generate().nsec,
-      );
-
-      expect(
-        service.headersFor('https://relay.example/media/${'a' * 64}.jpg'),
-        isNotEmpty,
-      );
-      expect(
-        service.headersFor('https://relay.example/media-evil/${'a' * 64}.jpg'),
+        await service.headersFor('https://evil.example/media/${'a' * 64}.jpg'),
         isEmpty,
       );
       expect(
-        service.headersFor('ftp://relay.example/media/${'a' * 64}.jpg'),
+        await service.headersFor('https://relay.example/avatar.png'),
         isEmpty,
       );
     });
 
-    test('does not sign without a key', () {
+    test(
+      'normalizes default ports and rejects path-prefix lookalikes',
+      () async {
+        final service = MediaGetAuthService(
+          baseUrl: 'https://Relay.Example:443',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        expect(
+          await service.headersFor(
+            'https://relay.example/media/${'a' * 64}.jpg',
+          ),
+          isNotEmpty,
+        );
+        expect(
+          await service.headersFor(
+            'https://relay.example/media-evil/${'a' * 64}.jpg',
+          ),
+          isEmpty,
+        );
+        expect(
+          await service.headersFor('ftp://relay.example/media/${'a' * 64}.jpg'),
+          isEmpty,
+        );
+      },
+    );
+
+    test('does not sign without a key', () async {
       final service = MediaGetAuthService(
         baseUrl: 'https://relay.example',
         nsec: null,
       );
 
       expect(
-        service.headersFor('https://relay.example/media/${'a' * 64}.jpg'),
+        await service.headersFor('https://relay.example/media/${'a' * 64}.jpg'),
         isEmpty,
       );
     });
 
-    test('does not throw or sign when the stored key is invalid', () {
+    test('does not throw or sign when the stored key is invalid', () async {
       final service = MediaGetAuthService(
         baseUrl: 'https://relay.example',
         nsec: 'not-an-nsec',
       );
 
       expect(
-        service.headersFor('https://relay.example/media/${'a' * 64}.jpg'),
+        await service.headersFor('https://relay.example/media/${'a' * 64}.jpg'),
         isEmpty,
       );
     });

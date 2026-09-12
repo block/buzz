@@ -197,7 +197,7 @@ class _CoordinatedPlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -980,6 +980,41 @@ void main() {
       expect(audioPlayer.playCount, 1);
     },
   );
+
+  for (final localFile in [false, true]) {
+    test(
+      'cancel during async auth prevents source load (local=$localFile)',
+      () async {
+        final audioPlayer = _FakeAudioPlayerBackend();
+        final client = _SequencedHttpClient();
+        final player = DeviceVoiceNotePlayerController(
+          coordinator: VoiceNotePlaybackCoordinator(),
+          client: client,
+          requiresAuthenticatedLocalFile: localFile,
+          player: audioPlayer,
+        );
+        addTearDown(player.dispose);
+        final signingStarted = Completer<void>();
+        final headers = Completer<Map<String, String>>();
+        await player.loadRemote(
+          'https://example.com/voice-note.mp4',
+          headers: () {
+            signingStarted.complete();
+            return headers.future;
+          },
+          fallbackDuration: const Duration(seconds: 7),
+        );
+        final loading = player.toggle();
+        await signingStarted.future;
+        await player.pause();
+        headers.complete({'Authorization': 'Nostr signed-event'});
+        await loading;
+        expect(audioPlayer.loadedUrls, isEmpty);
+        expect(client.requests, isEmpty);
+        expect(audioPlayer.playCount, 0);
+      },
+    );
+  }
 
   test('Android defers remote auth until playback starts', () async {
     final audioPlayer = _FakeAudioPlayerBackend();

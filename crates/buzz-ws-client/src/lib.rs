@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod error;
+pub mod event_signer;
 pub mod message;
 
 pub use connection::{publish_event, NostrWsConnection};

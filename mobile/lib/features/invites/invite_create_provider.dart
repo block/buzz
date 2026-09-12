@@ -221,7 +221,7 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
         .post(
           Uri.parse(url),
           headers: {
-            'Authorization': buildNip98AuthHeader(
+            'Authorization': await buildNip98AuthHeader(
               method: 'POST',
               url: url,
               bodyBytes: bodyBytes,

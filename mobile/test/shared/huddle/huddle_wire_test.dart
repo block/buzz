@@ -97,7 +97,7 @@ void main() {
   });
 
   group('HuddleAuthV2', () {
-    test('uses the base relay URL and fixed v2 auth envelope', () {
+    test('uses the base relay URL and fixed v2 auth envelope', () async {
       final parameters = HuddleConnectionParameters(
         relayWebSocketUrl: 'wss://buzz.example',
         nsec: _privateKey,
@@ -105,7 +105,7 @@ void main() {
         ephemeralChannelId: _ephemeralChannelId,
       );
 
-      final auth = HuddleAuthV2.buildMessage(
+      final auth = await HuddleAuthV2.buildMessage(
         parameters: parameters,
         challenge: 'relay-challenge',
         createdAt: 1_700_000_000,

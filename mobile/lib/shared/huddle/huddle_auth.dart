@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../auth/event_signer.dart';
+
 import '../relay/nostr_models.dart';
 import 'huddle_wire.dart';
 
@@ -56,26 +58,25 @@ final class HuddleConnectionParameters {
 
 /// Fixed NIP-42 + Huddle auth envelope used after the audio relay challenge.
 abstract final class HuddleAuthV2 {
-  static Map<String, dynamic> buildMessage({
+  static Future<Map<String, dynamic>> buildMessage({
     required HuddleConnectionParameters parameters,
     required String challenge,
     int? createdAt,
-  }) {
+  }) async {
     if (challenge.isEmpty) {
       throw const HuddleAuthException('Relay challenge must not be empty.');
     }
 
     final secretKey = _decodeSecretKey(parameters.nsec);
-    final event = nostr.Event.from(
+    final event = await signEvent(
       kind: EventKind.auth,
       content: '',
       tags: [
         ['relay', parameters.relayWebSocketUrl],
         ['challenge', challenge],
       ],
-      secretKey: secretKey,
+      signer: LocalEventSigner(secretKey),
       createdAt: createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      verify: false,
     );
 
     return {

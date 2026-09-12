@@ -24,8 +24,11 @@ use std::{
     time::Duration,
 };
 
+use buzz_ws_client_pkg::event_signer::EventSigner;
 use buzz_ws_client_pkg::{NostrWsConnection, RelayMessage};
-use nostr::{Event, Keys};
+use nostr::Event;
+#[cfg(test)]
+use nostr::Keys;
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
     time::Instant,
@@ -136,7 +139,11 @@ impl NativeRelayClient {
     /// slot. Destructive on entry, so every caller must already hold proof it
     /// is the current owner — today that is
     /// [`crate::archive::sync::ArchiveOwnership`].
-    async fn ensure_session(&self, relay_url: String, keys: Keys) -> Arc<RelaySession> {
+    async fn ensure_session(
+        &self,
+        relay_url: String,
+        keys: impl EventSigner + Clone + 'static,
+    ) -> Arc<RelaySession> {
         let scope = (relay_url.clone(), keys.public_key().to_hex());
         let mut current = self.current.lock().await;
         if let Some(managed) = current.as_ref().filter(|managed| managed.scope == scope) {
@@ -176,7 +183,11 @@ impl NativeRelayClient {
     /// Filling an empty slot is deliberate: at startup the catalog fetch
     /// commonly precedes archive sync, and installing here means the archive
     /// start that follows reuses this socket instead of opening a second one.
-    pub(crate) async fn session(&self, relay_url: String, keys: Keys) -> SessionLease {
+    pub(crate) async fn session(
+        &self,
+        relay_url: String,
+        keys: impl EventSigner + Clone + 'static,
+    ) -> SessionLease {
         let scope = (relay_url.clone(), keys.public_key().to_hex());
         let mut current = self.current.lock().await;
         if let Some(managed) = current.as_ref() {
@@ -216,7 +227,7 @@ impl NativeRelayClient {
     pub(crate) async fn archive_session(
         &self,
         relay_url: String,
-        keys: Keys,
+        keys: impl EventSigner + Clone + 'static,
         _ownership: &crate::archive::sync::ArchiveOwnership<'_>,
     ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
         let session = self.ensure_session(relay_url, keys).await;
@@ -386,7 +397,7 @@ impl RelaySession {
 #[cfg(test)]
 pub(crate) async fn start(
     relay_url: String,
-    keys: Keys,
+    keys: impl EventSigner + Clone + 'static,
     auth_tag: Option<nostr::Tag>,
 ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
     let session = start_managed(relay_url, keys, auth_tag);
@@ -394,7 +405,11 @@ pub(crate) async fn start(
     (session, events)
 }
 
-fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) -> Arc<RelaySession> {
+fn start_managed(
+    relay_url: String,
+    keys: impl EventSigner + Clone + 'static,
+    auth_tag: Option<nostr::Tag>,
+) -> Arc<RelaySession> {
     let (wake, wake_rx) = mpsc::channel(1);
     let session = Arc::new(RelaySession {
         state: Arc::new(Mutex::new(SessionState::default())),
@@ -417,7 +432,7 @@ fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) ->
 
 async fn run_session(
     relay_url: String,
-    keys: Keys,
+    keys: impl EventSigner + Clone + 'static,
     auth_tag: Option<nostr::Tag>,
     session: Arc<RelaySession>,
     mut wake_rx: mpsc::Receiver<()>,

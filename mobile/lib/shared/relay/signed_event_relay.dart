@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../auth/event_signer.dart';
+
 import 'nostr_models.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
@@ -10,15 +12,26 @@ import 'relay_socket.dart';
 class SignedEventRelay {
   final RelaySessionNotifier _session;
   final String? _nsec;
+  final EventSigner? _signer;
 
   SignedEventRelay({
     required RelaySessionNotifier session,
     required String? nsec,
   }) : _session = session,
-       _nsec = nsec;
+       _nsec = nsec,
+       _signer = null;
+
+  /// Submit with an explicit signer snapshot, without access to a local secret.
+  SignedEventRelay.withSigner({
+    required RelaySessionNotifier session,
+    required EventSigner signer,
+  }) : _session = session,
+       _signer = signer,
+       _nsec = null;
 
   /// The hex pubkey derived from the signing key, or null if no key.
   String? get pubkey {
+    if (_signer case final signer?) return signer.publicKey;
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return null;
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
@@ -36,23 +49,25 @@ class SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
   }) async {
-    final nsec = _nsec;
-    if (nsec == null || nsec.isEmpty) {
-      throw Exception('Cannot submit event: no signing key available');
+    final EventSigner signer;
+    if (_signer case final supplied?) {
+      signer = supplied;
+    } else {
+      final nsec = _nsec;
+      if (nsec == null || nsec.isEmpty) {
+        throw Exception('Cannot submit event: no signing key available');
+      }
+      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+      if (privkeyHex.isEmpty) throw Exception('Invalid nsec');
+      signer = LocalEventSigner(privkeyHex);
     }
 
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) {
-      throw Exception('Invalid nsec');
-    }
-
-    final event = nostr.Event.from(
+    final event = await signEvent(
       kind: kind,
       content: content,
       tags: tags,
-      secretKey: privkeyHex,
+      signer: signer,
       createdAt: createdAt,
-      verify: false,
     );
 
     final nostrEvent = NostrEvent.fromJson(event.toMap());
@@ -76,13 +91,12 @@ Future<NostrEvent> submitSignedEventOnce({
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
-  final signed = nostr.Event.from(
+  final signed = await signEvent(
     kind: kind,
     content: content,
     tags: tags,
-    secretKey: privateKey,
+    signer: LocalEventSigner(privateKey),
     createdAt: createdAt,
-    verify: false,
   );
   final event = NostrEvent.fromJson(signed.toMap());
   final result = Completer<NostrEvent>();

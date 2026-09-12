@@ -1,5 +1,7 @@
+use crate::event_signing::EventBuilderSigning;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use buzz_ws_client_pkg::event_signer::EventSigner;
+use nostr::{EventBuilder, JsonUtil, Kind, Tag};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -117,18 +119,23 @@ pub fn relay_api_base_url() -> String {
 
 // ── NIP-98 HTTP auth ────────────────────────────────────────────────────────
 
-pub fn build_nip98_auth_header(
+pub async fn build_nip98_auth_header(
     method: &Method,
     url: &str,
     body: &[u8],
     state: &AppState,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    build_nip98_auth_header_for_keys(&keys, method, url, body)
+    let keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    build_nip98_auth_header_for_keys(&keys, method, url, body).await
 }
 
-pub fn build_nip98_auth_header_for_keys(
-    keys: &Keys,
+/// Build NIP-98 outside the signer, retaining the explicit-key API name for callers.
+pub async fn build_nip98_auth_header_for_keys(
+    keys: &(impl EventSigner + ?Sized),
     method: &Method,
     url: &str,
     body: &[u8],
@@ -152,7 +159,8 @@ pub fn build_nip98_auth_header_for_keys(
 
     let event = EventBuilder::new(Kind::HttpAuth, "")
         .tags(tags)
-        .sign_with_keys(keys)
+        .sign_with_event_signer(keys)
+        .await
         .map_err(|error| format!("sign failed: {error}"))?;
 
     Ok(format!(
@@ -374,7 +382,7 @@ pub async fn query_relay_at(
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
+    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state).await?;
     send_query_request(
         &state.http_client,
         &url,
@@ -390,14 +398,14 @@ pub async fn query_relay_at_with_keys(
     state: &AppState,
     api_base_url: &str,
     filters: &[serde_json::Value],
-    keys: &Keys,
+    keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<Vec<nostr::Event>, String> {
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes).await?;
     send_query_request(
         &state.http_client,
         &url,
@@ -531,7 +539,8 @@ pub async fn sync_managed_agent_profile(
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
+    let auth =
+        build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes).await?;
 
     let mut request = state
         .http_client
@@ -634,11 +643,12 @@ pub use submit::{
 pub async fn submit_event_with_keys(
     builder: nostr::EventBuilder,
     state: &AppState,
-    keys: &Keys,
+    keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
     let event = builder
-        .sign_with_keys(keys)
+        .sign_with_event_signer(keys)
+        .await
         .map_err(|e| format!("failed to sign event: {e}"))?;
     submit_signed_event_with_keys(&event, state, keys, auth_tag).await
 }
@@ -647,7 +657,7 @@ pub async fn submit_event_with_keys(
 pub async fn submit_signed_event_with_keys(
     event: &nostr::Event,
     state: &AppState,
-    keys: &Keys,
+    keys: &(impl EventSigner + ?Sized),
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
     if event.pubkey != keys.public_key() {
@@ -657,7 +667,8 @@ pub async fn submit_signed_event_with_keys(
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth_header =
+        build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes).await?;
 
     let mut request = state
         .http_client

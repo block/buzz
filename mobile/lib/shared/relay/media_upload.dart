@@ -12,6 +12,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import '../auth/event_signer.dart';
+
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
@@ -639,7 +641,7 @@ class MediaUploadService {
     );
     request.contentLength = bytes.length;
     request.headers.addAll(
-      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+      await _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
     );
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
@@ -656,26 +658,26 @@ class MediaUploadService {
     }
   }
 
-  Map<String, String> _buildUploadHeaders({
+  Future<Map<String, String>> _buildUploadHeaders({
     required String mimeType,
     required String sha256,
-  }) {
+  }) async {
     final headers = <String, String>{
-      'Authorization': _buildUploadAuthHeader(sha256),
+      'Authorization': await _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
     };
     return headers;
   }
 
-  String _buildUploadAuthHeader(String sha256) {
-    final authEvent = _buildUploadAuthEvent(sha256);
+  Future<String> _buildUploadAuthHeader(String sha256) async {
+    final authEvent = await _buildUploadAuthEvent(sha256);
     final authJson = authEvent.toJson();
     final encoded = base64Url.encode(utf8.encode(authJson)).replaceAll('=', '');
     return 'Nostr $encoded';
   }
 
-  nostr.Event _buildUploadAuthEvent(String sha256) {
+  Future<nostr.Event> _buildUploadAuthEvent(String sha256) async {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) {
       throw Exception('Cannot upload media: no signing key available');
@@ -696,12 +698,11 @@ class MediaUploadService {
         ['server', authority],
     ];
 
-    return nostr.Event.from(
+    return signEvent(
       kind: _uploadAuthKind,
       content: 'Upload buzz-media',
       tags: tags,
-      secretKey: privkeyHex,
-      verify: false,
+      signer: LocalEventSigner(privkeyHex),
     );
   }
 

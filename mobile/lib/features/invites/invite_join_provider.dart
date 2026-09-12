@@ -211,7 +211,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       final request = http.Request('POST', Uri.parse(url))
         ..followRedirects = false
         ..headers.addAll({
-          'Authorization': buildNip98AuthHeader(
+          'Authorization': await buildNip98AuthHeader(
             method: 'POST',
             url: url,
             bodyBytes: utf8.encode(body),

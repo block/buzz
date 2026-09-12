@@ -10,6 +10,8 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../auth/event_signer.dart';
+
 import '../auth/auth.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
@@ -164,7 +166,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final response = await _httpQueryClient.post(
       Uri.parse(url),
       headers: {
-        'Authorization': buildNip98AuthHeader(
+        'Authorization': await buildNip98AuthHeader(
           method: 'POST',
           url: url,
           bodyBytes: bodyBytes,

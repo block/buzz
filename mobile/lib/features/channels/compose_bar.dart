@@ -17,6 +17,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/auth/event_signer.dart';
+
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/huddle/huddle_session.dart';

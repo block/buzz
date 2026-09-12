@@ -1,3 +1,4 @@
+use crate::event_signing::EventBuilderSigning;
 use nostr::{
     nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
 };
@@ -139,9 +140,9 @@ pub async fn sign_event(
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.signing_keys()?;
+    let keys = state.event_signer()?;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn(async move {
         let nostr_tags = tags
             .into_iter()
             .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
@@ -153,13 +154,14 @@ pub async fn sign_event(
         }
 
         let event = builder
-            .sign_with_keys(&keys)
+            .sign_with_event_signer(&keys)
+            .await
             .map_err(|error| format!("sign failed: {error}"))?;
 
         Ok(event.as_json())
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn failed: {e}"))?
 }
 
 #[tauri::command]

@@ -6,6 +6,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../auth/event_signer.dart';
+
 import 'nostr_models.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
@@ -192,9 +194,10 @@ class RelaySocket {
   }
 
   /// Handle the relay's AUTH challenge: sign a kind:22242 event and respond.
-  void _handleAuthChallenge(List<dynamic> data) {
+  void _handleAuthChallenge(List<dynamic> data) async {
     if (data.length < 2) return;
     final challenge = data[1] as String;
+    final channel = _channel;
 
     if (_nsec == null) {
       _failAuth(Exception('No nsec available for NIP-42 auth'));
@@ -216,16 +219,18 @@ class RelaySocket {
       ];
 
       // Create and sign the kind:22242 AUTH event.
-      final event = nostr.Event.from(
+      final event = await signEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,
-        secretKey: privkeyHex,
+        signer: LocalEventSigner(privkeyHex),
       );
 
+      if (!identical(channel, _channel)) return;
       _pendingAuthEventId = event.id;
       send(['AUTH', event.toMap()]);
     } catch (e) {
+      if (!identical(channel, _channel)) return;
       _failAuth(e);
     }
   }

@@ -41,7 +41,10 @@ impl AppState {
         }
     }
 
-    /// Return the active identity keys if they are in a signable state.
+    /// Local-secret capability: return the active identity keys in a signable state.
+    ///
+    /// Backup, pairing, encryption and agent provisioning require this capability;
+    /// generic event consumers should capture `event_signer` instead.
     ///
     /// Returns `Err` when the identity is in a lost state (`identity_lost`
     /// — ephemeral key, user must re-import their nsec) or when the keyring
@@ -65,6 +68,15 @@ impl AppState {
             .lock()
             .map_err(|e| e.to_string())
             .map(|k| k.clone())
+    }
+
+    /// Capture the active event signer after the same recovery checks as local keys.
+    /// Secret export, encryption, pairing and provisioning must use `signing_keys`.
+    pub fn event_signer(
+        &self,
+    ) -> Result<buzz_ws_client_pkg::event_signer::LocalEventSigner, String> {
+        self.signing_keys()
+            .map(buzz_ws_client_pkg::event_signer::LocalEventSigner::new)
     }
 
     /// Emit the current huddle state to the frontend via Tauri event.

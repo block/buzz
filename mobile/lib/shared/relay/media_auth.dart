@@ -4,6 +4,8 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../auth/event_signer.dart';
+
 import 'relay_provider.dart';
 
 const _mediaGetAuthKind = 24242;
@@ -47,7 +49,9 @@ class MediaGetAuthService {
     return _isRelayMediaUrl(uri, relayUri);
   }
 
-  Map<String, String> headersFor(String url) {
+  Future<Map<String, String>>? _pendingHeaders;
+
+  Future<Map<String, String>> headersFor(String url) async {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return const {};
     if (!isRelayMediaUrl(url)) return const {};
@@ -58,9 +62,21 @@ class MediaGetAuthService {
       return cached;
     }
 
+    final pending = _pendingHeaders;
+    if (pending != null) {
+      // The synchronous path completed each refresh before the next call.
+      // Recheck the cache after waiting: failures must not be shared/cached,
+      // and the existing expiry boundary still applies to every caller.
+      await pending;
+      return headersFor(url);
+    }
+    return _pendingHeaders = _refreshHeaders(nsec);
+  }
+
+  Future<Map<String, String>> _refreshHeaders(String nsec) async {
     try {
       final signedAt = _now();
-      final authEvent = _buildGetAuthEvent(nsec);
+      final authEvent = await _buildGetAuthEvent(nsec);
       final encoded = base64Url
           .encode(utf8.encode(authEvent.toJson()))
           .replaceAll('=', '');
@@ -80,6 +96,8 @@ class MediaGetAuthService {
       // unsigned fetch still works. Once the flag is on, this request will 403
       // instead of crashing the widget tree because local key material is bad.
       return const {};
+    } finally {
+      _pendingHeaders = null;
     }
   }
 
@@ -98,7 +116,7 @@ class MediaGetAuthService {
     return uri.path.startsWith('/media/');
   }
 
-  nostr.Event _buildGetAuthEvent(String nsec) {
+  Future<nostr.Event> _buildGetAuthEvent(String nsec) async {
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) {
       throw Exception('Invalid nsec');
@@ -113,12 +131,11 @@ class MediaGetAuthService {
         ['server', authority],
     ];
 
-    return nostr.Event.from(
+    return signEvent(
       kind: _mediaGetAuthKind,
       content: 'Get buzz-media',
       tags: tags,
-      secretKey: privkeyHex,
-      verify: false,
+      signer: LocalEventSigner(privkeyHex),
     );
   }
 }
@@ -128,11 +145,11 @@ final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
 });
 
-Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {
+Future<Map<String, String>> mediaGetHeadersFor(WidgetRef ref, String url) {
   return ref.read(mediaGetAuthServiceProvider).headersFor(url);
 }
 
-Map<String, String> mediaGetHeadersForContext(
+Future<Map<String, String>> mediaGetHeadersForContext(
   BuildContext context,
   String url,
 ) {

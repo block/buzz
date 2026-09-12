@@ -57,7 +57,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           try {
             streamingController = VideoPlayerController.networkUrl(
               uri,
-              httpHeaders: auth.headersFor(videoUrl),
+              httpHeaders: await auth.headersFor(videoUrl),
             );
             await streamingController.initialize();
             await streamingController.play();
@@ -84,7 +84,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             'GET',
             uri,
             abortTrigger: requestAbort.future,
-          )..headers.addAll(auth.headersFor(videoUrl));
+          )..headers.addAll(await auth.headersFor(videoUrl));
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);

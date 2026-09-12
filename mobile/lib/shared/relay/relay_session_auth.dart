@@ -1,11 +1,11 @@
 part of 'relay_session.dart';
 
-String buildNip98AuthHeader({
+Future<String> buildNip98AuthHeader({
   required String method,
   required String url,
   required List<int> bodyBytes,
   required String? nsec,
-}) {
+}) async {
   if (nsec == null || nsec.isEmpty) {
     throw Exception('Cannot query relay: no signing key available');
   }
@@ -17,7 +17,7 @@ String buildNip98AuthHeader({
       .process(Uint8List.fromList(bodyBytes))
       .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
       .join();
-  final event = nostr.Event.from(
+  final event = await signEvent(
     kind: 27235,
     content: '',
     tags: [
@@ -26,8 +26,7 @@ String buildNip98AuthHeader({
       ['payload', payloadHash],
       ['nonce', const Uuid().v4()],
     ],
-    secretKey: privkeyHex,
-    verify: false,
+    signer: LocalEventSigner(privkeyHex),
   );
   return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
 }

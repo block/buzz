@@ -405,6 +405,7 @@ mod tests {
             "https://relay.example.com/events",
             b"{}",
         )
+        .await
         .expect("header build must succeed");
 
         // Decode the base64-encoded Nostr event from "Nostr <base64>".

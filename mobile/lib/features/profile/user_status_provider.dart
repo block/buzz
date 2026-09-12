@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/auth/event_signer.dart';
+
 import '../../shared/relay/relay.dart';
 import 'user_status.dart';
 import 'user_status_cache_provider.dart';
@@ -94,12 +96,11 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     }
 
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    final event = nostr.Event.from(
+    final event = await signEvent(
       kind: EventKind.userStatus,
       content: trimmed,
       tags: tags,
-      secretKey: privkeyHex,
-      verify: false,
+      signer: LocalEventSigner(privkeyHex),
     );
 
     final session = ref.read(relaySessionProvider.notifier);

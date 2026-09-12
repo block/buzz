@@ -391,7 +391,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
   }
 
-  void _handleChallenge(Map<String, dynamic> message, int generation) {
+  void _handleChallenge(Map<String, dynamic> message, int generation) async {
     if (_state.phase != HuddleTransportPhase.awaitingChallenge) {
       _handleProtocolProblem('Unexpected Huddle auth challenge.', generation);
       return;
@@ -409,10 +409,11 @@ final class HuddleTransport implements HuddleTransportClient {
     }
 
     try {
-      final auth = HuddleAuthV2.buildMessage(
+      final auth = await HuddleAuthV2.buildMessage(
         parameters: parameters,
         challenge: challenge,
       );
+      if (generation != _generation) return;
       _channel?.sink.add(jsonEncode(auth));
       _emitState(
         HuddleTransportState(

@@ -10,6 +10,8 @@
 //!   → recv loop: WS binary frame → Opus decode (per-peer) → rodio playback
 //! ```
 
+use crate::event_signing::EventBuilderSigning;
+use buzz_ws_client_pkg::event_signer::EventSigner;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
@@ -41,8 +43,8 @@ pub(crate) fn parse_channel_uuid(channel_id: &str) -> Result<Uuid, String> {
 /// Handshake timeout — matches the server's AUTH_TIMEOUT (5 s).
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn build_audio_auth_event(
-    keys: &nostr::Keys,
+async fn build_audio_auth_event(
+    keys: &(impl EventSigner + ?Sized),
     relay_url: &str,
     challenge: &str,
     auth_tag_json: Option<&str>,
@@ -65,7 +67,8 @@ fn build_audio_auth_event(
     }
     nostr::EventBuilder::new(nostr::Kind::Custom(22242), "")
         .tags(tags)
-        .sign_with_keys(keys)
+        .sign_with_event_signer(keys)
+        .await
         .map_err(|e| format!("sign: {e}"))
 }
 
@@ -73,7 +76,7 @@ async fn connect_authenticated_audio_socket(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
-    keys: &nostr::Keys,
+    keys: &(impl EventSigner + ?Sized),
     auth_tag_json: Option<&str>,
 ) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
     use nostr::JsonUtil;
@@ -107,7 +110,7 @@ async fn connect_authenticated_audio_socket(
     .await
     .map_err(|_| "timeout waiting for challenge from relay".to_string())??;
 
-    let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?;
+    let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json).await?;
     let event_json: serde_json::Value = serde_json::from_str(&event.as_json())
         .map_err(|e| format!("failed to serialize auth event: {e}"))?;
     let auth_msg = serde_json::json!({
@@ -317,7 +320,7 @@ pub(crate) async fn connect_tts_audio_publisher(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     state: &AppState,
-    keys: &nostr::Keys,
+    keys: &(impl EventSigner + ?Sized),
     auth_tag_json: Option<&str>,
     local_tts_publishers: super::tts::LocalTtsPublishers,
 ) -> Result<super::tts::TtsAudioPublisher, String> {

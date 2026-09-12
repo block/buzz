@@ -332,7 +332,7 @@ abstract class VoiceNotePlayerController extends ChangeNotifier {
 
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   });
 
@@ -524,7 +524,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
   ({
     String url,
-    Map<String, String> Function() headers,
+    FutureOr<Map<String, String>> Function() headers,
     Duration fallbackDuration,
   })?
   _pendingRemote;
@@ -560,7 +560,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) {
     _replaceSource();
@@ -608,7 +608,12 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
         'GET',
         uri,
         abortTrigger: requestAbort.future,
-      )..headers.addAll(remote.headers());
+      )..headers.addAll(await remote.headers());
+      if (_disposed ||
+          sourceGeneration != _sourceGeneration ||
+          playbackOperationGeneration != _playbackOperationGeneration) {
+        return null;
+      }
       final response = await _client
           .send(request)
           .timeout(
@@ -838,7 +843,15 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           }
         } else {
           await _load(
-            () => _player.setUrl(remote.url, headers: remote.headers()),
+            () async {
+              final headers = await remote.headers();
+              if (_disposed ||
+                  sourceGeneration != _sourceGeneration ||
+                  playbackOperationGeneration != _playbackOperationGeneration) {
+                return null;
+              }
+              return _player.setUrl(remote.url, headers: headers);
+            },
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,
