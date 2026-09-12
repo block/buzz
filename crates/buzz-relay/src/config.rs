@@ -12,6 +12,8 @@ use tracing::warn;
 /// Must comfortably exceed accepted event content sizes after Nostr JSON and
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
+/// Maximum NIP-10 reply nesting depth accepted on ingest.
+pub const DEFAULT_MAX_THREAD_DEPTH: u64 = 100;
 
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
@@ -174,6 +176,8 @@ pub struct Config {
     pub send_buffer_size: usize,
     /// Maximum inbound WebSocket frame size in bytes.
     pub max_frame_bytes: usize,
+    /// Maximum NIP-10 reply nesting depth accepted on ingest.
+    pub max_thread_depth: u64,
     /// Number of consecutive buffer-full events tolerated before cancelling a slow client.
     pub slow_client_grace_limit: u8,
     /// Authentication provider configuration.
@@ -648,6 +652,8 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000);
 
+        let max_thread_depth =
+            positive_u64_from_env("BUZZ_MAX_THREAD_DEPTH", DEFAULT_MAX_THREAD_DEPTH)?;
         let max_frame_bytes = std::env::var("BUZZ_MAX_FRAME_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -1216,6 +1222,7 @@ impl Config {
             max_concurrent_handlers,
             send_buffer_size,
             max_frame_bytes,
+            max_thread_depth,
             slow_client_grace_limit,
             auth,
             require_auth_token,
@@ -2331,6 +2338,33 @@ mod tests {
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
         assert_eq!(config.max_frame_bytes, 262_144);
+    }
+
+    #[test]
+    fn max_thread_depth_defaults_and_can_be_configured() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("BUZZ_MAX_THREAD_DEPTH");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.max_thread_depth, DEFAULT_MAX_THREAD_DEPTH);
+
+        std::env::set_var("BUZZ_MAX_THREAD_DEPTH", "12");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_MAX_THREAD_DEPTH");
+        assert_eq!(config.max_thread_depth, 12);
+    }
+
+    #[test]
+    fn max_thread_depth_rejects_zero_and_garbage() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for bad in ["0", "-1", "not-a-number"] {
+            std::env::set_var("BUZZ_MAX_THREAD_DEPTH", bad);
+            let result = Config::from_env();
+            std::env::remove_var("BUZZ_MAX_THREAD_DEPTH");
+            assert!(
+                result.is_err(),
+                "BUZZ_MAX_THREAD_DEPTH={bad} should be rejected, not silently defaulted"
+            );
+        }
     }
 
     #[test]
