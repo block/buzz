@@ -6,7 +6,11 @@ import {
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+import {
+  isLinuxPlatform,
+  isMacPlatform,
+  isWindowsPlatform,
+} from "@/shared/lib/platform";
 
 // Backend event emitted when a native Linux notification is clicked or a
 // queued macOS activation becomes available. See src-tauri notification code.
@@ -123,6 +127,21 @@ function dispatchDesktopNotificationTarget(target: DesktopNotificationTarget) {
   );
 }
 
+/**
+ * True when the "denied" currently reported by `window.Notification` is the
+ * placeholder tauri-plugin-notification's Windows init script writes without
+ * consulting the backend (block/buzz#2445), rather than a real OS decision.
+ * Windows has no per-app notification prompt for the desktop backend to lose,
+ * so on Windows under Tauri a shim "denied" is never authoritative.
+ */
+function isWindowsShimDeniedPlaceholder(): boolean {
+  return (
+    isTauri() &&
+    isWindowsPlatform() &&
+    window.Notification.permission === "denied"
+  );
+}
+
 function shouldUseMacDevelopmentFallback(error: unknown): boolean {
   return String(error).includes("not running from an app bundle");
 }
@@ -147,6 +166,18 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
   }
 
   if (window.Notification.permission !== "default") {
+    // block/buzz#2445 — tauri-plugin-notification replaces
+    // `window.Notification` with a shim whose init script, on Windows only,
+    // compares its own freshly initialised "default" against "granted" instead
+    // of asking the backend, and so stamps "denied" on every launch. The
+    // desktop backend grants unconditionally, so a "denied" read from the shim
+    // carries no information on Windows. Report "default" instead: the
+    // auto-request in `use-feed-desktop-notifications` and the settings toggle
+    // then call `requestPermission()`, which the shim answers by writing the
+    // backend's real "granted" back into its cached state.
+    if (isWindowsShimDeniedPlaceholder()) {
+      return "default";
+    }
     return window.Notification.permission;
   }
 
