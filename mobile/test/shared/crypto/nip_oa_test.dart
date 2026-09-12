@@ -95,4 +95,65 @@ void main() {
       isNull,
     );
   });
+  test('rejects ambiguous auth and invalid envelopes', () {
+    final tag = authTag(owner, agent.public);
+    final valid = profile(agent, [tag]);
+    final badTags = [
+      for (final duplicate in [
+        tag,
+        ['auth'],
+        ['auth', 'invalid'],
+      ]) ...[
+        [tag, duplicate],
+        [duplicate, tag],
+      ],
+      for (final index in [1, 3])
+        [List<String>.from(tag)..[index] = tag[index].toUpperCase()],
+    ];
+    for (final event in [
+      for (final tags in badTags) profile(agent, tags),
+      profile(agent, [tag], kind: 1),
+      for (final patch in [
+        {'content': 'forged'},
+        {'created_at': 101},
+        {'id': '0' * 64},
+        {'sig': '0' * 128},
+        {'pubkey': owner.public},
+      ])
+        NostrEvent.fromJson({...valid.toJson(), ...patch}),
+    ]) {
+      expect(verifiedOaOwnerPubkey(event), isNull);
+    }
+  });
+  test('conditions evaluate the signed profile time, with strict bounds', () {
+    const valid = [
+      '',
+      'kind=0',
+      'created_at>99&created_at<101',
+      'created_at<4294967295',
+    ];
+    for (final conditions in [
+      ...valid,
+      'kind=1',
+      'created_at>100',
+      'created_at<100',
+      'kind=65536',
+      'kind=00',
+      'kind=+0',
+      'created_at<4294967296',
+      'kind=0&',
+      ' kind=0',
+      'kind=0&kind=1',
+    ]) {
+      expect(
+        verifiedOaOwnerPubkey(
+          profile(agent, [
+            authTag(owner, agent.public, conditions: conditions),
+          ]),
+        ),
+        valid.contains(conditions) ? owner.public : isNull,
+        reason: conditions,
+      );
+    }
+  });
 }

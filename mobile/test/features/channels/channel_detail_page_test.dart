@@ -198,7 +198,29 @@ NostrEvent _edit({
   sig: '',
 );
 
+Future<Widget> admissionDmHarness(List<String> pubkeys) async {
+  SharedPreferences.setMockInitialValues({});
+  _testPrefs = await SharedPreferences.getInstance();
+  return _buildTestable(
+    messages: const [],
+    realAdmission: true,
+    channel: Channel(
+      id: _channelId,
+      name: 'DM',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: pubkeys.first,
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      participantPubkeys: pubkeys,
+      isMember: true,
+    ),
+  );
+}
+
 Widget _buildTestable({
+  bool realAdmission = false,
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
@@ -266,9 +288,10 @@ Widget _buildTestable({
             huddleTypingNotifier ??
             _FakeTypingNotifier(const [], channelId: _huddleChannelId),
       ),
-      userCacheProvider.overrideWith(
-        () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
-      ),
+      if (!realAdmission)
+        userCacheProvider.overrideWith(
+          () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
+        ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
@@ -303,12 +326,14 @@ Widget _buildTestable({
             if (member.isBot) member.pubkey.toLowerCase(),
         },
       ),
-      agentOwnersProvider.overrideWith(
-        (ref) async => loadAgentOwners?.call() ?? const <String, String>{},
-      ),
-      agentDirectoryProvider.overrideWith(
-        (ref) async => loadAgentDirectory?.call() ?? const [],
-      ),
+      if (!realAdmission)
+        agentOwnersProvider.overrideWith(
+          (ref) async => loadAgentOwners?.call() ?? const <String, String>{},
+        ),
+      if (!realAdmission)
+        agentDirectoryProvider.overrideWith(
+          (ref) async => loadAgentDirectory?.call() ?? const [],
+        ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
       if (directoryUsers != null)
@@ -348,9 +373,10 @@ Widget _buildTestable({
         ),
         mediaHttpClientProvider.overrideWithValue(mediaClient),
       ],
-      if (relaySessionNotifier != null ||
-          (resolvedChannel.isDm &&
-              resolvedChannel.participantPubkeys.toSet().length == 2))
+      if (!realAdmission &&
+          (relaySessionNotifier != null ||
+              (resolvedChannel.isDm &&
+                  resolvedChannel.participantPubkeys.toSet().length == 2)))
         relaySessionProvider.overrideWith(
           () => relaySessionNotifier ?? _IdentityUpdateRelaySession(),
         ),

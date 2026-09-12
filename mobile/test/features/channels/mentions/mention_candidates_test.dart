@@ -223,6 +223,7 @@ void main() {
         sharedChannelIds: {'chan-1'},
         userCache: const {},
         ownerByAgentPubkey: const {},
+        ownerSourceAvailable: false,
         searchResults: [
           UserProfile(
             pubkey: agentPubkey,
