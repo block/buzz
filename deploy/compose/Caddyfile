@@ -1,5 +1,11 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  handle /pair {
+    reverse_proxy pairing-relay:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
 }
