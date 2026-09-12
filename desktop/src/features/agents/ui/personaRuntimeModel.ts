@@ -1,3 +1,5 @@
+import type { RespondToMode } from "@/shared/api/types";
+
 /** Runtime provider-capability tri-state used by the submit path. */
 export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
 
@@ -331,4 +333,73 @@ export function envVarsEqual(
     aKeys.length === Object.keys(b).length &&
     aKeys.every((key) => a[key] === b[key])
   );
+}
+
+/**
+ * Inputs for {@link computeRespondToWirePatch} — the persisted record shape
+ * alongside the dialog's submitted shape, both pre-derived primitives.
+ */
+export interface RespondToWirePatchInput {
+  /** The mode currently persisted on the agent record. */
+  currentMode: RespondToMode;
+  /** The allowlist currently persisted on the agent record. */
+  currentAllowlist: string[];
+  /** The mode the user is submitting from the dialog. */
+  submitMode: RespondToMode;
+  /** The allowlist the user is submitting from the dialog. */
+  submitAllowlist: string[];
+}
+
+/**
+ * The wire patch the edit dialog must send for the respond-to pair.
+ *
+ * - `respondTo` is `undefined` when the mode is unchanged (the Rust update
+ *   merges `undefined` as "leave unchanged").
+ * - `respondToAllowlist` is `undefined` when the payload need not be sent
+ *   (mode is not allowlist, OR the list is unchanged and the mode is already
+ *   allowlist).
+ */
+export interface RespondToWirePatch {
+  respondTo?: RespondToMode;
+  respondToAllowlist?: string[];
+}
+
+/**
+ * Compute the exact `{respondTo, respondToAllowlist}` wire patch the agent
+ * instance edit dialog must send for a given mode/allowlist transition.
+ *
+ * The dialog previously gated the allowlist payload on `submitMode ===
+ * "allowlist"` AND the list differing from the persisted record — which
+ * silently dropped the payload in two reachable shapes (#2501):
+ *
+ *   1. mode flip to allowlist with a list that happens to match the record
+ *      (e.g. anyone → allowlist where the allowlist was populated in an
+ *      earlier session), so the harness never receives the full
+ *      `{mode, allowlist}` tuple atomically and the agent stays unreachable;
+ *   2. mode already allowlist with an edited list — covered, but only because
+ *      the mode gate happened to coincide.
+ *
+ * The backend update merges `respondTo: undefined` as "mode unchanged" and
+ * `respondToAllowlist: undefined` as "payload unchanged", so the wire patch
+ * carries exactly the fields that must change on the record.
+ */
+export function computeRespondToWirePatch(
+  input: RespondToWirePatchInput,
+): RespondToWirePatch {
+  const modeChanged = input.submitMode !== input.currentMode;
+  const listChanged =
+    input.submitAllowlist.join(",") !== input.currentAllowlist.join(",");
+
+  const respondTo = modeChanged ? input.submitMode : undefined;
+
+  // Send the allowlist payload when the submitted mode needs it AND either the
+  // mode or the payload actually changed. A mode flip TO allowlist with an
+  // unchanged-but-nonempty list must still re-send the payload so the harness
+  // applies {mode, allowlist} atomically on the local record.
+  const respondToAllowlist =
+    input.submitMode === "allowlist" && (modeChanged || listChanged)
+      ? [...input.submitAllowlist]
+      : undefined;
+
+  return { respondTo, respondToAllowlist };
 }
