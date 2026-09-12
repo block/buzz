@@ -22,6 +22,8 @@ const _mentionSearchDebounce = Duration(milliseconds: 250);
 /// keystrokes dispose the stale family member so its request never fires.
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
+      ref.watch(relayConfigProvider);
+      final admission = ref.read(userCacheProvider.notifier).captureAdmission();
       final trimmed = query.trim();
       if (trimmed.isEmpty) return const [];
 
@@ -38,16 +40,11 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       // Keep only the latest kind:0 event per pubkey (the bridge does not
       // honor the `kinds` filter under search, and may return several
       // profile revisions — mirrors desktop's `list_user_search_results`).
-      final latestByPubkey = <String, NostrEvent>{};
-      for (final event in events) {
-        if (event.kind != 0) continue;
-        final pk = event.pubkey.toLowerCase();
-        final current = latestByPubkey[pk];
-        if (current == null || event.createdAt > current.createdAt) {
-          latestByPubkey[pk] = event;
-        }
+      if (disposed || !admission.isCurrent) return const [];
+      final latestByPubkey = latestProfileEvents(events);
+      for (final event in latestByPubkey.values) {
+        admission.add(event);
       }
-
       return [
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
@@ -61,7 +58,7 @@ UserProfile _profileFromEvent(NostrEvent event) {
     avatarUrl: data.avatarUrl,
     about: data.about,
     nip05Handle: data.nip05,
-    ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
+    ownerPubkey: verifiedOaOwnerPubkey(event),
   );
 }
 
@@ -89,7 +86,7 @@ final mentionCandidatesProvider = Provider.family
       final relayAgents =
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
-      final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      final owners = ref.watch(agentOwnersProvider);
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
@@ -107,7 +104,11 @@ final mentionCandidatesProvider = Provider.family
         relayAgents: relayAgents,
         sharedChannelIds: sharedChannelIds,
         userCache: userCache,
-        ownerByAgentPubkey: owners,
+        ownerByAgentPubkey: owners.asData?.value ?? const {},
+        ownerSourceAvailable: !owners.isLoading && !owners.hasError,
+        authoritativeProfilePubkeys: ref
+            .read(userCacheProvider.notifier)
+            .profilePubkeys,
         searchResults: searchResults,
         currentPubkey: currentPubkey,
       );

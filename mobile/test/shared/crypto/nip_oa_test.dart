@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 String _sha256Hex(String input) {
   final digest = SHA256Digest().process(Uint8List.fromList(utf8.encode(input)));
@@ -21,6 +22,22 @@ List<String> authTag(
   return ['auth', owner.public, conditions, sig];
 }
 
+NostrEvent profile(
+  nostr.Keys agent,
+  List<List<String>> tags, {
+  int createdAt = 100,
+  int kind = 0,
+  String content = '{}',
+}) => NostrEvent.fromJson(
+  nostr.Event.from(
+    kind: kind,
+    content: content,
+    secretKey: agent.secret,
+    createdAt: createdAt,
+    tags: tags,
+  ).toMap(),
+);
+
 void main() {
   final owner = nostr.Keys.generate();
   final agent = nostr.Keys.generate();
@@ -28,7 +45,7 @@ void main() {
   test('returns the owner pubkey for a valid auth tag', () {
     final tag = authTag(owner, agent.public);
     expect(
-      verifiedOaOwnerPubkey([tag], agent.public),
+      verifiedOaOwnerPubkey(profile(agent, [tag])),
       owner.public.toLowerCase(),
     );
   });
@@ -36,7 +53,7 @@ void main() {
   test('accepts valid conditions strings', () {
     final tag = authTag(owner, agent.public, conditions: 'kind=0');
     expect(
-      verifiedOaOwnerPubkey([tag], agent.public),
+      verifiedOaOwnerPubkey(profile(agent, [tag])),
       owner.public.toLowerCase(),
     );
   });
@@ -44,7 +61,7 @@ void main() {
   test('rejects a signature over a different agent pubkey', () {
     final otherAgent = nostr.Keys.generate();
     final tag = authTag(owner, otherAgent.public);
-    expect(verifiedOaOwnerPubkey([tag], agent.public), isNull);
+    expect(verifiedOaOwnerPubkey(profile(agent, [tag])), isNull);
   });
 
   test('rejects a tampered signature', () {
@@ -55,24 +72,26 @@ void main() {
       1,
       tampered[3][0] == '0' ? '1' : '0',
     );
-    expect(verifiedOaOwnerPubkey([tampered], agent.public), isNull);
+    expect(verifiedOaOwnerPubkey(profile(agent, [tampered])), isNull);
   });
 
   test('rejects self-attestation', () {
     final tag = authTag(agent, agent.public);
-    expect(verifiedOaOwnerPubkey([tag], agent.public), isNull);
+    expect(verifiedOaOwnerPubkey(profile(agent, [tag])), isNull);
   });
 
   test('rejects malformed conditions', () {
     final tag = authTag(owner, agent.public, conditions: 'kind=abc');
-    expect(verifiedOaOwnerPubkey([tag], agent.public), isNull);
+    expect(verifiedOaOwnerPubkey(profile(agent, [tag])), isNull);
   });
 
   test('ignores unrelated tags', () {
     expect(
-      verifiedOaOwnerPubkey([
-        ['p', owner.public],
-      ], agent.public),
+      verifiedOaOwnerPubkey(
+        profile(agent, [
+          ['p', owner.public],
+        ]),
+      ),
       isNull,
     );
   });

@@ -1,3 +1,5 @@
+import 'package:nostr/nostr.dart' as nostr;
+import '../../shared/crypto/nip_oa_test.dart' show profile;
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
@@ -25,6 +27,48 @@ part 'channels_provider_terminal_cases.dart';
 /// events on demand.
 void main() {
   const myPk = 'me';
+
+  test('DM names select only authenticated profile replacements', () async {
+    final keys = nostr.Keys.generate();
+    final signed = profile(keys, [], content: '{"name":"Genuine"}');
+    final tie = profile(keys, [], content: '{"name":"Tie"}');
+    final forged = NostrEvent.fromJson({
+      ...signed.toJson(),
+      'id': '0' * 64,
+      'content': '{"name":"Forged"}',
+    });
+    final meta = _meta(id: _channelA, name: 'DM', channelType: 'dm');
+    for (final events in [
+      [signed, forged],
+      [signed, tie],
+    ]) {
+      final winner = events.last == forged || signed.id.compareTo(tie.id) < 0
+          ? signed
+          : tie;
+      for (final ordered in [events, events.reversed.toList()]) {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            NostrEvent.fromJson({
+              ...meta.toJson(),
+              'tags': [
+                ...meta.tags,
+                ['p', keys.public],
+                ['p', myPk],
+              ],
+            }),
+          ],
+        )..profiles = ordered;
+        final container = _buildContainer(session: session);
+        final channels = await container.read(channelsProvider.future);
+        expect(
+          channels.single.displayLabel(currentPubkey: myPk),
+          ProfileData.fromEvent(winner).displayName,
+        );
+        container.dispose();
+      }
+    }
+  });
 
   test(
     'discovers open channels for a user with zero channel memberships',
@@ -2240,6 +2284,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.membershipFailures = 0,
   });
 
+  List<NostrEvent> profiles = [];
   List<NostrEvent> memberships;
   final List<List<NostrEvent>>? membershipPages;
   final bool repeatLastMembershipPage;
@@ -2471,6 +2516,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
+    if (filter.kinds.contains(0)) return profiles;
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
       final paused = _pausedMemberCount;
       if (paused != null) {

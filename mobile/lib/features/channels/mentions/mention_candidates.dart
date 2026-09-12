@@ -51,9 +51,17 @@ List<MentionCandidate> buildMentionCandidates({
   required Set<String> sharedChannelIds,
   required Map<String, UserProfile> userCache,
   required Map<String, String> ownerByAgentPubkey,
+  Set<String> authoritativeProfilePubkeys = const {},
+  bool ownerSourceAvailable = true,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
 }) {
+  // Display/search profiles can outlive their admitting cache generation.
+  String? ownerFor(String key) => !ownerSourceAvailable
+      ? null
+      : authoritativeProfilePubkeys.contains(key)
+      ? userCache[key]?.ownerPubkey
+      : ownerByAgentPubkey[key];
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
 
@@ -61,7 +69,7 @@ List<MentionCandidate> buildMentionCandidates({
     final pk = member.pubkey.toLowerCase();
     if (!seen.add(pk)) continue;
     final profile = userCache[pk];
-    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
+    final ownerPubkey = ownerFor(pk);
     final isAgent = member.isBot || ownerPubkey != null;
     candidates.add(
       MentionCandidate(
@@ -104,7 +112,7 @@ List<MentionCandidate> buildMentionCandidates({
         avatarUrl: profile?.avatarUrl,
         isAgent: true,
         isMember: false,
-        ownerPubkey: ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
+        ownerPubkey: ownerFor(pk),
       ),
     );
   }
@@ -113,8 +121,9 @@ List<MentionCandidate> buildMentionCandidates({
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
     if (seen.contains(pk)) continue;
-    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
-    final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
+    final ownerPubkey = ownerFor(pk);
+    final isAgent =
+        profile.isAgent || ownerPubkey != null || directoryPubkeys.contains(pk);
     if (isAgent) {
       // Mirrors desktop's `shouldHideAgentFromMentions` for non-member
       // agents: show only when invocable. Invocable = owned by the current

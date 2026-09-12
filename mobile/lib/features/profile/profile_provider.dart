@@ -80,6 +80,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final pubkey = ref.watch(myPubkeyProvider);
     ref.watch(relaySessionProvider);
     final context = _ProfileWriteContext(
+      admission: ref.read(userCacheProvider.notifier).captureAdmission(),
       config: config,
       pubkey: pubkey,
       session: ref.read(relaySessionProvider.notifier),
@@ -100,14 +101,14 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
     final session = context.session;
     final events = await session.fetchHistory(NostrFilters.profile(myPk));
-    if (events.isEmpty) {
+    final latest = latestProfileEvents(events)[myPk.toLowerCase()];
+    if (latest == null) {
       _requireCurrentWriteContext(context);
       _metadata = {};
       _lastCreatedAt = 0;
       _hasHydrated = true;
       return null;
     }
-    final latest = _latestProfileEvent(events)!;
     final metadata = _decodeProfileMetadata(latest);
     final data = ProfileData.fromEvent(latest);
     final profile = UserProfile(
@@ -116,9 +117,10 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: data.avatarUrl,
       about: data.about,
       nip05Handle: data.nip05,
-      ownerPubkey: verifiedOaOwnerPubkey(latest.tags, data.pubkey),
+      ownerPubkey: verifiedOaOwnerPubkey(latest),
     );
     _requireCurrentWriteContext(context);
+    context.admission.add(latest);
     _metadata = metadata;
     _lastCreatedAt = latest.createdAt;
     _hasHydrated = true;
@@ -160,6 +162,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   }
 
   _ProfileWriteContext _currentWriteContext() => _ProfileWriteContext(
+    admission: ref.read(userCacheProvider.notifier).captureAdmission(),
     config: ref.read(relayConfigProvider),
     pubkey: ref.read(myPubkeyProvider),
     session: ref.read(relaySessionProvider.notifier),
@@ -182,7 +185,9 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       NostrFilters.profile(pubkey),
     );
     _requireCurrentWriteContext(context);
-    final currentHead = _latestProfileEvent(currentEvents);
+    final currentHead = latestProfileEvents(
+      currentEvents,
+    )[pubkey.toLowerCase()];
     if (_lastCreatedAt > 0 &&
         (currentHead == null || currentHead.createdAt < _lastCreatedAt)) {
       throw StateError('Cannot confirm the latest profile metadata.');
@@ -216,9 +221,9 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     if (submittedEvent == null) {
       throw StateError('Profile update was not signed.');
     }
-    final verifiedHead = _latestProfileEvent(
+    final verifiedHead = latestProfileEvents(
       await session.fetchHistory(NostrFilters.profile(pubkey)),
-    );
+    )[pubkey.toLowerCase()];
     _requireCurrentWriteContext(context);
     if (verifiedHead?.id != submittedEvent.id) {
       throw StateError('Profile changed before the update could be confirmed.');
@@ -233,17 +238,18 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: _metadata['picture'] as String?,
       about: _metadata['about'] as String?,
       nip05Handle: _metadata['nip05'] as String?,
-      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent.tags, pubkey),
+      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent),
     );
     state = AsyncData(profile);
-    ref.read(userCacheProvider.notifier).put(profile);
+    context.admission.add(submittedEvent);
   }
 
   void _requireCurrentWriteContext(_ProfileWriteContext context) {
     final currentConfig = ref.read(relayConfigProvider);
     final currentSession = ref.read(relaySessionProvider.notifier);
     final currentPubkey = ref.read(myPubkeyProvider);
-    if (currentConfig.storedOrigin != context.config.storedOrigin ||
+    if (!context.admission.isCurrent ||
+        currentConfig.storedOrigin != context.config.storedOrigin ||
         currentConfig.nsec != context.config.nsec ||
         currentPubkey != context.pubkey ||
         !identical(currentSession, context.session)) {
@@ -254,25 +260,16 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
 class _ProfileWriteContext {
   const _ProfileWriteContext({
+    required this.admission,
     required this.config,
     required this.pubkey,
     required this.session,
   });
 
+  final ProfileAdmission admission;
   final RelayConfig config;
   final String? pubkey;
   final RelaySessionNotifier session;
-}
-
-NostrEvent? _latestProfileEvent(List<NostrEvent> events) {
-  if (events.isEmpty) return null;
-  return events.reduce((current, event) {
-    if (event.createdAt != current.createdAt) {
-      return event.createdAt > current.createdAt ? event : current;
-    }
-    // Match the relay replacement tie-breaker: the lowest event id wins.
-    return event.id.compareTo(current.id) < 0 ? event : current;
-  });
 }
 
 Map<String, dynamic> _decodeProfileMetadata(NostrEvent event) {
