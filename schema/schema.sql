@@ -643,6 +643,7 @@ CREATE TABLE archived_identities (
 -- (Lane Audit/Dawn builds the chain logic; Lane 0 fixes the scoped schema.)
 
 CREATE TABLE audit_log (
+    hash_version    SMALLINT NOT NULL DEFAULT 1 CHECK (hash_version IN (1, 2)),
     community_id    UUID NOT NULL REFERENCES communities(id),
     seq             BIGINT NOT NULL,
     hash            BYTEA NOT NULL,

@@ -6,9 +6,9 @@
 //! and refresh logic; the [`Llm`] just asks for a bearer per request.
 //!
 //! The PKCE engine implements RFC 6749 + RFC 7636 with on-disk token
-//! caching keyed by `sha256(discovery_url|client_id|scopes)`. It's the
-//! same shape goose uses for Databricks, but we own the wire format and
-//! cache directory so the two are independently upgradable.
+//! caching keyed by a versioned JSON tuple of discovery URL, client ID, and
+//! the scopes array. Buzz owns the wire format and cache directory, so it
+//! can upgrade them independently of other OAuth clients.
 //!
 //! First-use (cache empty) requires a browser: the engine opens
 //! `authorization_endpoint` in `webbrowser`, listens on `127.0.0.1:0`,
@@ -1377,20 +1377,28 @@ fn default_oauth_cache_root() -> Result<PathBuf, AgentError> {
 }
 
 fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
-    let mut h = sha2::Sha256::new();
-    h.update(cfg.discovery_url.as_bytes());
-    h.update(b"|");
-    h.update(cfg.client_id.as_bytes());
-    h.update(b"|");
-    h.update(cfg.scopes.join(",").as_bytes());
-    let hash = hex::encode(h.finalize());
+    // JSON preserves field boundaries and scope element boundaries, including
+    // delimiters inside values. Do not fall back to the old joined cache key:
+    // a token there could belong to a different OAuth configuration.
+    let identity = serde_json::to_vec(&(
+        "buzz:oauth-cache:v2",
+        &cfg.discovery_url,
+        &cfg.client_id,
+        &cfg.scopes,
+    ))
+    .map_err(|e| AgentError::Llm(format!("oauth cache identity: {e}")))?;
+    let hash = hex::encode(sha2::Sha256::digest(identity));
 
     let dir = match &cfg.cache_dir_override {
         Some(p) => p.join(&cfg.cache_namespace),
         None => default_oauth_cache_root()?.join(&cfg.cache_namespace),
     };
-    Ok(dir.join(format!("{hash}.json")))
+    Ok(dir.join(format!("v2-{hash}.json")))
 }
+
+#[cfg(test)]
+#[path = "auth_cache_identity_tests.rs"]
+mod cache_identity_tests;
 
 /// Append `ext` as an extra extension onto `base` (e.g. `<hash>.json` →
 /// `<hash>.json.lock`). Keeps the lock and cooldown sidecars in the same

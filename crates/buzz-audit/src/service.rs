@@ -11,7 +11,7 @@ use crate::{
     action::AuditAction,
     entry::{AuditEntry, NewAuditEntry},
     error::AuditError,
-    hash::{compute_hash, to_storage_precision},
+    hash::{compute_hash, to_storage_precision, CURRENT_HASH_VERSION},
 };
 
 /// The `created_at` stamped on a new entry.
@@ -117,6 +117,7 @@ impl AuditService {
         let created_at: DateTime<Utc> = log_timestamp();
 
         let mut audit_entry = AuditEntry {
+            hash_version: CURRENT_HASH_VERSION,
             community_id,
             seq,
             hash: Vec::new(),
@@ -135,8 +136,8 @@ impl AuditService {
         sqlx::query(
             r#"
             INSERT INTO audit_log
-                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(audit_entry.community_id)
@@ -148,6 +149,7 @@ impl AuditService {
         .bind(audit_entry.object_id.as_deref())
         .bind(&audit_entry.detail)
         .bind(audit_entry.created_at)
+        .bind(audit_entry.hash_version)
         .execute(&mut *tx)
         .await?;
 
@@ -174,7 +176,7 @@ impl AuditService {
     ) -> Result<bool, AuditError> {
         let rows = sqlx::query(
             r#"
-            SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+            SELECT hash_version, community_id, seq, hash, prev_hash, action, actor_pubkey,
                    object_id, detail, created_at
             FROM audit_log
             WHERE community_id = $1 AND seq BETWEEN $2 AND $3
@@ -230,7 +232,7 @@ impl AuditService {
     ) -> Result<Vec<AuditEntry>, AuditError> {
         let rows = sqlx::query(
             r#"
-            SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+            SELECT hash_version, community_id, seq, hash, prev_hash, action, actor_pubkey,
                    object_id, detail, created_at
             FROM audit_log
             WHERE community_id = $1 AND seq >= $2
@@ -256,6 +258,7 @@ fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditEr
     })?;
 
     Ok(AuditEntry {
+        hash_version: row.try_get("hash_version")?,
         community_id: row.get::<Uuid, _>("community_id"),
         seq: row.get("seq"),
         hash: row.get("hash"),
@@ -345,6 +348,7 @@ mod postgres_tests {
         assert_eq!(e.seq, 1, "first entry in a community starts at seq 1");
         assert!(e.prev_hash.is_none(), "genesis entry has NULL prev_hash");
         assert_eq!(e.hash.len(), 32);
+        assert_eq!(e.hash_version, CURRENT_HASH_VERSION);
         assert_eq!(e.community_id, c);
     }
 
@@ -503,8 +507,8 @@ mod postgres_tests {
 
         // Forge: copy A's seq-1 row's hash into B's chain at seq 1.
         sqlx::query(
-            "INSERT INTO audit_log (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-             VALUES ($1, 1, $2, NULL, $3, $4, $5, $6, NOW())",
+            "INSERT INTO audit_log (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
+             VALUES ($1, 1, $2, NULL, $3, $4, $5, $6, NOW(), 2)",
         )
         .bind(b)
         .bind(&a1.hash) // A's hash, which was computed over community_id = A
@@ -536,5 +540,47 @@ mod postgres_tests {
             .verify_chain(CommunityId::from_uuid(c), 1, 100)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_chain_continues_with_framed_entries_and_rejects_boundary_moves() {
+        let pool = test_pool().await.expect("test Postgres must be available");
+        let svc = AuditService::new(pool.clone());
+        let community = make_community(&pool).await;
+        let scope = CommunityId::from_uuid(community);
+        let mut legacy = new_entry(community, AuditAction::EventCreated);
+        legacy.object_id = Some("a".repeat(64));
+        let mut row = svc.log(legacy).await.unwrap();
+        row.hash_version = 1;
+        row.hash = compute_hash(&row).unwrap().to_vec();
+        sqlx::query(
+            "UPDATE audit_log SET hash_version = 1, hash = $1 WHERE community_id = $2 AND seq = 1",
+        )
+        .bind(&row.hash)
+        .bind(community)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut input = new_entry(community, AuditAction::EventCreated);
+        input.object_id = Some("record1".into());
+        input.detail = serde_json::json!(23);
+        let next = svc.log(input).await.unwrap();
+        assert_eq!(next.hash_version, CURRENT_HASH_VERSION);
+        assert_eq!(next.prev_hash, Some(row.hash));
+        assert!(svc.verify_chain(scope, 1, 2).await.unwrap());
+        let rows = svc.get_entries(scope, 1, 2).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|e| e.hash_version).collect::<Vec<_>>(),
+            [1, 2]
+        );
+
+        sqlx::query("UPDATE audit_log SET object_id = 'record12', detail = '3'::jsonb WHERE community_id = $1 AND seq = 2")
+            .bind(community).execute(&pool).await.unwrap();
+        assert!(matches!(
+            svc.verify_chain(scope, 1, 2).await,
+            Err(AuditError::HashMismatch { seq: 2 })
+        ));
     }
 }

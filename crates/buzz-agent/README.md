@@ -383,3 +383,9 @@ Test strategy is **real subprocess, no mocks**:
 - **Fake LLM** — `tests/fake_llm.rs` and the helpers in `tests/regressions.rs` spin up a real `tokio::net::TcpListener` on port 0, parse `Content-Length`, and return scripted JSON. No HTTP mocking library.
 - **Fake MCP server** — `tests/bin/fake_mcp.rs` is a separate binary controlled by env vars: `FAKE_MCP_HANG_INIT`, `FAKE_MCP_TOOL_DELAY`, `FAKE_MCP_SPAWN_GRANDCHILD`, etc. Each fault path is a real process being abused.
 - **Regression tests are the changelog.** Each `#[test]` in `regressions.rs` is named for the bug it locks down: `assistant_text_preserved_across_prompts`, `cancel_leaves_history_valid_for_next_prompt`, `mcp_init_timeout_kills_child`, `oversize_line_kills_connection`. Read them in order to learn the protocol's failure modes.
+
+OAuth cache filenames now use a versioned JSON encoding of the discovery URL,
+client ID, and scopes array. Existing caches from the delimiter-joined format
+are left in place but are not loaded: their tokens cannot be unambiguously
+associated with a configuration. Sign in once after upgrading; headless agents
+need a populated new cache or their configured static bearer token.
