@@ -138,6 +138,57 @@ const BLOCKED_MIME: &[&str] = &[
     "application/x-apple-diskimage",
 ];
 
+const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
+
+fn calendar_upload_metadata(filename: Option<&str>) -> Option<(&'static str, &'static str)> {
+    filename
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ics"))
+        .then_some(("text/calendar", "ics"))
+}
+
+fn sanitize_calendar_filename(name: &str) -> String {
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
+    let mut sanitized = String::new();
+    for character in stem.chars().filter(|character| !character.is_control()) {
+        if sanitized.len() + character.len_utf8() > 255 - ".ics".len() {
+            break;
+        }
+        sanitized.push(character);
+    }
+    let sanitized = sanitized.trim();
+    format!(
+        "{}.ics",
+        if sanitized.is_empty() {
+            "calendar"
+        } else {
+            sanitized
+        }
+    )
+}
+
+fn attachment_filename(name: &str, descriptor_mime: &str) -> String {
+    if descriptor_mime == "text/calendar" {
+        sanitize_calendar_filename(name)
+    } else {
+        sanitize_filename(name)
+    }
+}
+
+fn set_attachment_filename(descriptor: &mut BlobDescriptor, name: Option<&str>) {
+    let filename = name.map(|name| attachment_filename(name, &descriptor.mime_type));
+    descriptor.filename = filename;
+}
+
+fn upload_media_filename(name: Option<&str>, descriptor_mime: &str) -> Option<String> {
+    if descriptor_mime == "text/calendar" {
+        name.map(sanitize_calendar_filename)
+    } else {
+        None
+    }
+}
 /// Return true when a PNG/WebP payload declares animation.
 ///
 /// Animated payloads use structural sanitizers so frame timing, looping, and
@@ -393,6 +444,13 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     )
 }
 
+fn should_retry_upload_on_legacy(
+    status: reqwest::StatusCode,
+    file_extension: Option<&str>,
+) -> bool {
+    file_extension.is_none() && should_retry_legacy_upload(status)
+}
+
 pub(crate) async fn upload_image_bytes(
     body: Vec<u8>,
     state: &AppState,
@@ -402,7 +460,7 @@ pub(crate) async fn upload_image_bytes(
         return Err("profile avatar must be an image".to_string());
     }
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, state, None, None).await
+    do_upload(body, &mime, state, None, None, None).await
 }
 
 async fn do_upload(
@@ -411,6 +469,7 @@ async fn do_upload(
     state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
     cancellation: Option<&CancellationToken>,
+    file_extension: Option<&str>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
@@ -443,13 +502,14 @@ async fn do_upload(
             auth_header: &auth_header,
             mime,
             sha256: &sha256,
+            file_extension,
             body: body.clone(),
             progress: progress.as_ref(),
             cancellation,
         },
     )
     .await?;
-    if should_retry_legacy_upload(resp.status()) {
+    if should_retry_upload_on_legacy(resp.status(), file_extension) {
         resp = send_upload_attempt(
             state,
             UploadAttempt {
@@ -457,6 +517,7 @@ async fn do_upload(
                 auth_header: &auth_header,
                 mime,
                 sha256: &sha256,
+                file_extension: None,
                 body,
                 progress: progress.as_ref(),
                 cancellation,
@@ -486,6 +547,13 @@ pub async fn upload_media(
 ) -> Result<BlobDescriptor, String> {
     let path = std::path::Path::new(&file_path);
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let calendar_metadata =
+        calendar_upload_metadata(path.file_name().and_then(|name| name.to_str()));
+    if calendar_metadata.is_some()
+        && file.metadata().map_err(|error| error.to_string())?.len() > MAX_CALENDAR_BYTES
+    {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
 
     let fd_path = fd_real_path(&file)?;
     let canonical_temp = std::env::temp_dir()
@@ -505,9 +573,18 @@ pub async fn upload_media(
         let _ = std::fs::remove_file(&fd_path);
     }
 
-    let mime = detect_and_validate_mime(&body)?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, &state, None, None).await
+    let mut descriptor = do_upload(body, &mime, &state, None, None, file_extension).await?;
+    descriptor.filename = upload_media_filename(
+        path.file_name().and_then(|name| name.to_str()),
+        &descriptor.mime_type,
+    );
+    Ok(descriptor)
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -526,6 +603,13 @@ async fn process_picked_path(
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
     let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let calendar_metadata =
+        calendar_upload_metadata(path.file_name().and_then(|name| name.to_str()));
+    if calendar_metadata.is_some()
+        && file.metadata().map_err(|error| error.to_string())?.len() > MAX_CALENDAR_BYTES
+    {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
 
     // Extension hint for HEIC detection — some HEIC files from non-Apple
     // tooling carry brands outside HEIC_BRANDS, but the `.heic`/`.heif`
@@ -577,7 +661,11 @@ async fn process_picked_path(
         .await
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
-    let mime = detect_and_validate_mime(&body)?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
@@ -588,18 +676,18 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, progress, None).await?;
+    let mut descriptor = do_upload(body, &mime, state, progress, None, file_extension).await?;
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state, None, None).await {
+        match do_upload(poster, "image/jpeg", state, None, None, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    descriptor.filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(sanitize_filename);
+    set_attachment_filename(
+        &mut descriptor,
+        path.file_name().and_then(|name| name.to_str()),
+    );
 
     Ok(descriptor)
 }
@@ -701,6 +789,11 @@ pub(super) async fn upload_media_bytes_inner(
         return Err("empty upload".to_string());
     }
 
+    let calendar_metadata = calendar_upload_metadata(filename.as_deref());
+    if calendar_metadata.is_some() && data.len() as u64 > MAX_CALENDAR_BYTES {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
+
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
@@ -762,7 +855,11 @@ pub(super) async fn upload_media_bytes_inner(
         (data, None)
     };
 
-    let mime = detect_and_validate_mime(&body)?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
@@ -770,24 +867,26 @@ pub(super) async fn upload_media_bytes_inner(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
-    let mut descriptor = do_upload(body, &mime, &state, progress, cancellation).await?;
+    let mut descriptor =
+        do_upload(body, &mime, &state, progress, cancellation, file_extension).await?;
 
     emit_media_upload_phase(&app, progress_id.as_deref(), "finishing");
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state, None, cancellation).await {
+        match do_upload(poster, "image/jpeg", &state, None, cancellation, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    descriptor.filename = filename.as_deref().map(|name| {
+    let display_filename = filename.as_deref().map(|name| {
         let upload_name = if is_voice_note {
             voice_note_mp4_filename(name)
         } else {
             name.to_string()
         };
-        sanitize_filename(&upload_name)
+        upload_name
     });
+    set_attachment_filename(&mut descriptor, display_filename.as_deref());
 
     Ok(descriptor)
 }
@@ -797,6 +896,61 @@ pub(super) async fn upload_media_bytes_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_upload_metadata_uses_ics_extension_only() {
+        assert_eq!(
+            calendar_upload_metadata(Some("Planning.ICS")),
+            Some(("text/calendar", "ics"))
+        );
+        assert_eq!(calendar_upload_metadata(Some("Planning.txt")), None);
+        assert_eq!(calendar_upload_metadata(None), None);
+    }
+
+    #[test]
+    fn authoritative_calendar_descriptor_normalizes_generic_input_filename() {
+        assert_eq!(
+            attachment_filename("Planning.txt", "text/calendar"),
+            "Planning.ics"
+        );
+        assert_eq!(
+            attachment_filename("Agenda.markdown", "text/calendar"),
+            "Agenda.ics"
+        );
+        assert_eq!(attachment_filename("Agenda", "text/calendar"), "Agenda.ics");
+        assert_eq!(
+            attachment_filename("Planning.txt", "application/octet-stream"),
+            "Planning.txt"
+        );
+    }
+
+    #[test]
+    fn legacy_upload_media_adds_filenames_only_for_authoritative_calendars() {
+        assert_eq!(
+            upload_media_filename(Some("Planning.txt"), "text/calendar"),
+            Some("Planning.ics".to_string())
+        );
+        assert_eq!(
+            upload_media_filename(Some("report.pdf"), "application/pdf"),
+            None
+        );
+    }
+
+    #[test]
+    fn calendar_upload_never_retries_on_legacy_media_route() {
+        assert!(!should_retry_upload_on_legacy(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("ics")
+        ));
+        assert!(should_retry_upload_on_legacy(
+            reqwest::StatusCode::NOT_FOUND,
+            None
+        ));
+        assert!(!should_retry_upload_on_legacy(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            None
+        ));
+    }
 
     #[test]
     fn test_extract_server_authority_default_ports() {

@@ -79,6 +79,12 @@ pub struct MediaConfig {
     pub max_file_bytes: u64,
     /// Public base URL for media URLs in BlobDescriptor (must include `/media` path).
     pub public_base_url: String,
+    /// Whether validated iCalendar attachments receive the new `.ics` /
+    /// `text/calendar` classification. Keep this off during the first rolling
+    /// deployment so old writers cannot race the new classification; enable it
+    /// only after every relay writer runs the claim/conditional-publish code.
+    #[serde(default)]
+    pub calendar_classification_enabled: bool,
     /// Whether to write per-upload-event records under `_uploads/`
     /// (moderation side channel). Off by default; set via
     /// `BUZZ_MEDIA_UPLOAD_RECORDS=true`.
@@ -175,6 +181,7 @@ mod tests {
             max_video_bytes: 1,
             max_file_bytes: 1,
             public_base_url: "http://localhost:3000/media".to_string(),
+            calendar_classification_enabled: true,
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,

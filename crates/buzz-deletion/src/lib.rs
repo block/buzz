@@ -577,6 +577,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
         max_video_bytes: 1,
         max_file_bytes: 1,
         public_base_url: "http://localhost/media".to_string(),
+        calendar_classification_enabled: false,
         upload_records_enabled: false,
         upload_ip_header: None,
         upload_port_header: None,
@@ -662,7 +663,8 @@ fn validate_frozen_inventory(request: &DeletionRequest) -> Result<FrozenInventor
 
 fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManifest) -> Result<()> {
     buzz_db::deletion::validate_storage_manifest(manifest)?;
-    let expected = tenant_prefixes(*request.community_id.as_uuid());
+    let expected =
+        tenant_prefixes_for_manifest_version(*request.community_id.as_uuid(), manifest.version)?;
     let actual = manifest
         .prefixes
         .iter()
@@ -674,6 +676,20 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
         ));
     }
     Ok(())
+}
+
+fn tenant_prefixes_for_manifest_version(community: Uuid, version: i32) -> Result<Vec<String>> {
+    match version {
+        4 | 5 => Ok(vec![
+            format!("_meta/{community}/"),
+            format!("_uploads/{community}/"),
+            format!("repos/{community}/"),
+        ]),
+        6 => Ok(tenant_prefixes(community).into()),
+        _ => Err(permanent(format!(
+            "unsupported storage manifest version {version}"
+        ))),
+    }
 }
 
 async fn build_inventory(
@@ -728,7 +744,7 @@ fn manifest_chunk_deleted_detail(
     })
 }
 
-/// Enumerate the target's three tenant prefixes into per-prefix summaries.
+/// Enumerate the target's four tenant prefixes into per-prefix summaries.
 ///
 /// Cost is O(tenant objects) regardless of fleet size. Unknown shapes inside
 /// one of the owned prefixes fail closed; keys elsewhere in the shared bucket
@@ -808,7 +824,7 @@ async fn enumerate_tenant_prefixes(
         });
     }
     let manifest = StorageManifest {
-        version: 5,
+        version: 6,
         prefixes,
     };
     buzz_db::deletion::validate_storage_manifest(&manifest)?;
@@ -1602,6 +1618,28 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 }
 
 #[cfg(test)]
+mod manifest_version_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_manifests_keep_the_three_prefix_contract_after_repair_rollout() {
+        let community = Uuid::from_u128(7);
+        assert_eq!(
+            tenant_prefixes_for_manifest_version(community, 5).expect("version 5"),
+            vec![
+                format!("_meta/{community}/"),
+                format!("_uploads/{community}/"),
+                format!("repos/{community}/"),
+            ]
+        );
+        assert_eq!(
+            tenant_prefixes_for_manifest_version(community, 6).expect("version 6"),
+            tenant_prefixes(community)
+        );
+    }
+}
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
 
@@ -1639,7 +1677,7 @@ mod postgres_tests {
 
     fn empty_storage_manifest(community: buzz_core::CommunityId) -> StorageManifest {
         StorageManifest {
-            version: 4,
+            version: 6,
             prefixes: tenant_prefixes(*community.as_uuid())
                 .into_iter()
                 .map(|prefix| PrefixManifest {
@@ -1708,6 +1746,7 @@ mod postgres_tests {
                     max_video_bytes: 1,
                     max_file_bytes: 1,
                     public_base_url: "http://localhost/media".to_string(),
+                    calendar_classification_enabled: false,
                     upload_records_enabled: false,
                     upload_ip_header: None,
                     upload_port_header: None,
@@ -1811,6 +1850,7 @@ mod postgres_tests {
                 max_video_bytes: 1,
                 max_file_bytes: 1,
                 public_base_url: "http://localhost/media".to_string(),
+                calendar_classification_enabled: false,
                 upload_records_enabled: false,
                 upload_ip_header: None,
                 upload_port_header: None,

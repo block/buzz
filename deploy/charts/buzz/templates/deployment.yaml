@@ -139,6 +139,7 @@ spec:
             {{- if gt (.Values.relay.ephemeralTtlOverride | int) 0 }}
             - { name: BUZZ_EPHEMERAL_TTL_OVERRIDE, value: {{ .Values.relay.ephemeralTtlOverride | quote }} }
             {{- end }}
+            - { name: BUZZ_MEDIA_CALENDAR_CLASSIFICATION_READY, value: {{ .Values.relay.calendarClassificationReady | quote }} }
             {{- if .Values.relay.uploadRecords }}
             - { name: BUZZ_MEDIA_UPLOAD_RECORDS, value: "true" }
             {{- end }}

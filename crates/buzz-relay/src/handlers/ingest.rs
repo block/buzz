@@ -3573,7 +3573,7 @@ mod postgres_tests {
                 .await
                 .expect("schema inventory"),
             storage: StorageManifest {
-                version: 4,
+                version: 6,
                 prefixes: buzz_media::tenant_prefixes(*community.as_uuid())
                     .into_iter()
                     .map(|prefix| PrefixManifest {

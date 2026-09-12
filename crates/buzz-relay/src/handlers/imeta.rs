@@ -43,6 +43,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         let mut x_value = String::new();
         let mut m_value = String::new();
         let mut thumb_value = String::new();
+        let mut filename_value = String::new();
 
         for part in tag.iter().skip(1) {
             let mut parts = part.splitn(2, ' ');
@@ -153,6 +154,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                                 .into(),
                         );
                     }
+                    filename_value = value.to_string();
                 }
                 _ => {}
             }
@@ -160,6 +162,19 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
 
         if !has_url || !has_m || !has_x || !has_size {
             return Err("imeta tag must include url, m, x, and size".into());
+        }
+
+        if m_value == "text/calendar" {
+            if extract_ext_from_media_url(&url_value) != Some("ics") {
+                return Err("calendar imeta url must use the .ics extension".into());
+            }
+            // `filename` is a Buzz display extension, not a required NIP-92
+            // field. Standard clients may omit it; when present, keep its
+            // extension consistent with the canonical calendar URL.
+            if !filename_value.is_empty() && !filename_value.to_ascii_lowercase().ends_with(".ics")
+            {
+                return Err("calendar imeta filename must use the .ics extension".into());
+            }
         }
 
         // Video-only NIP-71 fields must not appear on image blobs.
@@ -586,6 +601,49 @@ mod tests {
             "filename Q3-budget.pdf".into(),
         ];
         assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn calendar_imeta_requires_ics_url_and_validates_optional_filename() {
+        let without_filename = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.ics"),
+            "m text/calendar".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+        ];
+        assert!(validate_imeta_tags(&[without_filename], BASE).is_ok());
+
+        let with_filename = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.ics"),
+            "m text/calendar".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+            "filename Planning.ICS".into(),
+        ];
+        assert!(validate_imeta_tags(&[with_filename], BASE).is_ok());
+
+        for invalid in [
+            vec![
+                "imeta".into(),
+                format!("url /media/{HASH}.bin"),
+                "m text/calendar".into(),
+                format!("x {HASH}"),
+                "size 512".into(),
+                "filename Planning.ics".into(),
+            ],
+            vec![
+                "imeta".into(),
+                format!("url /media/{HASH}.ics"),
+                "m text/calendar".into(),
+                format!("x {HASH}"),
+                "size 512".into(),
+                "filename Planning.txt".into(),
+            ],
+        ] {
+            assert!(validate_imeta_tags(&[invalid], BASE).is_err());
+        }
     }
 
     #[test]
