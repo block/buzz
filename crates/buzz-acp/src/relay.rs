@@ -433,6 +433,13 @@ impl RestClient {
                     )));
                 }
                 Ok(resp) => {
+                    // Surface non-retriable statuses (401/403/500/…): callers
+                    // often swallow the Err, and a silent auth failure here has
+                    // previously masqueraded as "the agent just went quiet".
+                    tracing::warn!(
+                        "{method} {path} returned non-retriable HTTP {}",
+                        resp.status()
+                    );
                     return Err(RelayError::Http(format!(
                         "{method} {} returned HTTP {}",
                         path,
