@@ -36,10 +36,17 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use nostr::EventId;
+
+const SETUP_NUDGE_KINDS: [u32; 4] = [
+    KIND_STREAM_MESSAGE,
+    KIND_FORUM_POST,
+    KIND_FORUM_COMMENT,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
+];
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -413,8 +420,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
-        // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
+        // Ignore non-message kinds (relay housekeeping, reminders, votes, etc.).
+        if !SETUP_NUDGE_KINDS.contains(&kind_u32) {
             continue;
         }
 
@@ -563,7 +570,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(|| crate::config::DEFAULT_MENTION_KINDS.to_vec());
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -690,6 +697,16 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_nudge_kinds_include_forum_messages_but_not_votes_or_reminders() {
+        assert!(SETUP_NUDGE_KINDS.contains(&KIND_STREAM_MESSAGE));
+        assert!(SETUP_NUDGE_KINDS.contains(&KIND_FORUM_POST));
+        assert!(SETUP_NUDGE_KINDS.contains(&KIND_FORUM_COMMENT));
+        assert!(SETUP_NUDGE_KINDS.contains(&KIND_WORKFLOW_APPROVAL_REQUESTED));
+        assert!(!SETUP_NUDGE_KINDS.contains(&buzz_core::kind::KIND_FORUM_VOTE));
+        assert!(!SETUP_NUDGE_KINDS.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {

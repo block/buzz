@@ -664,6 +664,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_default_mentions_match_tagged_forum_events() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            crate::config::DEFAULT_MENTION_KINDS.to_vec(),
+            true,
+            None,
+            Some("@mention"),
+        )];
+
+        for kind in [
+            buzz_core::kind::KIND_FORUM_POST,
+            buzz_core::kind::KIND_FORUM_COMMENT,
+        ] {
+            let event = make_event_with_p_tag(kind, "hello", agent_pubkey);
+            let matched = match_event(&event, channel_id, &rules, agent_pubkey)
+                .await
+                .expect("tagged forum event should match");
+            assert_eq!(matched.prompt_tag, "@mention");
+
+            let unmentioned = make_event(kind, "hello");
+            assert!(
+                match_event(&unmentioned, channel_id, &rules, agent_pubkey)
+                    .await
+                    .is_none(),
+                "unmentioned forum event should not match"
+            );
+        }
+
+        let vote = make_event_with_p_tag(buzz_core::kind::KIND_FORUM_VOTE, "vote", agent_pubkey);
+        assert!(
+            match_event(&vote, channel_id, &rules, agent_pubkey)
+                .await
+                .is_none(),
+            "forum votes should remain outside mentions mode"
+        );
+    }
+
+    #[tokio::test]
     async fn test_match_event_no_match() {
         let event = make_event(1, "hello");
         let channel_id = any_channel();
