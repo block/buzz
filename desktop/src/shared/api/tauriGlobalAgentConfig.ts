@@ -20,7 +20,7 @@ export async function getGlobalAgentConfig(): Promise<GlobalAgentConfig> {
  * shape and reserved-key rules, restarts running local agents whose effective
  * env changed, and returns the saved config with a restart count.
  *
- * Throws a string error message on validation failure.
+ * Throws an Error containing the backend message on validation failure.
  */
 export async function setGlobalAgentConfig(
   config: GlobalAgentConfig,
