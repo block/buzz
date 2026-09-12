@@ -40,6 +40,7 @@ import { resetAvatarPresentations } from "@/features/profile/avatarPresentationS
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
+import { resetUserLabelCacheMemo } from "@/features/profile/lib/userLabelStorage";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
@@ -95,6 +96,7 @@ async function resetCommunityState({
   resetDetachedToastScope();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetUserLabelCacheMemo();
   resetMessageLinkMetadataCache();
 }
 
