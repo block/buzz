@@ -144,6 +144,17 @@ non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
+**No AI attribution in commit messages.** Buzz history does not carry
+`Co-authored-by:` trailers naming an AI assistant, or `Generated with <tool>`
+footers. Several agent harnesses add one by default, so this is easy to do
+without noticing — the `commit-msg` hook installed by `just hooks` strips them
+for commits you create locally. Git runs `commit-msg` only for `git commit` and
+`git merge`, so a `git rebase` or `git cherry-pick` can still carry a trailer
+through; check with `git log --format='%(trailers)' origin/main..HEAD` before
+opening a PR. Human `Co-authored-by:` trailers are legitimate and are never
+stripped. To repair a branch that already carries one, rewrite the affected
+commits (`git rebase -i --signoff`) and force-push with `--force-with-lease`.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
