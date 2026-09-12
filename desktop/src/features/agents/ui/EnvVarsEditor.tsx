@@ -58,6 +58,37 @@ export function toRecord(
   return out;
 }
 
+/**
+ * Re-project rows after a skip-key change **without** discarding in-progress
+ * edits.
+ *
+ * `toRows` mints a fresh `crypto.randomUUID()` for every row, so rebuilding
+ * from `value` remounts each input. When the runtime catalog resolves
+ * mid-typing — the request is in flight for seconds after a harness switch —
+ * that remount happens under the user's cursor: focus is lost and every
+ * further keystroke lands nowhere, so a key typed as
+ * `BUZZ_ACP_PERMISSION_MODE` is saved as `BUZZ_AC` with no warning.
+ *
+ * Keeping the existing row objects keeps their ids, so React reuses the same
+ * inputs and the caret stays put. The projection invariant is preserved the
+ * narrow way instead: rows whose key just became a skip key are dropped, and
+ * keys in `value` that just stopped being skipped are appended.
+ *
+ * Exported for unit tests.
+ */
+export function reconcileRows(
+  prevRows: readonly Row[],
+  value: EnvVarsValue,
+  skipKeys: ReadonlySet<string>,
+): Row[] {
+  const kept = prevRows.filter((row) => !skipKeys.has(row.key));
+  const present = new Set(kept.map((row) => row.key));
+  const restored = Object.entries(value)
+    .filter(([key]) => !skipKeys.has(key) && !present.has(key))
+    .map(([key, val]) => ({ id: crypto.randomUUID(), key, value: val }));
+  return restored.length > 0 ? [...kept, ...restored] : kept;
+}
+
 // Module-private empty set constant so skipKeys defaults are allocation-free.
 const EMPTY_SET: ReadonlySet<string> = new Set<string>();
 
@@ -258,9 +289,16 @@ export function EnvVarsEditor({
   React.useEffect(() => {
     const skipKeysChanged = !skipKeysEqual(prevSkipKeys.current, skipKeys);
     prevSkipKeys.current = skipKeys;
-    if (skipKeysChanged || !recordsEqual(lastEmitted.current, value)) {
+    if (!recordsEqual(lastEmitted.current, value)) {
+      // The parent supplied a value we did not emit (dialog reopened on a
+      // different agent) — a full rebuild is what we want.
       lastEmitted.current = value;
       setRows(toRows(value, skipKeys));
+    } else if (skipKeysChanged) {
+      // Only the skip-key sets moved, which happens when the async runtime
+      // catalog resolves. Re-project in place so a row being typed into keeps
+      // its identity, and with it the caret.
+      setRows((prev) => reconcileRows(prev, value, skipKeys));
     }
   }, [value, skipKeys]);
 
