@@ -55,6 +55,7 @@ import 'unread_badge/observed_unread_event.dart';
 part 'channels_page/body.dart';
 part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
+part 'channels_page/name_input_dialog.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';

@@ -281,7 +281,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onRename: () async {
                   final name = await showBuzzDialog<String>(
                     context: context,
-                    builder: (_) => _SectionNameDialog(
+                    builder: (_) => _NameInputDialog(
                       title: 'Rename Section',
                       confirmLabel: 'Rename',
                       initialValue: section.name,
