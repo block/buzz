@@ -563,6 +563,16 @@ impl BuzzClient {
         &self.keys
     }
 
+    /// Return the verified NIP-OA tag that must be part of a prepared BW
+    /// candidate, if this agent runs under an owner attestation.
+    ///
+    /// Ordinary commands let [`sign_event`](Self::sign_event) inject this tag.
+    /// BW must include it before `Publication::prepare` pins the candidate ID,
+    /// so the narrow BW producer reads the already-verified public tag here.
+    pub(crate) fn bw_auth_tag(&self) -> Option<&Tag> {
+        self.auth_tag.as_ref()
+    }
+
     /// Get the relay base URL.
     #[allow(dead_code)]
     pub fn relay_url(&self) -> &str {

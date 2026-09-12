@@ -1,9 +1,16 @@
-use crate::error::CliError;
-use buzz_core::bw::{parse_json, Consumer};
-use nostr::JsonUtil;
+use crate::{client::BuzzClient, error::CliError};
+use buzz_core::bw::{parse_json, Consumer, Evidence, Trust};
+use nostr::{EventBuilder, JsonUtil, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const LIVE_KINDS: [u16; 5] = [30617, 1621, 46100, 1063, 1];
+const LIVE_HISTORY_LIMIT: u32 = 100_001;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum BwCmd {
@@ -128,6 +135,338 @@ fn history(v: &Value) -> Result<Consumer, CliError> {
         c.ingest(&wire(e)?);
     }
     Ok(c)
+}
+
+fn tag<'a>(event: &'a Value, name: &str) -> Option<&'a str> {
+    event["tags"]
+        .as_array()?
+        .iter()
+        .find(|tag| tag[0] == name)?[1]
+        .as_str()
+}
+
+fn empty_evidence() -> Evidence {
+    Evidence {
+        git_readbacks: vec![],
+        git_ancestry: vec![],
+        provider_readbacks: vec![],
+        downloads: vec![],
+        host_authorization: json!({"allowed": false}),
+    }
+}
+
+fn now() -> Result<u64, CliError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| CliError::Other(format!("read system clock: {error}")))
+}
+
+fn repo_coordinate(repo_owner: &str, repo_id: &str) -> Result<String, CliError> {
+    crate::validate::validate_hex64(repo_owner)?;
+    crate::validate::validate_repo_id(repo_id)?;
+    Ok(format!(
+        "30617:{}:{repo_id}",
+        repo_owner.to_ascii_lowercase()
+    ))
+}
+
+fn collect_reference_ids(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if matches!(
+                    key.as_str(),
+                    "assignment"
+                        | "update"
+                        | "implemented"
+                        | "pipeline"
+                        | "request"
+                        | "run"
+                        | "artifact"
+                        | "set"
+                        | "target"
+                        | "issue"
+                ) {
+                    if let Some(id) = value.as_str() {
+                        ids.insert(id.to_owned());
+                    }
+                }
+                collect_reference_ids(value, ids);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_reference_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn event_id(event: &Value) -> Result<String, CliError> {
+    event["id"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| CliError::Other("BW history event has no valid id".into()))
+}
+
+/// Load a complete repository-scoped BW history through the generic Nostr
+/// query bridge. Candidate kinds are enumerated before local `a`-tag
+/// filtering, so a relay that mishandles tag pagination cannot silently make
+/// an incomplete history look authoritative. Exact referenced events are then
+/// closed over recursively, including foreign bindings that Core must reject.
+async fn live_history(client: &BuzzClient, repo: &str) -> Result<(Consumer, Evidence), CliError> {
+    let mut parts = repo.splitn(3, ':');
+    let kind = parts.next();
+    let owner = parts.next();
+    let repo_id = parts.next();
+    let (Some("30617"), Some(owner), Some(repo_id)) = (kind, owner, repo_id) else {
+        return Err(CliError::Usage("invalid BW repository coordinate".into()));
+    };
+    crate::validate::validate_hex64(owner)?;
+    crate::validate::validate_repo_id(repo_id)?;
+
+    let mut events = BTreeMap::<String, Value>::new();
+    for kind in LIVE_KINDS {
+        let candidates = client
+            .query_paginated(json!({"kinds": [kind]}), LIVE_HISTORY_LIMIT)
+            .await?;
+        if candidates.len() >= LIVE_HISTORY_LIMIT as usize {
+            return Err(CliError::Other(
+                "BW history incomplete: candidate scan limit".into(),
+            ));
+        }
+        for event in candidates {
+            let belongs = if kind == 30617 {
+                event["pubkey"]
+                    .as_str()
+                    .is_some_and(|pubkey| pubkey.eq_ignore_ascii_case(owner))
+                    && tag(&event, "d") == Some(repo_id)
+            } else {
+                tag(&event, "a") == Some(repo)
+            };
+            if belongs {
+                events.insert(event_id(&event)?, event);
+            }
+        }
+    }
+
+    let mut requested = BTreeSet::new();
+    loop {
+        let mut references = BTreeSet::new();
+        for event in events.values() {
+            for tag in event["tags"].as_array().into_iter().flatten() {
+                if matches!(
+                    tag[0].as_str(),
+                    Some(
+                        "issue"
+                            | "policy"
+                            | "previous"
+                            | "prior"
+                            | "delegation"
+                            | "set"
+                            | "run"
+                            | "e"
+                    )
+                ) {
+                    if let Some(id) = tag[1].as_str() {
+                        references.insert(id.to_owned());
+                    }
+                }
+            }
+            if event["kind"] == 46100 {
+                if let Some(content) = event["content"].as_str() {
+                    if let Ok(body) = parse_json(content.as_bytes()) {
+                        collect_reference_ids(&body, &mut references);
+                    }
+                }
+            }
+        }
+        let references = references
+            .into_iter()
+            .filter(|id| {
+                id.len() == 64
+                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && requested.insert(id.to_ascii_lowercase())
+            })
+            .collect::<Vec<_>>();
+        if references.is_empty() {
+            break;
+        }
+        for ids in references.chunks(100) {
+            for event in client
+                .query_paginated(json!({"kinds": LIVE_KINDS, "ids": ids}), LIVE_HISTORY_LIMIT)
+                .await?
+            {
+                events.insert(event_id(&event)?, event);
+            }
+        }
+    }
+
+    let evidence = empty_evidence();
+    let mut consumer = Consumer::new(
+        Trust {
+            community: client.relay_url().to_owned(),
+            repo: repo.to_owned(),
+            owner: owner.to_ascii_lowercase(),
+        },
+        evidence.clone(),
+        now()?,
+    );
+    for event in events.into_values() {
+        let bytes = serde_json::to_vec(&event)
+            .map_err(|error| CliError::Other(format!("serialize BW history: {error}")))?;
+        consumer.ingest(&bytes);
+    }
+    Ok((consumer, evidence))
+}
+
+fn prepared_start_development(
+    consumer: &Consumer,
+    repo: &str,
+    issue: &str,
+    signer: &str,
+    created_at: u64,
+    auth_tag: Option<&Tag>,
+) -> Result<(buzz_sdk::bw::Publication, Value), CliError> {
+    let projection = consumer.projection();
+    let previous = projection["issue_state_id"][issue]
+        .as_str()
+        .ok_or_else(|| CliError::Usage("issue has no current BW state".into()))?;
+    let state = &projection["issue_state"][issue];
+    if state["state"] != "ready" {
+        return Err(CliError::Usage("BW issue is not ready".into()));
+    }
+    let stream = state["stream"]
+        .as_str()
+        .ok_or_else(|| CliError::Usage("ready issue has no stream".into()))?;
+    let assignment = state["assignment"]
+        .as_str()
+        .ok_or_else(|| CliError::Usage("ready issue has no selected writer".into()))?;
+    let activation = consumer.activation().map_err(|error| {
+        CliError::Usage(format!(
+            "bw:{}:{}:{}",
+            error.outcome, error.stage, error.code
+        ))
+    })?;
+    let mut tags = vec![
+        vec!["a".to_owned(), repo.to_owned()],
+        vec!["policy".to_owned(), activation.policy],
+        vec!["issue".to_owned(), issue.to_owned()],
+        vec!["previous".to_owned(), previous.to_owned()],
+    ];
+    if let Some(auth_tag) = auth_tag {
+        tags.push(auth_tag.as_slice().to_vec());
+    }
+    let draft = buzz_sdk::bw::record(
+        buzz_sdk::bw::RecordType::IssueState,
+        tags,
+        json!({
+            "state": "in-development",
+            "stream": stream,
+            "assignment": assignment,
+        }),
+    )
+    .map_err(refusal)?;
+    let dry = draft.dry_run().map_err(refusal)?;
+    let candidate = json!({
+        "pubkey": signer,
+        "created_at": created_at,
+        "kind": dry["kind"],
+        "tags": dry["tags"],
+        "content": dry["content"],
+    });
+    let publication = buzz_sdk::bw::Publication::prepare(consumer, candidate).map_err(refusal)?;
+    Ok((publication, dry))
+}
+
+fn parsed_tags(dry: &Value) -> Result<Vec<Tag>, CliError> {
+    dry["tags"]
+        .as_array()
+        .ok_or_else(|| CliError::Other("bw:shape:tags".into()))?
+        .iter()
+        .map(|tag| {
+            let parts = tag
+                .as_array()
+                .ok_or_else(|| CliError::Other("bw:shape:tags".into()))?
+                .iter()
+                .map(|part| {
+                    part.as_str()
+                        .ok_or_else(|| CliError::Other("bw:shape:tags".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Tag::parse(parts).map_err(|error| CliError::Other(format!("invalid BW tag: {error}")))
+        })
+        .collect()
+}
+
+/// Let the selected writer identity perform the live `ready` →
+/// `in-development` transition itself. This is the agent-facing counterpart
+/// to Desktop's asynchronous request button; no owner impersonation or local
+/// managed-agent key lookup is involved.
+pub(crate) async fn start_development(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<(), CliError> {
+    crate::validate::validate_hex64(issue)?;
+    let issue = issue.to_ascii_lowercase();
+    let repo = repo_coordinate(repo_owner, repo_id)?;
+    let (mut consumer, evidence) = live_history(client, &repo).await?;
+    let created_at = now()?;
+    consumer.observe(evidence, created_at);
+    let signer = client.keys().public_key().to_hex();
+    let (publication, dry) = prepared_start_development(
+        &consumer,
+        &repo,
+        &issue,
+        &signer,
+        created_at,
+        client.bw_auth_tag(),
+    )?;
+    let content = dry["content"]
+        .as_str()
+        .ok_or_else(|| CliError::Other("bw:shape:content".into()))?;
+    let event = EventBuilder::new(Kind::Custom(46100), content)
+        .tags(parsed_tags(&dry)?)
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(client.keys())
+        .map_err(|error| CliError::Other(format!("sign BW record: {error}")))?;
+    publication.seal(&event).map_err(refusal)?;
+
+    let submit_error = client.submit_event(event.clone()).await.err();
+    let readback = client
+        .query_paginated(
+            json!({"ids": [publication.event_id()], "kinds": [46100]}),
+            2,
+        )
+        .await?
+        .into_iter()
+        .find(|candidate| candidate["id"].as_str() == Some(publication.event_id()))
+        .map(serde_json::from_value::<nostr::Event>)
+        .transpose()
+        .map_err(|error| CliError::Other(format!("invalid BW readback: {error}")))?;
+    if readback.is_none() {
+        if let Some(error) = submit_error {
+            return Err(error);
+        }
+    }
+    publication
+        .confirm(&mut consumer, &event, readback.as_ref())
+        .map_err(refusal)?;
+    println!(
+        "{}",
+        json!({
+            "event_id": publication.event_id(),
+            "accepted": true,
+            "message": "issue moved to in-development",
+            "state": "in-development",
+        })
+    );
+    Ok(())
 }
 /// The readback-bound publish boundary: prepare, seal, confirm. No I/O, no
 /// signing and no local success latch — the relay readback is the only proof.
@@ -258,6 +597,70 @@ mod tests {
     }
     fn arg(p: &std::path::Path) -> String {
         p.to_str().expect("path").to_owned()
+    }
+
+    fn fixture_consumer_through(f: &Value, last_label: &str) -> Consumer {
+        let case = f["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .find(|case| case["name"] == "issue-state-positive")
+            .expect("issue-state-positive");
+        let mut consumer = Consumer::new(
+            serde_json::from_value(case["trust"].clone()).expect("trust"),
+            serde_json::from_value(case["external"].clone()).expect("evidence"),
+            case["now"].as_u64().expect("now"),
+        );
+        for label in case["input"].as_array().expect("input") {
+            let label = label.as_str().expect("label");
+            consumer
+                .ingest(&serde_json::to_vec(&f["events"][label]["event"]).expect("signed event"));
+            if label == last_label {
+                break;
+            }
+        }
+        consumer
+    }
+
+    #[test]
+    fn live_start_development_prepares_the_normative_writer_event() {
+        let f = fixtures();
+        let consumer = fixture_consumer_through(&f, "ready_a");
+        let expected = &f["events"]["dev_a"]["event"];
+        let (publication, dry) = prepared_start_development(
+            &consumer,
+            expected["tags"][1][1].as_str().expect("repo"),
+            expected["tags"][3][1].as_str().expect("issue"),
+            expected["pubkey"].as_str().expect("writer"),
+            expected["created_at"].as_u64().expect("time"),
+            None,
+        )
+        .expect("selected writer may start development");
+        assert_eq!(publication.activation().policy, expected["tags"][2][1]);
+        assert_eq!(dry["tags"], expected["tags"]);
+        assert_eq!(
+            parse_json(dry["content"].as_str().expect("content").as_bytes()).expect("body"),
+            parse_json(expected["content"].as_str().expect("content").as_bytes()).expect("body"),
+        );
+    }
+
+    #[test]
+    fn live_start_development_refuses_a_non_writer_identity() {
+        let f = fixtures();
+        let consumer = fixture_consumer_through(&f, "ready_a");
+        let expected = &f["events"]["dev_a"]["event"];
+        let error = prepared_start_development(
+            &consumer,
+            expected["tags"][1][1].as_str().expect("repo"),
+            expected["tags"][3][1].as_str().expect("issue"),
+            f["events"]["repo"]["event"]["pubkey"]
+                .as_str()
+                .expect("owner"),
+            expected["created_at"].as_u64().expect("time"),
+            None,
+        )
+        .expect_err("owner cannot impersonate the writer");
+        assert!(error.to_string().contains("bw:reject:role:unauthorized"));
     }
 
     #[tokio::test]

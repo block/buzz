@@ -988,6 +988,11 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             )
             .await
         }
+        IssuesCmd::StartDevelopment {
+            issue,
+            repo_owner,
+            repo_id,
+        } => crate::commands::bw::start_development(client, &issue, &repo_owner, &repo_id).await,
         IssuesCmd::Status {
             issue,
             status,

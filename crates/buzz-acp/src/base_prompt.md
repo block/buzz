@@ -23,7 +23,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz feed` | `get` |
 | `buzz social` | `publish`, `notes` |
 | `buzz repos` | `create`, `get`, `list` |
-| `buzz issues` | `create`, `get`, `list`, `status`, `assign` |
+| `buzz issues` | `create`, `get`, `list`, `status`, `assign`, `start-development` |
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
 | `buzz upload` | `file` |
 
@@ -34,6 +34,8 @@ When opening a pull request in response to channel work, always pass `--channel 
 `buzz pr open`, `buzz issues create`, `buzz repos create`, and `buzz projects create` return a `link` field (a `buzz://` deep link). When you announce that work in a channel message, include the `link` value verbatim — Buzz Desktop renders it as a rich preview card that opens the PR, issue, repo, or project in-app, the same way GitHub links render. Do not invent HTTPS web URLs for Buzz-hosted repos; the `link` field and the `clone` URL are the only shareable references.
 
 To assign an issue to someone, run `buzz issues assign --issue <event-id> --repo-owner <hex> --repo-id <id> --assignee <hex> --label <name>` after creating it. Remove an assignment with the matching `buzz issues unassign` arguments. Writing assignee names in the issue body or adding recipients with `issues create --to` is notification/presentation only — Buzz Desktop's Assignees rail and the "Assigned to me" filter read the signed assignment operations. Only operations signed by the issue author or repo owner are trusted for other people; anyone may assign or unassign themselves.
+
+When Buzz asks you to start a ready BW issue, run the exact `buzz issues start-development --issue <event-id> --repo-owner <hex> --repo-id <id>` command from the request before editing. It reloads the repository's BW history and succeeds only when your own agent identity is still the selected writer; an owner-auth tag never substitutes the owner's role for your event signer.
 
 ## Conversational Agent Creation
 

@@ -1,12 +1,14 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import type {
   ProjectIssue,
   Repository as Project,
 } from "@/features/projects/hooks";
 import { useRepoStateQuery } from "@/features/projects/hooks";
 import {
+  bwBoundWriter,
   bwMatchingTriageDelegation,
   bwRelationTargetCandidates,
   resolveBwRelationTarget,
@@ -15,7 +17,6 @@ import {
   BwConflictError,
   submitBwAcceptToBacklog,
   submitBwImplementedTransition,
-  submitBwInDevelopmentTransition,
   submitBwIssueTextUpdate,
   submitBwReadyTransition,
   submitBwRelation,
@@ -25,7 +26,9 @@ import {
 } from "@/features/projects/bwWrite";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { invokeTauri } from "@/shared/api/tauri";
+import { invokeTauri, sendChannelMessage } from "@/shared/api/tauri";
+import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { BwAssignmentSection } from "./BwAssignmentSection";
 import { BwRelationTargetCombobox } from "./BwRelationTargetCombobox";
 import {
@@ -34,6 +37,7 @@ import {
   errorMessage,
   useInvalidateProjectIssues,
 } from "./bwIssueActionsShared";
+import { bwStartDevelopmentRequest } from "./bwExecutionThread";
 
 const RELATION_TYPES = [
   "blocks",
@@ -594,35 +598,73 @@ function BwReadyAction({
   );
 }
 
-/** `ready` -> `in-development`. Reuses the exact stream/assignment the
- * current `ready` head already carries, so this never needs its own
- * inputs. */
+/** Open an issue execution thread for the selected writer. The
+ * Desktop signs only the channel request; the ACP writer performs and signs
+ * `ready` -> `in-development` itself after reloading the live BW history. */
 function BwInDevelopmentAction({
   issue,
+  profiles,
   project,
 }: {
   issue: ProjectIssue;
+  profiles?: UserProfileLookup;
   project: Project;
 }) {
   const [pending, setPending] = React.useState(false);
-  const invalidate = useInvalidateProjectIssues(project);
+  const relayAgentsQuery = useRelayAgentsQuery();
 
   const handleSubmit = async () => {
     if (pending || !issue.bw) return;
     setPending(true);
     try {
-      await submitBwInDevelopmentTransition({
-        issueId: issue.id,
-        repo: project.repoAddress,
-        snapshot: issue.bw.snapshot,
-      });
-      toast.success("Issue moved to in-development.");
-      await invalidate();
+      const writer = bwBoundWriter(issue.bw.snapshot, issue.id);
+      if (!writer) {
+        throw new Error(
+          "The ready state is not bound to a valid selected writer anymore.",
+        );
+      }
+      const normalizedWriter = normalizePubkey(writer);
+      const channelId = issue.channelId ?? project.channelId;
+      if (!channelId) {
+        throw new Error(
+          "This repository has no channel for the execution thread.",
+        );
+      }
+      const relayAgent = (relayAgentsQuery.data ?? []).find(
+        (agent) => normalizePubkey(agent.pubkey) === normalizedWriter,
+      );
+      const writerProfile = profiles?.[normalizedWriter];
+      const writerName =
+        relayAgent?.name.trim() ||
+        writerProfile?.displayName?.trim() ||
+        writerProfile?.nip05Handle?.trim() ||
+        "Selected writer";
+
+      // Start Development is an Execution Thread, not owner-side
+      // impersonation. The channel message's p-tag wakes the external ACP
+      // harness; the writer then signs the BW transition with its own key.
+      await sendChannelMessage(
+        channelId,
+        bwStartDevelopmentRequest({
+          issue,
+          repositoryName: project.name,
+          stream:
+            issue.bw.snapshot.projection.issue_state[issue.id]?.stream ?? "",
+          writerName,
+        }),
+        undefined,
+        undefined,
+        [writer],
+        KIND_STREAM_MESSAGE,
+      );
+      toast.success(
+        `Execution thread sent to ${writerName}. The writer will sign the status transition when it starts.`,
+      );
     } catch (error) {
       toast.error(
         error instanceof BwConflictError
           ? error.message
-          : errorMessage(error, "In-development transition was refused."),
+          : errorMessage(error, "Failed to open the execution thread."),
       );
     } finally {
       setPending(false);
@@ -637,7 +679,7 @@ function BwInDevelopmentAction({
       onClick={() => void handleSubmit()}
       type="button"
     >
-      {pending ? "Moving…" : "Start development"}
+      {pending ? "Sending…" : "Start development"}
     </button>
   );
 }
@@ -915,7 +957,11 @@ export function BwIssueActions({
         <BwReadyAction issue={issue} project={project} />
       ) : null}
       {issue.bw.state === "ready" ? (
-        <BwInDevelopmentAction issue={issue} project={project} />
+        <BwInDevelopmentAction
+          issue={issue}
+          profiles={profiles}
+          project={project}
+        />
       ) : null}
       {issue.bw.state === "in-development" ? (
         <BwImplementedAction issue={issue} project={project} />

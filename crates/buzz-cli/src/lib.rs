@@ -1710,6 +1710,19 @@ pub enum IssuesCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Start work on a ready BW issue as its currently selected writer
+    #[command(name = "start-development")]
+    StartDevelopment {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+    },
     /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
     Status {
         /// Issue event id
@@ -2377,7 +2390,16 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["assign", "comment", "create", "get", "list", "status", "unassign",]
+            vec![
+                "assign",
+                "comment",
+                "create",
+                "get",
+                "list",
+                "start-development",
+                "status",
+                "unassign",
+            ]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2406,7 +2428,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 7),
+            ("issues", 8),
             ("media", 1),
             ("messages", 9),
             ("pack", 2),

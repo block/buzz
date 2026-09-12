@@ -125,6 +125,20 @@ async function lastBwCall(
   return { ...call, payload: (call.payload as { input?: unknown })?.input };
 }
 
+async function lastCommandCall(
+  page: import("@playwright/test").Page,
+  command: string,
+) {
+  const calls = await page.evaluate(
+    (cmd) =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === cmd,
+      ),
+    command,
+  );
+  return calls.at(-1);
+}
+
 test("a backlog issue assigns a named writer from the dropdown without displaying a public key", async ({
   page,
 }) => {
@@ -354,7 +368,7 @@ test("backlog with a single-branch repo pre-fills the stream as a read-only fiel
   });
 });
 
-test("ready offers starting development, reusing the ready head's own stream and assignment with no extra input", async ({
+test("ready asks an external ACP writer to sign and start development itself", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -376,6 +390,14 @@ test("ready offers starting development, reusing the ready head's own stream and
         issue_state_id: { [ROOT]: "6".repeat(64) },
       },
     },
+    relayAgents: [
+      {
+        pubkey: WRITER,
+        name: WRITER_NAME,
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
   });
   const panel = await openIssuesPanel(page);
   const row = panel.locator(`[data-project-event-id="${ROOT}"]`);
@@ -386,16 +408,25 @@ test("ready offers starting development, reusing the ready head's own stream and
   );
 
   await panel.getByTestId("bw-in-development-submit").click();
-  const call = await lastBwCall(page, "submit_project_bw_record");
-  expect(call?.payload).toMatchObject({
-    record: "issue-state",
-    content: {
-      state: "in-development",
-      stream: "windows-integration",
-      assignment: ASSIGN_A,
-    },
-    signerPubkey: WRITER,
+  await expect(
+    page.getByText(`Execution thread sent to ${WRITER_NAME}.`, {
+      exact: false,
+    }),
+  ).toBeVisible();
+
+  const sendCall = await lastCommandCall(page, "send_channel_message");
+  expect(sendCall?.payload).toMatchObject({
+    channelId: expect.any(String),
+    kind: 9,
+    mentionPubkeys: [WRITER],
+    content: expect.stringMatching(
+      new RegExp(
+        `^\\[EXECUTION-THREAD\\] Starting development[\\s\\S]*buzz issues start-development --issue ${ROOT} --repo-owner ${"a".repeat(64)} --repo-id fixture-bw`,
+      ),
+    ),
   });
+  expect(await lastCommandCall(page, "open_dm")).toBeUndefined();
+  expect(await lastBwCall(page, "submit_project_bw_record")).toBeUndefined();
 });
 
 test("ready allows changing the named writer and rebinds ready to the new assignment", async ({
