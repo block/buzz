@@ -168,13 +168,12 @@ pub fn apply_env_vars_then_effort_transition(
 /// Decide the `agent_command_override` to persist at AGENT CREATE time.
 ///
 /// A persona-backed create receives its harness command from
-/// `resolvePersonaRuntime` (frontend), which produces a divergent command in two
-/// distinct cases that the backend MUST tell apart:
+/// `resolvePersonaRuntime` (frontend), and the backend must distinguish two
+/// kinds of caller intent:
 ///
-/// - DELIBERATE OVERRIDE (`harness_override` true): the user explicitly picked a
-///   runtime command in UI that exposes a runtime selector. This is a real pin
-///   and is preserved when it differs from the command inheritance would spawn,
-///   including installed aliases such as `claude-code-acp`.
+/// - DELIBERATE OVERRIDE (`harness_override` true): the caller explicitly chose
+///   a runtime command. This is a real pin and is preserved verbatim, including
+///   an exact path or alias that currently maps to the persona's runtime.
 /// - MISSING-RUNTIME FALLBACK (`harness_override` false): the persona's runtime
 ///   isn't installed locally, so `resolvePersonaRuntime` substitutes a fallback
 ///   default. This is NOT a pin — baking it would freeze the agent on the fallback
@@ -203,8 +202,7 @@ pub fn create_time_agent_command_override(
         let picked = picked_command
             .map(str::trim)
             .filter(|value| !value.is_empty())?;
-        let inherited_command = effective_agent_command(persona_id, personas, None);
-        return (picked != inherited_command).then(|| picked.to_string());
+        return Some(picked.to_string());
     }
 
     divergent_agent_command_override(persona_id, personas, picked_command)
