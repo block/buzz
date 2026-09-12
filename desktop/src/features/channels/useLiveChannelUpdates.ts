@@ -7,8 +7,16 @@ import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
+  isBroadcastReply,
   isThreadReply,
 } from "@/features/messages/lib/threading";
+import { projectChannelWindowMessages } from "@/features/messages/lib/projectChannelWindow";
+import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  emptyChannelWindowStore,
+  mergeLiveChannelWindowEvent,
+  type ChannelWindowStore,
+} from "@/features/messages/lib/channelWindowStore";
 import {
   hasMentionForEvent,
   shouldNotifyForEvent,
@@ -349,6 +357,21 @@ export function useLiveChannelUpdates(
         return mergeTimelineCacheMessages(current, event);
       },
     );
+
+    if (
+      isUnreadTriggerKind &&
+      (!isThreadedReply || isBroadcastReply(event.tags))
+    ) {
+      const windowKey = channelWindowKey(channelId);
+      const currentWindow =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+        emptyChannelWindowStore();
+      const nextWindow = mergeLiveChannelWindowEvent(currentWindow, event);
+      if (nextWindow !== currentWindow) {
+        queryClient.setQueryData(windowKey, nextWindow);
+        projectChannelWindowMessages(queryClient, channelId);
+      }
+    }
   });
 
   React.useEffect(() => {

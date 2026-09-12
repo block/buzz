@@ -9,6 +9,7 @@ import { useCommunityJoinAlerts } from "@/features/community-members/useCommunit
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
+  ensureDesktopNotificationPermissionGranted,
   listenForDesktopNotificationActions,
   requestDockBounce,
   revealDesktopAppWindow,
@@ -38,7 +39,11 @@ export function useAppShellDesktopNotifications({
   enabled: boolean;
   goChannel: (
     channelId: string,
-    options?: { force?: boolean },
+    options?: {
+      force?: boolean;
+      messageId?: string;
+      messageView?: "timeline";
+    },
   ) => Promise<unknown>;
   goHome: () => Promise<unknown>;
   notificationSettings: NotificationSettings;
@@ -85,20 +90,24 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
-      void sendDesktopNotification({
-        title,
-        body,
-        target: buildEventNotificationTarget(event, {
-          id: channel.id,
-          name: channelName,
-        }),
-      }).then((didSend) => {
-        if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
-          playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
-        }
-        void requestDockBounce();
-      });
+      void ensureDesktopNotificationPermissionGranted().then(
+        async (permissionGranted) => {
+          if (!permissionGranted) return;
+          const didSend = await sendDesktopNotification({
+            title,
+            body,
+            target: buildEventNotificationTarget(event, {
+              id: channel.id,
+              name: channelName,
+            }),
+          });
+          if (!didSend) return;
+          if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+            playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+          }
+          void requestDockBounce();
+        },
+      );
     },
   );
 
@@ -128,22 +137,30 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
-      void sendDesktopNotification({
-        title,
-        body,
-        target: buildEventNotificationTarget(event, {
-          id: channelId,
-          name: channelName,
-        }),
-      }).then((didSend) => {
-        if (!didSend) return;
-        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
-          playNotificationSound(
-            resolveSlotSound(notificationSettings, "thread_reply"),
-          );
-        }
-        void requestDockBounce();
-      });
+      void ensureDesktopNotificationPermissionGranted().then(
+        async (permissionGranted) => {
+          if (!permissionGranted) return;
+          const didSend = await sendDesktopNotification({
+            title,
+            body,
+            target: buildEventNotificationTarget(
+              event,
+              {
+                id: channelId,
+                name: channelName,
+              },
+              { openInThread: true },
+            ),
+          });
+          if (!didSend) return;
+          if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+            playNotificationSound(
+              resolveSlotSound(notificationSettings, "thread_reply"),
+            );
+          }
+          void requestDockBounce();
+        },
+      );
     },
   );
 

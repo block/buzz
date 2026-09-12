@@ -64,6 +64,7 @@ export function useChannelRouteTarget({
   setThreadReplyTargetId,
   setThreadScrollTargetId,
   targetMessageId,
+  targetMessageView,
   timelineMessages,
 }: {
   activeChannel: Channel | null;
@@ -77,6 +78,7 @@ export function useChannelRouteTarget({
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   targetMessageId: string | null;
+  targetMessageView?: "timeline" | null;
   timelineMessages: TimelineMessage[];
 }) {
   const timelineMessageById = React.useMemo(
@@ -117,6 +119,10 @@ export function useChannelRouteTarget({
     }
 
     if (!targetMessage.parentId) {
+      if (targetMessageView === "timeline") {
+        handledThreadRouteTargetRef.current = targetKey;
+        return;
+      }
       if (!requireThreadEditResolution()) {
         return;
       }
@@ -170,6 +176,7 @@ export function useChannelRouteTarget({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     targetMessageId,
+    targetMessageView,
     timelineMessageById,
   ]);
 

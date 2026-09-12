@@ -6,7 +6,7 @@ import {
   buildFeedItemNotificationTarget,
 } from "./target.ts";
 
-test("builds a complete click-through target from a live relay event", () => {
+test("DM notification targets open replies in the channel timeline", () => {
   const target = buildEventNotificationTarget(
     {
       content: "hello",
@@ -31,8 +31,31 @@ test("builds a complete click-through target from a live relay event", () => {
     eventId: "event-id",
     kind: 9,
     pubkey: "sender",
-    threadRootId: "root-id",
+    openInThread: false,
+    threadRootId: null,
   });
+});
+
+test("thread-reply notification targets open the containing branch", () => {
+  const target = buildEventNotificationTarget(
+    {
+      content: "hello",
+      created_at: 123,
+      id: "event-id",
+      kind: 9,
+      pubkey: "sender",
+      tags: [
+        ["h", "channel-id"],
+        ["e", "root-id", "", "root"],
+        ["e", "parent-id", "", "reply"],
+      ],
+    },
+    { id: "channel-id", name: "ship-room" },
+    { openInThread: true },
+  );
+
+  assert.equal(target.openInThread, true);
+  assert.equal(target.threadRootId, "root-id");
 });
 
 test("null channel name and top-level events produce null fields", () => {
@@ -76,6 +99,7 @@ test("builds a complete click-through target from a feed item", () => {
     eventId: "feed-event",
     kind: 9,
     pubkey: "sender",
+    openInThread: true,
     threadRootId: "root-id",
   });
 });

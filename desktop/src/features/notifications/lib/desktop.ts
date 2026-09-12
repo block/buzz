@@ -6,7 +6,11 @@ import {
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
+import {
+  isLinuxPlatform,
+  isMacPlatform,
+  isWindowsPlatform,
+} from "@/shared/lib/platform";
 
 // Backend event emitted when a native Linux notification is clicked or a
 // queued macOS activation becomes available. See src-tauri notification code.
@@ -32,6 +36,7 @@ export type DesktopNotificationTarget = {
   eventId: string | null;
   kind: number | null;
   pubkey?: string;
+  openInThread?: boolean;
   threadRootId?: string | null;
 };
 
@@ -89,6 +94,7 @@ function parseNotificationTarget(
   const kind = typeof candidate.kind === "number" ? candidate.kind : null;
   const pubkey =
     typeof candidate.pubkey === "string" ? candidate.pubkey : undefined;
+  const openInThread = candidate.openInThread === true;
   const threadRootId =
     typeof candidate.threadRootId === "string" ? candidate.threadRootId : null;
 
@@ -104,6 +110,7 @@ function parseNotificationTarget(
     eventId,
     kind,
     pubkey,
+    openInThread,
     threadRootId,
   };
 }
@@ -203,6 +210,20 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
   });
 
   return pendingPermissionRequest;
+}
+
+export async function ensureDesktopNotificationPermissionGranted(
+  getPermissionState = getDesktopNotificationPermissionState,
+  requestAccess = requestDesktopNotificationAccess,
+): Promise<boolean> {
+  const currentPermission = await getPermissionState();
+  if (currentPermission === "granted") {
+    return true;
+  }
+  if (currentPermission !== "default") {
+    return false;
+  }
+  return (await requestAccess()) === "granted";
 }
 
 export async function listenForDesktopNotificationActions(
@@ -443,7 +464,10 @@ export async function sendDesktopNotification(
   // Do NOT use the Tauri notification plugin's sendNotification() on Windows —
   // the native WinRT path handles delivery and click actions exclusively.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())) {
+  if (
+    isTauri() &&
+    (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())
+  ) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,

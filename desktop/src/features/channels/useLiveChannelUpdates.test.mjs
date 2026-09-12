@@ -42,7 +42,12 @@ function message(id, overrides = {}) {
   };
 }
 
-async function mount(initialChannels, options = {}, subscribeImpl) {
+async function mount(
+  initialChannels,
+  options = {},
+  subscribeImpl,
+  activeChannelId = null,
+) {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const React = await import("react");
   const { QueryClient, QueryClientProvider } = await import(
@@ -50,7 +55,7 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
   );
   const { relayClient } = await import("@/shared/api/relayClient");
   const { useLiveChannelUpdates } = await import("./useLiveChannelUpdates.ts");
-  const { channelMessagesKey } = await import(
+  const { channelMessagesKey, channelWindowKey } = await import(
     "@/features/messages/lib/messageQueryKeys"
   );
   const originalLive = relayClient.subscribeLive;
@@ -79,7 +84,8 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
   const wrapper = ({ children }) =>
     React.createElement(QueryClientProvider, { client: queryClient }, children);
   const hook = renderHook(
-    ({ members, opts }) => useLiveChannelUpdates(members, null, opts),
+    ({ members, opts }) =>
+      useLiveChannelUpdates(members, activeChannelId, opts),
     {
       wrapper,
       initialProps: {
@@ -101,6 +107,7 @@ async function mount(initialChannels, options = {}, subscribeImpl) {
     mentionSubscriptions,
     queryClient,
     channelMessagesKey,
+    channelWindowKey,
     rerender(members, opts = options) {
       hook.rerender({ members, opts: { currentPubkey: VIEWER, ...opts } });
     },
@@ -175,6 +182,31 @@ test("live channel stream drives mention, unread and DM callbacks once across re
     assert.deepEqual(mentions, ["mention"]);
     assert.deepEqual(unreads, [["channel-0", "mention"]]);
     assert.deepEqual(dms, [["channel-0", "mention"]]);
+    assert.deepEqual(
+      h.queryClient
+        .getQueryData(h.channelWindowKey("channel-0"))
+        .liveOverlay.map((item) => item.id),
+      ["mention"],
+    );
+  } finally {
+    h.restore();
+  }
+});
+
+test("notify while viewing permits DM notifications for the active channel", async () => {
+  const dms = [];
+  const h = await mount(
+    channels(1),
+    {
+      notifyForActiveChannel: true,
+      onDmMessage: (event, channel) => dms.push([channel.id, event.id]),
+    },
+    undefined,
+    "channel-0",
+  );
+  try {
+    await h.deliver(h.subscriptions[0], message("active-dm"));
+    assert.deepEqual(dms, [["channel-0", "active-dm"]]);
   } finally {
     h.restore();
   }
