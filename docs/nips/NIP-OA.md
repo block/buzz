@@ -71,6 +71,14 @@ Clause order is part of the signed preimage and verifiers MUST use the exact `<c
 Implementers MUST NOT reorder, deduplicate, normalize, or canonicalize the `<conditions>` string before computing the preimage.
 Verifiers MUST NOT reinterpret a valid `auth` tag as an identity override.
 
+## Ownership Chains
+
+An owner MAY itself be an agent and MAY authorize child agents by signing their `auth` tags with its own key, using the unchanged tag format and signing preimage above. An agent MAY publish its owner-signed `auth` tag on its signed `kind:0` metadata event to make its own ownership discoverable.
+
+A verifier MAY resolve ancestry by following each owner's `kind:0` event and its `auth` tag. Each event's `id` and `sig` MUST be valid for that owner's pubkey, and each tag MUST satisfy the NIP-OA rules against the event carrying it. Verifiers MUST reject cycles and MUST bound resolution depth and work. Missing or invalid evidence MUST NOT be interpreted as proof that a key is a root.
+
+An ownership chain does not transfer authorship or resource privileges. Relay admission through such a chain is defined separately by [NIP-AA](NIP-AA.md#relay-verification-algorithm).
+
 ## Relay Behavior
 
 Relays require no changes to support this NIP.
