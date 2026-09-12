@@ -783,6 +783,29 @@ fn validate_project_slug(slug: &str) -> Result<(), CliError> {
             slug.len()
         )));
     }
+    // The slug is the `d` tag: it identifies the project, it is the value every
+    // later command filters `#d` on, and it is what a listing prints. Only
+    // length and emptiness were checked, so a slug could carry a newline, a NUL
+    // or a stray leading space — none of which survive a round trip through a
+    // human. A slug that differs from another only by an untypeable character
+    // creates a second project that is indistinguishable from the first in
+    // `projects list`, and every later `--slug` on the visible spelling reports
+    // "not found" for a project the caller can see.
+    //
+    // Deliberately narrower than `validate_repo_id`'s allowlist: project slugs
+    // are meant to be more permissive (`platform:v2` is a valid one), so this
+    // rejects only what cannot be typed back, not everything unusual.
+    if let Some(bad) = slug.chars().find(|c| c.is_control()) {
+        return Err(CliError::Usage(format!(
+            "project slug must not contain control characters (found {:?})",
+            bad
+        )));
+    }
+    if slug.trim() != slug {
+        return Err(CliError::Usage(
+            "project slug must not begin or end with whitespace".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1142,6 +1165,42 @@ mod tests {
     fn validate_project_slug_accepts_normal() {
         assert!(validate_project_slug("my-project").is_ok());
         assert!(validate_project_slug("platform:v2").is_ok()); // colons allowed — more permissive than repo-id
+    }
+
+    #[test]
+    fn validate_project_slug_rejects_control_characters() {
+        // Each of these is accepted on main and becomes a `d` tag nobody can
+        // type back, so `--slug` on the visible spelling reports "not found"
+        // for a project that is right there in the listing.
+        for slug in ["team\nx", "team\tx", "team\0x", "team\rx"] {
+            assert!(
+                validate_project_slug(slug).is_err(),
+                "{slug:?} was accepted as a project slug"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_project_slug_rejects_surrounding_whitespace() {
+        for slug in [" team-x", "team-x ", " team-x ", "\tteam-x"] {
+            assert!(
+                validate_project_slug(slug).is_err(),
+                "{slug:?} was accepted as a project slug"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_project_slug_keeps_permissive_interior_characters() {
+        // The point is untypeable characters, not unusual ones. Interior
+        // spaces, colons and unicode stay legal — projects are deliberately
+        // more permissive than repo ids.
+        for slug in ["platform:v2", "my project", "équipe", "team_x.2"] {
+            assert!(
+                validate_project_slug(slug).is_ok(),
+                "{slug:?} should still be a legal project slug"
+            );
+        }
     }
 
     #[test]
