@@ -880,10 +880,28 @@ pub enum HuddleControlMsg {
         /// `owner_mismatch`, `future_generation`).
         reason: RegisterRejection,
     },
-    /// Non-owner → owner: the local client left; drop its remote peer.
+    /// Non-owner → owner: the local client left; drop its remote peer. Each
+    /// client owns a distinct control stream, so this can only address that
+    /// stream's registered admission.
     UnregisterPeer {
         /// Pubkey of the departing client.
         pubkey: String,
+    },
+    /// Owner → non-owner: confirms the authoritative roster revision assigned
+    /// when the requested admission was removed.
+    ///
+    /// Keep this variant append-only: `HuddleControlMsg` is postcard encoded,
+    /// so preserving every older discriminant lets a newer owner acknowledge an
+    /// unregister from an older ingress. The older ingress ignores the unknown
+    /// reply as non-terminal traffic. A newer ingress paired with an older owner
+    /// completes when that owner sends its existing `Goodbye` or closes the
+    /// stream. Either direction degrades to a revisionless LEFT without
+    /// breaking the control stream.
+    PeerUnregistered {
+        /// Pubkey the unregister request named.
+        pubkey: String,
+        /// Owner-monotonic revision for the removal.
+        roster_revision: u64,
     },
 }
 
@@ -1120,17 +1138,15 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         session_id: Uuid,
         generation: u64,
         peer_id: Uuid,
-    ) {
-        let Some(room) = self.rooms.get(community, session_id) else {
-            return;
-        };
-        let Some((delta, should_end)) = room.remove_peer_and_check_ended(peer_id) else {
-            return;
-        };
+    ) -> Option<u64> {
+        let room = self.rooms.get(community, session_id)?;
+        let (delta, should_end) = room.remove_peer_and_check_ended(peer_id)?;
+        let revision = delta.revision;
         broadcast_peer_left(&room, delta, session_id);
         if should_end && self.rooms.cleanup_if_empty(community, session_id) {
             self.owners.release(session_id, generation);
         }
+        Some(revision)
     }
 
     /// Serve register/unregister frames for one non-owner pod's stream.
@@ -1330,12 +1346,24 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 HuddleControlMsg::UnregisterPeer { pubkey } => {
                     if let Some(peer_id) = registered.remove(&pubkey) {
                         if let Some(community_id) = stream_community {
-                            self.remove_remote_peer(
+                            if let Some(roster_revision) = self.remove_remote_peer(
                                 CommunityId::from_uuid(community_id),
                                 session_id,
                                 fenced.generation,
                                 peer_id,
-                            );
+                            ) {
+                                stream
+                                    .send_frame(MeshStreamFrame::Data {
+                                        fenced,
+                                        payload: encode_control(
+                                            &HuddleControlMsg::PeerUnregistered {
+                                                pubkey,
+                                                roster_revision,
+                                            },
+                                        )?,
+                                    })
+                                    .await?;
+                            }
                         }
                     }
                 }
@@ -1356,6 +1384,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 // Owner→non-owner replies never arrive on the owner's accept
                 // side; a peer sending one is a protocol violation.
                 HuddleControlMsg::PeerRegistered { .. }
+                | HuddleControlMsg::PeerUnregistered { .. }
                 | HuddleControlMsg::RosterSnapshot { .. }
                 | HuddleControlMsg::RosterDelta { .. }
                 | HuddleControlMsg::RegisterRejected { .. } => {
@@ -1655,7 +1684,12 @@ pub async fn read_owner_control(
                         return HuddleTeardownCause::StreamClosed;
                     }
                 }
-                Ok(_) => {}
+                Ok(HuddleControlMsg::PeerRegistered { .. })
+                | Ok(HuddleControlMsg::PeerUnregistered { .. })
+                | Ok(HuddleControlMsg::RegisterRejected { .. })
+                | Ok(HuddleControlMsg::RegisterPeer { .. })
+                | Ok(HuddleControlMsg::UnregisterPeer { .. })
+                | Ok(HuddleControlMsg::RosterResync) => {}
                 Err(e) => debug!(owner_stream_error = %e, "invalid huddle owner control"),
             },
             Ok(Some(_)) => continue,
@@ -1839,12 +1873,18 @@ impl RemoteHuddleSession {
 }
 
 /// Unregister the client from the owner and close the control stream cleanly.
+/// Returns the owner's authoritative removal revision when the acknowledgement
+/// arrives before the bounded teardown deadline.
 ///
 /// Called on a *local-client-initiated* disconnect (the reader task's cancel
 /// branch), so the owner drops the remote peer and stops fanning media back.
-/// Best-effort: teardown never blocks connection cleanup, and a `Goodbye`
-/// already received from the owner makes this a no-op the owner ignores.
-pub async fn send_clean_close(stream: &mut MeshStream, fenced: FencedHeader, pubkey: &str) {
+/// Best-effort: teardown never blocks indefinitely, and a `Goodbye` already
+/// received from the owner makes this a no-op the owner ignores.
+pub async fn send_clean_close(
+    stream: &mut MeshStream,
+    fenced: FencedHeader,
+    pubkey: &str,
+) -> Option<u64> {
     if let Ok(payload) = encode_control(&HuddleControlMsg::UnregisterPeer {
         pubkey: pubkey.to_string(),
     }) {
@@ -1852,6 +1892,28 @@ pub async fn send_clean_close(stream: &mut MeshStream, fenced: FencedHeader, pub
             .send_frame(MeshStreamFrame::Data { fenced, payload })
             .await;
     }
+    let roster_revision = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match stream.recv_frame().await {
+                Ok(Some(MeshStreamFrame::Data { payload, .. })) => {
+                    if let Ok(HuddleControlMsg::PeerUnregistered {
+                        pubkey: removed,
+                        roster_revision,
+                    }) = decode_control(&payload)
+                    {
+                        if removed == pubkey {
+                            return Some(roster_revision);
+                        }
+                    }
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
     let _ = stream
         .send_frame(MeshStreamFrame::Goodbye {
             fenced,
@@ -1859,6 +1921,7 @@ pub async fn send_clean_close(stream: &mut MeshStream, fenced: FencedHeader, pub
         })
         .await;
     let _ = stream.finish();
+    roster_revision
 }
 
 /// Build the media datagram a non-owner ships to the owner for one client
@@ -2158,6 +2221,10 @@ mod tests {
                     epoch: 0,
                 }),
             },
+            HuddleControlMsg::PeerUnregistered {
+                pubkey: "abc123".into(),
+                roster_revision: 2,
+            },
             HuddleControlMsg::RosterResync,
             HuddleControlMsg::RegisterRejected {
                 pubkey: "abc123".into(),
@@ -2374,6 +2441,81 @@ mod tests {
         client.finish().unwrap();
         drop(client);
         served.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unregister_peer_acknowledges_owner_removal_revision() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::new(HuddleOwnerRegistry::new()),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RegisterPeer {
+                    community_id: *community().as_uuid(),
+                    pubkey: "client-a".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let registered = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected PeerRegistered Data, got {other:?}"),
+        };
+        assert!(matches!(
+            registered,
+            HuddleControlMsg::PeerRegistered { ref pubkey, .. } if pubkey == "client-a"
+        ));
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::UnregisterPeer {
+                    pubkey: "client-a".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let acknowledged = loop {
+            match client.recv_frame().await.unwrap().unwrap() {
+                MeshStreamFrame::Data { payload, .. } => {
+                    let message = decode_control(&payload).unwrap();
+                    if matches!(message, HuddleControlMsg::PeerUnregistered { .. }) {
+                        break message;
+                    }
+                }
+                other => panic!("expected unregister acknowledgement Data, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            acknowledged,
+            HuddleControlMsg::PeerUnregistered {
+                pubkey: "client-a".into(),
+                roster_revision: 2,
+            }
+        );
+
+        client.finish().unwrap();
+        drop(client);
+        served.await.unwrap().unwrap();
+        assert!(rooms.get(community(), session_id).is_none());
     }
 
     #[tokio::test]
@@ -3172,28 +3314,41 @@ mod tests {
         );
     }
 
-    /// The client-initiated clean close emits `UnregisterPeer` then
-    /// `Goodbye(SessionEnded)` on the owner's control stream, in that order.
+    /// The client-initiated clean close emits `UnregisterPeer`, waits for the
+    /// owner's revision acknowledgement, then sends `Goodbye(SessionEnded)`.
     #[tokio::test]
-    async fn clean_close_sends_unregister_then_goodbye() {
+    async fn clean_close_returns_owner_removal_revision() {
         let fenced = fenced_owned_by(rt(2), Uuid::new_v4());
         let (mut owner, mut client) = stream_pair();
-        send_clean_close(&mut client, fenced, "client-a").await;
+        let close =
+            tokio::spawn(async move { send_clean_close(&mut client, fenced, "client-a").await });
 
         match owner.recv_frame().await.unwrap().unwrap() {
             MeshStreamFrame::Data { payload, .. } => assert_eq!(
                 decode_control(&payload).unwrap(),
                 HuddleControlMsg::UnregisterPeer {
-                    pubkey: "client-a".into()
+                    pubkey: "client-a".into(),
                 }
             ),
             other => panic!("expected UnregisterPeer Data, got {other:?}"),
         }
+        owner
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::PeerUnregistered {
+                    pubkey: "client-a".into(),
+                    roster_revision: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
         match owner.recv_frame().await.unwrap().unwrap() {
             MeshStreamFrame::Goodbye { reason, .. } => {
                 assert_eq!(reason, GoodbyeReason::SessionEnded)
             }
             other => panic!("expected Goodbye(SessionEnded), got {other:?}"),
         }
+        assert_eq!(close.await.unwrap(), Some(2));
     }
 }
