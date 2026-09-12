@@ -596,10 +596,10 @@ pub fn build_add_member(
     target_pubkey: &str,
     role: Option<MemberRole>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
     let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
+        tag(&["p", &target_pubkey])?,
     ];
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
@@ -612,10 +612,10 @@ pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
     let tags = vec![
         tag(&["h", &channel_id.to_string()])?,
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
+        tag(&["p", &target_pubkey])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
 }
@@ -3061,6 +3061,59 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn add_member_rejects_overlong_pubkey() {
+        // Relay `extract_p_tag_bytes` requires exactly 64 hex; the SDK must
+        // reject 65+ hex here rather than sign a `p` tag the relay drops.
+        let cid = uuid();
+        let err = build_add_member(cid, &"a".repeat(65), None::<MemberRole>).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "expected InvalidInput for overlong pubkey, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_member_rejects_overlong_pubkey() {
+        let cid = uuid();
+        let err = build_remove_member(cid, &"a".repeat(100)).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "expected InvalidInput for overlong pubkey, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_member_rejects_short_pubkey() {
+        let cid = uuid();
+        let err = build_add_member(cid, &"a".repeat(63), None::<MemberRole>).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "expected InvalidInput for short pubkey, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_member_rejects_nonhex_pubkey() {
+        let cid = uuid();
+        let err = build_remove_member(cid, &"z".repeat(64)).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "expected InvalidInput for non-hex pubkey, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_member_lowercases_mixed_case_pubkey() {
+        // `check_pubkey_hex` returns the lowercased value; the resulting
+        // event should carry the lowercased pubkey in its `p` tag.
+        let cid = uuid();
+        let upper = "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234";
+        let lower = upper.to_ascii_lowercase();
+        let ev = sign(build_add_member(cid, upper, None::<MemberRole>).unwrap());
+        assert!(has_tag(&ev, "p", &lower));
     }
 
     #[test]
