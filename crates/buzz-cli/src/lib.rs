@@ -417,8 +417,15 @@ pub enum MessagesCmd {
         #[arg(long)]
         channel: String,
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
-        #[arg(long)]
-        content: String,
+        #[arg(
+            long,
+            conflicts_with = "content_file",
+            required_unless_present = "content_file"
+        )]
+        content: Option<String>,
+        /// Read message content from a UTF-8 file, avoiding shell pipe encoding.
+        #[arg(long, conflicts_with = "content", required_unless_present = "content")]
+        content_file: Option<String>,
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
