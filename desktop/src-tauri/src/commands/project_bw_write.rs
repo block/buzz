@@ -212,11 +212,20 @@ pub async fn submit_project_bw_record(
     let kind = record_type(&input.record)?;
     let bw_input = load_bw_input(&state, &input.repo).await?;
     let (mut consumer, _) = bw_projection::replay(&bw_input);
+    // `bw_input.now` is captured before `load_bw_input`'s own network round
+    // trips (`project_bw.rs::load` pages every BW-relevant kind, then
+    // resolves referenced ids in further round trips). Against a real relay
+    // that can take longer than the zero-tolerance window Core's
+    // `references:future` check allows, so a candidate signed after this
+    // point could otherwise look like it arrived from the future purely
+    // because of how long the load took. Refresh to the instant we are
+    // about to sign at before evaluating anything against it.
+    let created_at = Timestamp::now();
+    consumer.observe(bw_input.external.clone(), created_at.as_secs());
     let activation = consumer
         .activation()
         .map_err(|refusal| refusal.to_string())?;
     let keys = state.signing_keys()?;
-    let created_at = Timestamp::now();
 
     let mut content = input.content;
     if matches!(kind, RecordType::IssueState)

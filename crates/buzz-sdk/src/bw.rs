@@ -329,6 +329,54 @@ mod tests {
         }
     }
 
+    /// Regression for the desktop write commands (`project_bw_write.rs`,
+    /// `project_bw_assignment.rs`): loading a repository's history over a
+    /// real relay takes real network time, so a `Consumer`'s `now` captured
+    /// before that load can trail the `created_at` of a candidate signed
+    /// after it — which reads as "from the future" to Core's zero-tolerance
+    /// `references:future` check. `Consumer::observe` refreshing `now` right
+    /// before `Publication::prepare` (not at load time) is what fixes that;
+    /// this proves the same consumer flips from refused to accepted purely
+    /// by that refresh, with no change to the candidate or the history.
+    #[test]
+    fn a_candidate_newer_than_a_stale_consumer_clock_is_pending_until_now_is_refreshed() {
+        let f = fixtures();
+        let mut consumer = case(
+            &f,
+            "issue-update-positive",
+            &["repo", "policy", "root_a", "enroll_a"],
+        );
+        let candidate = unsigned(&f, "update_a");
+        let created_at = candidate["created_at"].as_u64().expect("created_at");
+        let evidence: buzz_core::bw::Evidence = serde_json::from_value(
+            f["cases"]
+                .as_array()
+                .expect("cases")
+                .iter()
+                .find(|c| c["name"] == "issue-update-positive")
+                .expect("case")["external"]
+                .clone(),
+        )
+        .expect("evidence");
+
+        // Simulate `now` captured before a slow history load: three seconds
+        // behind the candidate's own `created_at`. Same evidence either way —
+        // only `now` moves, exactly as the fix's `consumer.observe` call does.
+        consumer.observe(evidence.clone(), created_at - 3);
+        let refusal = Publication::prepare(&consumer, candidate.clone())
+            .expect_err("a stale consumer clock refuses a newer candidate");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid input: bw:pending:references:future"
+        );
+
+        // Refresh `now` to the signing instant, exactly as the fix does right
+        // after `bw_projection::replay` and before `Publication::prepare`.
+        consumer.observe(evidence, created_at);
+        Publication::prepare(&consumer, candidate)
+            .expect("refreshing now accepts the exact same candidate");
+    }
+
     #[test]
     fn mock_publish_succeeds_only_through_an_exact_readback() {
         let f = fixtures();

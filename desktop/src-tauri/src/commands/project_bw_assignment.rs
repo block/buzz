@@ -108,6 +108,12 @@ pub async fn submit_project_bw_assignment(
 
     let bw_input = load_bw_input(&state, &input.repo).await?;
     let (mut consumer, _) = bw_projection::replay(&bw_input);
+    // See the matching comment in `project_bw_write.rs`: `bw_input.now` predates
+    // `load_bw_input`'s own network round trips, so it can trail real time by
+    // more than Core's zero-tolerance `references:future` window by the time a
+    // candidate is actually signed below. Refresh before evaluating anything.
+    let created_at = Timestamp::now();
+    consumer.observe(bw_input.external.clone(), created_at.as_secs());
     let keys = state.signing_keys()?;
 
     let tags = assemble_assignment_tags(
@@ -125,7 +131,6 @@ pub async fn submit_project_bw_assignment(
     let draft = Draft::new(1, json!(tags), content.clone()).map_err(|error| error.to_string())?;
     let dry = draft.dry_run().map_err(|error| error.to_string())?;
 
-    let created_at = Timestamp::now();
     let candidate = json!({
         "pubkey": keys.public_key().to_hex(),
         "created_at": created_at.as_secs(),
