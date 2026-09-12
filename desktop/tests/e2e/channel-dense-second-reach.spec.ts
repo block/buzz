@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { pageOlderHistory } from "../helpers/timelineHistory";
 
 // Lane 1c regression — the dense-second reachability wall.
 //
@@ -45,7 +46,7 @@ test("dense single second beyond one window page is fully reachable via composit
           createdAt: denseSecond,
         });
       }
-      // Newer window so the cold load (newest CHANNEL_HISTORY_LIMIT) does NOT
+      // Newer window so the cold load (newest 50 rows) does NOT
       // include the dense block — it must be paged into from scroll-up.
       for (let index = 0; index < newerCount; index += 1) {
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -88,21 +89,6 @@ test("dense single second beyond one window page is fully reachable via composit
       return found;
     });
 
-  // Drive a real wheel-up gesture each pass: the older-history sentinel arms on
-  // a genuine leave→enter transition (IntersectionObserver), so a raw
-  // `scrollTop = 0` write on the virtualized container can fail to re-fire.
-  // A wheel event is what a real user issues and what the observer honors.
-  const wheelToTop = async () => {
-    for (let step = 0; step < 12; step += 1) {
-      const atTop = await timeline.evaluate(
-        (element) => (element as HTMLDivElement).scrollTop <= 1,
-      );
-      if (atTop) break;
-      await page.mouse.wheel(0, -6000);
-      await page.waitForTimeout(40);
-    }
-  };
-
   const seen = new Set<number>();
   const collectRendered = async () => {
     for (const index of await renderedDenseIndices()) {
@@ -110,39 +96,25 @@ test("dense single second beyond one window page is fully reachable via composit
     }
   };
 
-  await timeline.hover();
-  let stallStreak = 0;
-  for (
-    let attempt = 0;
-    attempt < 120 && seen.size < DENSE_COUNT;
-    attempt += 1
-  ) {
-    const before = seen.size;
-    await wheelToTop();
-    // Each gesture pages a bounded step (one pass of the row-floor pager, which
-    // may itself engage the keyset drain). The sentinel disconnects while the
-    // prepend's index-restore owns scroll and only re-arms once settled, so
-    // poll for real growth rather than a fixed sleep.
-    try {
-      await expect
-        .poll(
-          async () => {
-            await collectRendered();
-            return seen.size;
-          },
-          { timeout: 4_000 },
-        )
-        .toBeGreaterThan(before);
-    } catch {
-      // No growth this pass — count it toward a genuine stall.
-    }
+  // Load through the tied second using separate, settled gestures. Always
+  // send input at the boundary: scrollTop=0 alone must not request history.
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    await pageOlderHistory(page);
+    await timeline.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page.waitForTimeout(50);
+    if (await page.getByTestId("message-channel-intro").count()) break;
+  }
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+
+  // Walk the retained window in overlapping viewport-sized steps. Giant wheel
+  // jumps skip unmounted spans and cannot establish row reachability.
+  await collectRendered();
+  for (let step = 0; step < 250 && seen.size < DENSE_COUNT; step += 1) {
+    await page.mouse.wheel(0, 300);
+    await page.waitForTimeout(40);
     await collectRendered();
-    if (seen.size > before) {
-      stallStreak = 0;
-    } else {
-      stallStreak += 1;
-      if (stallStreak > 8) break;
-    }
   }
 
   // (a) Keyset paging actually engaged — the head load always issues

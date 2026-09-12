@@ -27,23 +27,15 @@ export function selectBufferedTimelineMessages<T extends { id: string }>({
     return messages;
   }
 
-  const firstFrozenIndex = messages.findIndex(
-    (message) => message.id === frozenMessageIds[0],
+  // Freeze a tail boundary, not membership. A reconnect can fill a gap
+  // between retained rows (including an old live overlay); those are history,
+  // not newer output, and must not vanish behind the live-message buffer.
+  const tailIndex = messages.findIndex(
+    (message) => message.id === frozenMessageIds[frozenMessageIds.length - 1],
   );
-  const prepended = messages.slice(0, firstFrozenIndex);
-  const frozen = frozenMessageIds.map((id) => currentById.get(id) as T);
-  const buffered = [...prepended, ...frozen];
-  if (
-    buffered.length === messages.length &&
-    buffered.every((message, index) => message.id === messages[index]?.id)
-  ) {
-    // Crossing the bottom threshold without a live arrival must be a semantic
-    // no-op for Virtua. Preserve the source array identity until there is
-    // actually something to buffer; otherwise the threshold transition can
-    // rebuild its model while a prepend is starting.
-    return messages;
-  }
-  return buffered;
+  return tailIndex === messages.length - 1
+    ? messages
+    : messages.slice(0, tailIndex + 1);
 }
 
 export function useBufferedTimelineMessages<T extends { id: string }>({

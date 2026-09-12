@@ -1,10 +1,9 @@
-import { useCallback, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   channelWindowHasMore,
-  channelWindowHistoryExhausted,
   emptyChannelWindowStore,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
@@ -14,43 +13,23 @@ import type { Channel } from "@/shared/api/types";
 export function useFetchOlderMessages(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
-  const [isFetchingOlder, setIsFetchingOlder] = useState(false);
-  const isFetchingOlderRef = useRef(false);
-
-  // Whether older history remains, derived reactively from the authoritative
-  // window store rather than a private latch. A latch only reset on channelId
-  // change went stale on reconnect: `refreshNewestWindow` replaces the newest
-  // window with fresh `hasMore:true` rows, but the latch — flipped false when
-  // the pre-reconnect window exhausted — kept the scroll observer uninstalled,
-  // freezing paging at page one. Reading the store's tail `hasMore` self-heals:
-  // the observer re-arms the moment the refreshed window reports more history.
-  const windowKey = channelWindowKey(channelId ?? "none");
-  const { data: hasOlderMessages = false } = useQuery({
-    enabled: channelId !== null,
-    queryKey: windowKey,
-    select: channelWindowHasMore,
-    // Passive subscription: the window store is written by the messages query
-    // and the live subscription via setQueryData; this observer only reads.
-    queryFn: () =>
-      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-      emptyChannelWindowStore(),
-  });
-
-  // Distinct from `!hasOlderMessages`: an empty/unloaded window also reports
-  // "no more", but exhaustion requires a RESOLVED tail page proving the
-  // channel's beginning. Consumers gating UI on the history boundary (the
-  // oldest day divider) must use this, not the paging signal.
-  const { data: historyExhausted = false } = useQuery({
-    enabled: channelId !== null,
-    queryKey: windowKey,
-    select: channelWindowHistoryExhausted,
-    queryFn: () =>
-      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-      emptyChannelWindowStore(),
-  });
+  const scopeRef = useRef({ channelId, active: true, fetching: false });
+  if (scopeRef.current.channelId !== channelId) {
+    scopeRef.current.active = false;
+    scopeRef.current = { channelId, active: true, fetching: false };
+  }
+  const scope = scopeRef.current;
+  const [fetchingScope, setFetchingScope] = useState<typeof scope | null>(null);
+  useEffect(() => {
+    scope.active = true;
+    return () => {
+      scope.active = false;
+    };
+  }, [scope]);
+  const isFetchingOlder = fetchingScope === scope;
 
   const fetchOlder = useCallback(async () => {
-    if (!channelId || isFetchingOlderRef.current) {
+    if (!channelId || !scope.active || scope.fetching) {
       return;
     }
     const store =
@@ -61,21 +40,22 @@ export function useFetchOlderMessages(channel: Channel | null) {
       return;
     }
 
-    isFetchingOlderRef.current = true;
-    setIsFetchingOlder(true);
+    scope.fetching = true;
+    setFetchingScope(scope);
     try {
-      await pageOlderMessagesUntilRowFloor(
+      const result = await pageOlderMessagesUntilRowFloor(
         queryClient,
         channelId,
-        () => channelId === channel?.id,
+        () => scope.active && scopeRef.current === scope,
       );
+      return result.revision;
     } catch (error) {
       console.error("Failed to fetch older messages", channelId, error);
     } finally {
-      isFetchingOlderRef.current = false;
-      setIsFetchingOlder(false);
+      scope.fetching = false;
+      if (scope.active && scopeRef.current === scope) setFetchingScope(null);
     }
-  }, [channel?.id, channelId, queryClient]);
+  }, [channelId, queryClient, scope]);
 
-  return { fetchOlder, isFetchingOlder, hasOlderMessages, historyExhausted };
+  return { fetchOlder, isFetchingOlder };
 }

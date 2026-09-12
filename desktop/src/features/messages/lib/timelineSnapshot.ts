@@ -370,7 +370,7 @@ export function selectTimelineIntroSurface({
   if (isSkeletonVisible) {
     return null;
   }
-  if (hasDirectMessageIntro) {
+  if (hasDirectMessageIntro && hasReachedChannelStart) {
     return "direct-message-intro";
   }
   if (hasChannelIntro && hasReachedChannelStart) {

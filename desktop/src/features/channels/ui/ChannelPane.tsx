@@ -18,11 +18,7 @@ import {
   MessageTimeline,
   type MessageTimelineHandle,
 } from "@/features/messages/ui/MessageTimeline";
-import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
-import {
-  getDmHuddleMemberPubkeys,
-  hasOtherDmParticipant,
-} from "@/features/channels/lib/dmHuddleMembers";
+import { useChannelPaneDmParticipants } from "./useChannelPaneDmParticipants";
 import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
@@ -88,6 +84,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   currentPubkey,
   editTarget = null,
   fetchOlder,
+  historyRevision,
   header,
   idleAuxiliaryPanel = null,
   idleAuxiliaryHeaderActions,
@@ -226,12 +223,17 @@ export const ChannelPane = React.memo(function ChannelPane({
       void goChannel(activeChannelId, { replace: true });
     }
   }, [activeChannelId, goChannel, onAutoSendComplete]);
-  const huddleMemberPubkeys = React.useMemo(
-    () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
-    [activeChannel, agentPubkeys, currentPubkey],
-  );
-  const huddleMemberPubkeysPending =
-    agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
+  const {
+    directMessageIntro,
+    huddleMemberPubkeys,
+    huddleMemberPubkeysPending,
+  } = useChannelPaneDmParticipants({
+    activeChannel,
+    agentPubkeys,
+    agentPubkeysPending,
+    currentPubkey,
+    profiles,
+  });
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeExperience(activeChannel);
   useComposerHeightPadding(
@@ -347,15 +349,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
-  const directMessageIntro = React.useMemo(
-    () =>
-      buildDirectMessageIntro({
-        channel: activeChannel,
-        currentPubkey,
-        profiles,
-      }),
-    [activeChannel, currentPubkey, profiles],
-  );
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
       beforeSend: () =>
@@ -630,6 +623,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               scrollContainerRef={timelineScrollRef}
               currentPubkey={currentPubkey}
               fetchOlder={fetchOlder}
+              historyRevision={historyRevision}
               followThreadById={followThreadById}
               hasComposerOverlay={hasMainComposerOverlay}
               hasOlderMessages={hasOlderMessages}

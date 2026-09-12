@@ -10,7 +10,11 @@ import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 
 const CHANNEL_WINDOW_PAGE_SIZE = 50;
-export type PageOlderResult = { hasOlderMessages: boolean };
+export type PageOlderResult = {
+  hasOlderMessages: boolean;
+  /** Receipt for the exact publication the timeline must visually commit. */
+  revision?: number;
+};
 const inFlightPasses = new Map<string, Promise<PageOlderResult>>();
 
 /** Fetch exactly one server-defined older window and append it atomically. */
@@ -52,9 +56,11 @@ async function runPage(
   const retained = queryClient.getQueryData<ChannelWindowStore>(
     channelWindowKey(channelId),
   );
-  if (!retained) return { hasOlderMessages: true };
+  if (!retained || retained.generation !== store.generation) {
+    return { hasOlderMessages: true };
+  }
   const next = appendOlderChannelWindow(retained, page);
   queryClient.setQueryData(channelWindowKey(channelId), next);
   projectChannelWindowMessages(queryClient, channelId);
-  return { hasOlderMessages: page.hasMore };
+  return { hasOlderMessages: page.hasMore, revision: next.revision };
 }

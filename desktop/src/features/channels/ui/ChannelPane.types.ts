@@ -38,7 +38,9 @@ export type ChannelPaneProps = {
   channelManagementOpen?: boolean;
   currentPubkey?: string;
   editTarget?: MessageComposerEditTarget | null;
-  fetchOlder?: () => Promise<void>;
+  fetchOlder?: () => Promise<number | undefined>;
+  /** Authoritative history publication paired with the message snapshot. */
+  historyRevision?: number;
   header?: React.ReactNode;
   /**
    * Idle-state body for the right auxiliary pane (project extras, etc.).
