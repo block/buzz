@@ -80,3 +80,10 @@ hex = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 tempfile = "3"
+
+[[bin]]
+name = "beehive-databricks"
+path = "src/bin/beehive_databricks.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"

@@ -1,3 +1,4 @@
+import { addDatabricks, databricksNative } from './databricks.ts';
 import { existsSync } from 'node:fs';
 import { readSettings, saveSettings, settingsId, type Settings, type RegisteredAgent } from './settings.ts';
 import { agentNsec } from './settings-credentials.ts';
@@ -231,13 +232,16 @@ A Stop result is not a recent host report that confirms the agent is stopped.` }
         this.profilePreview = undefined; this.status = 'Agent registered. Not assigned or started.';
       } else if (request.action === 'provider-form') {
         this.databricksHost = process.env.DATABRICKS_HOST ?? ''; this.status = 'Provider credentials stay in Beehive’s OS store.';
+      } else if (request.action === 'add-databricks') {
+        await addDatabricks(this.hostDirectory,v.name,v.endpoint,abort.signal); check(); this.status = 'Databricks signed in and saved. No agent was started.';
       } else if (request.action === 'add-openai') {
         await this.credential({ action: 'add-openai', directory: this.hostDirectory, name: v.name, secret: v.secret },abort.signal); check(); this.status = 'Provider saved. No agent was started.';
       } else if (request.action === 'runtime-form') {
         this.runtimeExecutable = detectBuzzAgent(); this.models = undefined; this.status = this.runtimeExecutable ? 'Buzz Agent found. Model access is not yet verified.' : 'Buzz Agent was not found on PATH. No installed harness was run.';
       } else if (request.action === 'models') {
         this.models = undefined;
-        const result = await this.credential({ action: 'models', directory: this.hostDirectory, provider: v.provider },abort.signal); check(); this.models = result.models; this.status = 'Model list loaded. Custom model is also available.';
+        const provider = readSettings(this.hostDirectory).providers.find(p => p.id === v.provider);
+        const result = provider?.type === 'databricks_v2' ? await databricksNative({ action: 'models',host:provider.endpoint,key:provider.key },abort.signal) : await this.credential({ action: 'models', directory: this.hostDirectory, provider: v.provider },abort.signal); check(); this.models = result.models; this.status = 'Model list loaded. Custom model is also available.';
       } else if (request.action === 'add-runtime') {
         if (!this.runtimeExecutable) throw plain('No supported executable found.');
         const previous = readSettings(this.hostDirectory);

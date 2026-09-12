@@ -900,6 +900,7 @@ dependencies = [
  "nix 0.31.3",
  "reqwest 0.13.4",
  "rmcp",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "serde_yaml",

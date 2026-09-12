@@ -15,7 +15,7 @@ function request(action: string, values?: Record<string,string>, target?: string
   const id = ++sequence;
   const completion = new Promise<void>(resolve => { pending = { id, resolve }; });
   const message: ManagerRequest = { id, action, values, target, revision };
-  screen.setPending(true); screen.notice('Working… Esc stops waiting. Remote work and saved changes are not cancelled. Inspect before you try again.');
+  screen.setPending(true); screen.notice(action === 'add-databricks' ? 'Signing in through your browser… Esc cancels the native helper. An OS credential write or browser window may remain; cancelled sign-in will not save a provider.' : 'Working… Esc stops waiting. Remote work and saved changes are not cancelled. Inspect before you try again.');
   output.write(JSON.stringify(message) + '\n');
   return completion;
 }
@@ -75,7 +75,12 @@ function render() {
     { label: 'Add provider', run: async () => {
       await request('provider-form');
       const type = await screen.choose('Add provider',['OpenAI','Databricks v2']); if (!type) return;
-      if (type === 'Databricks v2') { await screen.input('Databricks workspace URL',snapshot.databricksHost ?? ''); screen.notice('Databricks browser PKCE is not available in this candidate. No credentials were read or saved.'); return; }
+      if (type === 'Databricks v2') {
+        const endpoint = await screen.input('Databricks workspace URL',snapshot.databricksHost ?? ''); if (!endpoint) return;
+        const name = await screen.input('Provider name','Databricks'); if (!name) return;
+        if (await screen.confirm(`Sign in to ${name} in your browser? Tokens stay in Beehive’s OS store. No agent will start.`)) await request('add-databricks',{ name,endpoint });
+        return;
+      }
       const name = await screen.input('Provider name','OpenAI'); if (!name) return;
       let secret = await screen.input('OpenAI API key. Hidden. Saved in Beehive’s OS credential store.','',true); if (!secret) return;
       if (await screen.confirm(`Save provider ${name}? No agent will start.`)) await request('add-openai',{ name, secret });

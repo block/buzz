@@ -244,7 +244,7 @@ function slot(setup: Setup, path: string, agent: string, currentSetup: (id: stri
     if (setup.buzzProvider?.credential) {
       const controller = new AbortController(); credentialRead = controller;
       try {
-        const result = await providerRead({ action: 'provider-read', key: setup.buzzProvider.credential }, controller.signal);
+        const result = await providerRead({ action: 'provider-read', provider:setup.buzzProvider.provider, host:setup.buzzProvider.baseUrl, key: setup.buzzProvider.credential }, controller.signal);
         controller.signal.throwIfAborted();
         if (closing || retracting(revision) || state.revision !== revision || hash(state.assignment) !== assignment || hash(state.selected) !== selectionBefore) throw Error('Provider admission invalidated');
         resolvedProviderKey = result.secret; result.secret = undefined;

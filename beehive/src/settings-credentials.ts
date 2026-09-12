@@ -54,7 +54,7 @@ export function addOpenAI(directory: string, name: string, secret: string, backe
 
 /** Public recovery references precede OS writes. Cancellation may leave a stored
  * key; do not delete it or claim rollback. Retained attempts are bounded. */
-function retainCredentialAttempt(directory: string, key: object) {
+export function retainCredentialAttempt(directory: string, key: object) {
   const path = join(directory,'credential-attempts.json');
   const rows = existsSync(path) ? readPrivate(path) as object[] : [];
   if (!Array.isArray(rows) || rows.length >= 100) throw Error('Credential recovery log needs attention');

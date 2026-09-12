@@ -1,3 +1,4 @@
+import { databricksHost } from './databricks.ts';
 import { existsSync, mkdirSync, rmdirSync, lstatSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -8,7 +9,7 @@ import { credentialReference, type CredentialReference } from './credential-stor
 export type RegisteredAgent = { publicKey: string; key: CredentialReference; profile?: { relay: string; name?: string; about?: string; picture?: string }; profileState: 'found' | 'none' | 'unavailable' };
 /** Each provider version owns an exact immutable OS credential entry. */
 export type ProviderReference = { service: 'beehive'; account: string };
-export type SavedProvider = { id: string; name: string; type: 'openai'; endpoint: 'https://api.openai.com/v1'; key: ProviderReference };
+export type SavedProvider = { id: string; name: string; type: 'openai' | 'databricks_v2'; endpoint: string; key: ProviderReference };
 export type SavedRuntime = { id: string; name: string; harness: 'buzz-agent'; executable: string; providerId: string; model: string };
 export type Settings = { version: 1; revision: number; agents: RegisteredAgent[]; providers: SavedProvider[]; runtimes: SavedRuntime[] };
 const path = (directory: string) => join(directory, 'settings.json');
@@ -23,7 +24,7 @@ export function validateSettings(value: Settings): Settings {
     if (JSON.stringify(a.key) !== JSON.stringify(credentialReference('agent', a.publicKey)) || !['found','none','unavailable'].includes(a.profileState)) throw Error('Invalid registered agent');
     if (a.profile && (typeof a.profile.relay !== 'string' || Object.values(a.profile).some(v => typeof v !== 'string' || v.length > 2048 || /[\x00-\x1f\x7f]/.test(v)))) throw Error('Invalid public profile');
   }
-  for (const p of value.providers) if (!label(p.name) || !label(p.id) || p.type !== 'openai' || p.endpoint !== 'https://api.openai.com/v1' || p.key?.service !== 'beehive' || !/^provider:[0-9a-f-]{36}$/.test(p.key.account)) throw Error('Invalid saved provider');
+  for (const p of value.providers) if (!label(p.name) || !label(p.id) || !['openai','databricks_v2'].includes(p.type) || (p.type === 'openai' ? p.endpoint !== 'https://api.openai.com/v1' : databricksHost(p.endpoint) !== p.endpoint) || p.key?.service !== 'beehive' || !/^provider:[0-9a-f-]{36}$/.test(p.key.account)) throw Error('Invalid saved provider');
   for (const r of value.runtimes) if (!label(r.id) || !label(r.name) || r.harness !== 'buzz-agent' || !isAbsolute(r.executable) || !/^[a-zA-Z0-9_.:/-]{1,200}$/.test(r.model) || !value.providers.some(p => p.id === r.providerId)) throw Error('Invalid saved runtime');
   // Reject unknown fields, including accidental secret-bearing input.
   const fields = (o: object, allowed: string[]) => { if (Object.keys(o).some(k => !allowed.includes(k))) throw Error('Unexpected settings field'); };

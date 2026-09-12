@@ -1,3 +1,4 @@
+import { addDatabricks } from '../src/databricks.ts';
 import { wrapManagement, unwrapManagement } from '../src/nostr-codec.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,23 +72,24 @@ test('OpenAI verifies store before public commit; listing is bounded and custom 
   assert.throws(() => saveSettings(root,catalog,catalog.revision),/changed/);
 });
 
-test('saved runtime reaches host Save/new Start while the prior active run remains immutable', async t => {
+for (const providerType of ['openai','databricks_v2'] as const) test(`${providerType} saved runtime reaches host Save/new Start while the prior active run remains immutable`, async t => {
   const root = fixture(t), owner = newKey(), agent = newKey(), hostKey = publicKey(newKey());
   const setup: Setup = { host: hostKey, ownerSecret: owner, agentSecret: agent, runner: realpathSync(process.execPath), args: ['-e','setInterval(()=>{},1000)'], workspace: root, serviceHome: root, configDirectory: root, mode: 'fixture' };
   provision(root,setup,createGenesis(publicKey(owner),publicKey(agent),hostKey));
   let receive: (m: Message) => void = () => {}; const reports: Message[] = [];
   const transport = { binding: { host: hostKey, owner: publicKey(owner) }, validate() {}, connect(_url: string,_secret: string,handle: (m: Message) => void) { receive = handle; return { ready: Promise.resolve(), send(m: Message) { reports.push(m); }, close() {} }; } };
   let providerReads = 0;
-  const running = await host(root,'ws://127.0.0.1',undefined,transport,undefined,async (_input,signal) => { signal.throwIfAborted(); providerReads++; return {ok:true,secret:'synthetic-provider-key'}; });
+  const running = await host(root,'ws://127.0.0.1',undefined,transport,undefined,async (input,signal) => { signal.throwIfAborted(); assert.equal((input as any).provider,providerType === 'openai' ? 'openai-compat' : 'databricks_v2'); if (providerType === 'databricks_v2') assert.equal((input as any).host,'https://fixture.example'); providerReads++; return {ok:true,secret:'synthetic-provider-key'}; });
   t.after(() => running.close());
   const start = message('start',hostKey,publicKey(agent),0); receive(start);
   await wait(() => reports.some(m => m.type === 'inventory' && m.body.phase === 'running'));
   const active = reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun;
   let stored: string | null = null;
-  addOpenAI(root,'Fixture','synthetic',{ read: () => stored, create(_r,v) { stored = v; } });
+  if (providerType === 'openai') addOpenAI(root,'Fixture','synthetic',{ read: () => stored, create(_r,v) { stored = v; } });
+  else await addDatabricks(root,'Fixture','https://fixture.example',new AbortController().signal,async () => ({ok:true}));
   const prior = readSettings(root), id = settingsId();
   const executable = join(root,'fixture-buzz-agent');
-  writeFileSync(executable,`#!/bin/sh\nexec '${process.execPath}' '${fileURLToPath(new URL('./acp-fixture.ts',import.meta.url))}' openai\n`,{mode:0o700});
+  writeFileSync(executable,`#!/bin/sh\nexec '${process.execPath}' '${fileURLToPath(new URL('./acp-fixture.ts',import.meta.url))}' ${providerType === 'openai' ? 'openai' : 'databricks-os'}\n`,{mode:0o700});
   saveSettings(root,{ ...prior, runtimes: [{ id, name: 'Future', harness: 'buzz-agent', executable, providerId: prior.providers[0]!.id, model: 'custom-future' }] },prior.revision);
   await wait(() => running.settingsRevision === 2);
   await wait(() => reports.some(m => m.type === 'inventory' && (m.body.harnessSetups as any[]).some(r => r.id === `runtime:${id}`)));
@@ -106,6 +108,7 @@ test('saved runtime reaches host Save/new Start while the prior active run remai
   assert.equal(reports.find(m => m.body.operation === nextStart.id)?.body.result,'accepted');
   assert.equal((reports.filter(m => m.type === 'inventory').at(-1)!.body.actualRun as any).selection.model,'custom-future');
   assert.equal(providerReads,1);
+  assert.ok(!JSON.stringify(reports).includes('synthetic-provider-key'));
   assert.ok(!readFileSync(join(root,'journal.json'),'utf8').includes('synthetic-provider-key'));
   const invalid = { ...readSettings(root), revision: 3, runtimes: [] }; writePrivate(join(root,'settings.json'),invalid);
   await sleep(2100); assert.equal(running.settingsRevision,2,'invalid replacement retains effective catalog');

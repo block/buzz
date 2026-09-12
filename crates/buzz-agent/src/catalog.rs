@@ -155,7 +155,8 @@ pub async fn discover_databricks_models_with_cache_dir(
     discover_databricks_models_with_token_source(cfg, token_source).await
 }
 
-async fn discover_databricks_models_with_token_source(
+/// Discover using caller-owned authentication, retaining the canonical filters.
+pub async fn discover_databricks_models_with_token_source(
     cfg: &Config,
     token_source: Arc<dyn TokenSource>,
 ) -> Result<Vec<ModelEntry>, AgentError> {

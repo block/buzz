@@ -1117,3 +1117,12 @@ mod tests {
         );
     }
 }
+
+/// Canonical Databricks public-client PKCE configuration for native embedders.
+/// This does not read environment variables, credentials, or start a browser.
+pub fn databricks_oauth_config(
+    host: &str,
+    coordination: std::path::PathBuf,
+) -> auth::PkceOAuthConfig {
+    llm::databricks_pkce_config(host, Some(coordination))
+}

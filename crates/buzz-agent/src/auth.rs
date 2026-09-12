@@ -371,6 +371,7 @@ pub struct PkceOAuthTokenSource {
     cfg: PkceOAuthConfig,
     http: Client,
     cache_path: PathBuf,
+    custody: Option<Arc<dyn OAuthTokenCustody>>,
     /// Injected browser launcher, called inside [`browser_pkce_flow`] while the
     /// localhost listener is live. Production uses [`DefaultBrowserOpener`];
     /// Phase 2 supplies the Tauri opener.
@@ -379,6 +380,17 @@ pub struct PkceOAuthTokenSource {
     /// lock serializes slow-path work; this cell keeps the fast path off disk
     /// during a turn and off the lock entirely.
     state: Mutex<Option<CachedToken>>,
+}
+
+/// Caller-owned OS token custody. Serialized JSON is secret material, never a
+/// public catalog value. Writes must verify read-back before returning success.
+/// Callers serialize the entire acquisition across processes before constructing
+/// the source; coordination files contain metadata only, never tokens.
+pub trait OAuthTokenCustody: Send + Sync {
+    /// Read exactly this application's credential; no fallback or enumeration.
+    fn load(&self) -> Result<Option<String>, AgentError>;
+    /// Durably replace this credential and verify exact read-back.
+    fn store(&self, secret: &str) -> Result<(), AgentError>;
 }
 
 impl PkceOAuthTokenSource {
@@ -433,6 +445,7 @@ impl PkceOAuthTokenSource {
             cfg,
             http,
             cache_path,
+            custody: None,
             opener,
             state: Mutex::new(initial),
         }))
@@ -483,10 +496,73 @@ impl PkceOAuthTokenSource {
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::Llm("oauth discovery: token_endpoint missing".into()))?
             .to_string();
+        if self.custody.is_some() {
+            let discovery = url::Url::parse(&self.cfg.discovery_url)
+                .map_err(|_| AgentError::Llm("Invalid discovery origin".into()))?;
+            for endpoint in [&auth, &token] {
+                let parsed = url::Url::parse(endpoint)
+                    .map_err(|_| AgentError::Llm("Invalid OAuth endpoint".into()))?;
+                if parsed.origin() != discovery.origin()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err(AgentError::Llm("OAuth endpoint origin mismatch".into()));
+                }
+            }
+        }
         Ok(OidcEndpoints {
             authorization_endpoint: auth,
             token_endpoint: token,
         })
+    }
+
+    /// Construct using externally owned OS custody without reading or writing a
+    /// token cache file. The explicit coordination directory holds only locks and
+    /// attempt metadata. The caller must hold its custody lock until completion.
+    pub fn new_with_custody(
+        cfg: PkceOAuthConfig,
+        opener: Arc<dyn BrowserOpener>,
+        custody: Arc<dyn OAuthTokenCustody>,
+    ) -> Result<Arc<Self>, AgentError> {
+        if cfg.cache_dir_override.is_none() {
+            return Err(AgentError::InvalidParams(
+                "Explicit coordination directory required".into(),
+            ));
+        }
+        let cache_path = cache_path_for(&cfg)?;
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|_| AgentError::Llm("OAuth coordination unavailable".into()))?;
+        }
+        let initial = custody
+            .load()?
+            .map(|secret| {
+                serde_json::from_str::<CachedToken>(&secret)
+                    .map_err(|_| AgentError::LlmAuth("Invalid OS OAuth credential".into()))
+            })
+            .transpose()?;
+        let http = Client::builder()
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| AgentError::Llm("OAuth HTTP unavailable".into()))?;
+        Ok(Arc::new(Self {
+            cfg,
+            http,
+            cache_path,
+            custody: Some(custody),
+            opener,
+            state: Mutex::new(initial),
+        }))
+    }
+
+    fn disk_token(&self) -> Option<CachedToken> {
+        if self.custody.is_some() {
+            None
+        } else {
+            read_cache(&self.cache_path)
+        }
     }
 
     /// Persist a token to disk and the in-memory cell.
@@ -516,6 +592,11 @@ impl PkceOAuthTokenSource {
     /// the 401 neutralization path can rewrite the disk layer without clobbering
     /// a distinct in-memory entry. No-op on non-Unix (see [`save`](Self::save)).
     fn persist(&self, token: &CachedToken) -> Result<(), AgentError> {
+        if let Some(custody) = &self.custody {
+            let secret = serde_json::to_string(token)
+                .map_err(|_| AgentError::Llm("OAuth serialization failed".into()))?;
+            return custody.store(&secret);
+        }
         #[cfg(unix)]
         {
             let body = serde_json::to_vec_pretty(token)
@@ -615,7 +696,7 @@ impl PkceOAuthTokenSource {
         // but a later plain `bearer()` could re-adopt the file. That corner is
         // not in the normal threat model (a user actively hardening their own
         // cache file against their own process).
-        if let Some(mut disk) = read_cache(&self.cache_path) {
+        if let Some(mut disk) = self.disk_token() {
             if disk.access_token == rej {
                 disk.expires_at = Some(0);
                 if self.persist(&disk).is_err() {
@@ -774,7 +855,7 @@ impl PkceOAuthTokenSource {
                 return Some(tok.access_token.clone());
             }
         }
-        if let Some(disk) = read_cache(&self.cache_path) {
+        if let Some(disk) = self.disk_token() {
             if usable(&disk) {
                 let bearer = disk.access_token.clone();
                 *state = Some(disk);
@@ -793,7 +874,7 @@ impl PkceOAuthTokenSource {
     /// in-memory memo is intentionally not updated; the next real acquisition
     /// re-reads and adopts under the lock.
     fn usable_from_disk(&self, rejected: Option<&str>) -> Option<String> {
-        let disk = read_cache(&self.cache_path)?;
+        let disk = self.disk_token()?;
         (!is_expired(&disk) && rejected != Some(disk.access_token.as_str()))
             .then_some(disk.access_token)
     }
@@ -1083,6 +1164,15 @@ impl PkceOAuthTokenSource {
         // refresh token is untouched — it was not rejected and drives the
         // recovery below.
         self.expire_rejected(&mut state, rejected);
+        if self.custody.is_some() {
+            if let Some(token) = state
+                .as_ref()
+                .filter(|token| rejected == Some(token.access_token.as_str()))
+            {
+                self.persist(token)
+                    .map_err(|_| AuthError::NetworkUnavailable)?;
+            }
+        }
 
         // Re-check under the lock: a holder we queued behind may have already
         // produced a token (this process or a sibling wrote the cache).

@@ -14,7 +14,7 @@ export function runtimeBindings(base: Setup, settings: Settings): Record<string,
       runner: runtime.executable, args: [], workspace: base.workspace, allowedWorkspaces: base.allowedWorkspaces,
       serviceHome: base.serviceHome, configDirectory: base.configDirectory,
       ...(base.conversation ? { conversation: base.conversation } : {}), mode: 'buzz-agent-api-key',
-      buzzProvider: { provider: 'openai-compat', baseUrl: provider.endpoint, credential: provider.key, wire: 'auto', models: [runtime.model] },
+      buzzProvider: provider.type === 'databricks_v2' ? { provider:'databricks_v2',auth:'token',baseUrl:provider.endpoint,credential:provider.key,models:[runtime.model] } : { provider: 'openai-compat', baseUrl: provider.endpoint, credential: provider.key, wire: 'auto', models: [runtime.model] },
     })];
   }));
 }

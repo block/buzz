@@ -1,3 +1,4 @@
+import { databricksNative } from './databricks.ts';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -5,6 +6,8 @@ import { fileURLToPath } from 'node:url';
  * Cancellation cannot undo OS persistence; callers must inspect before retrying. */
 export function managerCredential(input: object, signal: AbortSignal, helper = new URL('./manager-credential-child.ts', import.meta.url)): Promise<any> {
   signal.throwIfAborted();
+  const request = input as any;
+  if (request.action === 'provider-read' && request.provider === 'databricks_v2') return databricksNative({ action:'token',host:request.host,key:request.key },signal);
   return new Promise((resolve, reject) => {
     const child = fork(fileURLToPath(helper), [], {
       execPath: process.execPath, execArgv: [], silent: true,
