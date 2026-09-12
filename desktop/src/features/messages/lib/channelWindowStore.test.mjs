@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendOlderChannelWindow,
+  channelWindowThreadRepliesInChannel,
   mapChannelWindowEvents,
   channelWindowHasMore,
   channelWindowHistoryExhausted,
@@ -25,9 +26,14 @@ function event(id, createdAt, kind = 9) {
   };
 }
 const cursor = (item) => ({ createdAt: item.created_at, eventId: item.id });
-function page(startCursor, rows, { aux = [], hasMore = true } = {}) {
+function page(
+  startCursor,
+  rows,
+  { aux = [], hasMore = true, threadRepliesInChannel = false } = {},
+) {
   return {
     startCursor,
+    threadRepliesInChannel,
     rows: rows.map((item) => ({ event: item, thread: null })),
     aux,
     nextCursor: hasMore ? cursor(rows.at(-1)) : null,
@@ -76,6 +82,7 @@ test("accepts a relay cursor when all retained rows were skipped", () => {
   const skippedRawTail = event("z", 99);
   const next = appendOlderChannelWindow(initial, {
     startCursor: first.nextCursor,
+    threadRepliesInChannel: false,
     rows: [],
     aux: [],
     nextCursor: cursor(skippedRawTail),
@@ -104,12 +111,48 @@ test("rejects inconsistent exhaustion and cursor facts", () => {
     () =>
       replaceNewestChannelWindow(emptyChannelWindowStore(), {
         startCursor: null,
+        threadRepliesInChannel: false,
         rows: [{ event: row, thread: null }],
         aux: [],
         nextCursor: cursor(row),
         hasMore: false,
       }),
     /disagree/,
+  );
+});
+
+test("rejects scrollback pages fetched under a different thread-reply projection mode", () => {
+  const first = page(null, [event("a", 100)], {
+    threadRepliesInChannel: true,
+  });
+  const store = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
+
+  assert.throws(
+    () =>
+      appendOlderChannelWindow(
+        store,
+        page(first.nextCursor, [event("z", 90)], {
+          hasMore: false,
+          threadRepliesInChannel: false,
+        }),
+      ),
+    /projection mode changed/,
+  );
+});
+
+test("channelWindowThreadRepliesInChannel reads the newest page setting", () => {
+  const store = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("a", 100)], {
+      hasMore: false,
+      threadRepliesInChannel: true,
+    }),
+  );
+
+  assert.equal(channelWindowThreadRepliesInChannel(store), true);
+  assert.equal(
+    channelWindowThreadRepliesInChannel(emptyChannelWindowStore()),
+    false,
   );
 });
 

@@ -67,6 +67,55 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
   );
 });
 
+test("buildMainTimelineEntries projects all thread replies when enabled", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const directReply = message({
+    id: "direct-reply",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const nestedReply = message({
+    id: "nested-reply",
+    createdAt: 3,
+    parentId: "direct-reply",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "direct-reply", "", "reply"],
+    ],
+  });
+  const next = message({ id: "next", createdAt: 4 });
+
+  const entries = buildMainTimelineEntries(
+    [root, directReply, nestedReply, next],
+    undefined,
+    undefined,
+    undefined,
+    { threadRepliesInChannel: true },
+  );
+
+  assert.deepEqual(
+    entries.map((entry) => entry.message.id),
+    ["root", "direct-reply", "nested-reply", "next"],
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.message.depth),
+    [0, 0, 0, 0],
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.projectedThread?.rootId ?? null),
+    [null, "root", "root", null],
+  );
+  assert.equal(entries[1].projectedThread?.rootMessage, root);
+  assert.equal(entries[2].projectedThread?.rootMessage, root);
+  assert.equal(entries[1].summary, null);
+  assert.equal(entries[2].summary, null);
+});
+
 test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
   const huddleRoot = message({
     id: "huddle-root",
@@ -185,6 +234,37 @@ test("buildThreadPanelData hides collapsed summaries for expanded replies", () =
 
   assert.equal(collapsed.visibleReplies[0].summary?.replyCount, 1);
   assert.equal(expanded.visibleReplies[0].summary, null);
+});
+
+test("buildThreadPanelData keeps collapsed descendants out of visible replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(),
+  );
+
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["branch"],
+  );
+  assert.equal(panelData.visibleReplies[0].summary?.replyCount, 1);
 });
 
 test("buildThreadSummaryFromVisibleEntries counts visible rows and hidden descendants", () => {

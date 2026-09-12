@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Eye } from "lucide-react";
 import {
@@ -7,6 +8,7 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { AvatarFramingSlider } from "@/features/profile/ui/AnimatedAvatarControls";
 import { contrastColorForBackground } from "@/features/profile/ui/ProfileAvatarEditor.utils";
@@ -15,6 +17,13 @@ import {
   useLinkPreviewStyle,
   type LinkPreviewStyle,
 } from "@/shared/lib/linkPreviewStylePreference";
+import {
+  communityProfileQueryKey,
+  fetchCommunityProfile,
+  setCommunityThreadRepliesInChannel,
+  type CommunityProfile,
+} from "@/shared/api/communityProfile";
+import { canManageCommunityMembers } from "@/shared/api/relayMembers";
 import { isLinuxPlatform } from "@/shared/lib/platform";
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import { LinkPreviewAttachmentPresentation } from "@/shared/ui/link-preview-attachment";
@@ -43,6 +52,7 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionRow } from "./SettingsOptionGroup";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
+import { toast } from "sonner";
 
 /** Buzz navigation can use either its production tint or a stronger tab. */
 export function ProminentActiveTabSetting() {
@@ -647,6 +657,94 @@ export function ThreadLayoutSetting() {
       </SettingsOptionRow>
       <ThreadLayoutPreview mode={displayedMode} />
     </div>
+  );
+}
+
+export function ThreadRepliesInChannelSetting() {
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? "";
+  const membershipQuery = useMyRelayMembershipLookupQuery();
+  const queryClient = useQueryClient();
+  const canManage = canManageCommunityMembers(membershipQuery.data);
+  const profileQueryKey = communityProfileQueryKey(relayUrl);
+  const profileQuery = useQuery({
+    enabled: Boolean(relayUrl),
+    queryKey: profileQueryKey,
+    queryFn: () => fetchCommunityProfile(relayUrl),
+    staleTime: 60_000,
+  });
+  const mutation = useMutation({
+    mutationFn: setCommunityThreadRepliesInChannel,
+    onMutate: async (enabled: boolean) => {
+      if (!relayUrl) return { previous: undefined, relayUrl };
+      await queryClient.cancelQueries({ queryKey: profileQueryKey });
+      const previous =
+        queryClient.getQueryData<CommunityProfile>(profileQueryKey);
+      queryClient.setQueryData<CommunityProfile>(profileQueryKey, {
+        icon: previous?.icon ?? null,
+        threadRepliesInChannel: enabled,
+      });
+      return { previous, relayUrl };
+    },
+    onError: (error, _enabled, context) => {
+      if (context?.relayUrl) {
+        queryClient.setQueryData(
+          communityProfileQueryKey(context.relayUrl),
+          context.previous,
+        );
+      }
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Couldn’t update thread reply display.",
+      );
+    },
+    onSuccess: async (_data, _enabled, context) => {
+      if (!context?.relayUrl) return;
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: communityProfileQueryKey(context.relayUrl),
+        }),
+        queryClient.invalidateQueries({ queryKey: ["channel-window"] }),
+        queryClient.invalidateQueries({ queryKey: ["channel-messages"] }),
+      ]);
+    },
+  });
+
+  const checked = profileQuery.data?.threadRepliesInChannel ?? false;
+  const disabled =
+    !relayUrl ||
+    !canManage ||
+    membershipQuery.isPending ||
+    profileQuery.isPending ||
+    mutation.isPending;
+
+  return (
+    <SettingsOptionRow data-testid="thread-replies-in-channel-row">
+      <div className="min-w-0">
+        <label
+          className="text-sm font-medium"
+          htmlFor="thread-replies-in-channel-switch"
+        >
+          Show thread replies in channel
+        </label>
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          {canManage
+            ? "Shows every thread reply in the channel timeline for everyone, with a link back to the original thread."
+            : "Community owners and admins can change this for everyone."}
+        </p>
+      </div>
+      <Switch
+        checked={checked}
+        data-testid="thread-replies-in-channel-toggle"
+        disabled={disabled}
+        id="thread-replies-in-channel-switch"
+        onCheckedChange={(enabled) => mutation.mutate(enabled)}
+      />
+    </SettingsOptionRow>
   );
 }
 

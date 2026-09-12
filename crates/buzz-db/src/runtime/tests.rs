@@ -1042,7 +1042,7 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
 
     // Head fetch (cursor: None) → writer: sees `fresh`, never `marker`.
     let head = db
-        .get_channel_window(cid, channel, 2, None, None)
+        .get_channel_window(cid, channel, 2, None, None, false)
         .await
         .expect("head window");
     let head_contents: Vec<String> = head
@@ -1059,7 +1059,7 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
     // Cursor page → replica: sees `marker`, never `fresh`.
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
     let page2 = db
-        .get_channel_window(cid, channel, 10, Some(cursor), None)
+        .get_channel_window(cid, channel, 10, Some(cursor), None, false)
         .await
         .expect("cursor window");
     let page2_contents: Vec<String> = page2
@@ -1119,7 +1119,7 @@ async fn replica_window_failure_falls_back_to_writer() {
     let cid = CommunityId::from_uuid(community);
 
     let head = db
-        .get_channel_window(cid, channel, 1, None, None)
+        .get_channel_window(cid, channel, 1, None, None, false)
         .await
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
@@ -1127,7 +1127,7 @@ async fn replica_window_failure_falls_back_to_writer() {
     // Guard against a vacuous pass: the cursor page must actually be
     // replica-eligible before we break the replica.
     let healthy = db
-        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
         .await
         .expect("healthy cursor window");
     assert!(
@@ -1146,7 +1146,7 @@ async fn replica_window_failure_falls_back_to_writer() {
         .expect("drop replica events");
 
     let page = db
-        .get_channel_window(cid, channel, 10, Some(cursor), None)
+        .get_channel_window(cid, channel, 10, Some(cursor), None, false)
         .await
         .expect("replica failure must fall back to the writer, not error");
     let contents: Vec<&str> = page
@@ -1275,12 +1275,12 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
     let cid = CommunityId::from_uuid(community);
 
     let head = db
-        .get_channel_window(cid, channel, 1, None, None)
+        .get_channel_window(cid, channel, 1, None, None, false)
         .await
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
     let (_window, mut session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None, false)
         .await
         .expect("routed cursor window");
     assert!(
@@ -1357,14 +1357,14 @@ async fn routed_request_holds_one_snapshot_across_page_and_aux() {
 
     // Head page on the writer yields the cursor for a replica-routed page.
     let head = db
-        .get_channel_window(cid, channel, 1, None, None)
+        .get_channel_window(cid, channel, 1, None, None, false)
         .await
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
 
     // Route the cursor page to the replica and HOLD the session.
     let (window, mut session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None, false)
         .await
         .expect("routed cursor window");
     assert!(
@@ -1459,7 +1459,7 @@ async fn head_fetch_routes_by_configured_budget() {
 
     // Budget unset (rollout default): head → writer, fence open or not.
     let head = db
-        .get_channel_window(cid, channel, 2, None, None)
+        .get_channel_window(cid, channel, 2, None, None, false)
         .await
         .expect("head, gate off");
     assert_eq!(
@@ -1471,7 +1471,7 @@ async fn head_fetch_routes_by_configured_budget() {
     // Budget set, entry fresh (just recorded): head → replica.
     db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
     let head = db
-        .get_channel_window(cid, channel, 2, None, None)
+        .get_channel_window(cid, channel, 2, None, None, false)
         .await
         .expect("head, gate on");
     assert_eq!(
@@ -1487,7 +1487,7 @@ async fn head_fetch_routes_by_configured_budget() {
         std::time::Instant::now() - std::time::Duration::from_secs(10),
     );
     let head = db
-        .get_channel_window(cid, channel, 2, None, None)
+        .get_channel_window(cid, channel, 2, None, None, false)
         .await
         .expect("head, entry too old");
     assert_eq!(
@@ -2277,7 +2277,7 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
 
     // Head page (writer): [m4, m3]; cursor lands on m3 (base+20).
     let head = db
-        .get_channel_window(cid, channel, 2, None, None)
+        .get_channel_window(cid, channel, 2, None, None, false)
         .await
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
@@ -2290,7 +2290,7 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
             .collect()
     };
     let page_closed = db
-        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
         .await
         .expect("cursor page, fence closed");
     assert_eq!(
@@ -2304,7 +2304,7 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
     db.fence()
         .force_open_for_tests(chrono::DateTime::from_timestamp(base as i64 + 5, 0).expect("ts"));
     let page_below = db
-        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
         .await
         .expect("cursor page, fence below cursor");
     assert_eq!(
@@ -2318,7 +2318,7 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
     // permanent-skip hole this fence exists to prevent.
     db.fence().force_open_for_tests(chrono::Utc::now());
     let page_hazard = db
-        .get_channel_window(cid, channel, 10, Some(cursor), None)
+        .get_channel_window(cid, channel, 10, Some(cursor), None, false)
         .await
         .expect("cursor page, fence wrongly open");
     assert_eq!(

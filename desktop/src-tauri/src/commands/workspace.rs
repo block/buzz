@@ -61,23 +61,31 @@ fn migrate_legacy_retention_into(
     }
 }
 
-#[derive(Deserialize)]
-struct RelayInfoIcon {
+#[derive(Deserialize, Default)]
+struct RelayInfoProfile {
     #[serde(default)]
     icon: Option<String>,
+    #[serde(default)]
+    thread_replies_in_channel: bool,
 }
 
-/// Fetch a relay's workspace icon from its NIP-11 relay information document.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceProfileInfo {
+    icon: Option<String>,
+    thread_replies_in_channel: bool,
+}
+
+/// Fetch a relay's workspace profile from its NIP-11 information document.
 ///
 /// Works for any workspace (active or not) with a plain unauthenticated HTTP
-/// GET — no WebSocket session needed. Returns `None` when the relay has no
-/// icon set, is unreachable, or serves a malformed document: the rail falls
-/// back to initials in all three cases.
+/// GET — no WebSocket session needed. Returns an empty/default profile when
+/// the relay is unreachable or serves a malformed document.
 #[tauri::command]
-pub async fn fetch_workspace_icon(
+pub async fn fetch_workspace_profile(
     relay_url: String,
     state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+) -> Result<WorkspaceProfileInfo, String> {
     let http_url = relay::relay_http_base_url(&relay_url);
     let Ok(response) = state
         .http_client
@@ -86,16 +94,34 @@ pub async fn fetch_workspace_icon(
         .send()
         .await
     else {
-        return Ok(None);
+        return Ok(WorkspaceProfileInfo {
+            icon: None,
+            thread_replies_in_channel: false,
+        });
     };
     if !response.status().is_success() {
-        return Ok(None);
+        return Ok(WorkspaceProfileInfo {
+            icon: None,
+            thread_replies_in_channel: false,
+        });
     }
     let doc = response
-        .json::<RelayInfoIcon>()
+        .json::<RelayInfoProfile>()
         .await
-        .unwrap_or(RelayInfoIcon { icon: None });
-    Ok(doc.icon.filter(|icon| !icon.is_empty()))
+        .unwrap_or_default();
+    Ok(WorkspaceProfileInfo {
+        icon: doc.icon.filter(|icon| !icon.is_empty()),
+        thread_replies_in_channel: doc.thread_replies_in_channel,
+    })
+}
+
+/// Fetch a relay's workspace icon from its NIP-11 relay information document.
+#[tauri::command]
+pub async fn fetch_workspace_icon(
+    relay_url: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    Ok(fetch_workspace_profile(relay_url, state).await?.icon)
 }
 
 #[derive(Serialize)]

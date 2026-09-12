@@ -45,10 +45,7 @@ import {
 import { buildMessageComposerEditTarget } from "@/features/messages/lib/draftMentionRefs";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
-import {
-  getThreadReference,
-  isThreadReply,
-} from "@/features/messages/lib/threading";
+import { isThreadReply } from "@/features/messages/lib/threading";
 import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
 import { resolveTimelineQueryLoadingState } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
@@ -75,6 +72,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { channelWindowThreadRepliesInChannel } from "@/features/messages/lib/channelWindowStore";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -84,6 +82,7 @@ import { useChannelTargetReset } from "./useChannelTargetReset";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { getLatestActiveChannelMessage } from "./ChannelScreen.helpers";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 import { GuardedChannelPane } from "./GuardedChannelPane"; import { useNavigationGuard } from "./useNavigationGuard"; import * as searchForwarding from "./searchTargetForwarding";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
@@ -202,6 +201,8 @@ export function ChannelScreen({
   }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   const windowQuery = useChannelWindowQuery(activeChannel);
+  const threadRepliesInChannel =
+    !!windowQuery.data && channelWindowThreadRepliesInChannel(windowQuery.data);
   const threadRepliesQuery = useThreadReplies(
     activeChannel,
     effectiveOpenThreadHeadId,
@@ -210,15 +211,11 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage = React.useMemo(() => {
-    const messages = messagesQuery.data;
-    if (!messages) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (getThreadReference(messages[index].tags).parentId === null)
-        return messages[index];
-    }
-    return null;
-  }, [messagesQuery.data]);
+  const latestActiveMessage = React.useMemo(
+    () =>
+      getLatestActiveChannelMessage(messagesQuery.data, threadRepliesInChannel),
+    [messagesQuery.data, threadRepliesInChannel],
+  );
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
@@ -444,6 +441,7 @@ export function ChannelScreen({
     respondToLookup,
     relaySelfPubkey,
   });
+  const visibleThreadReplies = threadPanelData.visibleReplies;
   const {
     firstUnreadMessageId,
     getFirstReplyIdForMessage,
@@ -465,7 +463,8 @@ export function ChannelScreen({
     openThreadHeadId: effectiveOpenThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
-    openThreadMessages: threadPanelData.visibleReplies,
+    openThreadMessages: visibleThreadReplies,
+    threadRepliesInChannel,
     clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,
@@ -682,7 +681,7 @@ export function ChannelScreen({
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
-  const displayedThreadMessages = threadPanelData.visibleReplies;
+  const displayedThreadMessages = visibleThreadReplies;
   const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
     ? threadFirstUnreadReplyId
@@ -882,8 +881,11 @@ export function ChannelScreen({
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
                   isSinglePanelView={isSinglePanelView}
-                  isTimelineError={messagesQuery.isError} isTimelineLoading={isTimelineLoading}
-                  onRetryTimeline={() => void messagesQuery.refetch()} messages={timelineMessages}
+                  isTimelineError={messagesQuery.isError}
+                  isTimelineLoading={isTimelineLoading}
+                  messages={timelineMessages}
+                  onRetryTimeline={() => void messagesQuery.refetch()}
+                  threadRepliesInChannel={threadRepliesInChannel}
                   threadSummaries={threadSummaries}
                   huddleThreadRepliesError={huddleThreadRepliesError}
                   onRetryHuddleThreadReplies={onRetryHuddleThreadReplies}

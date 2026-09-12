@@ -562,6 +562,114 @@ test("buildTimelineItems: dividers break grouping while thread summaries do not"
   );
 });
 
+test("buildTimelineItems: projected thread replies render as flat chronological message rows", () => {
+  const root = entry({
+    id: "root",
+    pubkey: "author-a",
+    createdAt: dayAt(2026, 6, 14, 12, 0),
+  });
+  const reply = {
+    ...entry({
+      id: "reply",
+      parentId: "root",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-b",
+      createdAt: dayAt(2026, 6, 14, 12, 1),
+    }),
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
+    },
+  };
+  const nestedReply = {
+    ...entry({
+      id: "nested-reply",
+      parentId: "reply",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-c",
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+    }),
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
+    },
+  };
+
+  const { items } = buildTimelineItems(
+    [
+      root,
+      reply,
+      nestedReply,
+      entry({ id: "next", createdAt: dayAt(2026, 6, 14, 12, 3) }),
+    ],
+    null,
+  );
+
+  assert.deepEqual(kinds(items), [
+    "day-divider",
+    "message",
+    "message",
+    "message",
+    "message",
+  ]);
+  assert.deepEqual(items.map(getTimelineItemKey), [
+    `day-${dayAt(2026, 6, 14, 0, 0)}`,
+    "root",
+    "reply",
+    "nested-reply",
+    "next",
+  ]);
+  assert.deepEqual(
+    items
+      .filter((item) => item.kind === "message")
+      .map((item) => item.entry.projectedThread?.rootId ?? null),
+    [null, "root", "root", null],
+  );
+});
+
+test("buildTimelineItems: projected replies break same-author grouping", () => {
+  const root = entry({
+    id: "root",
+    pubkey: "author-a",
+    createdAt: dayAt(2026, 6, 14, 12, 0),
+  });
+  const projectedReply = {
+    ...entry({
+      id: "reply",
+      parentId: "root",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 1),
+    }),
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
+    },
+  };
+  const next = entry({
+    id: "next",
+    pubkey: "author-a",
+    createdAt: dayAt(2026, 6, 14, 12, 2),
+  });
+
+  const messageItems = buildTimelineItems(
+    [root, projectedReply, next],
+    null,
+  ).items.filter((item) => item.kind === "message");
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, false, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [false, false, false],
+  );
+});
+
 test("buildTimelineItems: empty entries produce no items", () => {
   const { items } = buildTimelineItems([], null);
   assert.equal(items.length, 0);

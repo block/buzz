@@ -10,7 +10,8 @@
 //! | 9030 | Add member      | admin or owner       |
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
-//! | 9033 | Set workspace profile (icon) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9033 | Set workspace icon | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9033 | Set thread display policy | admin or owner |
 
 use std::sync::Arc;
 
@@ -94,6 +95,14 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_thread_replies_in_channel(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err("thread_replies_in_channel must be true or false".to_string()),
+    }
+}
+
 /// Whether `sender_role` may set the workspace profile (kind:9033).
 ///
 /// Closed relays (`membership_enforced == true`) require an `admin`/`owner`
@@ -112,6 +121,9 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
 ///   the desktop deliberately shows the icon editor on open relays (see
 ///   `canEditIcon` in `EditCommunityDialog.tsx`, #2640) and defers to this
 ///   relay-side check, which used to always say no.
+///
+/// Thread display policy is carried by the same 9033 event, but is checked
+/// separately and always requires an admin/owner row.
 fn may_set_workspace_profile(
     sender_role: &str,
     membership_enforced: bool,
@@ -256,7 +268,7 @@ async fn execute_relay_admin_command(
         .map(|m| m.role.as_str())
         .unwrap_or("");
 
-    // kind:9033 — Set workspace profile (icon). Handled before p-tag
+    // kind:9033 — Set workspace profile. Handled before p-tag
     // extraction: it targets the relay itself, not a member pubkey.
     if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE {
         // Steward detection only matters on open relays (closed relays gate on
@@ -277,6 +289,14 @@ async fn execute_relay_admin_command(
         ) {
             return Err("actor not authorized: must be admin or owner".to_string());
         }
+        let icon = extract_tag_value(event, "icon");
+        let thread_replies_in_channel = extract_tag_value(event, "thread_replies_in_channel")
+            .as_deref()
+            .map(parse_thread_replies_in_channel)
+            .transpose()?;
+        if thread_replies_in_channel.is_some() && sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".to_string());
+        }
         if sender_role != "admin" && sender_role != "owner" {
             // Rosterless-open-relay admit: 9033 writes no audit row and
             // publishes no announcement event (unlike 9030/9031), so this warn
@@ -287,20 +307,36 @@ async fn execute_relay_admin_command(
             );
         }
 
-        // Empty or missing icon tag clears the workspace icon.
-        let icon = extract_tag_value(event, "icon").unwrap_or_default();
-        validate_workspace_icon(&icon)?;
+        if let Some(icon) = icon.as_deref() {
+            validate_workspace_icon(icon)?;
+            state
+                .db
+                .set_community_icon(tenant.community(), (!icon.is_empty()).then_some(icon))
+                .await
+                .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        } else if thread_replies_in_channel.is_none() {
+            // Legacy 9033 behavior: an empty command clears the workspace icon.
+            state
+                .db
+                .set_community_icon(tenant.community(), None)
+                .await
+                .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        }
 
-        state
-            .db
-            .set_community_icon(
-                tenant.community(),
-                (!icon.is_empty()).then_some(icon.as_str()),
-            )
-            .await
-            .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        if let Some(enabled) = thread_replies_in_channel {
+            state
+                .db
+                .set_community_thread_replies_in_channel(tenant.community(), enabled)
+                .await
+                .map_err(|e| format!("failed to store workspace profile: {e}"))?;
+        }
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        info!(
+            sender = %sender_hex,
+            icon_len = icon.as_deref().map(str::len),
+            thread_replies_in_channel = ?thread_replies_in_channel,
+            "workspace profile updated"
+        );
         return Ok(());
     }
 
@@ -685,6 +721,22 @@ mod postgres_tests {
         assert!(validate_workspace_icon(&long_data).is_err());
     }
 
+    #[test]
+    fn thread_replies_in_channel_accepts_boolish_values() {
+        for value in ["true", "1", "yes", "on", "TRUE"] {
+            assert_eq!(parse_thread_replies_in_channel(value), Ok(true));
+        }
+        for value in ["false", "0", "no", "off", "FALSE"] {
+            assert_eq!(parse_thread_replies_in_channel(value), Ok(false));
+        }
+    }
+
+    #[test]
+    fn thread_replies_in_channel_rejects_unknown_values() {
+        assert!(parse_thread_replies_in_channel("maybe").is_err());
+        assert!(parse_thread_replies_in_channel("").is_err());
+    }
+
     // ─── Call-site integration: the 9033 gate wired to real config + DB ────
     //
     // The unit tests above pin `may_set_workspace_profile`'s truth table, but
@@ -718,6 +770,9 @@ mod postgres_tests {
             .await
             .expect("requires reachable Postgres");
         let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate()
+            .await
+            .expect("migrate workspace profile test DB");
         let record = db
             .ensure_configured_community(host)
             .await
@@ -755,6 +810,21 @@ mod postgres_tests {
         (Arc::new(state), tenant)
     }
 
+    /// Sign a fresh kind:9033 with the given tags and run it through the real
+    /// admission + command path.
+    async fn submit_9033_tags(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        keys: &Keys,
+        tags: Vec<Tag>,
+    ) -> Result<(), RelayAdminError> {
+        let event = EventBuilder::new(Kind::Custom(9033), "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign 9033");
+        handle_relay_admin_event(tenant, state, &event).await
+    }
+
     /// Sign a fresh kind:9033 with `icon` and run it through the real
     /// admission + command path.
     async fn submit_9033(
@@ -763,11 +833,28 @@ mod postgres_tests {
         keys: &Keys,
         icon: &str,
     ) -> Result<(), RelayAdminError> {
-        let event = EventBuilder::new(Kind::Custom(9033), "")
-            .tags(vec![Tag::parse(["icon", icon]).expect("icon tag")])
-            .sign_with_keys(keys)
-            .expect("sign 9033");
-        handle_relay_admin_event(tenant, state, &event).await
+        submit_9033_tags(
+            state,
+            tenant,
+            keys,
+            vec![Tag::parse(["icon", icon]).expect("icon tag")],
+        )
+        .await
+    }
+
+    async fn submit_9033_thread_display(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        keys: &Keys,
+        enabled: &str,
+    ) -> Result<(), RelayAdminError> {
+        submit_9033_tags(
+            state,
+            tenant,
+            keys,
+            vec![Tag::parse(["thread_replies_in_channel", enabled]).expect("thread display tag")],
+        )
+        .await
     }
 
     async fn stored_icon(state: &Arc<AppState>, tenant: &TenantContext) -> Option<String> {
@@ -835,6 +922,52 @@ mod postgres_tests {
         assert_eq!(
             stored_icon(&state, &tenant).await.as_deref(),
             Some("https://example.com/owner.png")
+        );
+    }
+
+    /// The rosterless-open exception is icon-only. Thread reply channel
+    /// projection changes the whole community's read/window behavior, so even
+    /// a genuinely rosterless open relay must require a steward before a
+    /// roleless sender can change it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn open_relay_9033_roleless_sender_may_set_icon_but_not_thread_display() {
+        let host = format!(
+            "thread-display-gate-open-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (state, tenant) = workspace_profile_test_state(&host, false).await;
+        let roleless = Keys::generate();
+
+        submit_9033(&state, &tenant, &roleless, "https://example.com/open.png")
+            .await
+            .expect("rosterless open relay must admit an icon update");
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/open.png"),
+            "icon-only update must still be stored"
+        );
+
+        let refused = submit_9033_thread_display(&state, &tenant, &roleless, "true").await;
+        assert_eq!(
+            refused,
+            Err(RelayAdminError::Rejected(
+                "actor not authorized: must be admin or owner".to_string()
+            )),
+            "rosterless open relay must refuse thread-display updates from a roleless sender"
+        );
+        assert!(
+            !state
+                .db
+                .get_community_thread_replies_in_channel(tenant.community())
+                .await
+                .expect("read thread display policy"),
+            "refused attempt must not enable thread reply projection"
+        );
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/open.png"),
+            "refused thread-display attempt must not mutate the icon"
         );
     }
 

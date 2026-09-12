@@ -204,8 +204,12 @@ the same grow-only registers defined in the Merge Rule, they remain monotone
 state-based CvRDT interpretations — no change to the merge rule is required.
 Marking a channel read clears unread state on any thread/message whose relevant
 event predates the channel frontier, since each child context inherits the
-channel term; replies newer than the channel frontier remain unread until their
-own message marker or thread marker is advanced.
+channel term. In the default channel-window mode, replies newer than the channel
+frontier remain unread until their own message marker or thread marker is
+advanced. If a channel surface explicitly renders thread replies as channel
+timeline rows (for example, NIP-CW `thread_replies_in_channel` projection),
+then those rendered reply events are part of what the user has read in the
+channel surface and may be covered by the channel frontier.
 
 If the thread root or message event (and therefore its parent channel) cannot be
 resolved from the event graph, `effective(thread:<root>)` or
@@ -220,10 +224,21 @@ reading a single thread or reply would silently mark later top-level channel
 messages as read. Marking a channel read advances only the channel context
 (which the hierarchical rule then propagates to child contexts at read time).
 The channel context SHOULD advance to the maximum `created_at` across the
-channel's top-level messages only, NOT including thread replies. This keeps a
-thread unread when its replies exceed the newest top-level message: opening a
-channel clears the channel timeline but leaves its threads/replies unread until
-each thread or message is read.
+messages rendered as channel timeline rows in the current read surface. For the
+default NIP-CW row mode, that means the channel's top-level messages only, NOT
+ordinary thread replies. This keeps a thread unread when its replies exceed the
+newest top-level message: opening a default channel timeline clears the channel
+timeline but leaves its threads/replies unread until each thread or message is
+read.
+
+When NIP-CW `thread_replies_in_channel` projection is active, projected direct
+and nested thread replies are channel timeline rows. Opening or reading that
+surface SHOULD let the channel context advance across those projected rows too,
+using the replies' own `created_at` values. Clients MUST NOT use the projection
+setting to mark hidden, unrendered, or unreturned replies read; the channel
+frontier only represents the channel row set the user actually read. Explicit
+thread-panel reads still advance `thread:<root>` or `msg:<event-id>` contexts,
+not the parent channel context.
 
 ##### Eviction
 

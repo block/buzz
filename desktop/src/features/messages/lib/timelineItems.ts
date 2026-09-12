@@ -10,8 +10,10 @@ import {
   buildDayGroupBoundaries,
   type DayGroupBoundary,
 } from "@/features/messages/lib/timelineSnapshot";
-import { shouldRenderUnreadDivider } from "@/features/messages/lib/threadPanel";
-import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import {
+  shouldRenderUnreadDivider,
+  type MainTimelineEntry,
+} from "@/features/messages/lib/threadPanel";
 import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
@@ -248,8 +250,10 @@ export function buildTimelineItems(
     // that same standalone state until the send acknowledgement arrives.
     const isContinuation =
       !message.pending &&
+      !entry.projectedThread &&
       !startsNewMessageGroup(message) &&
       previousGroupEntry !== null &&
+      !previousGroupEntry.projectedThread &&
       !previousGroupEntry.message.pending &&
       hasSameMessageAuthor(previousGroupEntry.message, message) &&
       isWithinGroupingWindow(

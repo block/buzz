@@ -98,6 +98,9 @@ type MessageTimelineProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+  onOpenProjectedThread?: (message: TimelineMessage) => void;
+  onReplyToProjectedThread?: (message: TimelineMessage) => void;
+  threadRepliesInChannel?: boolean;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -199,6 +202,9 @@ const MessageTimelineBase = React.forwardRef<
     onMarkRead,
     onReply,
     onOpenThread,
+    onOpenProjectedThread,
+    onReplyToProjectedThread,
+    threadRepliesInChannel = false,
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -681,6 +687,8 @@ const MessageTimelineBase = React.forwardRef<
       onMarkRead={onMarkRead}
       onReply={onReply}
       onOpenThread={onOpenThread}
+      onOpenProjectedThread={onOpenProjectedThread}
+      onReplyToProjectedThread={onReplyToProjectedThread}
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
       onStartReached={loadOlderViaVirtualizer}
@@ -697,6 +705,7 @@ const MessageTimelineBase = React.forwardRef<
       searchQuery={searchQuery}
       useVirtualizer={useTimelineVirtualizer}
       threadUnreadCounts={threadUnreadCounts}
+      threadRepliesInChannel={threadRepliesInChannel}
       unfollowThreadById={unfollowThreadById}
     />
   ) : null;
