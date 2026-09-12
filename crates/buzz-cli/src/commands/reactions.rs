@@ -4,7 +4,23 @@ use nostr::EventId;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::parse_hex64;
+
+/// The kind:7 query behind `reactions get` and `reactions remove`.
+///
+/// `event_id` must already be lowercased (`parse_hex64`): `#e` is a generic
+/// tag filter, compared as a raw string against a tag every event writes
+/// lowercase. `author`, when given, narrows to the caller's own reactions.
+fn reaction_filter(event_id: &str, author: Option<&str>) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "kinds": [7],
+        "#e": [event_id],
+    });
+    if let Some(author) = author {
+        filter["authors"] = serde_json::json!([author]);
+    }
+    filter
+}
 
 pub async fn cmd_add_reaction(
     client: &BuzzClient,
@@ -12,7 +28,7 @@ pub async fn cmd_add_reaction(
     emoji: &str,
     emoji_url: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
+    let event_id = &parse_hex64(event_id)?;
     let target_eid =
         EventId::parse(event_id).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))?;
 
@@ -36,16 +52,14 @@ pub async fn cmd_remove_reaction(
     event_id: &str,
     emoji: &str,
 ) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
+    // Reaches a `#e` generic tag filter below, matched as a raw string
+    // against a lowercase tag.
+    let event_id = &parse_hex64(event_id)?;
     let keys = client.keys();
 
     // Find our reaction event by querying kind:7 reactions on this event from us
     let my_pk = keys.public_key().to_hex();
-    let filter = serde_json::json!({
-        "kinds": [7],
-        "#e": [event_id],
-        "authors": [my_pk]
-    });
+    let filter = reaction_filter(event_id, Some(&my_pk));
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse reactions query: {e}")))?;
@@ -78,11 +92,8 @@ pub async fn cmd_remove_reaction(
 }
 
 pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
-    let filter = serde_json::json!({
-        "kinds": [7],
-        "#e": [event_id]
-    });
+    let event_id = &parse_hex64(event_id)?;
+    let filter = reaction_filter(event_id, None);
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 
@@ -134,5 +145,29 @@ pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(
         } => cmd_add_reaction(client, &event, &emoji, emoji_url.as_deref()).await,
         ReactionsCmd::Remove { event, emoji } => cmd_remove_reaction(client, &event, &emoji).await,
         ReactionsCmd::Get { event } => cmd_get_reactions(client, &event).await,
+    }
+}
+
+#[cfg(test)]
+mod reaction_filter_tests {
+    use super::reaction_filter;
+    use crate::validate::parse_hex64;
+
+    #[test]
+    fn the_e_tag_filter_carries_the_normalized_id() {
+        let upper = "ABCDEF0123456789".repeat(4);
+        let id = parse_hex64(&upper).unwrap();
+        let filter = reaction_filter(&id, None);
+        assert_eq!(filter["#e"][0], upper.to_lowercase().as_str());
+        assert_eq!(filter["kinds"][0], 7);
+        assert!(filter.get("authors").is_none());
+    }
+
+    #[test]
+    fn an_author_narrows_the_query_when_given() {
+        let id = "a".repeat(64);
+        let me = "b".repeat(64);
+        let filter = reaction_filter(&id, Some(&me));
+        assert_eq!(filter["authors"][0], me.as_str());
     }
 }
