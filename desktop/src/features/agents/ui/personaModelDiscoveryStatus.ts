@@ -3,6 +3,46 @@ export type PersonaModelDiscoveryStatus = {
   tone: "muted" | "warning";
 };
 
+/**
+ * Availability reasons the ACP runtime catalog reports for a harness that
+ * cannot run. `available` is excluded: it has no status to explain.
+ */
+export type UnavailableRuntimeAvailability =
+  | "adapter_missing"
+  | "adapter_outdated"
+  | "cli_missing"
+  | "not_installed";
+
+/**
+ * Explains a harness that the catalog already knows is unavailable.
+ *
+ * This is deliberately not routed through `formatModelDiscoveryErrorStatus`:
+ * that formatter interprets *live catalog fetch* failures, so an availability
+ * reason falls through to its generic "could not load live models for
+ * <provider>" fallback and blames the provider for a missing local adapter or
+ * CLI. The harness dropdown already names the reason via
+ * `formatRuntimeOptionLabel`; this keeps the model status line consistent with
+ * it.
+ */
+export function formatRuntimeAvailabilityStatus(
+  availability: UnavailableRuntimeAvailability,
+  agentLabel?: string,
+): PersonaModelDiscoveryStatus {
+  const harness = agentLabel?.trim() ? agentLabel.trim() : "This harness";
+  const reason =
+    availability === "cli_missing"
+      ? `${harness} is installed but its CLI was not found. Install the CLI and sign in, then reopen this dialog.`
+      : availability === "not_installed"
+        ? `${harness} is not installed. Install it, then reopen this dialog.`
+        : availability === "adapter_missing"
+          ? `${harness} is missing its ACP adapter. Install the adapter, then reopen this dialog.`
+          : `${harness}'s ACP adapter is out of date. Update the adapter, then reopen this dialog.`;
+  return {
+    message: `Using built-in model options. ${reason}`,
+    tone: "warning",
+  };
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;

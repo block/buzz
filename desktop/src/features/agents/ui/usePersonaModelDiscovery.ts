@@ -9,6 +9,7 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
+  formatRuntimeAvailabilityStatus,
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
@@ -251,9 +252,8 @@ export function usePersonaModelDiscovery({
         selectedRuntimeAvailability !== "available"
       ) {
         setModelDiscoveryStatus(
-          formatModelDiscoveryErrorStatus(
-            new Error(`Runtime not available: ${selectedRuntimeAvailability}`),
-            trimmedProvider,
+          formatRuntimeAvailabilityStatus(
+            selectedRuntimeAvailability,
             selectedRuntimeLabel,
           ),
         );

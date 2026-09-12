@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.ts";
+import {
+  formatModelDiscoveryErrorStatus,
+  formatRuntimeAvailabilityStatus,
+} from "./personaModelDiscoveryStatus.ts";
 
 test("model discovery status names missing Anthropic credentials", () => {
   const status = formatModelDiscoveryErrorStatus(
@@ -157,4 +160,52 @@ test("non-auth -32000 errors do NOT get the sign-in copy", () => {
   assert.equal(status?.tone, "warning");
   assert.doesNotMatch(status?.message ?? "", /sign-in/i);
   assert.match(status?.message ?? "", /Using built-in model options/);
+});
+
+// ── formatRuntimeAvailabilityStatus — the harness itself is unavailable ───────
+//
+// Regression for #7088: an availability reason used to be wrapped in a
+// synthetic `Runtime not available: <reason>` error and handed to
+// formatModelDiscoveryErrorStatus, which has no handler for it and fell
+// through to the generic "could not load live models for <provider>" copy.
+// That blamed the provider for a missing local adapter or CLI, and contradicted
+// the harness dropdown, which already names the reason.
+
+test("runtime availability status names a missing CLI and the next step", () => {
+  const status = formatRuntimeAvailabilityStatus("cli_missing", "Claude Code");
+
+  assert.equal(status.tone, "warning");
+  assert.match(status.message, /Claude Code/);
+  assert.match(status.message, /CLI/);
+  assert.doesNotMatch(status.message, /load live models/);
+});
+
+test("runtime availability status covers every unavailable reason", () => {
+  const expectations = [
+    ["cli_missing", /CLI/],
+    ["not_installed", /not installed/],
+    ["adapter_missing", /adapter/],
+    ["adapter_outdated", /out of date/],
+  ];
+
+  for (const [availability, pattern] of expectations) {
+    const status = formatRuntimeAvailabilityStatus(availability, "Codex");
+
+    assert.equal(status.tone, "warning", `${availability} warns`);
+    assert.match(status.message, pattern, `${availability} names its reason`);
+    assert.match(status.message, /Codex/, `${availability} names the harness`);
+    // The provider is not at fault, so the provider-oriented fallback copy
+    // must never appear for an availability reason.
+    assert.doesNotMatch(
+      status.message,
+      /load live models/,
+      `${availability} does not blame model discovery`,
+    );
+  }
+});
+
+test("runtime availability status falls back to a generic harness noun", () => {
+  const status = formatRuntimeAvailabilityStatus("not_installed", "   ");
+
+  assert.match(status.message, /This harness is not installed/);
 });
