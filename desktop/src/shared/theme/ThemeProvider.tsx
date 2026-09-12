@@ -125,13 +125,23 @@ type Rgb = {
 };
 
 function hexToRgb(hex: string): Rgb {
-  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})/i.exec(hex);
-  if (!m) return { r: 255, g: 255, b: 255 };
-  return {
-    r: parseInt(m[1], 16),
-    g: parseInt(m[2], 16),
-    b: parseInt(m[3], 16),
-  };
+  const long = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})/i.exec(hex);
+  if (long) {
+    return {
+      r: parseInt(long[1], 16),
+      g: parseInt(long[2], 16),
+      b: parseInt(long[3], 16),
+    };
+  }
+  const short = /^#?([a-f\d])([a-f\d])([a-f\d])$/i.exec(hex);
+  if (short) {
+    return {
+      r: parseInt(short[1] + short[1], 16),
+      g: parseInt(short[2] + short[2], 16),
+      b: parseInt(short[3] + short[3], 16),
+    };
+  }
+  return { r: 255, g: 255, b: 255 };
 }
 
 function mixRgb(from: Rgb, to: Rgb, factor: number): Rgb {
@@ -435,11 +445,29 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
   if (requestToken !== themeApplyRequest) return null;
 
   const info = extractThemeInfo(name, themeData);
-  const { isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
-    added: info.added,
-    deleted: info.deleted,
-    modified: info.modified,
-  });
+  const { isDark, vars, windowBackingColor } = createThemeVars(
+    info.bg,
+    info.fg,
+    info.comment,
+    {
+      added: info.added,
+      deleted: info.deleted,
+      modified: info.modified,
+    },
+  );
+  if (isTauri() && isMacPlatform()) {
+    const { r: red, g: green, b: blue } = hexToRgb(windowBackingColor);
+    try {
+      await invokeTauri<void>("set_window_backing_color", {
+        red,
+        green,
+        blue,
+      });
+    } catch (error) {
+      console.warn("set_window_backing_color failed", error);
+    }
+    if (requestToken !== themeApplyRequest) return null;
+  }
 
   const root = document.documentElement;
   for (const [key, value] of Object.entries(vars)) {
