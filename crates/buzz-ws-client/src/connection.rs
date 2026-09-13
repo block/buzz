@@ -297,6 +297,9 @@ pub async fn publish_event(
 mod tests {
     use super::*;
 
+    use nostr::{EventBuilder, Kind};
+    use tokio_tungstenite::accept_async;
+
     #[test]
     fn auth_challenge_timeout_meets_floor() {
         const { assert!(AUTH_CHALLENGE_TIMEOUT_SECS >= 20) };
@@ -310,5 +313,325 @@ mod tests {
     #[test]
     fn publish_ok_timeout_meets_floor() {
         const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
+
+    type ServerStream = WebSocketStream<tokio::net::TcpStream>;
+
+    /// Bind an in-process WebSocket server and return its `ws://` URL plus a
+    /// handle that resolves to the server side of the stream once a client
+    /// completes the handshake.
+    async fn spawn_test_relay() -> (String, tokio::task::JoinHandle<ServerStream>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket");
+        let address = listener.local_addr().expect("read test address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test websocket");
+            accept_async(stream)
+                .await
+                .expect("complete server websocket handshake")
+        });
+        (format!("ws://{address}"), server)
+    }
+
+    async fn next_test_frame(server: &mut ServerStream) -> Value {
+        let message = timeout(Duration::from_secs(5), server.next())
+            .await
+            .expect("timed out waiting for websocket frame")
+            .expect("test websocket closed")
+            .expect("read test websocket frame");
+        serde_json::from_str(message.to_text().expect("expected text frame"))
+            .expect("parse test websocket frame")
+    }
+
+    async fn send_frame(server: &mut ServerStream, value: Value) {
+        server
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .expect("send test frame");
+    }
+
+    /// Build a real signed Nostr event for publish tests.
+    fn make_test_event(keys: &Keys) -> Event {
+        EventBuilder::new(Kind::TextNote, "test")
+            .sign_with_keys(keys)
+            .expect("signing should succeed")
+    }
+
+    async fn connect_test_pair() -> (NostrWsConnection, ServerStream) {
+        let (url, accept) = spawn_test_relay().await;
+        let conn = NostrWsConnection::connect(&url)
+            .await
+            .expect("connect test client");
+        let server = accept.await.expect("join test websocket server");
+        (conn, server)
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_invalid_url() {
+        let result = NostrWsConnection::connect("not a url").await;
+        assert!(matches!(result, Err(WsClientError::Url(_))));
+    }
+
+    #[tokio::test]
+    async fn authenticate_signs_challenge_and_accepts_ok() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            send_frame(&mut server, json!(["AUTH", "test-challenge"])).await;
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[0], "AUTH");
+            let auth_event: Event =
+                serde_json::from_value(frame[1].clone()).expect("deserialize AUTH event");
+            let event_id = auth_event.id.to_hex();
+            send_frame(&mut server, json!(["OK", event_id, true, ""])).await;
+            auth_event
+        });
+
+        conn.authenticate(&keys, None).await.expect("authenticate");
+
+        let auth_event = server_task.await.expect("join server task");
+        assert_eq!(auth_event.kind, Kind::Authentication);
+        assert_eq!(auth_event.pubkey, pubkey);
+        auth_event.verify().expect("valid signature");
+        let tags = serde_json::to_value(&auth_event).expect("serialize AUTH event")["tags"]
+            .as_array()
+            .cloned()
+            .expect("tags array");
+        assert!(
+            tags.contains(&json!(["challenge", "test-challenge"])),
+            "missing challenge tag in {tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejected_by_relay_fails_with_reason() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            send_frame(&mut server, json!(["AUTH", "test-challenge"])).await;
+            let frame = next_test_frame(&mut server).await;
+            let event_id = frame[1]["id"].as_str().expect("auth event id").to_string();
+            send_frame(
+                &mut server,
+                json!(["OK", event_id, false, "auth-required: bad"]),
+            )
+            .await;
+        });
+
+        let result = conn.authenticate(&keys, None).await;
+        server_task.await.expect("join server task");
+        match result {
+            Err(WsClientError::AuthFailed(message)) => {
+                assert_eq!(message, "auth-required: bad");
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_buffers_earlier_messages_for_later_delivery() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            send_frame(&mut server, json!(["NOTICE", "welcome"])).await;
+            send_frame(&mut server, json!(["EOSE", "sub-1"])).await;
+            send_frame(&mut server, json!(["AUTH", "test-challenge"])).await;
+            let frame = next_test_frame(&mut server).await;
+            let event_id = frame[1]["id"].as_str().expect("auth event id").to_string();
+            send_frame(&mut server, json!(["OK", event_id, true, ""])).await;
+            server
+        });
+
+        conn.authenticate(&keys, None).await.expect("authenticate");
+        let _server = server_task.await.expect("join server task");
+
+        match conn.next_event(Duration::from_secs(1)).await {
+            Ok(RelayMessage::Notice { message }) => assert_eq!(message, "welcome"),
+            other => panic!("expected buffered Notice first, got {other:?}"),
+        }
+        match conn.next_event(Duration::from_secs(1)).await {
+            Ok(RelayMessage::Eose { subscription_id }) => assert_eq!(subscription_id, "sub-1"),
+            other => panic!("expected buffered Eose second, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejects_oversized_challenge() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            send_frame(&mut server, json!(["AUTH", "x".repeat(1025)])).await;
+            server
+        });
+
+        let result = conn.authenticate(&keys, None).await;
+        let _server = server_task.await.expect("join server task");
+        match result {
+            Err(WsClientError::AuthFailed(message)) => {
+                assert_eq!(message, "challenge exceeds 1024 bytes");
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_event_returns_matching_ok_and_buffers_interleaved_messages() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+        let event = make_test_event(&keys);
+        let event_id = event.id.to_hex();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[0], "EVENT");
+            let published_id = frame[1]["id"].as_str().expect("event id").to_string();
+            send_frame(&mut server, json!(["EOSE", "sub-1"])).await;
+            send_frame(&mut server, json!(["OK", "deadbeef", false, "other event"])).await;
+            send_frame(&mut server, json!(["OK", published_id, true, "stored"])).await;
+            server
+        });
+
+        let ok = conn.send_event(event).await.expect("send event");
+        let _server = server_task.await.expect("join server task");
+        assert!(ok.accepted);
+        assert_eq!(ok.event_id, event_id);
+        assert_eq!(ok.message, "stored");
+
+        match conn.next_event(Duration::from_secs(1)).await {
+            Ok(RelayMessage::Eose { subscription_id }) => assert_eq!(subscription_id, "sub-1"),
+            other => panic!("expected buffered Eose first, got {other:?}"),
+        }
+        match conn.next_event(Duration::from_secs(1)).await {
+            Ok(RelayMessage::Ok(other_ok)) => assert_eq!(other_ok.event_id, "deadbeef"),
+            other => panic!("expected buffered Ok second, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_event_answers_ping_while_waiting_for_ok() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+        let event = make_test_event(&keys);
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            let frame = next_test_frame(&mut server).await;
+            let published_id = frame[1]["id"].as_str().expect("event id").to_string();
+            server
+                .send(Message::Ping(b"heartbeat".to_vec().into()))
+                .await
+                .expect("send ping");
+            let reply = timeout(Duration::from_secs(5), server.next())
+                .await
+                .expect("timed out waiting for pong")
+                .expect("test websocket closed")
+                .expect("read pong frame");
+            match reply {
+                Message::Pong(data) => assert_eq!(data.as_ref(), b"heartbeat"),
+                other => panic!("expected Pong, got {other:?}"),
+            }
+            send_frame(&mut server, json!(["OK", published_id, true, ""])).await;
+            server
+        });
+
+        let ok = conn.send_event(event).await.expect("send event");
+        let _server = server_task.await.expect("join server task");
+        assert!(ok.accepted);
+    }
+
+    #[tokio::test]
+    async fn auth_challenge_received_while_publishing_is_reused_by_authenticate() {
+        let (mut conn, server) = connect_test_pair().await;
+        let keys = Keys::generate();
+        let event = make_test_event(&keys);
+
+        let server_task = tokio::spawn(async move {
+            let mut server = server;
+            let frame = next_test_frame(&mut server).await;
+            let published_id = frame[1]["id"].as_str().expect("event id").to_string();
+            send_frame(&mut server, json!(["AUTH", "late-challenge"])).await;
+            send_frame(&mut server, json!(["OK", published_id, true, ""])).await;
+            // The client must now authenticate against the stored challenge
+            // without waiting for another AUTH frame from the relay.
+            let auth_frame = next_test_frame(&mut server).await;
+            assert_eq!(auth_frame[0], "AUTH");
+            let tags = auth_frame[1]["tags"].as_array().cloned().expect("tags");
+            assert!(
+                tags.contains(&json!(["challenge", "late-challenge"])),
+                "missing challenge tag in {tags:?}"
+            );
+            let auth_id = auth_frame[1]["id"].as_str().expect("auth id").to_string();
+            send_frame(&mut server, json!(["OK", auth_id, true, ""])).await;
+            server
+        });
+
+        let ok = conn.send_event(event).await.expect("send event");
+        assert!(ok.accepted);
+        conn.authenticate(&keys, None)
+            .await
+            .expect("authenticate with stored challenge");
+        let _server = server_task.await.expect("join server task");
+
+        match conn.next_event(Duration::from_secs(1)).await {
+            Ok(RelayMessage::Auth { challenge }) => assert_eq!(challenge, "late-challenge"),
+            other => panic!("expected buffered Auth, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn next_event_times_out_when_relay_is_silent() {
+        let (mut conn, _server) = connect_test_pair().await;
+        let result = conn.next_event(Duration::from_millis(50)).await;
+        assert!(matches!(result, Err(WsClientError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn next_event_surfaces_connection_close() {
+        let (mut conn, mut server) = connect_test_pair().await;
+        server.close(None).await.expect("close server side");
+        let result = conn.next_event(Duration::from_secs(5)).await;
+        assert!(matches!(result, Err(WsClientError::ConnectionClosed)));
+    }
+
+    #[tokio::test]
+    async fn publish_event_helper_completes_full_auth_and_publish_flow() {
+        let (url, accept) = spawn_test_relay().await;
+        let keys = Keys::generate();
+        let event = make_test_event(&keys);
+        let expected_id = event.id.to_hex();
+
+        let server_task = tokio::spawn(async move {
+            let mut server = accept.await.expect("join test websocket server");
+            send_frame(&mut server, json!(["AUTH", "publish-challenge"])).await;
+            let auth_frame = next_test_frame(&mut server).await;
+            assert_eq!(auth_frame[0], "AUTH");
+            let auth_id = auth_frame[1]["id"].as_str().expect("auth id").to_string();
+            send_frame(&mut server, json!(["OK", auth_id, true, ""])).await;
+            let event_frame = next_test_frame(&mut server).await;
+            assert_eq!(event_frame[0], "EVENT");
+            let event_id = event_frame[1]["id"].as_str().expect("event id").to_string();
+            send_frame(&mut server, json!(["OK", event_id, true, "stored"])).await;
+            event_id
+        });
+
+        let ok = publish_event(&url, event, &keys, None, 10)
+            .await
+            .expect("publish event");
+        let published_id = server_task.await.expect("join server task");
+        assert!(ok.accepted);
+        assert_eq!(ok.event_id, expected_id);
+        assert_eq!(published_id, expected_id);
+        assert_eq!(ok.message, "stored");
     }
 }
