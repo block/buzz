@@ -15,6 +15,7 @@ use tauri::AppHandle;
 use crate::app_state::AppState;
 
 pub(crate) mod deletion_intent;
+pub(crate) mod provider_settlement;
 mod legacy_migration;
 pub use legacy_migration::migrate_legacy_retention_db;
 
@@ -149,6 +150,7 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     .map_err(|e| format!("failed to create retention table: {e}"))?;
 
     deletion_intent::initialize(&conn)?;
+    provider_settlement::initialize(&conn)?;
     Ok(conn)
 }
 

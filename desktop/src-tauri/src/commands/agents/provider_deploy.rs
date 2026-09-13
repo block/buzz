@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use nostr::JsonUtil;
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::{
@@ -70,7 +72,7 @@ pub(crate) async fn deploy_to_provider(
     // the stale snapshot captured by its caller, and never raw disk bytes a
     // newer relay head has superseded (stale prompt/model/env/credentials/
     // access, or a raw backend that no longer matches the resolved one).
-    let (provider_id, config, cached_binary_path, mut agent_json) = {
+    let (provider_id, config, cached_binary_path, mut agent_json, scope, invocation) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -85,26 +87,67 @@ pub(crate) async fn deploy_to_provider(
             disk_record,
         )?;
         let (provider_id, config) = resolved_provider_backend(&record)?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+        if let Some(pending) = crate::managed_agents::retention::provider_settlement::pending(
+            &conn,
+            &scope.owner_keys.public_key().to_hex(),
+            pubkey,
+        )? {
+            return Err(provider_settlement_pending_error(&pending));
+        }
+        let authority_event_id = private_authority_event_id(
+            &conn,
+            &scope.owner_keys.public_key().to_hex(),
+            pubkey,
+        )?;
+        let built_payload = build_deploy_payload(app, state, &record)?;
+        let invocation = crate::managed_agents::retention::provider_settlement::ProviderSettlement {
+            owner: scope.owner_keys.public_key().to_hex(),
+            agent: pubkey.to_string(),
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            authority_event_id,
+            provider_id: provider_id.clone(),
+            config_fingerprint: provider_config_fingerprint(
+                &provider_id,
+                &config,
+                &built_payload,
+            )?,
+            backend_agent_id: None,
+        };
+        crate::managed_agents::retention::provider_settlement::begin(&conn, &invocation)?;
         (
             provider_id,
             config,
             // Device-local field: the overlay never patches it, so the
             // resolved record carries the disk value unchanged.
             record.provider_binary_path.clone(),
-            build_deploy_payload(app, state, &record)?,
+            built_payload,
+            scope,
+            invocation,
         )
     };
     // The rebuild above re-read the live workspace relay and owner identity.
     // Assert the caller's captured scope against THIS payload — the exact
     // value invoked below — not the pre-lock snapshot its caller validated.
-    assert_payload_scope(&agent_json, expected_relay_url, expected_signer_pubkey)?;
+    if let Err(error) = assert_payload_scope(&agent_json, expected_relay_url, expected_signer_pubkey)
+    {
+        let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+        crate::managed_agents::retention::provider_settlement::finish(
+            &conn,
+            &invocation.owner,
+            pubkey,
+            &invocation.invocation_id,
+        )?;
+        return Err(error);
+    }
     // The floor is invocation state, not record state, so the post-lock
     // rebuild cannot restore it — inject it into the payload actually invoked.
     apply_replay_floor(&mut agent_json, replay_floor_unix);
     // Resolve via discovered candidates only. Cached path must match BOTH
     // "is a discovered candidate" AND "belongs to this provider_id". A tampered
     // record cannot redirect deploys to a different provider's binary.
-    let bin_path = cached_binary_path
+    let bin_path_result = cached_binary_path
         .as_deref()
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
@@ -114,7 +157,20 @@ pub(crate) async fn deploy_to_provider(
                 id == &provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
             })
         })
-        .map_or_else(|| resolve_provider_binary(&provider_id), Ok)?;
+        .map_or_else(|| resolve_provider_binary(&provider_id), Ok);
+    let bin_path = match bin_path_result {
+        Ok(path) => path,
+        Err(error) => {
+            let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+            crate::managed_agents::retention::provider_settlement::finish(
+                &conn,
+                &invocation.owner,
+                pubkey,
+                &invocation.invocation_id,
+            )?;
+            return Err(error);
+        }
+    };
 
     let deployed_agent_json = agent_json.clone();
     let config_clone = config.clone();
@@ -122,6 +178,29 @@ pub(crate) async fn deploy_to_provider(
         tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
             .await
             .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+    let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+    let backend_agent_id = match deploy_result {
+        Ok(backend_agent_id) => {
+            crate::managed_agents::retention::provider_settlement::record_handle(
+                &conn,
+                &invocation.owner,
+                pubkey,
+                &invocation.invocation_id,
+                &backend_agent_id,
+            )?;
+            backend_agent_id
+        }
+        Err(error) => {
+            crate::managed_agents::retention::provider_settlement::finish(
+                &conn,
+                &invocation.owner,
+                pubkey,
+                &invocation.invocation_id,
+            )?;
+            return Err(error);
+        }
+    };
 
     // Persist result under lock.
     let _store_guard = state
@@ -141,15 +220,106 @@ pub(crate) async fn deploy_to_provider(
     // against relay edits that landed while the provider call was in flight.
     let resolved =
         crate::managed_agents::private_config_overlay::resolved_local_record(state, disk_record)?;
-    let (settled, result) =
-        settle_deploy_result(disk_record, resolved, deploy_result, &deployed_agent_json);
-    save_managed_agents(app, &records)?;
-    if result.is_ok() {
-        // Author the settlement as the next 30179 head and write it through
-        // to the overlay, exactly like every other edit this device makes.
-        super::retain_managed_agent_pending(app, state, &settled)?;
+    let active_scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let current_authority_event_id = private_authority_event_id(
+        &conn,
+        &invocation.owner,
+        pubkey,
+    )?;
+    let current_backend = resolved_provider_backend(&resolved).ok();
+    let current_payload = build_deploy_payload(app, state, &resolved).ok();
+    let current_fingerprint = current_backend
+        .as_ref()
+        .zip(current_payload.as_ref())
+        .map(|((id, config), payload)| provider_config_fingerprint(id, config, payload))
+        .transpose()?;
+    if !settlement_matches_invocation(
+        &scope.db_path,
+        &invocation.owner,
+        &invocation,
+        &active_scope.db_path,
+        &active_scope.owner_keys.public_key().to_hex(),
+        &current_authority_event_id,
+        current_backend.as_ref().map(|(id, _)| id.as_str()),
+        current_fingerprint.as_deref(),
+    ) {
+        return Err(format!(
+            "provider returned handle {backend_agent_id}, but managed-agent authority changed during deploy; unresolved cleanup is retained"
+        ));
     }
-    result
+    let (settled, result) =
+        settle_deploy_result(disk_record, resolved, Ok(backend_agent_id), &deployed_agent_json);
+    result?;
+    // Relay-primary authority is the commit point. The JSON row is only a
+    // device-local mirror and must never get ahead of the encrypted head.
+    super::retain_managed_agent_pending(app, state, &settled)?;
+    save_managed_agents(app, &records)?;
+    crate::managed_agents::retention::provider_settlement::finish(
+        &conn,
+        &invocation.owner,
+        pubkey,
+        &invocation.invocation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settlement_matches_invocation(
+    invoked_db: &std::path::Path,
+    invoked_owner: &str,
+    invocation: &crate::managed_agents::retention::provider_settlement::ProviderSettlement,
+    current_db: &std::path::Path,
+    current_owner: &str,
+    current_head: &str,
+    current_provider: Option<&str>,
+    current_fingerprint: Option<&str>,
+) -> bool {
+    invoked_db == current_db
+        && invoked_owner == current_owner
+        && invocation.authority_event_id == current_head
+        && current_provider == Some(invocation.provider_id.as_str())
+        && current_fingerprint == Some(invocation.config_fingerprint.as_str())
+}
+
+fn private_authority_event_id(
+    conn: &rusqlite::Connection,
+    owner: &str,
+    agent: &str,
+) -> Result<String, String> {
+    let row = crate::managed_agents::retention::get_retained_event(
+        conn,
+        buzz_core_pkg::kind::KIND_PRIVATE_MANAGED_AGENT,
+        owner,
+        agent,
+    )?
+    .ok_or_else(|| "managed-agent private authority is not retained".to_string())?;
+    let event = nostr::Event::from_json(&row.raw_event)
+        .map_err(|error| format!("invalid retained managed-agent authority: {error}"))?;
+    Ok(event.id.to_hex())
+}
+
+fn provider_config_fingerprint(
+    provider_id: &str,
+    config: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(provider_id, config, payload))
+        .map_err(|error| format!("failed to fingerprint provider invocation: {error}"))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+pub(super) fn provider_settlement_pending_error(
+    pending: &crate::managed_agents::retention::provider_settlement::ProviderSettlement,
+) -> String {
+    match pending.backend_agent_id.as_deref() {
+        Some(handle) => format!(
+            "unresolved provider settlement for {} handle {handle}; resolve or force-delete before deploying again",
+            pending.provider_id
+        ),
+        None => format!(
+            "unfinished provider invocation for {}; restart recovery is required before deploying again",
+            pending.provider_id
+        ),
+    }
 }
 
 /// Apply the deploy outcome to the relay-resolved record (the one to retain)
@@ -759,5 +929,63 @@ mod tests {
             production.matches("retain_managed_agent_pending(").count(),
             1
         );
+        let save = production
+            .find("save_managed_agents(app, &records)")
+            .expect("disk mirror save must remain present");
+        assert!(retain < save, "relay authority must commit before the disk mirror");
+    }
+
+    fn invocation() -> crate::managed_agents::retention::provider_settlement::ProviderSettlement {
+        crate::managed_agents::retention::provider_settlement::ProviderSettlement {
+            owner: "owner-a".into(),
+            agent: "agent".into(),
+            invocation_id: "call".into(),
+            authority_event_id: "head-a".into(),
+            provider_id: "provider-a".into(),
+            config_fingerprint: "fingerprint-a".into(),
+            backend_agent_id: Some("handle-a".into()),
+        }
+    }
+
+    #[test]
+    fn delayed_provider_a_result_is_fenced_after_authority_moves_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocation = invocation();
+        assert!(!settlement_matches_invocation(
+            dir.path(),
+            "owner-a",
+            &invocation,
+            dir.path(),
+            "owner-a",
+            "head-local",
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn delayed_provider_a_result_is_fenced_after_authority_moves_provider_b() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocation = invocation();
+        assert!(!settlement_matches_invocation(
+            dir.path(),
+            "owner-a",
+            &invocation,
+            dir.path(),
+            "owner-a",
+            "head-b",
+            Some("provider-b"),
+            Some("fingerprint-b"),
+        ));
+        assert!(settlement_matches_invocation(
+            dir.path(),
+            "owner-a",
+            &invocation,
+            dir.path(),
+            "owner-a",
+            "head-a",
+            Some("provider-a"),
+            Some("fingerprint-a"),
+        ));
     }
 }

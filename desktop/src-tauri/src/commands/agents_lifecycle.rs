@@ -129,11 +129,11 @@ pub(super) async fn start_local_agent_with_preflight(
         disk_record,
         &resolved_record,
     );
-    save_managed_agents(app, &records)?;
     // Retain the relay-resolved configuration. The projection equality guard
     // makes a runtime-only start a no-op, while avoiding resurrection of stale
     // disk config when this device is following a newer relay snapshot.
     retain_managed_agent_pending(app, state, &resolved_record)?;
+    save_managed_agents(app, &records)?;
     build_managed_agent_summary(
         app,
         &resolved_record,

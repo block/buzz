@@ -10,7 +10,7 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 
 /// Retain a freshly authored managed-agent event in the local store, flagged
 /// for relay sync. MUST be called inside the `managed_agents_store_lock`-held
-/// body after `save_managed_agents`, NEVER across an `.await`: it acquires
+/// body before the device-local mirror save, NEVER across an `.await`: it acquires
 /// `state.keys` and a retention-db connection, both `std::sync` guards, and
 /// drops them before returning.
 ///

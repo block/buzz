@@ -130,10 +130,10 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
                 record.updated_at = crate::util::now_iso();
             }
         }
-        save_managed_agents(app, &records)?;
         if let Some(saved_record) = records.iter().find(|record| record.pubkey == pubkey) {
             retain_managed_agent_pending(app, state, saved_record)?;
         }
+        save_managed_agents(app, &records)?;
     }
 
     let mut errors = Vec::new();
@@ -215,6 +215,10 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
         let teams = load_teams(&app).unwrap_or_default();
         let global_config =
             crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        let scope = crate::managed_agents::retention::active_retention_scope(&app, &state)?;
+        let settlement_conn =
+            crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+        let settlement_owner = scope.owner_keys.public_key().to_hex();
         records
             .iter()
             .map(|record| {
@@ -227,6 +231,18 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
                     &global_config,
                 )?;
                 summary.has_local_lifecycle = local_pubkeys.contains(&record.pubkey);
+                if let Some(pending) =
+                    crate::managed_agents::retention::provider_settlement::pending(
+                        &settlement_conn,
+                        &settlement_owner,
+                        &record.pubkey,
+                    )?
+                {
+                    summary.status = "settlement_pending".into();
+                    summary.last_error = Some(provider_deploy::provider_settlement_pending_error(
+                        &pending,
+                    ));
+                }
                 Ok(summary)
             })
             .collect()
@@ -588,16 +604,15 @@ pub async fn create_managed_agent(
 
         records.push(record);
 
-        save_managed_agents(&app, &records)?;
-
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
-        // Publish the agent to the relay. Inside the Phase-3 lock, after save,
+        // Publish the agent to relay-primary authority before its disk mirror.
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
         retain_managed_agent_pending(&app, &state, record)?;
+        save_managed_agents(&app, &records)?;
         // Effective owner-authored description for the kind:0 `about`.
         let profile_about = crate::managed_agents::record_effective_description(record, &personas);
         (
@@ -971,10 +986,17 @@ pub async fn delete_managed_agent(
                     .map(|record| overlay.resolve_local_record(record))
                     .or_else(|| overlay.materialize_relay_only_record(&pubkey, &records))
                     .ok_or_else(|| format!("agent {pubkey} not found"))?;
-                if resolved.backend_agent_id.is_some() && !force_remote_delete.unwrap_or(false) {
+                let unresolved_provider =
+                    crate::managed_agents::retention::provider_settlement::pending(
+                        &conn,
+                        &owner,
+                        &pubkey,
+                    )?;
+                if (resolved.backend_agent_id.is_some() || unresolved_provider.is_some())
+                    && !force_remote_delete.unwrap_or(false)
+                {
                     return Err(
-                        "cannot delete a deployed remote agent without force_remote_delete: true"
-                            .into(),
+                        "cannot delete a deployed or unsettled remote agent without force_remote_delete: true".into(),
                     );
                 }
                 drop(overlay);
@@ -982,6 +1004,11 @@ pub async fn delete_managed_agent(
                 tombstone_managed_agent_pending(&app, &state, &pubkey)?;
             }
             deletion_recovery::finish(&app, &state, &conn, &owner, &pubkey)?;
+            if force_remote_delete.unwrap_or(false) {
+                crate::managed_agents::retention::provider_settlement::abandon(
+                    &conn, &owner, &pubkey,
+                )?;
+            }
         }
         try_regenerate_nest(&app);
         Ok(())
