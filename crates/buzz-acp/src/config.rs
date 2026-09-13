@@ -267,6 +267,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// macOS Keychain service containing the Buzz private key for the MCP server.
+    /// When set, the service identifier replaces BUZZ_PRIVATE_KEY in ACP session JSON.
+    #[arg(long, env = "BUZZ_KEYCHAIN_SERVICE", hide_env_values = true)]
+    pub keychain_service: Option<String>,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -543,6 +548,8 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// macOS Keychain service delegated to the MCP server instead of a private key.
+    pub keychain_service: Option<String>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -814,6 +821,10 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
         _ => &[],
     }
 }
+
+/// Environment variable passed to a local MCP server so it can resolve the
+/// Buzz identity without serializing the private key into ACP session JSON.
+pub(crate) const MCP_KEYCHAIN_SERVICE_ENV: &str = "BUZZ_KEYCHAIN_SERVICE";
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
 /// network access in Codex's macOS Seatbelt sandbox.
@@ -1137,6 +1148,37 @@ impl Config {
         let mut persona_env_vars = Vec::new();
         let model = args.model;
 
+        let keychain_service = match args.keychain_service.as_deref() {
+            Some(raw) => {
+                let service = raw.trim();
+                if service.is_empty() {
+                    return Err(ConfigError::ConfigFile(
+                        "BUZZ_KEYCHAIN_SERVICE must not be empty when configured".into(),
+                    ));
+                }
+                Some(service.to_owned())
+            }
+            None => None,
+        };
+        if let Some(service) = &keychain_service {
+            #[cfg(not(target_os = "macos"))]
+            return Err(ConfigError::ConfigFile(
+                "BUZZ_KEYCHAIN_SERVICE is only supported on macOS".into(),
+            ));
+            if args.mcp_command.is_empty() {
+                return Err(ConfigError::ConfigFile(
+                    "BUZZ_KEYCHAIN_SERVICE requires BUZZ_ACP_MCP_COMMAND".into(),
+                ));
+            }
+            if service.chars().any(char::is_control) || service.chars().count() > 255 {
+                return Err(ConfigError::ConfigFile(
+                    "BUZZ_KEYCHAIN_SERVICE must be 1-255 characters with no control characters"
+                        .into(),
+                ));
+            }
+            persona_env_vars.push((MCP_KEYCHAIN_SERVICE_ENV.into(), service.clone()));
+        }
+
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
@@ -1156,6 +1198,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            keychain_service,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1540,6 +1583,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            keychain_service: None,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -3188,5 +3232,22 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+
+    #[test]
+    fn empty_keychain_service_fails_closed() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--mcp-command",
+            "buzz-dev-mcp",
+            "--keychain-service",
+            " ",
+        ])
+        .expect("clap should preserve an explicitly blank service for validation");
+
+        let error = Config::from_args(args).expect_err("blank service must not fall back");
+        assert!(error.to_string().contains("must not be empty"));
     }
 }
