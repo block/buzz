@@ -64,6 +64,15 @@ test("offers only outputs available in every runtime shape", () => {
   assert.ok(!variables.includes("steps.react.output.response"));
 });
 
+test("offers parsed command fields to slash-command workflows", () => {
+  const variables = workflowTemplateVariables("slash_command", []).map(
+    ({ value }) => value,
+  );
+  assert.ok(variables.includes("trigger.command"));
+  assert.ok(variables.includes("trigger.args"));
+  assert.ok(variables.includes("trigger.author"));
+});
+
 test("keeps prior-step ordering and ignores unsafe step IDs", () => {
   const variables = workflowTemplateVariables("webhook", [
     { id: "first", action: "delay" },

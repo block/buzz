@@ -57,6 +57,18 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
+    /// Fires when a stream message starts with an exact bare slash command.
+    ///
+    /// The configured name omits the leading slash (`new-task`, not
+    /// `/new-task`). Mention-prefixed commands such as `@Agent /review` are
+    /// intentionally left to ACP command pass-through and do not match.
+    SlashCommand {
+        /// Lowercase command name: ASCII alphanumeric plus internal hyphens.
+        command: String,
+        /// Optional evalexpr filter over the command trigger context.
+        #[serde(default)]
+        filter: Option<String>,
+    },
     /// Fires on a cron schedule.
     Schedule {
         /// Cron expression (UTC). Mutually exclusive with `interval`.
@@ -221,6 +233,7 @@ impl WorkflowDef {
             TriggerDef::MessagePosted { .. }
                 | TriggerDef::ReactionAdded { .. }
                 | TriggerDef::DiffPosted { .. }
+                | TriggerDef::SlashCommand { .. }
         );
         if !trigger_has_message {
             for step in &self.steps {
@@ -233,12 +246,16 @@ impl WorkflowDef {
                 ) {
                     return Err(WorkflowError::InvalidDefinition(format!(
                         "step '{}': reply_in_thread requires a message-based trigger \
-                         (message_posted, reaction_added, or diff_posted); \
+                         (message_posted, reaction_added, diff_posted, or slash_command); \
                          schedule and webhook triggers have no message to reply to",
                         step.id
                     )));
                 }
             }
+        }
+
+        if let TriggerDef::SlashCommand { command, .. } = &self.trigger {
+            validate_slash_command_name(command)?;
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -276,6 +293,32 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Validate a workflow-owned slash command name.
+///
+/// Names omit the leading slash and use a deliberately narrow portable shape:
+/// lowercase ASCII letters/digits with optional internal hyphens. This keeps
+/// matching deterministic across Desktop, mobile, CLI, and ACP runtimes.
+fn validate_slash_command_name(command: &str) -> Result<(), WorkflowError> {
+    let valid_len = (1..=64).contains(&command.len());
+    let mut chars = command.chars();
+    let valid_first = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let valid_chars = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let valid_last = command
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+
+    if valid_len && valid_first && valid_chars && valid_last {
+        return Ok(());
+    }
+
+    Err(WorkflowError::InvalidDefinition(format!(
+        "slash command '{command}' is invalid: use 1-64 lowercase ASCII letters/digits with optional internal hyphens, without the leading slash"
+    )))
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -345,6 +388,56 @@ mod tests {
             }
             other => panic!("unexpected trigger: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_slash_command_trigger() {
+        let yaml = "name: New Task\ntrigger:\n  on: slash_command\n  command: new-task\n  filter: 'trigger_author == \"abc123\"'\nsteps:\n  - id: dispatch\n    action: send_message\n    text: '@Planner /plan {{trigger.args}}'\n    reply_in_thread: true\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::SlashCommand { command, filter } => {
+                assert_eq!(command, "new-task");
+                assert_eq!(filter.as_deref(), Some("trigger_author == \"abc123\""));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert!(matches!(
+            reparsed.trigger,
+            TriggerDef::SlashCommand { ref command, .. } if command == "new-task"
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_slash_command_names() {
+        for command in [
+            "",
+            "/new-task",
+            "New-task",
+            "new_task",
+            "-new-task",
+            "new-task-",
+            "new task",
+        ] {
+            let yaml = format!(
+                "name: Invalid command\ntrigger:\n  on: slash_command\n  command: '{command}'\nsteps:\n  - id: s1\n    action: delay\n    duration: 1s\n"
+            );
+            let err = parse_yaml(&yaml).expect_err(command);
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "unexpected error for {command:?}: {err}"
+            );
+        }
+
+        let too_long = "a".repeat(65);
+        let yaml = format!(
+            "name: Invalid command\ntrigger:\n  on: slash_command\n  command: '{too_long}'\nsteps:\n  - id: s1\n    action: delay\n    duration: 1s\n"
+        );
+        assert!(matches!(
+            parse_yaml(&yaml),
+            Err(WorkflowError::InvalidDefinition(_))
+        ));
     }
 
     #[test]
