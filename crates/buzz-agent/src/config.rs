@@ -967,7 +967,7 @@ fn parse_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
 
 /// `true` when `base_url` is an official OpenAI host. Hosts on
 /// `*.openai.com` get Responses under `Auto`; everything else (vLLM,
-/// Ollama, OpenRouter, Block Gateway, …) gets Chat Completions.
+/// Ollama, OpenRouter, Novita AI, Block Gateway, …) gets Chat Completions.
 /// Lookalike-safe: `api.openai.com.evil.example` returns `false`.
 pub fn is_openai_host(base_url: &str) -> bool {
     let rest = match base_url
@@ -1347,6 +1347,7 @@ mod tests {
             ("http://eu.api.openai.com/v1", true),
             ("http://localhost:11434/v1", false),
             ("https://openrouter.ai/api/v1", false),
+            ("https://api.novita.ai/openai", false),
             ("https://gateway.block.example/v1", false),
             ("https://api.openai.com.evil.example/v1", false),
             ("not a url", false),
