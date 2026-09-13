@@ -106,6 +106,7 @@ jobs:
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+
       - name: Codex security review contract
         run: just security-review-check
       - name: Rust cache contract
@@ -116,6 +117,12 @@ jobs:
         run: scripts/test-ci-required-context-isolation.sh
       - name: File size policy
         run: just file-size-check
+      - name: Migration immutability
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          scripts/check-migration-immutability.sh
+
 
   dead-token-guard:
     name: Dead Token Reference Guard
