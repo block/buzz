@@ -15,7 +15,7 @@ use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{parse_uuid, read_markdown_or_stdin, validate_hex64, validate_uuid};
 
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -1458,7 +1458,7 @@ pub async fn cmd_set_canvas(
     channel_id: &str,
     content: &str,
 ) -> Result<(), CliError> {
-    let content = read_or_stdin(content)?;
+    let content = read_markdown_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
