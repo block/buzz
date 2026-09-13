@@ -86,7 +86,9 @@ crates/
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (auto-applied on relay startup)
+migrations/           # SQL migrations — applied via `just migrate`; the relay
+                      # can also auto-apply them at startup with BUZZ_AUTO_MIGRATE=true
+                      # (default in the Helm chart, off elsewhere)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
 ```
