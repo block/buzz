@@ -510,6 +510,13 @@ pub const KIND_DM_ADD_MEMBER: u32 = 41011;
 /// Hide DM from sidebar.
 pub const KIND_DM_HIDE: u32 = 41012;
 /// A new direct-message conversation was created.
+///
+/// RESERVED, NOT EMITTED: no code path in this repo ever builds a
+/// kind:41001 event. `handle_dm_open` creates the channel and then publishes
+/// NIP-29 group discovery (kind:39000 with `t=dm` and one `p` tag per
+/// participant) — that is the event to query when listing a user's DMs.
+/// `buzz dms list` once queried this kind and returned an empty list for every
+/// account on every relay. Do not consume it without adding an emitter first.
 pub const KIND_DM_CREATED: u32 = 41001;
 
 // Agent job protocol (43000–43999)
