@@ -396,9 +396,14 @@ async fn community_hosts_with_operation(
     operation: observability::WriterOperation,
 ) -> Result<Vec<CommunityHost>> {
     let mut connection = observability::acquire_writer(pool, operation).await?;
-    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
-        .fetch_all(&mut *connection)
-        .await?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, host FROM communities \
+         WHERE archived_at IS NULL \
+           AND deleted_at IS NULL \
+           AND deletion_state = 'active'",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|(id, host)| CommunityHost { id, host })
@@ -803,6 +808,32 @@ mod postgres_tests {
         let found = hosts.iter().find(|h| h.id == id);
         assert!(found.is_some(), "inserted community not found");
         assert_eq!(found.unwrap().host, host);
+    }
+
+    /// Regression for #7558: community_hosts excludes tombstoned (deleted)
+    /// communities so the NIP-43 maintenance sweep never hands a fenced
+    /// community to publish_nip43_membership_list, where it is rejected and
+    /// logged every cycle.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_community_hosts_excludes_tombstoned_communities() {
+        let pool = get_pool().await;
+        let (active_id, _, _) = make_community(&pool).await;
+        let (tombstoned_id, _, _) = make_community(&pool).await;
+
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'tombstone', deleted_at = NOW() WHERE id = $1",
+        )
+        .bind(tombstoned_id)
+        .execute(&pool)
+        .await
+        .expect("tombstone community");
+
+        let hosts = community_hosts(&pool).await.expect("community_hosts");
+        let found_active = hosts.iter().any(|h| h.id == active_id);
+        let found_tombstoned = hosts.iter().any(|h| h.id == tombstoned_id);
+        assert!(found_active, "active community must be returned");
+        assert!(!found_tombstoned, "tombstoned community must be excluded");
     }
 
     /// community_count reflects newly inserted communities.
