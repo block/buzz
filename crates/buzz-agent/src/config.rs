@@ -669,7 +669,9 @@ impl Config {
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                env("OPENAI_BASE_URL")
+                    .or_else(|| env("OPENAI_COMPAT_BASE_URL"))
+                    .unwrap_or_else(|| "https://api.openai.com/v1".into()),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
