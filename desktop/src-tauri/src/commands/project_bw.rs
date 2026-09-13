@@ -4,10 +4,15 @@ use crate::{
     bw_projection::{self, Input},
     relay,
 };
-use buzz_core_pkg::bw::{parse_json, Evidence, Trust};
+use buzz_core_pkg::bw::{parse_json, Decision, Evidence, Trust};
 use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use tauri::State;
+
+use super::project_bw_git::{
+    genesis_clone_url, resolve_stream_head_blocking, validate_stream_for_git,
+};
+use super::project_git_exec::{build_git_auth_config, validate_workspace_clone_url};
 
 const PAGE: usize = 500;
 const KINDS: [u64; 5] = [30617, 1621, 46100, 1063, 1];
@@ -111,7 +116,7 @@ pub(crate) async fn load(state: &AppState, repo: &str) -> Result<Input, String> 
             }
         }
     }
-    Ok(Input {
+    let mut input = Input {
         trust: Trust {
             community: relay::relay_api_base_url_with_override(state),
             repo: repo.into(),
@@ -126,6 +131,121 @@ pub(crate) async fn load(state: &AppState, repo: &str) -> Result<Input, String> 
         },
         now,
         events: events.into_values().collect(),
+    };
+    observe_current_implemented_readbacks(state, &mut input).await;
+    Ok(input)
+}
+
+/// Select only otherwise-valid implemented transitions that Core left pending
+/// solely because the caller supplied no canonical Git observation. Signature,
+/// role, policy, references and causality have therefore already passed before
+/// any event-controlled stream reaches the Git helper.
+fn pending_implemented_readbacks(input: &Input, decisions: &[Decision]) -> Vec<Value> {
+    let mut readbacks = BTreeMap::new();
+    for (raw, decision) in input.events.iter().zip(decisions) {
+        if decision.outcome != "pending"
+            || decision.stage != "external"
+            || decision.code != "relay-head"
+        {
+            continue;
+        }
+        let Ok(event) = parse_json(raw.as_bytes()) else {
+            continue;
+        };
+        if event["kind"] != 46100 || tag(&event, "record") != Some("issue-state") {
+            continue;
+        }
+        let Some(content) = event["content"].as_str() else {
+            continue;
+        };
+        let Ok(body) = parse_json(content.as_bytes()) else {
+            continue;
+        };
+        if body["state"] != "implemented" || !body["remote_readback"].is_object() {
+            continue;
+        }
+        let readback = body["remote_readback"].clone();
+        readbacks.entry(readback.to_string()).or_insert(readback);
+    }
+    readbacks.into_values().collect()
+}
+
+/// Re-observe current canonical heads when that observation can confirm every
+/// otherwise-valid implemented readback in this history. Evidence is all or
+/// nothing: supplying a partial non-empty vector would turn unrelated missing
+/// observations from `pending` into false contradictions in Core.
+async fn observe_current_implemented_readbacks(state: &AppState, input: &mut Input) {
+    let (consumer, _) = bw_projection::replay(input);
+    let readbacks = pending_implemented_readbacks(input, &consumer.inspect_all());
+    if readbacks.is_empty() {
+        return;
+    }
+    let Ok(activation) = consumer.activation() else {
+        return;
+    };
+    let Ok(clone_url) = genesis_clone_url(input, &activation.genesis) else {
+        return;
+    };
+    if validate_workspace_clone_url(&clone_url, state).is_err() {
+        return;
+    }
+    let Ok(auth) = build_git_auth_config(state) else {
+        return;
+    };
+
+    if readbacks
+        .iter()
+        .any(|readback| readback["stream"].as_str().is_none())
+    {
+        return;
+    }
+    let streams: BTreeSet<String> = readbacks
+        .iter()
+        .filter_map(|readback| readback["stream"].as_str().map(str::to_owned))
+        .collect();
+    if streams
+        .iter()
+        .any(|stream| validate_stream_for_git(stream).is_err())
+    {
+        return;
+    }
+
+    let observed = {
+        let clone_url = clone_url.clone();
+        let task = tauri::async_runtime::spawn_blocking(move || {
+            streams
+                .into_iter()
+                .map(|stream| {
+                    resolve_stream_head_blocking(&clone_url, &stream, &auth)
+                        .map(|head| (stream, head))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+        })
+        .await;
+        match task {
+            Ok(Ok(observed)) => observed,
+            _ => return,
+        }
+    };
+
+    if all_readbacks_match_observed(input, &readbacks, &observed) {
+        input.external.git_readbacks = readbacks;
+    }
+}
+
+fn all_readbacks_match_observed(
+    input: &Input,
+    readbacks: &[Value],
+    observed: &BTreeMap<String, String>,
+) -> bool {
+    readbacks.iter().all(|readback| {
+        let Some(stream) = readback["stream"].as_str() else {
+            return false;
+        };
+        observed.get(stream).is_some_and(|head| {
+            readback["repo"].as_str() == Some(input.trust.repo.as_str())
+                && readback["head"].as_str() == Some(head.as_str())
+        })
     })
 }
 
@@ -217,6 +337,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn implemented_fixture_without_external_evidence() -> Input {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../../../../docs/nips/NIP-BW.fixtures.json"))
+                .expect("fixtures");
+        let case = fixtures["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .find(|case| case["name"] == "issue-state-positive")
+            .expect("issue-state-positive");
+        let events = case["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .map(|label| fixtures["events"][label.as_str().expect("label")]["event"].to_string())
+            .collect();
+        Input {
+            trust: serde_json::from_value(case["trust"].clone()).expect("trust"),
+            external: Evidence {
+                git_readbacks: vec![],
+                git_ancestry: vec![],
+                provider_readbacks: vec![],
+                downloads: vec![],
+                host_authorization: json!({"allowed":false}),
+            },
+            now: case["now"].as_u64().expect("now"),
+            events,
+        }
+    }
+
     #[tokio::test]
     async fn pagination_drains_boundary_and_keeps_original_bytes() {
         let newer = "{ \"created_at\": 3 }".to_owned();
@@ -261,5 +412,52 @@ mod tests {
         )
         .await;
         assert!(result.expect_err("saturated").contains("saturated"));
+    }
+
+    #[test]
+    fn current_canonical_head_turns_the_exact_pending_readback_into_evidence() {
+        let mut input = implemented_fixture_without_external_evidence();
+        let (consumer, _) = bw_projection::replay(&input);
+        let decisions = consumer.inspect_all();
+        let implemented = decisions.last().expect("implemented decision");
+        assert_eq!(implemented.outcome, "pending");
+        assert_eq!(implemented.stage, "external");
+        assert_eq!(implemented.code, "relay-head");
+
+        let readbacks = pending_implemented_readbacks(&input, &decisions);
+        assert_eq!(readbacks.len(), 1);
+        let stream = readbacks[0]["stream"].as_str().expect("stream");
+        let head = readbacks[0]["head"].as_str().expect("head");
+        let observed = BTreeMap::from([(stream.to_owned(), head.to_owned())]);
+        assert!(all_readbacks_match_observed(&input, &readbacks, &observed));
+
+        input.external.git_readbacks = readbacks;
+        let (consumer, _) = bw_projection::replay(&input);
+        assert_eq!(
+            consumer
+                .inspect_all()
+                .last()
+                .expect("implemented decision")
+                .outcome,
+            "accept"
+        );
+    }
+
+    #[test]
+    fn different_or_missing_canonical_head_cannot_confirm_a_signed_claim() {
+        let input = implemented_fixture_without_external_evidence();
+        let (consumer, _) = bw_projection::replay(&input);
+        let readbacks = pending_implemented_readbacks(&input, &consumer.inspect_all());
+        let stream = readbacks[0]["stream"].as_str().expect("stream");
+
+        let different = BTreeMap::from([(stream.to_owned(), "f".repeat(40))]);
+        assert!(!all_readbacks_match_observed(
+            &input, &readbacks, &different
+        ));
+        assert!(!all_readbacks_match_observed(
+            &input,
+            &readbacks,
+            &BTreeMap::new()
+        ));
     }
 }

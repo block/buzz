@@ -22,20 +22,20 @@
 //! Relay Git head, never a caller's claim. This command resolves that one
 //! fact itself (`git ls-remote` against the repository's own owner-signed
 //! clone URL, read at the moment of this explicit "mark implemented"
-//! submission — never from rendering the issue) and overwrites whatever the
+//! submission) and overwrites whatever the
 //! caller sent for those two fields before Core ever sees the candidate, the
 //! same way `assemble_bw_tags` already overwrites a caller-supplied `policy`.
 
 use super::project_bw::load as load_bw_input;
-use super::project_bw_signer::explicit_writer_signer;
-use super::project_git_exec::{
-    build_git_auth_config, run_git, validate_workspace_clone_url, GitAuthConfig,
+use super::project_bw_git::{
+    genesis_clone_url, resolve_stream_head_blocking, validate_stream_for_git,
 };
+use super::project_bw_signer::explicit_writer_signer;
+use super::project_git_exec::{build_git_auth_config, validate_workspace_clone_url};
 use super::project_git_workflow::project_owner_identity;
 use crate::app_state::AppState;
 use crate::bw_projection;
 use crate::relay::{query_relay, submit_signed_event_with_keys};
-use buzz_core_pkg::bw::parse_json;
 use buzz_sdk_pkg::bw::{record as bw_record, Publication, RecordType};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
@@ -56,100 +56,6 @@ fn record_type(name: &str) -> Result<RecordType, String> {
             "Unsupported BW record type for this command: {other}"
         )),
     }
-}
-
-/// Defensive shape gate before a stream name reaches a `git` argv, mirroring
-/// (not replacing) NIP-BW.md's own `stream` grammar
-/// (`crates/buzz-core/src/bw/shape.rs`). This never decides BW validity —
-/// Core's own shape/causality checks still run on the assembled candidate —
-/// it only keeps a hostile stream value from being interpreted as a git flag
-/// or an out-of-repo ref before that point.
-fn validate_stream_for_git(stream: &str) -> Result<(), String> {
-    let bytes = stream.as_bytes();
-    let ok = !stream.is_empty()
-        && stream.len() <= 128
-        && bytes[0].is_ascii_alphanumeric()
-        && bytes.iter().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'/' | b'-')
-        })
-        && !stream.contains("..")
-        && !stream.contains("@{")
-        && !stream.ends_with(['.', '/'])
-        && stream
-            .split('/')
-            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"));
-    if ok {
-        Ok(())
-    } else {
-        Err("Invalid BW stream name.".to_string())
-    }
-}
-
-/// The owner-signed repository genesis's `clone` URL — read only from the
-/// exact record Core's own `activation()` already authenticated (`genesis`),
-/// never from any other same-coordinate 30617 event that happened to be
-/// fetched alongside it.
-fn genesis_clone_url(bw_input: &bw_projection::Input, genesis_id: &str) -> Result<String, String> {
-    bw_input
-        .events
-        .iter()
-        .find_map(|raw| {
-            let wire = parse_json(raw.as_bytes()).ok()?;
-            if wire["id"].as_str() != Some(genesis_id) {
-                return None;
-            }
-            wire["tags"].as_array()?.iter().find_map(|tag| {
-                let tag = tag.as_array()?;
-                (tag.first()?.as_str()? == "clone")
-                    .then(|| tag.get(1)?.as_str())
-                    .flatten()
-                    .map(str::to_owned)
-            })
-        })
-        .ok_or_else(|| "Repository announcement has no clone URL on record.".to_string())
-}
-
-/// Read the real current commit of `stream` from the repository's own git
-/// hosting. A blocking `git` subprocess call, run only for this one explicit
-/// write (never from a render): the only way NIP-BW.md's `implemented`
-/// transition can carry a fact instead of a claim.
-fn resolve_stream_head_blocking(
-    clone_url: &str,
-    stream: &str,
-    auth: &GitAuthConfig,
-) -> Result<String, String> {
-    let refname = format!("refs/heads/{stream}");
-    let output = run_git(
-        &[
-            "ls-remote",
-            "--exit-code",
-            "--end-of-options",
-            clone_url,
-            refname.as_str(),
-        ],
-        None,
-        auth,
-    )
-    .map_err(|error| format!("Could not read the repository's current {stream} head: {error}"))?;
-    // `git ls-remote <url> <pattern>` matches a pattern against the *tail* of
-    // a ref, anchored at either the start of the ref or a `/` boundary
-    // (git-ls-remote(1)) — so a ref an attacker pushed as
-    // `refs/heads/x/refs/heads/<stream>` also matches this same pattern and
-    // can sort before the real branch in the output. Anyone who can push to
-    // the repository (the assigned writer, by construction) can otherwise
-    // pick the "externally observed" commit for their own implemented claim.
-    // Only a line whose own ref is byte-for-byte `refs/heads/<stream>` is
-    // ever accepted; any other match is a shadow, not the branch.
-    output
-        .lines()
-        .find_map(|line| {
-            let mut parts = line.split_whitespace();
-            let sha = parts.next()?;
-            let matched_ref = parts.next()?;
-            (matched_ref == refname).then(|| sha.to_ascii_lowercase())
-        })
-        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| format!("Could not resolve a commit for stream {stream}."))
 }
 
 /// Extra, record-specific tags supplied by the caller (`issue`, `previous`,
