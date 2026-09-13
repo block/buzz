@@ -30,6 +30,7 @@ class ManageChannelSheet extends HookConsumerWidget {
     useListenable(descriptionController);
     final canvasController = useTextEditingController();
     final isEditingCanvas = useState(false);
+    final editingCanvasEventId = useState<String?>(null);
     final isSavingCanvas = useState(false);
     final isSavingDetails = useState(false);
     final actionError = useState<String?>(null);
@@ -54,7 +55,8 @@ class ManageChannelSheet extends HookConsumerWidget {
         canonicalName.isNotEmpty &&
         (nameDirty || descriptionDirty) &&
         !isSavingDetails.value;
-    final canEditCanvas = channel.isMember && !channel.isArchived;
+    final canEditCanvas =
+        canEditDetails && channel.isMember && !channel.isArchived;
 
     Future<void> saveDetails() async {
       if (!canSaveDetails) return;
@@ -91,8 +93,13 @@ class ManageChannelSheet extends HookConsumerWidget {
             .setCanvas(
               channelId: channel.id,
               content: canvasController.text.trim(),
+              enforceRevision: true,
+              expectedEventId: editingCanvasEventId.value,
             );
-        if (context.mounted) isEditingCanvas.value = false;
+        if (context.mounted) {
+          isEditingCanvas.value = false;
+          editingCanvasEventId.value = null;
+        }
       } catch (error) {
         actionError.value = error.toString();
       } finally {
@@ -176,6 +183,7 @@ class ManageChannelSheet extends HookConsumerWidget {
                                   ? null
                                   : () {
                                       isEditingCanvas.value = false;
+                                      editingCanvasEventId.value = null;
                                       canvasController.text =
                                           canvas.content ?? '';
                                     },
@@ -214,7 +222,10 @@ class ManageChannelSheet extends HookConsumerWidget {
                         alignment: Alignment.centerRight,
                         child: FilledButton.tonal(
                           onPressed: canEditCanvas
-                              ? () => isEditingCanvas.value = true
+                              ? () {
+                                  editingCanvasEventId.value = canvas.eventId;
+                                  isEditingCanvas.value = true;
+                                }
                               : null,
                           child: Text(
                             canvas.content?.trim().isNotEmpty == true
