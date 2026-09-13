@@ -46,6 +46,35 @@ keypair.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
+## Mobile pairing
+
+`BUZZ_REQUIRE_RELAY_MEMBERSHIP=true` (the production default in `.env.example`)
+makes the relay advertise NIP-43 device pairing in its NIP-11 document,
+regardless of whether a pairing relay is actually reachable. Without the
+wiring below, the desktop/mobile app's pairing probe finds NIP-43 advertised,
+falls back to the legacy `<relay>/pair` convention, and gets
+`HTTP error: 404 Not Found` — there is nothing listening on `/pair`.
+
+To make mobile pairing work out of the box, this bundle includes:
+
+- A `pairing-relay` service in `compose.yml` — the same image as `relay`,
+  running the bundled `buzz-pair-relay` binary instead. It's stateless and
+  needs no database/Redis/secrets.
+- A `BUZZ_PAIRING_RELAY_URL` env var (see `.env.example`) that the main relay
+  advertises directly in NIP-11, so the client connects to the pairing relay
+  without needing the legacy fallback at all.
+- With `BUZZ_COMPOSE_TLS=true` (`compose.caddy.yml`), a `/pair` route in the
+  `Caddyfile` that proxies to `pairing-relay:5000`, including the WebSocket
+  upgrade.
+
+If you're **not** using `compose.caddy.yml` (bringing your own reverse
+proxy), you must add an equivalent `/pair` → `pairing-relay:5000` route
+yourself — see `crates/buzz-pair-relay`'s module docs for the requirements
+(route only `/pair`, terminate TLS, enforce read timeouts). Without that
+route, either wire it up or set `BUZZ_REQUIRE_RELAY_MEMBERSHIP=false` and
+clear `BUZZ_PAIRING_RELAY_URL` to disable device pairing entirely on an open
+relay.
+
 ## Validation
 
 Before sharing an install link publicly, verify a fresh install with:
