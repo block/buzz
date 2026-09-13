@@ -113,7 +113,7 @@ pub(super) fn genesis_clone_url(
         repo_owner.to_ascii_lowercase(),
         repo_id
     );
-    if clone.path() != expected_path {
+    if clone.path() != expected_path && clone.path() != format!("{expected_path}.git") {
         return Err(CliError::Usage(
             "repository clone URL does not match the active BW repository".into(),
         ));
@@ -303,6 +303,25 @@ mod tests {
             .expect("same relay repository"),
             format!("https://relay.example/base/git/{owner}/buzz")
         );
+        let mut dot_git_events = BTreeMap::new();
+        dot_git_events.insert(
+            "b".repeat(64),
+            json!({
+                "id": "b".repeat(64),
+                "tags": [["clone", format!("https://relay.example/base/git/{owner}/buzz.git")]],
+            }),
+        );
+        assert_eq!(
+            genesis_clone_url(
+                &dot_git_events,
+                &"b".repeat(64),
+                "wss://relay.example/base",
+                &owner,
+                "buzz"
+            )
+            .expect("same relay repository with .git suffix"),
+            format!("https://relay.example/base/git/{owner}/buzz.git")
+        );
         assert!(genesis_clone_url(
             &events,
             &"b".repeat(64),
@@ -319,5 +338,29 @@ mod tests {
             "buzz"
         )
         .is_err());
+
+        for clone_url in [
+            format!("https://relay.example/base/git/{owner}/buzz/extra"),
+            format!("https://user@relay.example/base/git/{owner}/buzz"),
+            format!("https://relay.example/base/git/{owner}/buzz?ref=windows"),
+            format!("https://relay.example/base/git/{owner}/buzz#windows"),
+        ] {
+            let mut invalid_events = BTreeMap::new();
+            invalid_events.insert(
+                "b".repeat(64),
+                json!({
+                    "id": "b".repeat(64),
+                    "tags": [["clone", clone_url]],
+                }),
+            );
+            assert!(genesis_clone_url(
+                &invalid_events,
+                &"b".repeat(64),
+                "wss://relay.example/base",
+                &owner,
+                "buzz"
+            )
+            .is_err());
+        }
     }
 }
