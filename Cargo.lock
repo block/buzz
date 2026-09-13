@@ -1456,6 +1456,7 @@ dependencies = [
 name = "buzz-ws-client"
 version = "0.1.0"
 dependencies = [
+ "buzz-core",
  "futures-util",
  "nostr 0.44.7",
  "serde_json",
