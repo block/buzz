@@ -27,6 +27,7 @@ import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { isRelayMembershipDeniedError } from "@/shared/lib/relayError";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
@@ -42,16 +43,6 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-
-function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.message.includes("You must be a relay member") ||
-    error.message.includes("relay_membership_required") ||
-    error.message.includes("restricted: not a relay member") ||
-    error.message.includes("invalid: you are not a relay member")
-  );
-}
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
