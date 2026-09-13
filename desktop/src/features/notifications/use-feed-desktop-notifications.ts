@@ -110,6 +110,14 @@ export function writeStoredRetryFeedIds(pubkey: string, ids: string[]) {
 
 export type FeedNotificationPermissionOutcome = "granted" | "denied" | "error";
 
+export function persistRetryFeedIds(pubkey: string, ids: Set<string>) {
+  for (const id of ids) {
+    if (ids.size <= HOME_FEED_SEEN_MAX_ITEMS) break;
+    ids.delete(id);
+  }
+  writeStoredRetryFeedIds(pubkey, [...ids]);
+}
+
 export type FeedNotificationBatchResult = {
   handledIds: string[];
   retryableIds: string[];
@@ -225,13 +233,13 @@ export function useFeedDesktopNotifications(
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
-    if (enabled) {
+    if (enabled && settings.desktopEnabled) {
       return;
     }
 
     notificationGenerationRef.current += 1;
     inFlightItemIdsRef.current.clear();
-  }, [enabled]);
+  }, [enabled, settings.desktopEnabled]);
 
   const autoRequestPermissionIfNeeded = React.useEffectEvent(() =>
     ensureFeedNotificationPermission(
@@ -241,13 +249,17 @@ export function useFeedDesktopNotifications(
   );
 
   const deliverFeedNotification = React.useEffectEvent(
-    async (item: FeedItem, senderName?: string) => {
+    async (item: FeedItem, generation: number, senderName?: string) => {
+      if (!enabled || !settings.desktopEnabled) return false;
       const { title, body } = formatFeedNotification(item, senderName);
-      const didSend = await sendDesktopNotification({
-        body,
-        target: buildFeedItemNotificationTarget(item),
-        title,
-      });
+      const didSend = await sendDesktopNotification(
+        {
+          body,
+          target: buildFeedItemNotificationTarget(item),
+          title,
+        },
+        () => generation === notificationGenerationRef.current,
+      );
 
       if (
         didSend &&
@@ -336,7 +348,7 @@ export function useFeedDesktopNotifications(
         inFlightItemIdsRef.current.add(item.id);
         retryItemIdsRef.current.add(item.id);
       }
-      writeStoredRetryFeedIds(normalizedPubkey, [...retryItemIdsRef.current]);
+      persistRetryFeedIds(normalizedPubkey, retryItemIdsRef.current);
       const generation = notificationGenerationRef.current;
       void deliverFeedNotificationBatch(
         newItems,
@@ -362,7 +374,7 @@ export function useFeedDesktopNotifications(
             resolvedLabel && resolvedLabel !== truncateNpub(item.pubkey)
               ? resolvedLabel
               : undefined;
-          return deliverFeedNotification(item, senderName);
+          return deliverFeedNotification(item, generation, senderName);
         },
       ).then((result) => {
         if (generation !== notificationGenerationRef.current) {
@@ -377,7 +389,7 @@ export function useFeedDesktopNotifications(
         for (const id of result.retryableIds) {
           retryItemIdsRef.current.add(id);
         }
-        writeStoredRetryFeedIds(normalizedPubkey, [...retryItemIdsRef.current]);
+        persistRetryFeedIds(normalizedPubkey, retryItemIdsRef.current);
         if (result.handledIds.length === 0) {
           return;
         }

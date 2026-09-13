@@ -272,3 +272,101 @@ test("a delivery failure remains retryable across a hook remount", async (t) => 
   remountedHook.unmount();
   cleanup();
 });
+
+test("feed retry persistence bounds the production in-memory set", async () => {
+  const { persistRetryFeedIds, readStoredRetryFeedIds } = await import(
+    "./use-feed-desktop-notifications.ts"
+  );
+  const ids = new Set(
+    Array.from({ length: 510 }, (_, index) => `retry-${index}`),
+  );
+  persistRetryFeedIds("bounded-viewer", ids);
+  assert.equal(ids.size, 500);
+  assert.equal(ids.has("retry-9"), false);
+  assert.equal(ids.has("retry-10"), true);
+  assert.deepEqual(readStoredRetryFeedIds("bounded-viewer"), [...ids]);
+});
+
+test("disabling desktop notifications fences a pending feed permission check", async (t) => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useFeedDesktopNotifications, readStoredRetryFeedIds } = await import(
+    "./use-feed-desktop-notifications.ts"
+  );
+  const delivered = [];
+  let releasePermission;
+  let permission = new Promise((resolve) => {
+    releasePermission = resolve;
+  });
+  const previousPlatform = Object.getOwnPropertyDescriptor(
+    navigator,
+    "platform",
+  );
+  const previousInternals = window.__TAURI_INTERNALS__;
+  const previousIsTauri = globalThis.isTauri;
+  t.after(() => {
+    window.__TAURI_INTERNALS__ = previousInternals;
+    globalThis.isTauri = previousIsTauri;
+    if (previousPlatform)
+      Object.defineProperty(navigator, "platform", previousPlatform);
+    else delete navigator.platform;
+  });
+  globalThis.isTauri = true;
+  Object.defineProperty(navigator, "platform", {
+    configurable: true,
+    value: "Win32",
+  });
+  window.__TAURI_INTERNALS__ = {
+    invoke(command) {
+      if (command === "windows_notification_permission_state")
+        return permission;
+      assert.equal(command, "show_native_notification");
+      delivered.push(command);
+      return Promise.resolve();
+    },
+  };
+  const item = {
+    id: "toggle-alert",
+    kind: 9,
+    pubkey: "sender",
+    content: "pending",
+    createdAt: 123,
+    channelId: "channel-id",
+    channelName: "ship-room",
+    channelType: "stream",
+    tags: [],
+    category: "mention",
+  };
+  const emptyFeed = { feed: { mentions: [], needsAction: [] } };
+  const feed = { feed: { mentions: [item], needsAction: [] } };
+  const profiles = new Map();
+  const silent = new Set(["channel-id"]);
+  const hook = renderHook(
+    ({ feed, desktopEnabled }) =>
+      useFeedDesktopNotifications(
+        feed,
+        "toggle-viewer",
+        { desktopEnabled, slotAlertsEnabled: { mention: true } },
+        async () => true,
+        true,
+        profiles,
+        undefined,
+        [],
+        silent,
+      ),
+    { initialProps: { feed: emptyFeed, desktopEnabled: true } },
+  );
+  t.after(() => hook.unmount());
+  hook.rerender({ feed, desktopEnabled: true });
+  await act(async () => {});
+  hook.rerender({ feed, desktopEnabled: false });
+  await act(async () => {
+    releasePermission("granted");
+  });
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(readStoredRetryFeedIds("toggle-viewer"), ["toggle-alert"]);
+  permission = Promise.resolve("granted");
+  await act(async () => {
+    hook.rerender({ feed, desktopEnabled: true });
+  });
+  assert.equal(delivered.length, 1);
+});

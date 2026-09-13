@@ -44,7 +44,7 @@ export type DesktopNotificationTarget = {
   threadRootId?: string | null;
 };
 
-type DesktopNotificationPayload = {
+export type DesktopNotificationPayload = {
   body?: string;
   target?: DesktopNotificationTarget;
   title: string;
@@ -283,8 +283,8 @@ export async function listenForDesktopNotificationActions(
       }
     }
 
-    // Linux forwards the target as the event payload. macOS queues targets in
-    // Rust first so cold-start clicks survive until this listener is mounted.
+    // Linux forwards the target as the event payload. macOS and Windows queue
+    // targets in Rust before emitting so clicks survive a missing listener.
     const dispatchNativeActivations = async (payload?: unknown) => {
       if (usesActivationQueue) {
         const targets = await invoke<unknown[]>(
@@ -323,12 +323,12 @@ export async function listenForDesktopNotificationActions(
       nativeUnlisten = null;
     }
 
-    if (nativeUnlisten && usesActivationQueue) {
+    if (usesActivationQueue) {
       try {
         await dispatchNativeActivations();
       } catch (error) {
         console.error(
-          "Failed to drain pending macOS notification activations",
+          "Failed to drain pending notification activations",
           error,
         );
       }
@@ -470,6 +470,7 @@ export async function revealDesktopAppWindow(): Promise<void> {
 
 export async function sendDesktopNotification(
   payload: DesktopNotificationPayload,
+  canDeliver: () => boolean = () => true,
 ): Promise<boolean> {
   let permission: DesktopNotificationPermissionState;
   try {
@@ -479,7 +480,7 @@ export async function sendDesktopNotification(
     return false;
   }
 
-  if (permission !== "granted") {
+  if (permission !== "granted" || !canDeliver()) {
     return false;
   }
 

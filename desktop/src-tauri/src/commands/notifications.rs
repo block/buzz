@@ -13,6 +13,8 @@
 //! action, which we forward to the frontend so it can focus the window and
 //! route to the notification target.
 
+#![forbid(unsafe_code)]
+
 pub(crate) const NATIVE_NOTIFICATION_ACTIVATED_EVENT: &str = "native-notification-activated";
 
 /// Show a desktop notification natively.
@@ -155,6 +157,7 @@ mod windows {
         core::HSTRING,
         UI::Notifications::{NotificationSetting, ToastNotificationManager},
     };
+    use winsafe::{co, prelude::*, IPersistFile, IPropertyStore, IShellLink, RegistryValue, HKEY};
 
     const MAX_PENDING_ACTIVATIONS: usize = 64;
     static STARTUP_REGISTRATION: OnceLock<Result<(), String>> = OnceLock::new();
@@ -172,173 +175,76 @@ mod windows {
             .clone()
     }
 
-    fn to_wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
     fn set_process_aumid(app_id: &str) -> Result<(), String> {
-        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-
-        let app_id = to_wide(app_id);
-        let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
-        if result < 0 {
-            return Err(format!(
-                "failed to set Windows process AUMID: 0x{result:08X}"
-            ));
-        }
-        Ok(())
+        winsafe::SetCurrentProcessExplicitAppUserModelID(app_id)
+            .map_err(|error| format!("failed to set Windows process AUMID: {error}"))
     }
 
     fn write_notification_settings_entry(app_id: &str) -> Result<(), String> {
-        use windows_sys::Win32::System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-            KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
-        };
-
-        let subkey = to_wide(&format!(
+        initialize_notification_settings(&format!(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\{app_id}"
-        ));
-        unsafe {
-            let mut existing: HKEY = std::ptr::null_mut();
-            if RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                subkey.as_ptr(),
-                0,
-                KEY_READ,
-                &mut existing,
-            ) == 0
-            {
-                RegCloseKey(existing);
-                return Ok(());
-            }
+        ))
+    }
 
-            let mut key: HKEY = std::ptr::null_mut();
-            let status = RegCreateKeyExW(
-                HKEY_CURRENT_USER,
-                subkey.as_ptr(),
-                0,
-                std::ptr::null(),
-                REG_OPTION_NON_VOLATILE,
-                KEY_WRITE,
-                std::ptr::null(),
-                &mut key,
-                std::ptr::null_mut(),
-            );
-            if status != 0 {
-                return Err(format!("RegCreateKeyExW failed with status {status}"));
-            }
-
-            let show_name = to_wide("ShowInActionCenter");
-            let enabled_name = to_wide("Enabled");
-            let value: u32 = 1;
-            let show_status = RegSetValueExW(
-                key,
-                show_name.as_ptr(),
-                0,
-                REG_DWORD,
-                (&value as *const u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            );
-            let enabled_status = RegSetValueExW(
-                key,
-                enabled_name.as_ptr(),
-                0,
-                REG_DWORD,
-                (&value as *const u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            );
-            RegCloseKey(key);
-            if show_status != 0 {
-                return Err(format!(
-                    "RegSetValueExW(ShowInActionCenter) failed: {show_status}"
-                ));
-            }
-            if enabled_status != 0 {
-                return Err(format!("RegSetValueExW(Enabled) failed: {enabled_status}"));
-            }
+    fn initialize_notification_settings(subkey: &str) -> Result<(), String> {
+        let (key, disposition) = HKEY::CURRENT_USER
+            .RegCreateKeyEx(
+                subkey,
+                None,
+                co::REG_OPTION::NON_VOLATILE,
+                co::KEY::WRITE,
+                None,
+            )
+            .map_err(|error| format!("could not open Windows notification settings: {error}"))?;
+        if disposition == co::REG_DISPOSITION::OPENED_EXISTING_KEY {
+            return Ok(());
+        }
+        for name in ["ShowInActionCenter", "Enabled"] {
+            key.RegSetValueEx(Some(name), RegistryValue::Dword(1))
+                .map_err(|error| {
+                    format!("could not initialize notification setting {name}: {error}")
+                })?;
         }
         Ok(())
     }
 
     fn write_aumid_registry_entry(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {
-        use windows_sys::Win32::System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-            REG_OPTION_NON_VOLATILE, REG_SZ,
-        };
-
         let display_name = app
             .config()
             .product_name
             .clone()
             .unwrap_or_else(|| "Buzz".to_string());
         let icon_path = std::env::current_exe()
-            .map_err(|error| format!("could not resolve current executable: {error}"))?
-            .to_string_lossy()
-            .into_owned();
-        let subkey = to_wide(&format!("Software\\Classes\\AppUserModelId\\{app_id}"));
-        let display_name_key = to_wide("DisplayName");
-        let display_name_value = to_wide(&display_name);
-        let icon_key = to_wide("IconUri");
-        let icon_value = to_wide(&icon_path);
+            .map_err(|error| format!("could not resolve current executable: {error}"))?;
+        write_aumid_metadata(
+            &format!("Software\\Classes\\AppUserModelId\\{app_id}"),
+            &display_name,
+            &icon_path.to_string_lossy(),
+        )
+    }
 
-        unsafe {
-            let mut key: HKEY = std::ptr::null_mut();
-            let status = RegCreateKeyExW(
-                HKEY_CURRENT_USER,
-                subkey.as_ptr(),
-                0,
-                std::ptr::null(),
-                REG_OPTION_NON_VOLATILE,
-                KEY_WRITE,
-                std::ptr::null(),
-                &mut key,
-                std::ptr::null_mut(),
-            );
-            if status != 0 {
-                return Err(format!("RegCreateKeyExW failed with status {status}"));
-            }
-            let display_status = RegSetValueExW(
-                key,
-                display_name_key.as_ptr(),
-                0,
-                REG_SZ,
-                display_name_value.as_ptr().cast(),
-                (display_name_value.len() * 2) as u32,
-            );
-            let icon_status = RegSetValueExW(
-                key,
-                icon_key.as_ptr(),
-                0,
-                REG_SZ,
-                icon_value.as_ptr().cast(),
-                (icon_value.len() * 2) as u32,
-            );
-            RegCloseKey(key);
-            if display_status != 0 {
-                return Err(format!(
-                    "RegSetValueExW(DisplayName) failed: {display_status}"
-                ));
-            }
-            if icon_status != 0 {
-                return Err(format!("RegSetValueExW(IconUri) failed: {icon_status}"));
-            }
+    fn write_aumid_metadata(
+        subkey: &str,
+        display_name: &str,
+        icon_path: &str,
+    ) -> Result<(), String> {
+        let (key, _) = HKEY::CURRENT_USER
+            .RegCreateKeyEx(
+                subkey,
+                None,
+                co::REG_OPTION::NON_VOLATILE,
+                co::KEY::WRITE,
+                None,
+            )
+            .map_err(|error| format!("could not open Windows AUMID metadata: {error}"))?;
+        for (name, value) in [("DisplayName", display_name), ("IconUri", icon_path)] {
+            key.RegSetValueEx(Some(name), RegistryValue::Sz(value.to_string()))
+                .map_err(|error| format!("could not write AUMID {name}: {error}"))?;
         }
         Ok(())
     }
 
     fn ensure_start_menu_shortcut(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {
-        use windows::core::{Interface, PCWSTR};
-        use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
-        use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-        use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
-            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
-        };
-        use windows::Win32::UI::Shell::{
-            FOLDERID_Programs, IShellLinkW, PropertiesSystem::IPropertyStore, SHGetKnownFolderPath,
-            ShellLink, KF_FLAG_CREATE,
-        };
-
         let product_name = app
             .config()
             .product_name
@@ -346,72 +252,71 @@ mod windows {
             .unwrap_or_else(|| "Buzz".to_string());
         let executable = std::env::current_exe()
             .map_err(|error| format!("could not resolve current executable: {error}"))?;
-        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if initialized.is_err() {
-            return Err(format!("CoInitializeEx failed: {initialized:?}"));
+        let programs =
+            winsafe::SHGetKnownFolderPath(&co::KNOWNFOLDERID::Programs, co::KF::CREATE, None)
+                .map_err(|error| format!("could not find Start Menu programs: {error}"))?;
+        ensure_shortcut_in(
+            std::path::Path::new(&programs),
+            &product_name,
+            &executable,
+            app_id,
+        )
+    }
+
+    fn ensure_shortcut_in(
+        programs: &std::path::Path,
+        product_name: &str,
+        executable: &std::path::Path,
+        app_id: &str,
+    ) -> Result<(), String> {
+        let _apartment = winsafe::CoInitializeEx(co::COINIT::APARTMENTTHREADED)
+            .map_err(|error| format!("could not initialize shortcut COM apartment: {error}"))?;
+        let subfolder = programs.join(product_name);
+        let nested_path = subfolder.join(format!("{product_name}.lnk"));
+        let flat_path = programs.join(format!("{product_name}.lnk"));
+        let shortcut_path = if nested_path.exists() {
+            nested_path
+        } else if flat_path.exists() {
+            flat_path
+        } else {
+            std::fs::create_dir_all(&subfolder)
+                .map_err(|error| format!("could not create Start Menu folder: {error}"))?;
+            nested_path
+        };
+        let link = winsafe::CoCreateInstance::<IShellLink>(
+            &co::CLSID::ShellLink,
+            None::<&winsafe::IUnknown>,
+            co::CLSCTX::INPROC_SERVER,
+        )
+        .map_err(|error| format!("could not create ShellLink: {error}"))?;
+        let persist: IPersistFile = link
+            .QueryInterface()
+            .map_err(|error| format!("could not query shortcut persistence: {error}"))?;
+        if shortcut_path.exists() {
+            persist
+                .Load(&shortcut_path.to_string_lossy(), co::STGM::READWRITE)
+                .map_err(|error| format!("could not load Start Menu shortcut: {error}"))?;
+        } else {
+            link.SetPath(&executable.to_string_lossy())
+                .map_err(|error| format!("could not set shortcut path: {error}"))?;
+            link.SetIconLocation(&executable.to_string_lossy(), 0)
+                .map_err(|error| format!("could not set shortcut icon: {error}"))?;
         }
-
-        let result = (|| -> Result<(), String> {
-            let programs_path_ptr = unsafe {
-                SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_CREATE, None)
-                    .map_err(|error| format!("SHGetKnownFolderPath failed: {error}"))?
-            };
-            let programs_path_result = unsafe { programs_path_ptr.to_string() };
-            unsafe {
-                CoTaskMemFree(Some(programs_path_ptr.0.cast()));
-            }
-            let programs_path = programs_path_result
-                .map_err(|error| format!("invalid Start Menu path: {error}"))?;
-
-            let subfolder = format!("{programs_path}\\{product_name}");
-            let nested_path = format!("{subfolder}\\{product_name}.lnk");
-            let flat_path = format!("{programs_path}\\{product_name}.lnk");
-            let shortcut_path = if std::path::Path::new(&nested_path).exists() {
-                nested_path
-            } else if std::path::Path::new(&flat_path).exists() {
-                flat_path
-            } else {
-                std::fs::create_dir_all(&subfolder)
-                    .map_err(|error| format!("could not create Start Menu folder: {error}"))?;
-                nested_path
-            };
-            let shortcut_path = to_wide(&shortcut_path);
-            let executable = to_wide(&executable.to_string_lossy());
-            let link: IShellLinkW = unsafe {
-                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|error| format!("CoCreateInstance(ShellLink) failed: {error}"))?
-            };
-            let persist: IPersistFile = link
-                .cast()
-                .map_err(|error| format!("IShellLinkW -> IPersistFile failed: {error}"))?;
-            if unsafe { persist.Load(PCWSTR(shortcut_path.as_ptr()), STGM_READWRITE) }.is_err() {
-                unsafe {
-                    link.SetPath(PCWSTR(executable.as_ptr()))
-                        .map_err(|error| format!("IShellLinkW::SetPath failed: {error}"))?;
-                    link.SetIconLocation(PCWSTR(executable.as_ptr()), 0)
-                        .map_err(|error| format!("IShellLinkW::SetIconLocation failed: {error}"))?;
-                }
-            }
-            let properties: IPropertyStore = link
-                .cast()
-                .map_err(|error| format!("IShellLinkW -> IPropertyStore failed: {error}"))?;
-            let value = PROPVARIANT::from(app_id);
-            unsafe {
-                properties
-                    .SetValue(&PKEY_AppUserModel_ID, &value)
-                    .map_err(|error| format!("IPropertyStore::SetValue failed: {error}"))?;
-                properties
-                    .Commit()
-                    .map_err(|error| format!("IPropertyStore::Commit failed: {error}"))?;
-                persist
-                    .Save(PCWSTR(shortcut_path.as_ptr()), true)
-                    .map_err(|error| format!("IPersistFile::Save failed: {error}"))?;
-            }
-            Ok(())
-        })();
-
-        unsafe { CoUninitialize() };
-        result
+        let properties: IPropertyStore = link
+            .QueryInterface()
+            .map_err(|error| format!("could not query shortcut property store: {error}"))?;
+        properties
+            .SetValue(
+                &co::PKEY::AppUserModel_ID,
+                &winsafe::PropVariant::from_str(app_id),
+            )
+            .map_err(|error| format!("could not set shortcut AUMID: {error}"))?;
+        properties
+            .Commit()
+            .map_err(|error| format!("could not commit shortcut properties: {error}"))?;
+        persist
+            .Save(Some(&shortcut_path.to_string_lossy()), true)
+            .map_err(|error| format!("could not save Start Menu shortcut: {error}"))
     }
 
     fn queue_activation(target: Option<serde_json::Value>) {
@@ -510,6 +415,130 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        struct TestRegistryKey(String);
+
+        impl TestRegistryKey {
+            fn new() -> Self {
+                Self(format!(
+                    "Software\\BuzzNotificationTest-{}",
+                    uuid::Uuid::new_v4()
+                ))
+            }
+
+            fn open(&self) -> winsafe::guard::RegCloseKeyGuard {
+                HKEY::CURRENT_USER
+                    .RegOpenKeyEx(
+                        Some(&self.0),
+                        co::REG_OPTION::default(),
+                        co::KEY::READ | co::KEY::WRITE,
+                    )
+                    .expect("open isolated test key")
+            }
+        }
+
+        impl Drop for TestRegistryKey {
+            fn drop(&mut self) {
+                HKEY::CURRENT_USER
+                    .RegDeleteTree(Some(&self.0))
+                    .expect("remove isolated test key");
+            }
+        }
+
+        #[test]
+        fn notification_settings_preserve_existing_opt_out() {
+            let test_key = TestRegistryKey::new();
+            initialize_notification_settings(&test_key.0).expect("initialize settings");
+            let key = test_key.open();
+            for name in ["Enabled", "ShowInActionCenter"] {
+                assert!(matches!(
+                    key.RegQueryValueEx(Some(name)),
+                    Ok(RegistryValue::Dword(1))
+                ));
+                key.RegSetValueEx(Some(name), RegistryValue::Dword(0))
+                    .expect("disable setting");
+            }
+            initialize_notification_settings(&test_key.0).expect("repair settings");
+            for name in ["Enabled", "ShowInActionCenter"] {
+                assert!(matches!(
+                    key.RegQueryValueEx(Some(name)),
+                    Ok(RegistryValue::Dword(0))
+                ));
+            }
+        }
+
+        #[test]
+        fn aumid_metadata_is_repaired() {
+            let test_key = TestRegistryKey::new();
+            write_aumid_metadata(&test_key.0, "Old Buzz", "old.exe").expect("initial metadata");
+            write_aumid_metadata(&test_key.0, "Buzz", "new.exe").expect("repair metadata");
+            let key = test_key.open();
+            assert!(
+                matches!(key.RegQueryValueEx(Some("DisplayName")), Ok(RegistryValue::Sz(value)) if value == "Buzz")
+            );
+            assert!(
+                matches!(key.RegQueryValueEx(Some("IconUri")), Ok(RegistryValue::Sz(value)) if value == "new.exe")
+            );
+        }
+
+        #[test]
+        fn shortcut_aumid_is_repaired_without_changing_arguments() {
+            let directory = tempfile::tempdir().expect("temporary programs folder");
+            let executable = std::env::current_exe().expect("test executable");
+            ensure_shortcut_in(directory.path(), "Buzz", &executable, "buzz.test.old")
+                .expect("create shortcut");
+            let path = directory.path().join("Buzz").join("Buzz.lnk");
+            let _apartment =
+                winsafe::CoInitializeEx(co::COINIT::APARTMENTTHREADED).expect("COM apartment");
+            let load = || {
+                let link = winsafe::CoCreateInstance::<IShellLink>(
+                    &co::CLSID::ShellLink,
+                    None::<&winsafe::IUnknown>,
+                    co::CLSCTX::INPROC_SERVER,
+                )
+                .expect("ShellLink");
+                link.QueryInterface::<IPersistFile>()
+                    .expect("persist")
+                    .Load(&path.to_string_lossy(), co::STGM::READWRITE)
+                    .expect("load shortcut");
+                link
+            };
+            {
+                let link = load();
+                link.SetArguments("--preserve-this").expect("arguments");
+                link.QueryInterface::<IPersistFile>()
+                    .expect("persist")
+                    .Save(Some(&path.to_string_lossy()), true)
+                    .expect("save arguments");
+            }
+            ensure_shortcut_in(directory.path(), "Buzz", &executable, "buzz.test.new")
+                .expect("repair shortcut");
+            let link = load();
+            assert_eq!(
+                link.GetArguments().expect("read arguments"),
+                "--preserve-this"
+            );
+            let value = link
+                .QueryInterface::<IPropertyStore>()
+                .expect("properties")
+                .GetValue(&co::PKEY::AppUserModel_ID)
+                .expect("read AUMID");
+            assert!(matches!(value, winsafe::PropVariant::Bstr(value) if value == "buzz.test.new"));
+        }
+
+        #[test]
+        fn shortcut_failure_is_propagated() {
+            let directory = tempfile::tempdir().expect("temporary programs folder");
+            std::fs::write(directory.path().join("Buzz"), "blocks directory creation")
+                .expect("block shortcut folder");
+            assert!(ensure_shortcut_in(
+                directory.path(),
+                "Buzz",
+                std::path::Path::new("buzz.exe"),
+                "buzz.test"
+            )
+            .is_err());
+        }
 
         #[test]
         fn only_enabled_notification_setting_is_granted() {

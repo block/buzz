@@ -6,14 +6,13 @@ import {
   shouldBounceForChannelNotification,
 } from "@/app/AppShell.helpers";
 import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
-  ensureDesktopNotificationPermissionGranted,
   listenForDesktopNotificationActions,
   requestDockBounce,
   revealDesktopAppWindow,
-  sendDesktopNotification,
 } from "@/features/notifications/lib/desktop";
 import { formatMessageNotification } from "@/features/notifications/lib/notificationFormat";
 import { buildEventNotificationTarget } from "@/features/notifications/lib/target";
@@ -23,6 +22,7 @@ import {
   shouldPlayNotificationSound,
 } from "@/features/notifications/lib/sound";
 import { useNotificationSenderName } from "@/features/notifications/useNotificationSenderName";
+import { useLiveNotificationDelivery } from "@/features/notifications/useLiveNotificationDelivery";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export function useAppShellDesktopNotifications({
@@ -62,6 +62,25 @@ export function useAppShellDesktopNotifications({
   });
 
   const resolveSenderName = useNotificationSenderName();
+  const { activeCommunity } = useCommunities();
+  const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
+  const enqueueLiveNotification = useLiveNotificationDelivery({
+    scope:
+      activeCommunity && normalizedPubkey
+        ? JSON.stringify([activeCommunity.relayUrl, normalizedPubkey])
+        : null,
+    enabled: enabled && notificationSettings.desktopEnabled,
+    dmEnabled: notificationSettings.slotAlertsEnabled.dm,
+    threadReplyEnabled: notificationSettings.slotAlertsEnabled.thread_reply,
+    onDelivered: ({ payload, slot }) => {
+      if (
+        shouldPlayNotificationSound(payload.target?.channelId, silentChannelIds)
+      ) {
+        playNotificationSound(resolveSlotSound(notificationSettings, slot));
+      }
+      void requestDockBounce();
+    },
+  });
 
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
@@ -90,24 +109,18 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
-      void ensureDesktopNotificationPermissionGranted().then(
-        async (permissionGranted) => {
-          if (!permissionGranted) return;
-          const didSend = await sendDesktopNotification({
-            title,
-            body,
-            target: buildEventNotificationTarget(event, {
-              id: channel.id,
-              name: channelName,
-            }),
-          });
-          if (!didSend) return;
-          if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
-            playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
-          }
-          void requestDockBounce();
+      enqueueLiveNotification({
+        id: event.id,
+        slot: "dm",
+        payload: {
+          title,
+          body,
+          target: buildEventNotificationTarget(event, {
+            id: channel.id,
+            name: channelName,
+          }),
         },
-      );
+      });
     },
   );
 
@@ -137,30 +150,19 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
-      void ensureDesktopNotificationPermissionGranted().then(
-        async (permissionGranted) => {
-          if (!permissionGranted) return;
-          const didSend = await sendDesktopNotification({
-            title,
-            body,
-            target: buildEventNotificationTarget(
-              event,
-              {
-                id: channelId,
-                name: channelName,
-              },
-              { openInThread: true },
-            ),
-          });
-          if (!didSend) return;
-          if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
-            playNotificationSound(
-              resolveSlotSound(notificationSettings, "thread_reply"),
-            );
-          }
-          void requestDockBounce();
+      enqueueLiveNotification({
+        id: event.id,
+        slot: "thread_reply",
+        payload: {
+          title,
+          body,
+          target: buildEventNotificationTarget(
+            event,
+            { id: channelId, name: channelName },
+            { openInThread: true },
+          ),
         },
-      );
+      });
     },
   );
 
