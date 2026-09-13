@@ -40,6 +40,16 @@ fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn check_message_content(content: &str, media_tags: &[Vec<String>]) -> Result<(), SdkError> {
+    check_content(content, 64 * 1024)?;
+    if content.trim().is_empty() && media_tags.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "message must have content or attachments".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate hex string has at least `min_len` hex characters.
 fn check_hex_len(s: &str, min_len: usize, field: &str) -> Result<(), SdkError> {
     if s.len() < min_len || !s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -246,7 +256,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
-    check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
@@ -306,7 +316,7 @@ pub fn build_forum_post(
     mentions: &[&str],
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
-    check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
@@ -323,7 +333,7 @@ pub fn build_forum_comment(
     mentions: &[&str],
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
-    check_content(content, 64 * 1024)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
@@ -2402,6 +2412,33 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn message_rejects_empty_or_whitespace_only_content_without_media() {
+        let cid = uuid();
+        for content in ["", "   \n\t"] {
+            let err = build_message(cid, content, None, &[], false, &[]).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn message_allows_media_without_text() {
+        let cid = uuid();
+        let media = vec![vec![
+            "imeta".to_string(),
+            "url https://cdn.example/image.png".to_string(),
+        ]];
+        assert!(build_message(cid, "", None, &[], false, &media).is_ok());
+        assert!(build_forum_post(cid, " \n", &[], &media).is_ok());
+
+        let root = event_id();
+        let thread_ref = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        assert!(build_forum_comment(cid, "", &thread_ref, &[], &media).is_ok());
     }
 
     #[test]

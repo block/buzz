@@ -45,6 +45,14 @@ fn check_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_message_content(content: &str, media_tags: &[Vec<String>]) -> Result<(), String> {
+    check_content(content)?;
+    if content.trim().is_empty() && media_tags.is_empty() {
+        return Err("message must have content or attachments".into());
+    }
+    Ok(())
+}
+
 /// NIP-10 thread reference.
 pub struct ThreadRef {
     pub root_event_id: EventId,
@@ -298,7 +306,7 @@ pub fn build_message_with_client_tags(
     if sent_from_thread_tag.is_some() && thread_ref.is_some() {
         return Err("sent-from-thread provenance requires a top-level message".into());
     }
-    check_content(content)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         tags.extend(thread_tags(tr)?);
@@ -321,7 +329,7 @@ pub fn build_forum_post(
     media_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
-    check_content(content)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
@@ -338,7 +346,7 @@ pub fn build_forum_comment(
     media_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
-    check_content(content)?;
+    check_message_content(content, media_tags)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(thread_tags(thread_ref)?);
     tags.extend(mention_tags(mentions)?);
@@ -762,6 +770,10 @@ pub use workflows::{
     build_approval_deny, build_approval_grant, build_workflow_definition, build_workflow_delete,
     build_workflow_trigger,
 };
+
+#[cfg(test)]
+#[path = "events_message_content_tests.rs"]
+mod message_content_tests;
 
 // ── Transport ────────────────────────────────────────────────────────────────
 
