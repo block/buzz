@@ -413,6 +413,7 @@ fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionE
                     .map(str::to_string),
                 display_name: opt
                     .get("displayName")
+                    .or_else(|| opt.get("name"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
                 current_value: opt
@@ -438,6 +439,7 @@ fn parse_option_values(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionVa
                 value,
                 display_name: o
                     .get("displayName")
+                    .or_else(|| o.get("name"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
             })
