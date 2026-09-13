@@ -14,7 +14,9 @@ import {
   TerminalContextOverrideProvider,
 } from "@/app/TerminalContextOverrideContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { describeHistoryLocation } from "@/app/navigation/navigationHistory";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
+import { useCommunityDestinationRestore } from "@/app/useCommunityDestinationRestore";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
@@ -83,11 +85,6 @@ import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
-import {
-  consumePendingCommunityRestore,
-  loadCommunityDestination,
-  saveCommunityDestination,
-} from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
@@ -143,6 +140,8 @@ export function AppShell() {
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
   useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
   const {
     goAgents,
@@ -156,8 +155,9 @@ export function AppShell() {
     closeSettings,
     openSearchHit,
   } = useAppNavigation();
-  const { canGoBack, canGoForward, goBack, goForward } =
-    useBackForwardControls();
+  const navigationControls = useBackForwardControls(
+    describeHistoryLocation(location, channels),
+  );
   const { selectedChannelId, selectedView } = React.useMemo(
     () => deriveShellRoute(location.pathname),
     [location.pathname],
@@ -235,8 +235,6 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
-  const channelsQuery = useChannelsQuery();
-  const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
@@ -276,54 +274,15 @@ export function AppShell() {
       ),
     [huddleBackingChannelIds, memberChannels, revealedHuddleChannelIds],
   );
-  const hasRestoredCommunityDestinationRef = React.useRef(false);
-  React.useEffect(() => {
-    const activeCommunityId = communitiesHook.activeCommunity?.id;
-    if (
-      hasRestoredCommunityDestinationRef.current ||
-      !channelsQuery.isSuccess ||
-      channelsQuery.dataUpdatedAt === 0 ||
-      !activeCommunityId
-    ) {
-      return;
-    }
-    hasRestoredCommunityDestinationRef.current = true;
-
-    // Restoration belongs to an explicit community transition. Cold boot and
-    // reconnect remounts must preserve the route the user explicitly opened.
-    if (!consumePendingCommunityRestore(activeCommunityId)) {
-      return;
-    }
-
-    const destination = loadCommunityDestination(activeCommunityId);
-    if (!destination || destination.kind === "home") {
-      return;
-    }
-
-    const channelIsAvailable = sidebarChannels.some(
-      (channel) => channel.id === destination.channelId,
-    );
-    if (!channelIsAvailable) {
-      saveCommunityDestination(activeCommunityId, { kind: "home" });
-      void goHome({ replace: true });
-      return;
-    }
-
-    // The normal switch path writes the remembered channel into the hash before
-    // the target community mounts, so no intermediate Inbox frame is painted.
-    // Older transition callers may still arrive at neutral Home; repair those.
-    if (selectedView === "home") {
-      void goChannel(destination.channelId, { replace: true });
-    }
-  }, [
-    channelsQuery.dataUpdatedAt,
-    channelsQuery.isSuccess,
-    communitiesHook.activeCommunity?.id,
+  useCommunityDestinationRestore({
+    activeCommunityId: communitiesHook.activeCommunity?.id,
+    channelsDataUpdatedAt: channelsQuery.dataUpdatedAt,
+    channelsLoaded: channelsQuery.isSuccess,
     goChannel,
     goHome,
     selectedView,
     sidebarChannels,
-  ]);
+  });
   const [terminalContextOverride, setTerminalContextOverride] =
     React.useState<TerminalContextOverride | null>(null);
   const { activeChannel, terminalContext } = useTerminalContext({
@@ -776,11 +735,15 @@ export function AppShell() {
                 <AppWorkflowEditorOverlayProvider>
                   {!settingsOpen && !isHuddleRoom ? (
                     <AppTopChrome
-                      canGoBack={canGoBack}
-                      canGoForward={canGoForward}
+                      backHistory={navigationControls.backHistory}
+                      canGoBack={navigationControls.canGoBack}
+                      canGoForward={navigationControls.canGoForward}
+                      forwardHistory={navigationControls.forwardHistory}
                       hasCommunityRail={hasCommunityRail}
-                      onGoBack={goBack}
-                      onGoForward={goForward}
+                      onGoBack={navigationControls.goBack}
+                      onGoBackTo={navigationControls.goBackTo}
+                      onGoForward={navigationControls.goForward}
+                      onGoForwardTo={navigationControls.goForwardTo}
                     />
                   ) : null}
                   {settingsOpen ? (
