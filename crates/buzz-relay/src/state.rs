@@ -844,13 +844,14 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
+        let git_store = crate::api::git::store::GitStore::new_with_compatibility(
             &config.media.s3_endpoint,
             &config.media.s3_access_key,
             &config.media.s3_secret_key,
             &config.media.s3_bucket,
             &config.media.s3_region,
             config.media.s3_addressing_style,
+            config.git_s3_compatibility,
         )
         .expect("media storage was already constructed with this S3 config");
         let git_pack_cache = Arc::new(
