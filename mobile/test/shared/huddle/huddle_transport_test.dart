@@ -14,7 +14,7 @@ const _parentChannelId = '11111111-2222-4333-8444-555555555555';
 const _ephemeralChannelId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 void main() {
-  test('authenticates with object JSON and admits a v3 room', () async {
+  test('authenticates with object JSON and admits a v2 room', () async {
     final channel = _ControlledWebSocketChannel();
     final transport = _transport(channel);
     addTearDown(transport.dispose);
@@ -28,7 +28,7 @@ void main() {
     expect(auth, isA<Map<String, dynamic>>());
     expect(auth['type'], 'auth');
     expect(auth['parent_channel_id'], _parentChannelId);
-    expect(auth['protocol_version'], 3);
+    expect(auth['protocol_version'], 2);
 
     channel.emitText(
       jsonEncode({
@@ -72,7 +72,7 @@ void main() {
         ),
       );
       channel.emitBinary(
-        Uint8List.fromList([4, 0, 0, 9, 0, 0, 3, 0xc0, 0xd8, 0, 0xaa]),
+        Uint8List.fromList([4, 0, 9, 0, 0, 3, 0xc0, 0xd8, 0, 0xaa]),
       );
       await inbound;
 
@@ -471,12 +471,10 @@ void main() {
   );
 
   test(
-    'stale-epoch frame is fenced after its index is reused by a new occupant',
+    'v2 media routes through the current peer-index occupant after reuse',
     () async {
-      // Blocker 1 causal race: a frame authored by the prior occupant of an
-      // index can be queued in the relay's data path and delivered *after* the
-      // roster control that reassigns the index. Index-only fencing would
-      // mis-attribute it to the new occupant; the epoch rejects it.
+      // Protocol v2 exposes only the peer index on media. After the roster
+      // reassigns that index, subsequent frames route to the current occupant.
       final channel = _ControlledWebSocketChannel();
       final transport = _transport(channel);
       addTearDown(transport.dispose);
@@ -511,14 +509,13 @@ void main() {
       expect(transport.state.peers[4]?.pubkey, 'new');
       expect(transport.state.peers[4]?.epoch, 1);
 
-      // A residual frame from 'old' (epoch 0) arrives after the reassignment.
-      // It must be dropped, not delivered as 'new' audio.
+      // V2 cannot distinguish delayed media from the old occupancy, so both
+      // packets are delivered through the currently occupied index.
       channel.emitBinary(_relayFrame(peerIndex: 4, epoch: 0, sequence: 7));
-      // A legitimate 'new' frame (epoch 1) is delivered.
       channel.emitBinary(_relayFrame(peerIndex: 4, epoch: 1, sequence: 8));
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(received, [8]);
+      expect(received, [7, 8]);
     },
   );
 
@@ -822,11 +819,11 @@ Uint8List _relayFrame({
     levelDbov: -30,
     flags: 0,
   );
-  final clientFrame = HuddleWireV3.encodeClientFrame(
+  final clientFrame = HuddleWireV2.encodeClientFrame(
     header,
     Uint8List.fromList([sequence & 0xff]),
   );
-  return Uint8List.fromList([peerIndex, epoch, ...clientFrame]);
+  return Uint8List.fromList([peerIndex, ...clientFrame]);
 }
 
 Future<void> _waitForPhase(

@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 const CONTEXT_RAIL_GUTTER_PX = 8;
 
 export function ProjectContextRail({
+  animateWidth = true,
   children,
   open,
   panelWidthPx,
@@ -12,6 +13,7 @@ export function ProjectContextRail({
   rounded = true,
   testId = "project-context-rail",
 }: {
+  animateWidth?: boolean;
   children: React.ReactNode;
   open: boolean;
   panelWidthPx: number;
@@ -24,7 +26,7 @@ export function ProjectContextRail({
       aria-hidden={!open}
       className={cn(
         "relative z-30 h-full shrink-0 overflow-hidden motion-reduce:transition-none",
-        resizing
+        resizing || !animateWidth
           ? "transition-none"
           : "transition-[width] duration-200 ease-linear",
       )}

@@ -585,6 +585,225 @@ test("draft_lifecycle_empty_target_clears_stale_mention_refs", async () => {
   await handle.unmount();
 });
 
+test("draft_lifecycle_persists_an_explicit_clear_before_async_rerender", async () => {
+  const DRAFT_KEY = "chan-clear-race";
+  setupStore("pubkey-clear-race");
+  persistDraftEntry(DRAFT_KEY, "draft text", DRAFT_KEY, [], []);
+
+  let editorContent = "";
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "draft text");
+
+  trackAuthoredContent("");
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "the authoritative update removes the stale body even while editor reads lag",
+  );
+
+  await handle.unmount();
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "async settlement must not repersist the deleted body",
+  );
+
+  const remounted = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "", "the deleted body must not be restored");
+  await remounted.unmount();
+});
+
+test("draft_lifecycle_clear_caption_preserves_image_and_spoiler_on_remount", async () => {
+  const DRAFT_KEY = "chan-clear-caption-image";
+  setupStore("pubkey-clear-caption-image");
+  persistDraftEntry(DRAFT_KEY, "caption", DRAFT_KEY, [IMG_A], [IMG_A.url]);
+
+  let editorContent = "";
+  let pendingImeta = [];
+  let spoileredUrls = new Set();
+  let trackAuthoredContent;
+
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: pendingImeta,
+      setPendingImeta: (imeta) => {
+        pendingImeta = imeta;
+      },
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: (urls) => {
+        spoileredUrls = urls;
+      },
+      spoileredAttachmentUrlsRef: {
+        get current() {
+          return spoileredUrls;
+        },
+      },
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  trackAuthoredContent("");
+  editorContent = "";
+  await handle.unmount();
+
+  const remounted = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "");
+  assert.equal(pendingImeta[0]?.url, IMG_A.url);
+  assert.deepEqual([...spoileredUrls], [IMG_A.url]);
+  assert.equal(loadDraftEntry(DRAFT_KEY)?.content, "");
+  await remounted.unmount();
+});
+
+test("draft_lifecycle_clear_caption_preserves_queued_file_on_remount", async () => {
+  const DRAFT_KEY = "chan-clear-caption-file";
+  setupStore("pubkey-clear-caption-file");
+  persistDraftEntry(DRAFT_KEY, "caption", DRAFT_KEY, [], []);
+  const FILE_A = {
+    file: new File(["report"], "report.pdf", { type: "application/pdf" }),
+    id: 9,
+    spoilered: true,
+  };
+
+  let editorContent = "";
+  let queuedAttachments = [FILE_A];
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      getQueuedAttachments: () => queuedAttachments,
+      saveQueuedAttachmentsForDraft,
+      clearQueuedAttachments: () => {
+        queuedAttachments = [];
+      },
+      restoreQueuedAttachments: (attachments) => {
+        queuedAttachments = attachments;
+      },
+      takeQueuedAttachmentsForDraft,
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  saveQueuedAttachmentsForDraft(DRAFT_KEY, [FILE_A]);
+  const handle = await mountStrictMode(HarnessComposer);
+  trackAuthoredContent("");
+  editorContent = "";
+  await handle.unmount();
+
+  const remounted = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "");
+  assert.equal(queuedAttachments[0]?.file.name, "report.pdf");
+  assert.equal(queuedAttachments[0]?.spoilered, true);
+  await remounted.unmount();
+});
+
+test("draft_lifecycle_clear_authority_is_scoped_to_relay_and_identity", async () => {
+  const DRAFT_KEY = "shared-key";
+  installFreshLocalStorage();
+  clearAllDrafts();
+  initDraftStore("pubkey-a", "wss://relay-a.example");
+  persistDraftEntry(DRAFT_KEY, "workspace A", DRAFT_KEY, [], []);
+
+  let editorContent = "";
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const workspaceA = await mountStrictMode(HarnessComposer);
+  trackAuthoredContent("");
+  editorContent = "";
+  await workspaceA.unmount();
+
+  initDraftStore("pubkey-b", "wss://relay-b.example");
+  persistDraftEntry(DRAFT_KEY, "workspace B", DRAFT_KEY, [], []);
+  const workspaceB = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "workspace B");
+  await workspaceB.unmount();
+  assert.equal(loadDraftEntry(DRAFT_KEY)?.content, "workspace B");
+
+  initDraftStore("pubkey-a", "wss://relay-a.example");
+  const workspaceARemount = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "", "workspace A stale text must stay cleared");
+  await workspaceARemount.unmount();
+});
+
 test("draft_lifecycle_preserves_local_files_across_a_b_a_switch", async () => {
   setupStore("pubkey-switch-files");
   const FILE_A = {

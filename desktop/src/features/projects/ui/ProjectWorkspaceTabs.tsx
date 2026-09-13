@@ -53,16 +53,15 @@ import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailabl
 import {
   PROJECT_COLUMN_HEADER_BACKDROP_CLASS,
   PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+  PROJECT_SECTION_HEADER_CLASS,
 } from "./projectPanelStyles";
 import { ProjectSectionHeader } from "./ProjectSectionHeader";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { CreatePullRequestDialog } from "./CreatePullRequestDialog";
 import {
   CreateIssueDialog,
   type CreateIssueDialogInput,
 } from "./CreateIssueDialog";
-
-const SECTION_HEADER_CLASS = "mx-4 mb-2 rounded-xl bg-muted/40";
 
 type CreatePullRequestAction = {
   projects: Project[];
@@ -96,6 +95,7 @@ export function WorkspaceTabs({
   createPullRequestRequestKey,
   updatePullRequestAction,
   initialTab,
+  initialFilePath,
   initialTabRequestKey,
   fileContentSource,
   localSnapshot,
@@ -119,6 +119,7 @@ export function WorkspaceTabs({
   onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
   onSelectedTabChange,
+  onBack,
   onOpenMergeRecoveryTerminal,
   snapshot,
   snapshotError,
@@ -142,6 +143,8 @@ export function WorkspaceTabs({
   updatePullRequestAction?: UpdatePullRequestAction;
   /** Tab to open on mount (workspace vocabulary), e.g. from a share link. */
   initialTab?: string;
+  /** File or folder to open when entering the repository Files tab. */
+  initialFilePath?: string;
   /** Changes for every entity-link activation, including repeated links. */
   initialTabRequestKey?: string;
   fileContentSource?: RepositoryFileContentSource;
@@ -170,6 +173,7 @@ export function WorkspaceTabs({
   onSelectedPullRequestIdChange: (id: string | null) => void;
   /** Reports the active tab so the screen breadcrumb can mirror it. */
   onSelectedTabChange?: (tab: string) => void;
+  onBack: () => void;
   onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -350,13 +354,13 @@ export function WorkspaceTabs({
   const sectionHeader =
     selectedTab === "files" && files.length > 0 ? (
       <ProjectSectionHeader
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={FilesIcon}
         title="Files"
       />
     ) : selectedTab === "activity" && !selectedCommitHash ? (
       <ProjectSectionHeader
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={GitCommitHorizontal}
         title="Commits"
       />
@@ -367,7 +371,7 @@ export function WorkspaceTabs({
           label: "Create task",
           onClick: () => setCreateIssueOpen(true),
         }}
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={CircleDot}
         title="Tasks"
       />
@@ -381,19 +385,19 @@ export function WorkspaceTabs({
           onClick: () => setCreatePullRequestOpen(true),
           title: "Create review — choose a repository and branches to compare",
         }}
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={GitPullRequest}
         title="Reviews"
       />
     ) : selectedTab === "channels" ? (
       <ProjectSectionHeader
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={Hash}
         title="Channels"
       />
     ) : selectedTab === "contributors" ? (
       <ProjectSectionHeader
-        className={SECTION_HEADER_CLASS}
+        className={PROJECT_SECTION_HEADER_CLASS}
         icon={Users}
         title="Contributors"
       />
@@ -412,7 +416,7 @@ export function WorkspaceTabs({
           }`}
           data-testid="project-workspace-tab-menu"
         >
-          <ProjectTabsList prsActive={isPullRequestSelected} />
+          <ProjectTabsList onBack={onBack} prsActive={isPullRequestSelected} />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             {updatePullRequestAction ? (
               <Button
@@ -440,7 +444,10 @@ export function WorkspaceTabs({
       >
         {sectionHeader}
 
-        <TabsContent className="m-0" value="overview">
+        <TabsContent
+          className="m-0 min-h-0 flex-1 flex-col data-[state=active]:flex"
+          value="overview"
+        >
           <ProjectOverviewPanel
             accessChannelId={project.channelId}
             externalHost={externalHost}
@@ -567,20 +574,17 @@ export function WorkspaceTabs({
             (repoSource === "local" &&
             !localSnapshot &&
             !localSnapshotLoading ? (
-              <div className="mb-3">
-                <div
-                  className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-                  data-project-detail-panel
-                >
-                  No local checkout found.
-                </div>
-              </div>
+              <ProjectPanelState
+                description="Switch to the remote source or clone this repository locally."
+                title="No local checkout found"
+              />
             ) : (
               <RepositoryFilesPanel
                 error={displayedSnapshotError}
                 fallbackAuthorPubkey={project.owner}
                 fileContentSource={fileContentSource}
                 files={files}
+                initialPath={initialFilePath}
                 isLoading={displayedSnapshotLoading}
                 onContextChange={onFilesContextChange}
                 onOpenCommit={onSelectedCommitHashChange}

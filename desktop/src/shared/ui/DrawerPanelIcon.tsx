@@ -5,9 +5,11 @@ import { cn } from "@/shared/lib/cn";
 export function DrawerPanelIcon({
   className,
   side,
+  testId,
 }: {
   className?: string;
   side: "left" | "right";
+  testId?: string;
 }) {
   const prefersReducedMotion = useReducedMotion();
   const isOpen = side === "left";
@@ -16,6 +18,7 @@ export function DrawerPanelIcon({
     <svg
       aria-hidden="true"
       className={cn("h-4 w-auto shrink-0", className)}
+      data-testid={testId}
       fill="none"
       height="22"
       viewBox="0 0 24 22"

@@ -279,9 +279,7 @@ void main() {
       expect(border.borderRadius, BorderRadius.circular(Radii.full));
     });
 
-    testWidgets('uses the shared sheet surface instead of a picker override', (
-      tester,
-    ) async {
+    testWidgets('uses the transformed shared sheet surface', (tester) async {
       final prefs = await _prefs();
       final theme = AppTheme.light().copyWith(
         colorScheme: lightColorScheme.copyWith(
@@ -326,11 +324,11 @@ void main() {
           .map((element) => element.widget as Material);
       expect(
         ancestorMaterials.map((material) => material.color),
-        contains(Colors.green),
+        contains(Colors.grey),
       );
       expect(
         ancestorMaterials.map((material) => material.color),
-        isNot(contains(Colors.grey)),
+        isNot(contains(Colors.green)),
       );
     });
 

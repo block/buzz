@@ -139,7 +139,7 @@ final class HuddleMediaPlugin {
 
   private func prepare(arguments: Any?, result: @escaping FlutterResult) {
     guard let values = arguments as? [String: Any],
-      (values["protocolVersion"] as? NSNumber)?.intValue == 3,
+      (values["protocolVersion"] as? NSNumber)?.intValue == 2,
       (values["sampleRateHz"] as? NSNumber)?.intValue == 48_000,
       (values["channels"] as? NSNumber)?.intValue == 1,
       (values["frameSamples"] as? NSNumber)?.intValue == 960
@@ -147,7 +147,7 @@ final class HuddleMediaPlugin {
       result(
         FlutterError(
           code: "invalid_configuration",
-          message: "Expected the fixed Huddle Opus v3 media configuration.",
+          message: "Expected the fixed Huddle Opus v2 media configuration.",
           details: nil
         )
       )

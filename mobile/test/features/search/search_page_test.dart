@@ -95,9 +95,10 @@ void main() {
     expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
-    expect(appBar.bottomDividerOpacity, 0.06);
+    expect(appBar.bottomDividerOpacity, 0.07);
     expect(appBar.bottomHeight, 57);
     expect(appBar.leading, isNull);
+    expect(appBar.centerTitle, isFalse);
     expect(find.text('Search'), findsOneWidget);
     final promptText = find.descendant(
       of: find.byKey(const Key('search-field-container')),
@@ -929,6 +930,43 @@ void main() {
     expect(content.mentionNames, const {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
     expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+  });
+
+  testWidgets('does not label an unjoined channel as having zero members', (
+    tester,
+  ) async {
+    final state = SearchState(
+      query: 'community',
+      channelResults: [
+        Channel(
+          id: 'community-help',
+          name: 'community-help',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Help from the community',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 0,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('0 members'), findsNothing);
   });
 }
 

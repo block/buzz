@@ -1,4 +1,5 @@
 import type {
+  AcpSessionPolicy,
   AgentPersona,
   CatalogSourceCoordinate,
   RespondToMode,
@@ -10,6 +11,8 @@ export type CatalogPersonaShareLevel = "not-shared" | "none";
 type CatalogAgentProjection = {
   displayName: string;
   avatarUrl: string | null;
+  /** Optional public description (validated server-side; max 280 chars). */
+  description: string | null;
   systemPrompt: string;
   runtime: string | null;
   model: string | null;
@@ -17,6 +20,7 @@ type CatalogAgentProjection = {
   namePool: string[];
   respondTo: RespondToMode | null;
   parallelism: number | null;
+  sessionPolicy: AcpSessionPolicy;
 };
 
 export type PersonaCatalogPublication = {
@@ -69,6 +73,7 @@ function publicationToPersona(
       `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
     displayName: publication.agent.displayName,
     avatarUrl: publication.agent.avatarUrl,
+    description: publication.agent.description ?? null,
     systemPrompt: publication.agent.systemPrompt,
     runtime: publication.agent.runtime,
     model: publication.agent.model,
@@ -82,6 +87,7 @@ function publicationToPersona(
     respondTo: publication.agent.respondTo,
     respondToAllowlist: [],
     parallelism: publication.agent.parallelism,
+    sessionPolicy: publication.agent.sessionPolicy,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

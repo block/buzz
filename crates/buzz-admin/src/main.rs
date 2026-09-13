@@ -433,10 +433,13 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 async fn connect_db() -> Result<Db> {
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-    let db = Db::new(&DbConfig {
-        database_url: db_url,
-        ..DbConfig::default()
-    })
+    let db = Db::new(
+        &DbConfig {
+            database_url: db_url,
+            ..DbConfig::default()
+        }
+        .with_session_timeouts_from_env(),
+    )
     .await?;
     Ok(db)
 }

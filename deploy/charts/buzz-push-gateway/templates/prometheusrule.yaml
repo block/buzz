@@ -21,9 +21,9 @@ spec:
           annotations:
             summary: Push gateway APNs configuration faults
             description: >-
-              APNs is returning configuration faults (bad/expired provider token
-              or topic). Deliveries are failing without invalidating endpoints.
-              See runbook: check the APNs .p8 key, key id, team id, and topic.
+              APNs is returning certificate or topic configuration faults.
+              Deliveries are failing without invalidating endpoints. See the
+              runbook and check the APNs certificate identity and topic.
         # Authority store unavailable at admission = durable dependency is down.
         - alert: PushGatewayAdmissionUnavailable
           expr: |

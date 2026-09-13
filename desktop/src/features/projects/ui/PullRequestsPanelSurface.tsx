@@ -1,6 +1,7 @@
 import type * as React from "react";
 
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 /** Which center pane `PullRequestsPanel` should show. A retained selected
  * review wins over an empty list so refetching does not flash "No reviews yet." */
@@ -48,14 +49,16 @@ export function PullRequestsPanelSurface({
   }
   if (kind === "empty") {
     return (
-      <p
-        className="p-4 text-sm text-muted-foreground"
-        data-testid="project-pull-requests-empty"
-      >
-        {error
-          ? "Could not load reviews for this repository."
-          : "No reviews yet."}
-      </p>
+      <ProjectPanelState
+        description={
+          error
+            ? "Refresh the repository and try again."
+            : "Reviews opened for this repository will appear here."
+        }
+        error={Boolean(error)}
+        testId="project-pull-requests-empty"
+        title={error ? "Could not load reviews" : "No reviews yet"}
+      />
     );
   }
   return list;

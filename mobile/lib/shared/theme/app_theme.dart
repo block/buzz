@@ -15,7 +15,10 @@ class Radii {
   static const double lg = 10.0;
   static const double md = 8.0;
   static const double sm = 6.0;
-  static const double card = 12.0; // grouped settings cards
+
+  /// Shared strong radius for grouped rows, fields, and utility containers.
+  static const double container = 22.0;
+  static const double card = container; // Backwards-compatible card alias.
   static const double popover = 20.0;
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
 

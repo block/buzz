@@ -265,6 +265,15 @@ pub enum JoinOutcome {
 }
 
 impl JoinOutcome {
+    /// Fenced generation carried by both local- and remote-owner outcomes.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        match *self {
+            JoinOutcome::LocalOwner { generation }
+            | JoinOutcome::RemoteOwner { generation, .. } => generation,
+        }
+    }
+
     /// The fenced header for frames this join produces, given the huddle's
     /// session id (its channel id) and resolved owner. For a local-owner join
     /// the owner is this pod (`local_runtime_id`); for a remote-owner join it
@@ -1101,6 +1110,29 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             .await
     }
 
+    /// Remove one peer admitted by a remote control stream and perform the
+    /// same authoritative room-empty teardown as the local owner WebSocket
+    /// path. The owner-registry release is generation-fenced, so a late close
+    /// from an old stream cannot cancel a newly acquired lease epoch.
+    fn remove_remote_peer(
+        &self,
+        community: CommunityId,
+        session_id: Uuid,
+        generation: u64,
+        peer_id: Uuid,
+    ) {
+        let Some(room) = self.rooms.get(community, session_id) else {
+            return;
+        };
+        let Some((delta, should_end)) = room.remove_peer_and_check_ended(peer_id) else {
+            return;
+        };
+        broadcast_peer_left(&room, delta, session_id);
+        if should_end && self.rooms.cleanup_if_empty(community, session_id) {
+            self.owners.release(session_id, generation);
+        }
+    }
+
     /// Serve register/unregister frames for one non-owner pod's stream.
     ///
     /// The community is learned from the first `RegisterPeer` frame and latched
@@ -1297,13 +1329,13 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 }
                 HuddleControlMsg::UnregisterPeer { pubkey } => {
                     if let Some(peer_id) = registered.remove(&pubkey) {
-                        if let Some(room) = stream_community.and_then(|community_id| {
-                            self.rooms
-                                .get(CommunityId::from_uuid(community_id), session_id)
-                        }) {
-                            if let Some(delta) = room.remove_peer(peer_id) {
-                                broadcast_peer_left(&room, delta, session_id);
-                            }
+                        if let Some(community_id) = stream_community {
+                            self.remove_remote_peer(
+                                CommunityId::from_uuid(community_id),
+                                session_id,
+                                fenced.generation,
+                                peer_id,
+                            );
                         }
                     }
                 }
@@ -1347,14 +1379,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // Teardown: drop every peer this stream registered, regardless of how
         // the loop ended. Dropping the peer drops its `audio_tx`, which ends the
         // matching `spawn_remote_peer_sink` task.
-        if let Some(room) = stream_community.and_then(|community_id| {
-            self.rooms
-                .get(CommunityId::from_uuid(community_id), session_id)
-        }) {
+        if let Some(community_id) = stream_community {
+            let community = CommunityId::from_uuid(community_id);
             for (_pubkey, peer_id) in registered {
-                if let Some(delta) = room.remove_peer(peer_id) {
-                    broadcast_peer_left(&room, delta, session_id);
-                }
+                self.remove_remote_peer(community, session_id, fenced.generation, peer_id);
             }
         }
         result
@@ -2409,6 +2437,54 @@ mod tests {
         assert_eq!(left["pubkey"], "remote");
         assert_eq!(left["peer_index"], remote_index);
         assert_eq!(room.peer_pubkeys(), vec![("owner-local".into(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn remote_only_stream_close_releases_owner_room_and_lease() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let dir = Arc::new(FakeDir::default());
+        let owners = Arc::new(HuddleOwnerRegistry::new());
+        owners.attach_signals(session_id, Arc::clone(&dir), lease_for(session_id, 7));
+
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::clone(&dir),
+            owner_rt,
+            Arc::clone(&owners),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RegisterPeer {
+                    community_id: *community().as_uuid(),
+                    pubkey: "remote-only".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let registered = client.recv_frame().await.unwrap().unwrap();
+        assert!(matches!(registered, MeshStreamFrame::Data { .. }));
+        assert!(rooms.get(community(), session_id).is_some());
+        assert!(owners.lost_for(session_id).is_some());
+
+        drop(client);
+        served.await.unwrap().unwrap();
+
+        assert!(rooms.get(community(), session_id).is_none());
+        assert!(owners.lost_for(session_id).is_none());
+        await_release_calls(&dir, 1).await;
     }
 
     /// A `RegisterPeer` whose fence is rejected (wrong community keys a lease

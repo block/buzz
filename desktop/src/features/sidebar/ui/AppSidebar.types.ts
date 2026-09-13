@@ -3,6 +3,7 @@ import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity
 import type { Community } from "@/features/communities/types";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
+import type { UserStatusInput } from "@/features/user-status/types";
 import type {
   Channel,
   ChannelVisibility,
@@ -47,6 +48,7 @@ export type AppSidebarProps = {
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  highPriorityUnreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;
   communities: Community[];
   onAddCommunity: (community: Community) => void;
@@ -88,13 +90,13 @@ export type AppSidebarProps = {
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
-  onOpenSearchResult: (hit: SearchHit) => void;
+  onOpenSearchResult: (hit: SearchHit, query: string) => void;
   /** Full channel set for global search, including channels outside the joined sidebar list. */
   searchChannels: Channel[];
   searchFocusRequests: readonly [global: number, channel: number];
   onSelectSettings: (section?: SettingsSection) => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
-  onSetUserStatus: (text: string, emoji: string) => void;
+  onSetUserStatus: (status: UserStatusInput) => void;
   onClearUserStatus: () => void;
   onSwitchCommunity: (id: string) => void;
   selfUserStatus?: UserStatus;

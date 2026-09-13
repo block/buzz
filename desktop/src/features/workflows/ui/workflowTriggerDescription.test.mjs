@@ -1,7 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { workflowTriggerDescription } from "./workflowTriggerDescription.ts";
+import {
+  compactWorkflowTriggerDescription,
+  splitWorkflowAuthorDescription,
+  workflowTriggerDescription,
+} from "./workflowTriggerDescription.ts";
+
+test("splits generated author attribution instead of matching quoted user copy", () => {
+  assert.deepEqual(
+    splitWorkflowAuthorDescription(
+      "Reaction added by Carl to “thanks Carl”",
+      "Carl",
+    ),
+    { prefix: "Reaction added by", suffix: "to “thanks Carl”" },
+  );
+  assert.deepEqual(
+    splitWorkflowAuthorDescription("Message by Carl contains “Carl”", "Carl"),
+    { prefix: "Message by", suffix: "contains “Carl”" },
+  );
+  assert.deepEqual(
+    splitWorkflowAuthorDescription(
+      "Message by anyone except Carl contains “Carl”",
+      "Carl",
+    ),
+    { prefix: "Message by anyone except", suffix: "contains “Carl”" },
+  );
+  assert.equal(
+    splitWorkflowAuthorDescription("Message contains “Carl”", "Carl"),
+    null,
+  );
+});
 
 test("describes selected trigger conditions on the workflow canvas", () => {
   assert.equal(
@@ -140,6 +169,71 @@ test("describes selected trigger conditions on the workflow canvas", () => {
       { authorLabel: "Carl", messageLabel: "hey yourself" },
     ),
     "👾 reaction added by Carl to “hey yourself”",
+  );
+
+  // Without a resolved label, an author renders its compact npub while the
+  // referenced message keeps the generic hex truncation — an event id, not
+  // a pubkey identity.
+  const unresolvedAuthor = "deadbeef".repeat(8);
+  assert.equal(
+    workflowTriggerDescription({
+      on: "message_posted",
+      filter: `trigger_author == "${unresolvedAuthor}"`,
+    }),
+    "Message posted by npub1m6k…zuz0",
+  );
+  assert.equal(
+    workflowTriggerDescription({
+      on: "message_posted",
+      filter: `trigger_author != "${unresolvedAuthor}"`,
+    }),
+    "Message posted by anyone except npub1m6k…zuz0",
+  );
+  assert.equal(
+    workflowTriggerDescription({
+      on: "reaction_added",
+      filter: `trigger_message_id == "${"b".repeat(64)}"`,
+    }),
+    "Reaction added to bbbbbbbb…bbbb",
+  );
+  assert.equal(
+    workflowTriggerDescription({
+      on: "reaction_added",
+      filter: `trigger_emoji == "👾" && trigger_author == "${unresolvedAuthor}" && trigger_message_id == "${"b".repeat(64)}"`,
+    }),
+    "👾 reaction added by npub1m6k…zuz0 to bbbbbbbb…bbbb",
+  );
+});
+
+test("compacts only an included emoji already rendered as the node icon", () => {
+  assert.equal(
+    compactWorkflowTriggerDescription("😍 reaction added", "😍"),
+    "Reaction added",
+  );
+  assert.equal(
+    compactWorkflowTriggerDescription("😍 reaction added by Carl", "😍"),
+    "Reaction added by Carl",
+  );
+  assert.equal(
+    compactWorkflowTriggerDescription(
+      "😍 reaction added by Carl to “release 😍 notes”",
+      "😍",
+    ),
+    "Reaction added by Carl to “release 😍 notes”",
+  );
+  assert.equal(
+    compactWorkflowTriggerDescription(
+      "Any reaction except 😍 added",
+      undefined,
+    ),
+    "Any reaction except 😍 added",
+  );
+  assert.equal(
+    compactWorkflowTriggerDescription(
+      "Reaction added to “😍 reaction added”",
+      "😍",
+    ),
+    "Reaction added to “😍 reaction added”",
   );
 });
 

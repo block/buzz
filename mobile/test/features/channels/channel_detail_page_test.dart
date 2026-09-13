@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -200,7 +201,12 @@ Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
-  _FakeUserCacheNotifier? userCacheNotifier,
+  Set<String>? knownAgentPubkeys,
+  Future<Set<String>> Function()? loadChannelBotPubkeys,
+  bool watchChannelMembershipUpdates = false,
+  Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
+  Future<Map<String, String>> Function()? loadAgentOwners,
+  UserCacheNotifier? userCacheNotifier,
   List<ChannelMember> members = const [],
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
@@ -214,6 +220,7 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   _FakeTypingNotifier? typingNotifier,
+  _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
   String? initialMessageId,
   String? initialThreadRootId,
@@ -253,6 +260,11 @@ Widget _buildTestable({
       channelTypingProvider(
         _channelId,
       ).overrideWith(() => typingNotifier ?? _FakeTypingNotifier(typing)),
+      channelTypingProvider(_huddleChannelId).overrideWith(
+        () =>
+            huddleTypingNotifier ??
+            _FakeTypingNotifier(const [], channelId: _huddleChannelId),
+      ),
       userCacheProvider.overrideWith(
         () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
       ),
@@ -280,16 +292,24 @@ Widget _buildTestable({
       ),
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
-      channelBotPubkeysProvider(
-        _channelId,
-      ).overrideWith((ref) async => const <String>{}),
+      if (!watchChannelMembershipUpdates)
+        channelBotPubkeysProvider(_channelId).overrideWith(
+          (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
+        ),
       channelBotPubkeysProvider(_huddleChannelId).overrideWith(
         (ref) async => {
           for (final member in huddleMembers)
             if (member.isBot) member.pubkey.toLowerCase(),
         },
       ),
-      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      agentOwnersProvider.overrideWith(
+        (ref) async => loadAgentOwners?.call() ?? const <String, String>{},
+      ),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => loadAgentDirectory?.call() ?? const [],
+      ),
+      if (knownAgentPubkeys != null)
+        knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
       if (directoryUsers != null)
         relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
       if (createChannelActions != null)
@@ -327,8 +347,12 @@ Widget _buildTestable({
         ),
         mediaHttpClientProvider.overrideWithValue(mediaClient),
       ],
-      if (relaySessionNotifier != null)
-        relaySessionProvider.overrideWith(() => relaySessionNotifier),
+      if (relaySessionNotifier != null ||
+          (resolvedChannel.isDm &&
+              resolvedChannel.participantPubkeys.toSet().length == 2))
+        relaySessionProvider.overrideWith(
+          () => relaySessionNotifier ?? _IdentityUpdateRelaySession(),
+        ),
       if (relayConfigNotifier != null)
         relayConfigProvider.overrideWith(() => relayConfigNotifier),
       if (huddleMediaFactory != null)
@@ -452,7 +476,118 @@ void main() {
     _testPrefs = await SharedPreferences.getInstance();
   });
 
+  for (final thread in [false, true]) {
+    for (final reverse in [false, true]) {
+      testWidgets('signed qualified caller thread=$thread reverse=$reverse', (
+        tester,
+      ) async {
+        final first = 'a' * 64, second = 'b' * 64, sibling = 'c' * 64;
+        Future<void> tapProfile(String label, String key) async {
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                .pubkey,
+            key,
+          );
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        for (final firstName in ['Scout', 'Renamed Scout', first, null]) {
+          for (final secondName in [null, 'Scout', 'Renamed Scout', second]) {
+            for (final bystander in [null, 'Bob', 'Scout']) {
+              final names = {
+                first: ?firstName,
+                second: ?secondName,
+                sibling: 'Alice',
+                'd' * 64: ?bystander,
+              };
+              final keys = [
+                first,
+                second.toUpperCase(),
+                sibling,
+                if (bystander != null) 'd' * 64,
+              ];
+              final event = _textMsg(
+                id: 'qualified',
+                pubkey: 'author',
+                content: '@Scout @Scout ($second) @Alice @Other (${'e' * 64})',
+                extraTags: [
+                  for (final key in reverse ? keys.reversed : keys) ['p', key],
+                ],
+              );
+              await tester.pumpWidget(
+                _buildTestable(
+                  messages: [event],
+                  users: {
+                    for (final e in names.entries)
+                      e.key: UserProfile(pubkey: e.key, displayName: e.value),
+                  },
+                  threadReplies: const {'qualified': []},
+                  initialThreadRootId: thread ? 'qualified' : null,
+                ),
+              );
+              await tester.pumpAndSettle();
+              await tapProfile('Scout (bbbbbbbb…bbbb)', second);
+              expect(find.text('Scout'), findsNothing);
+              expect(find.text('Bob'), findsNothing);
+              if (firstName != null) expect(find.text(firstName), findsNothing);
+              expect(find.text('Other (eeeeeeee…eeee)'), findsNothing);
+              await tapProfile('Alice', sibling);
+              expect(tester.takeException(), isNull);
+              await tester.pumpWidget(const SizedBox.shrink());
+              await tester.pumpAndSettle();
+            }
+          }
+        }
+      });
+    }
+  }
+
   group('ChannelDetailPage', () {
+    testWidgets(
+      'bot-role author avatars stay squircles in channel and thread',
+      (tester) async {
+        final message = _textMsg(
+          id: 'bot-message',
+          pubkey: 'bot',
+          content: 'Bot message',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [message],
+            users: const {
+              'bot': UserProfile(pubkey: 'bot', displayName: 'Bot'),
+            },
+            loadChannelBotPubkeys: () async => const {'bot'},
+            threadReplies: const {'bot-message': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        AvatarImage avatarIn(Finder row) => tester.widget<AvatarImage>(
+          find.descendant(of: row, matching: find.byType(AvatarImage)),
+        );
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('message-row-bot-message')));
+        await tester.pumpAndSettle();
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('thread-message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {
@@ -487,6 +622,17 @@ void main() {
       expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
       expect(avatar.badge, isNotNull);
       expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(16),
+      );
+      expect(
         find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
         findsOneWidget,
       );
@@ -500,8 +646,1051 @@ void main() {
       expect(name.style?.fontWeight, FontWeight.w500);
       expect(presence.style?.fontSize, 14);
       expect(presence.style?.fontWeight, FontWeight.w400);
+      // Named counterpart: the avatar initial comes from the authored name.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
       expect(find.byTooltip('View members'), findsNothing);
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
+
+    testWidgets('keys unnamed DM header avatars to the hex participant key', (
+      tester,
+    ) async {
+      // A valid unnamed counterpart: the compact-npub label would render `N`
+      // for every unnamed DM, so the header avatar stays keyed to the hex
+      // public key instead.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: [shortPubkey(a11ce), 'Self'],
+        participantPubkeys: const [a11ce, 'self'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(a11ce),
+      );
+      // The named counterpart in the test above keeps its authored initial
+      // ('A' from 'Alice'); this unnamed one gets the hex-key-derived 'A',
+      // not the `N` its npub label starts with.
+      expect(_dmHeaderAvatarInitial(tester), 'A');
+    });
+
+    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
+      tester,
+    ) async {
+      // Member order does not guarantee the counterpart is listed first:
+      // the current user (self, from the fake profile) comes FIRST, so an
+      // avatar keyed to the first participant would render the current
+      // user's initial while the header label names the counterpart.
+      const b0b =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: ['Self', shortPubkey(b0b)],
+        participantPubkeys: const ['self', b0b],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], channel: dmChannel),
+      );
+      await tester.pumpAndSettle();
+
+      // Label and avatar agree on the counterpart's key: the compact npub
+      // names the unnamed counterpart, and the avatar initial is keyed to
+      // that same hex key — never the current user's `S`.
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
+        shortPubkey(b0b),
+      );
+      expect(_dmHeaderAvatarInitial(tester), 'B');
+    });
+
+    testWidgets('uses a fallback squircle for bot-role DM participants', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message with a bot',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadChannelBotPubkeys: () async => const {'bot'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
+      expect(
+        tester
+            .widget<AvatarImageContent>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(AvatarImageContent),
+              ),
+            )
+            .imageUrl,
+        isNull,
+      );
+      expect(
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('hides the Huddle action in a one-to-one agent DM', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message with an agent',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'agent': UserProfile(
+              pubkey: 'agent',
+              displayName: 'Agent',
+              ownerPubkey: 'owner',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
+      expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('hides the Huddle action for a channel bot DM', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message with a channel bot',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadChannelBotPubkeys: () async => const {'bot'},
+          users: const {'bot': UserProfile(pubkey: 'bot', displayName: 'Bot')},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps the Huddle action hidden while agent identity loads', (
+      tester,
+    ) async {
+      final directoryCompleter = Completer<List<AgentDirectoryEntry>>();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadAgentDirectory: () => directoryCompleter.future,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      directoryCompleter.complete(const []);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('preloads DM participant profiles without a member snapshot', (
+      tester,
+    ) async {
+      final preloadedPubkeys = <String>[];
+      final userCache = _FakeUserCacheNotifier(
+        const {},
+        preload: (pubkeys) async {
+          preloadedPubkeys.addAll(pubkeys);
+          return true;
+        },
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(preloadedPubkeys, containsAll(const ['self', 'alice']));
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('force-refreshes cached profiles before enabling Huddle', (
+      tester,
+    ) async {
+      late final _FakeUserCacheNotifier userCache;
+      userCache = _FakeUserCacheNotifier(
+        const {
+          'agent': UserProfile(pubkey: 'agent', displayName: 'Cached Human'),
+        },
+        preload: (_) async {
+          await Future<void>.delayed(Duration.zero);
+          userCache.replace(
+            const UserProfile(
+              pubkey: 'agent',
+              displayName: 'Agent',
+              ownerPubkey: 'owner',
+            ),
+          );
+          return true;
+        },
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(userCache.state['agent']?.ownerPubkey, 'owner');
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden when live owner profile beats refresh', (
+      tester,
+    ) async {
+      final owner = nostr.Keys.generate();
+      final agent = nostr.Keys.generate();
+      final profileRefresh = Completer<List<NostrEvent>>();
+      final relaySession = _IdentityUpdateRelaySession(
+        profileRefresh: profileRefresh.future,
+      );
+      final userCache = UserCacheNotifier();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: ['self', agent.public],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: agent.public,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitProfile(
+        _profileEvent(
+          id: 'newer-agent',
+          pubkey: agent.public,
+          createdAt: 2,
+          name: 'Agent',
+          tags: [_authTag(owner, agent.public)],
+        ),
+      );
+      profileRefresh.complete([
+        _profileEvent(
+          id: 'older-human',
+          pubkey: agent.public,
+          createdAt: 1,
+          name: 'Human',
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(userCache.state[agent.public]?.ownerPubkey, owner.public);
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden while a verified owner profile loads', (
+      tester,
+    ) async {
+      final profilePreloadCompleter = Completer<bool>();
+      final userCache = _FakeUserCacheNotifier(
+        const {},
+        preload: (_) => profilePreloadCompleter.future,
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      userCache.replace(
+        const UserProfile(
+          pubkey: 'agent',
+          displayName: 'Agent',
+          ownerPubkey: 'owner',
+        ),
+      );
+      profilePreloadCompleter.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('rechecks verified owner profiles after reconnect', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final reconnectPreloadCompleter = Completer<bool>();
+      var memberPreloadCount = 0;
+      var blockMemberPreload = false;
+      final userCache = _FakeUserCacheNotifier(
+        const {},
+        preload: (pubkeys) {
+          if (pubkeys.length == 1) return Future.value(true);
+          memberPreloadCount++;
+          return blockMemberPreload
+              ? reconnectPreloadCompleter.future
+              : Future.value(true);
+        },
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+      final memberPreloadsBeforeReconnect = memberPreloadCount;
+      blockMemberPreload = true;
+
+      relaySession.disconnect();
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.connect();
+      await tester.pump();
+      expect(memberPreloadCount, greaterThan(memberPreloadsBeforeReconnect));
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      userCache.replace(
+        const UserProfile(
+          pubkey: 'agent',
+          displayName: 'Agent',
+          ownerPubkey: 'owner',
+        ),
+      );
+      reconnectPreloadCompleter.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 500));
+    });
+
+    testWidgets('keeps directory-only agent Huddle hidden after disconnect', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          loadAgentDirectory: () async => const [
+            AgentDirectoryEntry(pubkey: 'agent'),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.disconnect();
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps bot-role-only Huddle hidden after disconnect', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          loadChannelBotPubkeys: () async => const {'bot'},
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'bot',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.disconnect();
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden until bot-role replay reaches EOSE', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          watchChannelMembershipUpdates: true,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+
+      relaySession.beginMembershipReplay();
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitReplayedMembership(
+        NostrEvent(
+          id: 'membership-self',
+          pubkey: 'relay',
+          createdAt: 1,
+          kind: 39002,
+          tags: const [
+            ['d', _channelId],
+            ['p', 'self'],
+          ],
+          content: '',
+          sig: 'sig',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitReplayedMembership(
+        NostrEvent(
+          id: 'membership-bot',
+          pubkey: 'relay',
+          createdAt: 2,
+          kind: 39002,
+          tags: const [
+            ['d', _channelId],
+            ['p', 'self'],
+            ['p', 'alice', '', 'bot'],
+          ],
+          content: '',
+          sig: 'sig',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.finishMembershipReplay();
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps the Huddle action hidden when identity loading fails', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadAgentOwners: () => Future.error('identity unavailable'),
+          disableRetries: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps the Huddle action hidden when member preload fails', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadMembers: () => Future.error('members unavailable'),
+          disableRetries: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('hides Huddle when a participant becomes an agent live', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      var directoryLoadCount = 0;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          loadAgentDirectory: () async {
+            directoryLoadCount++;
+            return directoryLoadCount == 1
+                ? const []
+                : const [AgentDirectoryEntry(pubkey: 'alice')];
+          },
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(relaySession.identityFilter?.kinds, const [0, 10100]);
+      expect(relaySession.identityFilter?.authors, contains('alice'));
+      expect(relaySession.identityFilter?.limit, 100);
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+
+      relaySession.emitAgentProfile(pubkey: 'alice');
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden while identity replay retries', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+
+      relaySession.retryIdentitySubscription();
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitAgentProfile(pubkey: 'alice');
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.readyIdentitySubscription();
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('queries DM participants directly for agent identity', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(relaySession.directIdentityFilter?.kinds, const [10100]);
+      expect(
+        relaySession.directIdentityFilter?.authors,
+        containsAll(const ['self', 'alice']),
+      );
+      expect(relaySession.directIdentityFilter?.limit, 2);
+    });
+
+    testWidgets('hides Huddle for an agent found by direct DM lookup', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession()
+        ..directIdentityProfiles = const [
+          NostrEvent(
+            id: 'old-agent-profile',
+            pubkey: 'alice',
+            createdAt: 1,
+            kind: 10100,
+            tags: [],
+            content: '{"name":"Agent"}',
+            sig: 'sig',
+          ),
+        ];
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets(
+      'keeps Huddle hidden if the live identity subscription closes',
+      (tester) async {
+        final relaySession = _IdentityUpdateRelaySession();
+        final dmChannel = Channel(
+          id: _channelId,
+          name: 'Human DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: 'Direct message',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Alice'],
+          participantPubkeys: const ['self', 'alice'],
+          isMember: true,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: dmChannel,
+            relaySessionNotifier: relaySession,
+            members: [
+              ChannelMember(
+                pubkey: 'self',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey: 'alice',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byTooltip('Start Huddle'), findsOneWidget);
+
+        relaySession.closeIdentitySubscription();
+        await tester.pump();
+
+        expect(find.byTooltip('Start Huddle'), findsNothing);
+      },
+    );
 
     testWidgets('keeps the Members action for group DMs', (tester) async {
       final dmChannel = Channel(
@@ -522,6 +1711,7 @@ void main() {
         _buildTestable(
           messages: const [],
           channel: dmChannel,
+          knownAgentPubkeys: const {'alice'},
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
             'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
@@ -531,6 +1721,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('View members'), findsOneWidget);
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
 
     testWidgets(
@@ -1247,16 +2438,36 @@ void main() {
     testWidgets('previews five members before an icon-free See all row', (
       tester,
     ) async {
+      // Valid fixture keys whose npub encodings were verified against the
+      // NIP-19 codec independently of the code under test.
+      const a11ce =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const carol =
+          'c010100000000000000000000000000000000000000000000000000000000000';
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          users: {
+            carol: const UserProfile(pubkey: carol, displayName: 'Carol'),
+          },
           members: [
             ChannelMember(
               pubkey: 'self',
               role: 'owner',
               joinedAt: DateTime(2025),
             ),
-            for (var index = 0; index < 5; index++)
+            ChannelMember(
+              pubkey: a11ce,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: carol,
+              role: 'member',
+              joinedAt: DateTime(2025),
+              displayName: 'Carol',
+            ),
+            for (var index = 0; index < 3; index++)
               ChannelMember(
                 pubkey: 'member-$index',
                 role: 'member',
@@ -1315,6 +2526,31 @@ void main() {
         closeTo(tester.getTopLeft(firstMemberTitle).dx, 0.1),
       );
       expect(tester.getSize(seeAllRow).height, 40 + (Grid.xxs * 2));
+
+      // Identity display in the preview rows: unnamed members keep distinct
+      // hex-keyed avatar initials (the compact-npub label would render `N`
+      // for everyone), while self and named rows keep their label initials.
+      final unnamedRow = find.byKey(ValueKey('channel-details-member-$a11ce'));
+      expect(
+        find.descendant(
+          of: unnamedRow,
+          matching: find.textContaining(shortPubkey(a11ce)),
+        ),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, a11ce), 'A');
+      final namedRow = find.byKey(ValueKey('channel-details-member-$carol'));
+      expect(
+        find.descendant(of: namedRow, matching: find.textContaining('Carol')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, carol), 'C');
+      final selfRow = find.byKey(const ValueKey('channel-details-member-self'));
+      expect(
+        find.descendant(of: selfRow, matching: find.textContaining('You')),
+        findsOneWidget,
+      );
+      expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
       await tester.ensureVisible(seeAllRow);
       await tester.pumpAndSettle();
@@ -3204,6 +4440,16 @@ void main() {
         );
 
         await tester.tap(find.text('Message #general'));
+        for (var frame = 0; frame < 15; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'Composer expansion must not expose Latest while tail-follow '
+                'layout catches up.',
+          );
+        }
         await tester.pumpAndSettle();
 
         expect(
@@ -3219,7 +4465,24 @@ void main() {
           findsNothing,
         );
 
-        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+          tester.view.viewInsets = FakeViewPadding(bottom: inset);
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'IME inset frames must not expose Latest while the followed '
+                'tail is being realigned.',
+          );
+        }
+        await tester.pump(androidImeMetricsSettleDelay);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+          reason:
+              'Latest must stay hidden when settled IME padding is applied.',
+        );
         await tester.pumpAndSettle();
 
         expect(latestMessage, findsOneWidget);
@@ -4216,11 +5479,12 @@ void main() {
       expect(find.text('Alice'), findsNWidgets(2));
     });
 
-    testWidgets('shows pubkey fallback when no profile', (tester) async {
+    testWidgets('shows compact npub fallback when no profile', (tester) async {
       final messages = [
         _textMsg(
           id: 'msg1',
-          pubkey: 'abcdef1234567890',
+          pubkey:
+              'abcdef0000000000000000000000000000000000000000000000000000000000',
           content: 'Hi',
           createdAt: 1000,
         ),
@@ -4230,8 +5494,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Hi'), findsOneWidget);
-      // Should show first 8 chars of pubkey + ellipsis
-      expect(find.text('abcdef12…'), findsOneWidget);
+      // Should show the compact npub form of the author's public key
+      expect(find.text('npub140x…etzk'), findsOneWidget);
     });
   });
 
@@ -4703,6 +5967,431 @@ void main() {
       );
     });
 
+    testWidgets('shows response dots only until the agent starts speaking', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final typing = _FakeTypingNotifier([
+        TypingEntry(
+          pubkey: 'agent',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+        ),
+      ], channelId: _huddleChannelId);
+      final transport = _HuddleTestTransport(
+        peers: const {
+          1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+          2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'working-agent-call',
+              kind: EventKind.huddleStarted,
+              pubkey: 'self',
+              createdAt: now,
+            ),
+          ],
+          users: const {
+            'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+          },
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          loadChannelBotPubkeys: () async => const {'agent'},
+          huddleTypingNotifier: typing,
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => transport,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsNothing,
+      );
+      expect(
+        find.bySemanticsLabel('Pollen, preparing a response'),
+        findsOneWidget,
+      );
+      // The preparing transition must be announced live. The outer avatar node
+      // excludes descendant semantics, so it must itself become a live region.
+      expect(
+        tester
+            .getSemantics(
+              find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+            )
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
+      final dotFinder = find.byKey(const ValueKey('bouncing-dot-2'));
+      final initialDotOffset = tester
+          .widget<Transform>(dotFinder)
+          .transform
+          .getTranslation()
+          .y;
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(
+        tester.widget<Transform>(dotFinder).transform.getTranslation().y,
+        isNot(initialDotOffset),
+      );
+
+      transport.emitRemoteAudio(peerIndex: 2);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel('Pollen, speaking'), findsOneWidget);
+
+      // A brief audio gap must not revive the waiting state while the same
+      // working signal is still active.
+      await tester.pump(const Duration(milliseconds: 650));
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsOneWidget,
+      );
+
+      typing.setEntries(const []);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'shows preparing indicator for a Huddle-only bot without a parent role',
+      (tester) async {
+        // Regression: a valid ephemeral Huddle bot with no parent bot role and
+        // no directory identity must still enter the preparing state from its
+        // Huddle typing. Classification must derive from authoritative
+        // ephemeral Huddle bot membership, not parent-channel classification.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final typing = _FakeTypingNotifier([
+          TypingEntry(
+            pubkey: 'agent',
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+          ),
+        ], channelId: _huddleChannelId);
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'huddle-only-working-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            // Bot membership is supplied ONLY through the ephemeral Huddle, and
+            // deliberately not through the parent channel (`members`).
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'bot',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleTypingNotifier: typing,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(
+          find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-avatar-image-agent')),
+          findsNothing,
+        );
+        expect(
+          find.bySemanticsLabel('Pollen, preparing a response'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('does not revive response dots when typing follows audio', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final typing = _FakeTypingNotifier(const [], channelId: _huddleChannelId);
+      final transport = _HuddleTestTransport(
+        peers: const {
+          1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+          2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'audio-before-working-signal',
+              kind: EventKind.huddleStarted,
+              pubkey: 'self',
+              createdAt: now,
+            ),
+          ],
+          users: const {
+            'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+          },
+          huddleTypingNotifier: typing,
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => transport,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pumpAndSettle();
+
+      transport.emitRemoteAudio(peerIndex: 2);
+      await tester.pump();
+      expect(find.bySemanticsLabel('Pollen, speaking'), findsOneWidget);
+
+      // Let the active-speaker window close before the independently
+      // transported typing signal arrives.
+      await tester.pump(const Duration(milliseconds: 650));
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'agent',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('revives response dots for a new turn after audio completes', (
+      tester,
+    ) async {
+      // Regression: a completed working cycle followed by a genuinely new one
+      // must show the preparing indicator again. A single audio-seen latch
+      // conflates late same-turn typing (suppress) with a fresh turn (show).
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final typing = _FakeTypingNotifier(const [], channelId: _huddleChannelId);
+      final transport = _HuddleTestTransport(
+        peers: const {
+          1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+          2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'new-turn-after-audio',
+              kind: EventKind.huddleStarted,
+              pubkey: 'self',
+              createdAt: now,
+            ),
+          ],
+          users: const {
+            'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+          },
+          huddleMembers: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          huddleTypingNotifier: typing,
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => transport,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pumpAndSettle();
+
+      // Turn 1: audio speaks, then late same-turn typing must stay suppressed.
+      transport.emitRemoteAudio(peerIndex: 2);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 650));
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'agent',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsNothing,
+      );
+
+      // Turn 1's working signal completes.
+      typing.setEntries(const []);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Turn 2: a fresh working signal within the 1.2 s cooldown must show the
+      // preparing indicator and announce it live again.
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'agent',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-avatar-image-agent')),
+        findsNothing,
+      );
+      expect(
+        find.bySemanticsLabel('Pollen, preparing a response'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getSemantics(
+              find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+            )
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
+    });
+
+    testWidgets(
+      'does not restart the profile subscription on speaker-level updates',
+      (tester) async {
+        // Regression: the logical-participant provider must select only
+        // roster-relevant session fields. Watching the whole session would
+        // recompute at the 50 ms speaker-level flush cadence, tearing down and
+        // recreating the kind-0 profile subscription ~20x/sec while anyone is
+        // speaking.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final relaySession = _ProfileSubscriptionRelaySession();
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'speaker-level-profile-churn',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            relaySessionNotifier: relaySession,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final baseline = relaySession.profileSubscriptions;
+        expect(baseline, greaterThan(0));
+
+        // Drive continuous speaker-level flushes: each frame within the 600 ms
+        // active window refreshes the level and schedules a 50 ms flush that
+        // republishes the whole session state.
+        for (var i = 0; i < 10; i++) {
+          transport.emitRemoteAudio(peerIndex: 2, sequence: i + 1);
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        await tester.pumpAndSettle();
+
+        expect(relaySession.profileSubscriptions, baseline);
+      },
+    );
+
     testWidgets(
       'opens the sparse full-screen call with avatar and audio controls',
       (tester) async {
@@ -4715,8 +6404,29 @@ void main() {
             3: HuddlePeer(pubkey: 'agent', peerIndex: 3, epoch: 0),
           },
         );
+        final users = _FakeUserCacheNotifier(const {
+          'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+          'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+          'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+        });
         final navigator = _RecordingNavigatorObserver();
         String? leftChannelId;
+        final hapticCalls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'HapticFeedback.vibrate') {
+              hapticCalls.add(call);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
 
         await tester.pumpWidget(
           _buildTestable(
@@ -4728,11 +6438,7 @@ void main() {
                 createdAt: now,
               ),
             ],
-            users: const {
-              'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
-              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
-              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
-            },
+            userCacheNotifier: users,
             huddleMembers: [
               ChannelMember(
                 pubkey: 'agent',
@@ -4851,47 +6557,103 @@ void main() {
           find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
         );
         await tester.pump();
-        final milesLabel = find.byKey(
-          const ValueKey('huddle-participant-label-desktop'),
-        );
-        final milesReveal = find
-            .ancestor(of: milesLabel, matching: find.byType(FadeTransition))
-            .first;
-        expect(tester.widget<FadeTransition>(milesReveal).opacity.value, 0);
-        await tester.pump(const Duration(milliseconds: 90));
+        expect(hapticCalls, hasLength(1));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
-          tester.widget<FadeTransition>(milesReveal).opacity.value,
-          allOf(greaterThan(0), lessThan(1)),
+          find.byKey(const ValueKey('huddle-participant-modal-backdrop')),
+          findsOneWidget,
         );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
         expect(find.text('Miles'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.label == 'Miles',
+          ),
+          findsNWidgets(2),
+        );
+        transport.emitRemoteAudio();
+        await tester.pump();
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Miles, speaking',
+          ),
+          findsNWidgets(2),
+        );
+        users.replace(
+          const UserProfile(pubkey: 'desktop', displayName: 'Miles Davis'),
+        );
+        await tester.pump();
+        expect(find.text('Miles'), findsNothing);
+        expect(find.text('Miles Davis'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Miles Davis, speaking',
+          ),
+          findsNWidgets(2),
+        );
+        users.replace(
+          const UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+        );
+        await tester.pump();
         expect(find.text('Pollen'), findsNothing);
         expect(find.byKey(const ValueKey('huddle-leave')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('huddle-participant-label-desktop')),
+          findsNothing,
+        );
+
+        transport.emitPeerLeave(1);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+          findsNothing,
+        );
+        transport.emitPeerJoin(
+          const HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 1),
+        );
+        await tester.pump();
 
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-agent')),
         );
-        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(2));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.text('Pollen'), findsOneWidget);
+        await tester.tapAt(const Offset(8, 8));
+        await tester.pumpAndSettle();
+        expect(find.text('Pollen'), findsNothing);
 
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-self')),
         );
         await tester.pumpAndSettle();
-        expect(find.text('You'), findsOneWidget);
-        final selfLabel = find.byKey(
-          const ValueKey('huddle-participant-label-self'),
-        );
-        final selfAvatar = find.byKey(
-          const ValueKey('huddle-speaking-ring-self'),
-        );
+        expect(find.text('You'), findsNothing);
         expect(
-          tester.getCenter(selfLabel).dx,
-          closeTo(tester.getCenter(selfAvatar).dx, 0.01),
+          find.byKey(
+            const ValueKey('huddle-participant-spotlight-avatar-self'),
+          ),
+          findsNothing,
         );
-        expect(
-          tester.getTopLeft(selfLabel).dy,
-          greaterThanOrEqualTo(tester.getBottomLeft(selfAvatar).dy),
+        expect(hapticCalls, hasLength(2));
+        final selfSemantics = tester.widget<Semantics>(
+          find.byWidgetPredicate(
+            (widget) => widget is Semantics && widget.properties.label == 'You',
+          ),
         );
+        expect(selfSemantics.properties.button, isFalse);
+        expect(selfSemantics.properties.onTap, isNull);
+        expect(selfSemantics.properties.hint, isNull);
+        hapticCalls.clear();
         expect(find.text('Connected'), findsNothing);
         expect(find.text('Waiting for remote audio'), findsNothing);
         expect(find.text('Microphone muted'), findsNothing);
@@ -4998,6 +6760,8 @@ void main() {
             ?.resolve(const <WidgetState>{});
         await tester.tap(find.byKey(const ValueKey('huddle-speaker-toggle')));
         await tester.pump();
+        expect(hapticCalls, hasLength(1));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-speaker-toggle')),
@@ -5052,6 +6816,8 @@ void main() {
         );
         await tester.tap(find.byKey(const ValueKey('huddle-mute-toggle')));
         await tester.pump();
+        expect(hapticCalls, hasLength(2));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-mute-toggle')),
@@ -5092,6 +6858,8 @@ void main() {
         );
         await tester.tap(find.byKey(const ValueKey('huddle-emoji-reactions')));
         await tester.pump(const Duration(milliseconds: 500));
+        expect(hapticCalls, hasLength(3));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.byType(EmojiPickerSheet), findsOneWidget);
         tester
             .widget<EmojiPickerSheet>(find.byType(EmojiPickerSheet))
@@ -5102,6 +6870,8 @@ void main() {
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(4));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.widgetWithText(FilledButton, 'Open'), findsOneWidget);
         expect(
           tester
@@ -5158,9 +6928,18 @@ void main() {
         expect(find.bySemanticsLabel('Unmute'), findsOneWidget);
 
         await tester.tap(
+          find.byKey(const ValueKey('huddle-drawer-speaker-toggle')),
+        );
+        await tester.pump();
+        expect(hapticCalls, hasLength(5));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+
+        await tester.tap(
           find.byKey(const ValueKey('huddle-drawer-mute-toggle')),
         );
         await tester.pump();
+        expect(hapticCalls, hasLength(6));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           tester
               .widget<AnimatedPositioned>(
@@ -5204,6 +6983,8 @@ void main() {
         }
         await tester.tap(find.byKey(const ValueKey('huddle-drawer-expand')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(7));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.byKey(const ValueKey('huddle-minimize')), findsOneWidget);
         expect(
           tester
@@ -5218,8 +6999,12 @@ void main() {
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(8));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         await tester.tap(find.byKey(const ValueKey('huddle-drawer-leave')));
         await tester.pump();
+        expect(hapticCalls, hasLength(9));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           tester
               .widget<AnimatedPositioned>(
@@ -5243,8 +7028,9 @@ void main() {
     );
 
     testWidgets(
-      'fits a dense Huddle roster without scrolling and shrinks avatars',
+      'caps a dense Huddle roster at ten avatars with an overflow count',
       (tester) async {
+        const membershipAgentPubkey = 'membership-agent';
         tester.view.physicalSize = const Size(390, 844);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
@@ -5278,6 +7064,10 @@ void main() {
             ],
             users: {
               'self': const UserProfile(pubkey: 'self', displayName: 'Self'),
+              membershipAgentPubkey: const UserProfile(
+                pubkey: membershipAgentPubkey,
+                displayName: 'Membership agent',
+              ),
               for (final pubkey in remotePubkeys)
                 pubkey: UserProfile(pubkey: pubkey, displayName: pubkey),
             },
@@ -5288,6 +7078,11 @@ void main() {
                   role: 'member',
                   joinedAt: DateTime(2025),
                 ),
+              ChannelMember(
+                pubkey: membershipAgentPubkey,
+                role: 'bot',
+                joinedAt: DateTime(2025),
+              ),
             ],
             relayConfigNotifier: _HuddleRelayConfigNotifier(),
             huddleCurrentPubkey: 'self',
@@ -5314,12 +7109,74 @@ void main() {
           ),
           findsNothing,
         );
-        for (final pubkey in remotePubkeys) {
+        for (final pubkey in remotePubkeys.take(10)) {
           expect(
-            find.byKey(ValueKey('huddle-participant-entry-$pubkey')),
+            find.byKey(ValueKey('huddle-participant-avatar-$pubkey')),
             findsOneWidget,
           );
         }
+        for (final pubkey in remotePubkeys.skip(10)) {
+          expect(
+            find.byKey(ValueKey('huddle-participant-avatar-$pubkey')),
+            findsNothing,
+          );
+        }
+        expect(
+          find.byKey(const ValueKey('huddle-participant-overflow')),
+          findsOneWidget,
+        );
+        expect(find.text('+15'), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('huddle-participant-overflow')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster')),
+          findsOneWidget,
+        );
+        expect(find.text('15 more people'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-10')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-0')),
+          findsNothing,
+        );
+        await tester.scrollUntilVisible(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-23')),
+          200,
+          scrollable: find.descendant(
+            of: find.byKey(const ValueKey('huddle-participant-roster-list')),
+            matching: find.byType(Scrollable),
+          ),
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-23')),
+          findsOneWidget,
+        );
+        final membershipAgentRow = find.byKey(
+          const ValueKey(
+            'huddle-participant-roster-row-$membershipAgentPubkey',
+          ),
+        );
+        await tester.scrollUntilVisible(
+          membershipAgentRow,
+          200,
+          scrollable: find.descendant(
+            of: find.byKey(const ValueKey('huddle-participant-roster-list')),
+            matching: find.byType(Scrollable),
+          ),
+        );
+        expect(membershipAgentRow, findsOneWidget);
+        await tester.tapAt(const Offset(8, 8));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster')),
+          findsNothing,
+        );
 
         final firstRemoteRing = find.byKey(
           const ValueKey('huddle-speaking-ring-guest-0'),
@@ -5467,65 +7324,211 @@ void main() {
       },
     );
 
-    testWidgets('does not add backing-channel members after relay admission', (
-      tester,
-    ) async {
-      const staleMemberPubkey =
-          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final membersNotifier = _MutableHuddleMembersNotifier(const []);
+    testWidgets(
+      'shows admitted agents from membership before their audio peer joins',
+      (tester) async {
+        const addedMemberPubkey =
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final membersNotifier = _MutableHuddleMembersNotifier(const []);
+        final transport = _HuddleTestTransport();
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _huddleMsg(
-              id: 'authoritative-live-roster',
-              kind: EventKind.huddleStarted,
-              pubkey: 'self',
-              createdAt: now,
-            ),
-          ],
-          users: const {
-            'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
-            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
-            staleMemberPubkey: UserProfile(
-              pubkey: staleMemberPubkey,
-              displayName: 'Stale member',
-            ),
-          },
-          huddleMembersNotifier: membersNotifier,
-          relayConfigNotifier: _HuddleRelayConfigNotifier(),
-          relaySessionNotifier: _ReconnectingRelaySession(),
-          huddleCurrentPubkey: 'self',
-          huddleMediaFactory: _HuddleTestMedia.new,
-          huddleTransportFactory: (_) => _HuddleTestTransport(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
-      await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'authoritative-live-roster',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+              addedMemberPubkey: UserProfile(
+                pubkey: addedMemberPubkey,
+                displayName: 'Added member',
+              ),
+            },
+            huddleMembersNotifier: membersNotifier,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
 
-      membersNotifier.replace([
-        ChannelMember(
-          pubkey: staleMemberPubkey,
-          role: 'member',
-          joinedAt: DateTime(2025),
-        ),
-      ]);
-      await tester.pump();
-      await tester.pump();
+        final desktopAvatar = find.byKey(
+          const ValueKey('huddle-speaking-ring-desktop'),
+        );
+        final initialDesktopCenter = tester.getCenter(desktopAvatar);
 
-      expect(
-        find.byKey(
-          const ValueKey('huddle-participant-avatar-$staleMemberPubkey'),
-        ),
-        findsNothing,
-      );
-      expect(
-        find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
-        findsOneWidget,
-      );
-    });
+        membersNotifier.replace([
+          ChannelMember(
+            pubkey: addedMemberPubkey,
+            role: 'bot',
+            joinedAt: DateTime(2025),
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+          findsOneWidget,
+        );
+
+        final addedMemberScale = find.byKey(
+          const ValueKey('huddle-participant-entry-scale-$addedMemberPubkey'),
+        );
+        expect(
+          tester.widget<Transform>(addedMemberScale).transform.storage[0],
+          closeTo(0.72, 0.01),
+        );
+        await tester.pump(const Duration(milliseconds: 120));
+        final movingDesktopCenter = tester.getCenter(desktopAvatar);
+        expect(
+          tester.widget<Transform>(addedMemberScale).transform.storage[0],
+          greaterThan(0.72),
+        );
+        expect(
+          (movingDesktopCenter - initialDesktopCenter).distance,
+          greaterThan(1),
+        );
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
+          findsOneWidget,
+        );
+
+        await tester.tap(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+          findsOneWidget,
+        );
+        expect(find.text('Added member'), findsOneWidget);
+        await tester.tapAt(const Offset(8, 8));
+        await tester.pumpAndSettle();
+
+        await tester.pumpAndSettle();
+        final settledDesktopCenter = tester.getCenter(desktopAvatar);
+        expect(
+          (settledDesktopCenter - movingDesktopCenter).distance,
+          greaterThan(1),
+        );
+        expect(
+          (settledDesktopCenter - initialDesktopCenter).distance,
+          greaterThan(1),
+        );
+        expect(
+          tester.widget<Transform>(addedMemberScale).transform.storage[0],
+          closeTo(1, 0.01),
+        );
+
+        // The avatar reflects logical membership, so an audio connection ending
+        // does not remove the agent. Removing its membership does.
+        transport.emitPeerJoin(
+          const HuddlePeer(pubkey: addedMemberPubkey, peerIndex: 3, epoch: 0),
+        );
+        await tester.pump();
+        transport.emitPeerLeave(3);
+        await tester.pump();
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+          findsOneWidget,
+        );
+
+        membersNotifier.replace(const []);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'does not show admitted human membership without an audio peer',
+      (tester) async {
+        const invitedHumanPubkey =
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final membersNotifier = _MutableHuddleMembersNotifier(const []);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'human-membership-is-not-audio-presence',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'desktop': UserProfile(pubkey: 'desktop', displayName: 'Desktop'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+              invitedHumanPubkey: UserProfile(
+                pubkey: invitedHumanPubkey,
+                displayName: 'Invited human',
+              ),
+            },
+            huddleMembersNotifier: membersNotifier,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => _HuddleTestTransport(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        membersNotifier.replace([
+          ChannelMember(
+            pubkey: invitedHumanPubkey,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(
+          find.byKey(
+            const ValueKey('huddle-participant-avatar-$invitedHumanPubkey'),
+          ),
+          findsNothing,
+        );
+      },
+    );
 
     testWidgets('top-right call end leaves audio and the backing channel', (
       tester,
@@ -5534,6 +7537,22 @@ void main() {
       final media = _HuddleTestMedia();
       final transport = _HuddleTestTransport();
       String? leftChannelId;
+      final hapticCalls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            hapticCalls.add(call);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
 
       await tester.pumpWidget(
         _buildTestable(
@@ -5575,6 +7594,8 @@ void main() {
 
       await tester.tap(hangup);
       await tester.pump();
+      expect(hapticCalls, hasLength(1));
+      expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
       for (var attempt = 0; attempt < 100 && leftChannelId == null; attempt++) {
         await tester.pump();
       }
@@ -6535,21 +8556,60 @@ void main() {
     testWidgets('opens a profile sheet from a membership system avatar', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        _buildTestable(
+      const alicePubkey =
+          'a11ce00000000000000000000000000000000000000000000000000000000000';
+      const bobPubkey =
+          'b0b0000000000000000000000000000000000000000000000000000000000000';
+      // Not a valid hex public key — the sheet must surface a neutral label
+      // and refuse to copy it rather than leaking the raw string.
+      const invalidPubkey = 'bob-not-a-real-pubkey';
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      // Both scenarios share this sheet workflow — a keyed remount so the
+      // second [ProviderScope] (and its user-cache override) is fresh.
+      Widget sheetHost(
+        String scenario,
+        String target, {
+        Map<String, UserProfile> users = const {},
+      }) => KeyedSubtree(
+        key: ValueKey('sheet-$scenario'),
+        child: _buildTestable(
           messages: [
             _systemMsg(
-              id: 'sys-membership-avatar',
+              id: 'sys-membership-avatar-$scenario',
               payload: {
                 'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'bob',
+                'actor': alicePubkey,
+                'target': target,
               },
             ),
           ],
+          users: users,
+        ),
+      );
+
+      // A valid identity: the sheet copies the full canonical npub.
+      await tester.pumpWidget(
+        sheetHost(
+          'valid',
+          bobPubkey,
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+            bobPubkey: const UserProfile(pubkey: bobPubkey, displayName: 'Bob'),
           },
         ),
       );
@@ -6559,15 +8619,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
-      expect(find.text('alice'), findsNothing);
+      // The full hex key is never rendered in the sheet.
+      expect(find.text(alicePubkey), findsNothing);
+      expect(find.text(bobPubkey), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
-      addTearDown(
-        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(SystemChannels.platform, null),
-      );
       await tester.ensureVisible(find.text('Copy public key'));
       await tester.pumpAndSettle();
       final copyAction = find
@@ -6580,6 +8636,68 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsOneWidget);
+      // The clipboard receives the full canonical npub — never the raw hex.
+      expect(clipboardTexts, [
+        'npub1kzcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0euyv8',
+      ]);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
+
+      // An invalid identity through the same workflow: neutral label,
+      // disabled copy, and no second clipboard write.
+      await tester.pumpWidget(
+        sheetHost(
+          'invalid',
+          invalidPubkey,
+          users: {
+            alicePubkey: const UserProfile(
+              pubkey: alicePubkey,
+              displayName: 'Alice',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      // Malformed identity → neutral label, never truncated raw input.
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Unknown identity'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text(invalidPubkey), findsNothing);
+      // The copy tile is disabled and exposes no tap handler.
+      final disabledCopyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      expect(tester.widget<GestureDetector>(disabledCopyAction).onTap, isNull);
+      final copySemantics = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(Semantics),
+          )
+          .first;
+      expect(
+        tester.widget<Semantics>(copySemantics).properties.enabled,
+        isFalse,
+      );
+
+      await tester.tap(disabledCopyAction, warnIfMissed: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsNothing);
+      // The valid scenario's npub is still the only clipboard write.
+      expect(clipboardTexts, hasLength(1));
 
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
@@ -6587,6 +8705,79 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets(
+      'profile sheet heading falls back to the compact npub for blank cached names',
+      (tester) async {
+        const alicePubkey =
+            'a11ce00000000000000000000000000000000000000000000000000000000000';
+        const bobPubkey =
+            'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+        // The membership row opens the sheet for the joined member (bob).
+        // His cached display name is relay-valid but blank (empty and
+        // whitespace-only), so the heading must resolve through the shared
+        // nonblank-name label contract — the compact npub of the b0b key,
+        // never a blank heading. Keyed remounts keep each ProviderScope
+        // (and its user-cache override) fresh between scenarios.
+        for (final blankName in const ['', '   ']) {
+          await tester.pumpWidget(
+            KeyedSubtree(
+              key: ValueKey('blank-name-sheet-${blankName.length}'),
+              child: _buildTestable(
+                messages: [
+                  _systemMsg(
+                    id: 'sys-membership-blank-${blankName.length}',
+                    payload: {
+                      'type': 'member_joined',
+                      'actor': alicePubkey,
+                      'target': bobPubkey,
+                    },
+                  ),
+                ],
+                users: {
+                  alicePubkey: const UserProfile(
+                    pubkey: alicePubkey,
+                    displayName: 'Alice',
+                  ),
+                  bobPubkey: UserProfile(
+                    pubkey: bobPubkey,
+                    displayName: blankName,
+                  ),
+                },
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.byType(CircleAvatar));
+          await tester.pumpAndSettle();
+
+          expect(find.byType(UserProfileSheet), findsOneWidget);
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text(blankName),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byType(UserProfileSheet),
+              matching: find.text('npub1kzc…uyv8'),
+            ),
+            findsOneWidget,
+          );
+          // The full hex key is never rendered either.
+          expect(find.text(bobPubkey), findsNothing);
+
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('opens a profile sheet from a huddle system avatar', (
       tester,
@@ -7884,6 +10075,7 @@ void main() {
       expect(detailsAppBar.frostedSurfaceOpacity, 0);
       expect(detailsAppBar.frostedBlurSigma, 0);
       expect(detailsAppBar.showBottomDivider, isFalse);
+      expect(detailsAppBar.centerTitle, isTrue);
 
       final descriptionBottom = tester
           .getRect(find.byKey(const ValueKey('channel-details-description')))
@@ -7938,7 +10130,7 @@ void main() {
       expect(detailsAppBar.frostedSurfaceOpacity, 0.5);
       expect(detailsAppBar.frostedBlurSigma, 20);
       expect(detailsAppBar.showBottomDivider, isTrue);
-      expect(detailsAppBar.bottomDividerOpacity, 0.15);
+      expect(detailsAppBar.bottomDividerOpacity, 0.07);
       expect(
         tester
             .widget<AppListCard>(
@@ -9140,6 +11332,96 @@ void main() {
       );
     });
 
+    testWidgets(
+      'iOS thread keeps Latest hidden through composer and keyboard frames',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'A short thread',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 6; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: i.isEven ? 'alice' : 'bob',
+                content: i.isEven ? 'hello' : 'testing',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('thread-jump-to-latest')),
+            findsNothing,
+          );
+
+          await tester.tap(find.text('Reply in thread…').hitTestable());
+          for (var frame = 0; frame < 15; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'Composer expansion must not expose Latest while followed '
+                  'tail geometry catches up.',
+            );
+          }
+
+          for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+            tester.view.viewInsets = FakeViewPadding(bottom: inset);
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'IME inset frames must not expose Latest while the composer '
+                  'is following the thread tail.',
+            );
+          }
+          await tester.pumpAndSettle();
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     for (final replyCount in [0, 1]) {
       testWidgets(
         'cached writable $replyCount-reply thread defers dock correction until measured',
@@ -9682,75 +11964,94 @@ void main() {
     testWidgets('short initial thread hydration remains top-anchored', (
       tester,
     ) async {
-      final rootEvent = _textMsg(
-        id: 'thread-root',
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: 1000,
-      );
-      final replies = [
-        _textMsg(
-          id: 'reply-1',
-          pubkey: 'bob',
-          content: 'First reply',
-          createdAt: 1100,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-        _textMsg(
-          id: 'reply-2',
-          pubkey: 'bob',
-          content: 'Second reply',
-          createdAt: 1101,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-      ];
-      final completer = Completer<List<NostrEvent>>();
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          pendingThreadReplies: {'thread-root': completer.future},
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final threadHead = formatTimeline([rootEvent]).single;
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: [threadHead],
-            channelId: _channelId,
-            currentPubkey: 'self',
-            isMember: true,
-            isArchived: false,
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          _textMsg(
+            id: 'reply-1',
+            pubkey: 'bob',
+            content: 'First reply',
+            createdAt: 1100,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
+          _textMsg(
+            id: 'reply-2',
+            pubkey: 'bob',
+            content: 'Second reply',
+            createdAt: 1101,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
 
-      final headFinder = find.byKey(
-        const ValueKey('thread-message-group-thread-root'),
-      );
-      final initialHeadY = tester.getTopLeft(headFinder).dy;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      completer.complete(replies);
-      await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(headFinder, findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('thread-message-group-reply-2')),
-        findsOneWidget,
-      );
-      expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        final headFinder = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final initialHeadY = tester.getTopLeft(headFinder).dy;
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsNothing);
+
+        completer.complete(replies);
+        await tester.pump();
+        for (var frame = 0; frame < 8; frame++) {
+          expect(
+            find.byKey(latestButton),
+            findsNothing,
+            reason:
+                'Ordinary thread entry must not expose Latest on frame $frame.',
+          );
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+
+        expect(headFinder, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-2')),
+          findsOneWidget,
+        );
+        expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        expect(find.byKey(latestButton), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets(
@@ -10472,7 +12773,9 @@ void main() {
         final composer = find.byKey(const ValueKey('composer-surface'));
         // Clear the gesture arena's touch slop so this represents a deliberate
         // tail-detaching drag rather than a long-press hold with small motion.
-        await tester.drag(list, const Offset(0, 48));
+        // The compact composer now rests lower, so use enough drag distance to
+        // keep the final reply beneath its top edge for this covered-tail case.
+        await tester.drag(list, const Offset(0, 56));
         await tester.pumpAndSettle();
         expect(
           tester.getBottomLeft(latest).dy,
@@ -11124,6 +13427,81 @@ void main() {
       );
     }
 
+    testWidgets(
+      'thread shows Latest after composer tail correction exhausts and focus leaves',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([rootEvent]).single,
+              allMessages: formatTimeline([rootEvent, replies[5]]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+              jumpThreadTailForTesting: () => true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pump();
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+          reason: 'The lazy tail must remain unlaid after bounded correction.',
+        );
+
+        focusNode.unfocus();
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(find.byKey(latestButton), findsOneWidget);
+      },
+    );
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {
@@ -11300,19 +13678,35 @@ void main() {
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
 
-    test(
-      'thread tail accepts exact scroll extent while item positions lag',
-      () {
+    test('thread tail ignores oscillating item positions at exact extent', () {
+      for (final tailItemIsVisible in [true, false, false, true, false]) {
         expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 0),
+          threadTailIsAtEffectiveEnd(
+            tailIsLaidOut: true,
+            tailIsVisible: tailItemIsVisible,
+            extentAfter: 0,
+          ),
           isTrue,
         );
-        expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
-          isFalse,
-        );
-      },
-    );
+      }
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: true,
+          tailIsVisible: false,
+          extentAfter: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: false,
+          tailIsVisible: false,
+          extentAfter: 0,
+        ),
+        isFalse,
+        reason: 'A not-yet-laid-out lazy tail cannot trust stale extent.',
+      );
+    });
 
     testWidgets('thread Latest settles across expanding lazy scroll extents', (
       tester,
@@ -11469,6 +13863,21 @@ void main() {
         expect(
           find.byKey(const ValueKey('thread-jump-to-latest')),
           findsNothing,
+        );
+
+        final landingScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        landingScrollable.position.jumpTo(
+          landingScrollable.position.maxScrollExtent - 24,
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+          reason:
+              'A stale landing measurement must not expose Latest before the '
+              'user explicitly browses history.',
         );
 
         await tester.drag(list, const Offset(0, 500));
@@ -11634,6 +14043,8 @@ void main() {
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
         positionedList.itemScrollController!.jumpTo(index: 5);
+        await tester.pumpAndSettle();
+        await tester.drag(list, const Offset(0, 20));
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-159')),
@@ -12059,6 +14470,171 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   }
 }
 
+class _IdentityUpdateRelaySession extends RelaySessionNotifier {
+  _IdentityUpdateRelaySession({this.profileRefresh});
+
+  final Future<List<NostrEvent>>? profileRefresh;
+  NostrFilter? identityFilter;
+  NostrFilter? directIdentityFilter;
+  List<NostrEvent> directIdentityProfiles = const [];
+  void Function(NostrEvent)? _identityListener;
+  void Function(String message)? _identityClosedListener;
+  void Function(RelaySubscriptionStatus status)? _identityStatusListener;
+  void Function(NostrEvent)? _membershipListener;
+  void Function(RelaySubscriptionStatus status)? _membershipStatusListener;
+  NostrEvent? membershipSnapshot;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filter.kinds.length == 1 && filter.kinds.single == 0) {
+      return profileRefresh ?? const [];
+    }
+    if (filter.kinds.contains(10100) && filter.kinds.length == 1) {
+      directIdentityFilter = filter;
+      return directIdentityProfiles;
+    }
+    return membershipSnapshot == null ? const [] : [membershipSnapshot!];
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    if (filter.kinds.contains(10100)) {
+      identityFilter = filter;
+      _identityListener = onEvent;
+      _identityClosedListener = onClosed;
+      _identityStatusListener = onStatusChanged;
+      onStatusChanged(RelaySubscriptionStatus.ready);
+      return () {
+        if (identical(_identityListener, onEvent)) {
+          _identityListener = null;
+          _identityClosedListener = null;
+          _identityStatusListener = null;
+        }
+      };
+    }
+    _membershipListener = onEvent;
+    _membershipStatusListener = onStatusChanged;
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {
+      if (identical(_membershipListener, onEvent)) {
+        _membershipListener = null;
+        _membershipStatusListener = null;
+      }
+    };
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async {
+    if (filter.kinds.contains(10100)) {
+      identityFilter = filter;
+      _identityListener = onEvent;
+      _identityClosedListener = onClosed;
+    }
+    return () {
+      if (identical(_identityListener, onEvent)) {
+        _identityListener = null;
+        _identityClosedListener = null;
+      }
+    };
+  }
+
+  void emitProfile(NostrEvent event) {
+    _identityListener?.call(event);
+  }
+
+  void emitAgentProfile({required String pubkey}) {
+    _identityListener?.call(
+      NostrEvent(
+        id: 'agent-profile-$pubkey',
+        pubkey: pubkey,
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        kind: 10100,
+        tags: const [],
+        content: '{"name":"Agent"}',
+        sig: 'sig',
+      ),
+    );
+  }
+
+  void closeIdentitySubscription() {
+    _identityClosedListener?.call('unsupported filter');
+  }
+
+  void retryIdentitySubscription() {
+    _identityStatusListener?.call(RelaySubscriptionStatus.retrying);
+  }
+
+  void readyIdentitySubscription() {
+    _identityStatusListener?.call(RelaySubscriptionStatus.ready);
+  }
+
+  void beginMembershipReplay() {
+    _membershipStatusListener?.call(RelaySubscriptionStatus.retrying);
+  }
+
+  void emitReplayedMembership(NostrEvent event) {
+    membershipSnapshot = event;
+    _membershipListener?.call(event);
+    _membershipStatusListener?.call(RelaySubscriptionStatus.retrying);
+  }
+
+  void finishMembershipReplay() {
+    _membershipStatusListener?.call(RelaySubscriptionStatus.ready);
+  }
+
+  void disconnect() {
+    state = const SessionState(status: SessionStatus.disconnected);
+  }
+
+  void connect() {
+    state = const SessionState(status: SessionStatus.connected);
+  }
+}
+
+class _ProfileSubscriptionRelaySession extends RelaySessionNotifier {
+  int profileSubscriptions = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => event;
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async {
+    if (filter.kinds.contains(0)) profileSubscriptions++;
+    return () {};
+  }
+}
+
 class _HuddleReactionRelaySession extends RelaySessionNotifier {
   NostrFilter? reactionFilter;
   void Function(NostrEvent)? _reactionListener;
@@ -12201,15 +14777,59 @@ class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
   }
 }
 
+NostrEvent _profileEvent({
+  required String id,
+  required String pubkey,
+  required int createdAt,
+  required String name,
+  List<List<String>> tags = const [],
+}) => NostrEvent(
+  id: id,
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: 0,
+  tags: tags,
+  content: jsonEncode({'name': name}),
+  sig: 'sig',
+);
+
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final digest = SHA256Digest().process(
+    Uint8List.fromList(
+      utf8.encode('nostr:agent-auth:${agentPubkey.toLowerCase()}:'),
+    ),
+  );
+  final message = digest
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+  return [
+    'auth',
+    owner.public,
+    '',
+    nostr.Schnorr.sign(secretKey: owner.secret, message: message),
+  ];
+}
+
 class _FakeUserCacheNotifier extends UserCacheNotifier {
   final Map<String, UserProfile> _users;
-  _FakeUserCacheNotifier(this._users);
+  final Future<bool> Function(List<String>)? _preload;
+  _FakeUserCacheNotifier(
+    this._users, {
+    Future<bool> Function(List<String>)? preload,
+  }) : _preload = preload;
 
   @override
   Map<String, UserProfile> build() => _users;
 
   @override
   UserProfile? get(String pubkey) => _users[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) =>
+      _preload?.call(pubkeys) ?? Future.value(true);
+
+  @override
+  Future<bool> refresh(List<String> pubkeys) => preload(pubkeys);
 
   void replace(UserProfile profile) {
     state = {...state, profile.pubkey.toLowerCase(): profile};
@@ -12512,10 +15132,28 @@ final class _HuddleTestTransport implements HuddleTransportClient {
     );
   }
 
-  void emitRemoteAudio({int levelDbov = -30, int sequence = 1}) {
+  void emitPeerLeave(int peerIndex) {
+    final peer = _peers.remove(peerIndex);
+    if (peer == null) return;
+    _state = HuddleTransportState(
+      phase: HuddleTransportPhase.connected,
+      localPeerIndex: _state.localPeerIndex,
+      peers: _peers,
+    );
+    _states.add(_state);
+    _peerEvents.add(
+      HuddlePeerEvent(type: HuddlePeerEventType.left, peer: peer),
+    );
+  }
+
+  void emitRemoteAudio({
+    int peerIndex = 1,
+    int levelDbov = -30,
+    int sequence = 1,
+  }) {
     _remoteFrames.add(
       HuddleRemoteAudioFrame(
-        peerIndex: 1,
+        peerIndex: peerIndex,
         epoch: 0,
         header: HuddleAudioHeader(
           sequence: sequence,
@@ -12619,4 +15257,26 @@ class _TestNavigatorObserver extends NavigatorObserver {
     pushCount += 1;
     super.didPush(route, previousRoute);
   }
+}
+
+/// Avatar fallback initial in the DM header — asserts at the production
+/// seam (the masked `dm-header-avatar` badge), not the label helper.
+String _dmHeaderAvatarInitial(WidgetTester tester) {
+  final avatar = find.byKey(const ValueKey('dm-header-avatar'));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
+}
+
+/// Avatar fallback initial in the channel-details member preview row keyed
+/// to [pubkey] — asserts at the production seam (the rendered
+/// `_ChannelMemberPreviewRow`), not the label helper.
+String _previewRowAvatarInitial(WidgetTester tester, String pubkey) {
+  final row = find.byKey(ValueKey('channel-details-member-$pubkey'));
+  final avatar = find.descendant(of: row, matching: find.byType(AvatarImage));
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
 }

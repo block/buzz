@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   Project,
   ProjectActivitySummary,
@@ -21,19 +22,18 @@ import {
   projectSelectionPresentation,
 } from "@/features/projects/lib/projectSelection";
 import type { ProjectsFilter } from "@/features/projects/lib/projectsViewHelpers";
+import type { ProjectsActivityDigest } from "@/features/projects/lib/projectsActivityDigest";
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { ProjectsCreateMenu } from "./ProjectsCreateMenu";
+import { ProjectsOverviewPeople } from "./ProjectsOverviewRail";
 import { ProjectsSelectionCountMenu } from "./ProjectsSelectionCountMenu";
-import { useCommunities } from "@/features/communities/useCommunities";
-import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import {
+  type OverviewContextAction,
   type OverviewContextStatIcon,
   type ProjectsOverviewSection,
   projectsOverviewContext,
 } from "./projectsOverviewContext";
-import { ProjectsOverviewPeople } from "./ProjectsOverviewRail";
 
 export type { ProjectsOverviewSection };
 
@@ -56,37 +56,65 @@ type ProjectsOverviewPanelProps = {
 
 type ProjectsOverviewContextPanelProps = {
   filter: ProjectsFilter;
+  canCreateTarget: boolean;
   issues: ProjectIssue[];
+  onAddChannel: () => void;
+  onAddRepository: () => void;
   onChatWithAgent: (items: ProjectSelectionItem[]) => void;
   onCreateIssue: () => void;
   onCreateProject: () => void;
   onCreatePullRequest: () => void;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   profiles?: UserProfileLookup;
+  projectReadModels: Project[];
   projects: Project[];
   pullRequests: ProjectPullRequest[];
+  repositorySummaries?: Record<string, ProjectActivitySummary>;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
-function OverviewActionButton({
-  children,
-  onClick,
-  testId,
+function OverviewCreateButton({
+  action,
+  canCreateTarget,
+  onAddChannel,
+  onAddRepository,
+  onCreateIssue,
+  onCreateProject,
+  onCreatePullRequest,
 }: {
-  children: React.ReactNode;
-  onClick: () => void;
-  testId?: string;
+  action: Exclude<OverviewContextAction, null>;
+  canCreateTarget: boolean;
+  onAddChannel: () => void;
+  onAddRepository: () => void;
+  onCreateIssue: () => void;
+  onCreateProject: () => void;
+  onCreatePullRequest: () => void;
 }) {
+  const actionHandler =
+    action.kind === "issue"
+      ? onCreateIssue
+      : action.kind === "pullRequest"
+        ? onCreatePullRequest
+        : action.kind === "project"
+          ? onCreateProject
+          : action.kind === "channel"
+            ? onAddChannel
+            : onAddRepository;
+  const requiresProject =
+    action.kind === "channel" || action.kind === "repository";
   return (
     <Button
-      className="-mx-2 h-7 w-[calc(100%+1rem)] justify-start gap-3 rounded-md px-2 text-left text-sm font-normal hover:bg-muted/70 [&_svg]:h-4 [&_svg]:w-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground"
-      data-testid={testId}
-      onClick={onClick}
-      size="sm"
+      aria-label={action.label}
+      className="h-6 w-6 shrink-0 rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+      data-testid={action.testId}
+      disabled={requiresProject && !canCreateTarget}
+      onClick={actionHandler}
+      size="icon"
+      title={action.label}
       type="button"
       variant="ghost"
     >
-      {children}
+      <Plus className="h-4 w-4" />
     </Button>
   );
 }
@@ -113,7 +141,9 @@ function OverviewStatRow({
         <Icon className="h-3.5 w-3.5 shrink-0" />
         {label}
       </span>
-      <span className="font-medium tabular-nums text-foreground">{count}</span>
+      <span className="font-medium tabular-nums text-muted-foreground/65">
+        {count}
+      </span>
     </button>
   );
 }
@@ -128,59 +158,61 @@ export function ProjectsOverviewPanel({
   );
 }
 
-export function ProjectsActivityIntro() {
-  const { activeCommunity } = useCommunities();
-  const communityIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
-  const communityIcon = communityIconQuery.data ?? null;
-
+export function ProjectsActivityIntro({
+  digest,
+}: {
+  digest: ProjectsActivityDigest;
+}) {
   return (
     <section
-      className="pb-8 pt-16 text-center"
+      className="pb-6 pt-8 text-left"
       data-testid="projects-activity-intro"
     >
-      <div
-        aria-label={`${activeCommunity?.name ?? "Current"} relay`}
-        className="mx-auto mb-3 flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl text-4xl"
-        data-testid="projects-activity-relay-icon"
-        role="img"
-      >
-        {communityIcon ? (
-          <img
-            alt=""
-            className="h-full w-full object-cover"
-            draggable={false}
-            src={communityIcon}
-          />
-        ) : (
-          <span aria-hidden="true" className="-translate-y-px leading-none">
-            🐝
-          </span>
-        )}
-      </div>
       <h2
         className="text-xl font-semibold tracking-tight text-foreground"
         data-testid="projects-page-header"
       >
         Projects Activity
       </h2>
-      <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Keeping up with the community has never been easier—or mattered more.
+      <p
+        className="mt-2 max-w-2xl text-sm text-muted-foreground"
+        data-testid="projects-activity-summary"
+      >
+        {digest.prefix}{" "}
+        {digest.highlights.map((highlight, index) => (
+          <span key={highlight}>
+            {index > 0
+              ? index === digest.highlights.length - 1
+                ? ", and "
+                : ", "
+              : null}
+            <strong className="font-medium text-foreground/90">
+              {highlight}
+            </strong>
+          </span>
+        ))}
+        {digest.suffix}
       </p>
     </section>
   );
 }
 
 export function ProjectsOverviewContextPanel({
+  canCreateTarget,
   filter,
   issues,
+  onAddChannel,
+  onAddRepository,
   onChatWithAgent,
   onCreateIssue,
   onCreateProject,
   onCreatePullRequest,
   onSelectSection,
   profiles,
+  projectReadModels,
   projects,
   pullRequests,
+  repositorySummaries,
   summaries,
 }: ProjectsOverviewContextPanelProps) {
   const selection = useProjectSelection();
@@ -196,22 +228,28 @@ export function ProjectsOverviewContextPanel({
       projectsOverviewContext({
         filter,
         issues,
+        projectReadModels,
         projects,
         pullRequests,
+        repositorySummaries,
         summaries,
       }),
-    [filter, issues, projects, pullRequests, summaries],
+    [
+      filter,
+      issues,
+      projectReadModels,
+      projects,
+      pullRequests,
+      repositorySummaries,
+      summaries,
+    ],
   );
-  const actionHandler =
-    context.action?.kind === "issue"
-      ? onCreateIssue
-      : context.action?.kind === "pullRequest"
-        ? onCreatePullRequest
-        : onCreateProject;
-
   return (
     <div
-      className="min-w-0 overflow-hidden rounded-2xl bg-background"
+      className={cn(
+        "min-w-0 overflow-hidden",
+        selectionPresentation && "rounded-xl bg-background/90",
+      )}
       data-testid="projects-overview-context-panel"
     >
       <div className="px-4 pb-3 pt-3">
@@ -230,41 +268,35 @@ export function ProjectsOverviewContextPanel({
             >
               {context.title}
             </h2>
-            <ProjectsCreateMenu
-              compact
-              onCreateIssue={onCreateIssue}
-              onCreateProject={onCreateProject}
-              onCreatePullRequest={onCreatePullRequest}
-            />
+            {context.action ? (
+              <OverviewCreateButton
+                action={context.action}
+                canCreateTarget={canCreateTarget}
+                onAddChannel={onAddChannel}
+                onAddRepository={onAddRepository}
+                onCreateIssue={onCreateIssue}
+                onCreateProject={onCreateProject}
+                onCreatePullRequest={onCreatePullRequest}
+              />
+            ) : null}
           </div>
         )}
         {selectionPresentation ? null : (
-          <>
-            <div className="space-y-0.5 pt-2">
-              {context.action ? (
-                <OverviewActionButton
-                  onClick={actionHandler}
-                  testId={context.action.testId}
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  {context.action.label}
-                </OverviewActionButton>
-              ) : null}
-              <section
-                className="space-y-0.5 text-sm"
-                data-testid="projects-overview-stats-pod"
-              >
-                {context.stats.map((stat) => (
-                  <OverviewStatRow
-                    count={stat.count}
-                    icon={STAT_ICONS[stat.icon]}
-                    key={`${stat.section}:${stat.label}`}
-                    label={stat.label}
-                    onClick={() => onSelectSection(stat.section)}
-                  />
-                ))}
-              </section>
-            </div>
+          <div className="space-y-2.5 pt-2">
+            <section
+              className="space-y-2.5 text-sm"
+              data-testid="projects-overview-stats-pod"
+            >
+              {context.stats.map((stat) => (
+                <OverviewStatRow
+                  count={stat.count}
+                  icon={STAT_ICONS[stat.icon]}
+                  key={`${stat.section}:${stat.label}`}
+                  label={stat.label}
+                  onClick={() => onSelectSection(stat.section)}
+                />
+              ))}
+            </section>
             {context.people.length > 0 ? (
               <div className="mt-3 space-y-3 py-3">
                 <ProjectsOverviewPeople
@@ -273,7 +305,7 @@ export function ProjectsOverviewContextPanel({
                 />
               </div>
             ) : null}
-          </>
+          </div>
         )}
       </div>
     </div>

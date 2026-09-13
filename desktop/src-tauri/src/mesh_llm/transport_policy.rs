@@ -43,6 +43,22 @@ pub(super) fn iroh_relay_mode_from(raw: Option<&str>) -> anyhow::Result<IrohRela
     }
 }
 
+pub(super) fn sdk_iroh_relay_config(mode: IrohRelayMode) -> (bool, Vec<String>) {
+    match mode {
+        IrohRelayMode::Disabled => (true, Vec::new()),
+        IrohRelayMode::Default => (
+            false,
+            MESH_LLM_DEFAULT_RELAYS
+                .iter()
+                .map(|url| (*url).to_string())
+                .collect(),
+        ),
+        IrohRelayMode::Custom(urls) => {
+            (false, urls.into_iter().map(|url| url.to_string()).collect())
+        }
+    }
+}
+
 fn parse_configured_relay_url(raw: &str) -> anyhow::Result<RelayUrl> {
     let parsed = url::Url::parse(raw)
         .map_err(|error| anyhow::anyhow!("invalid relay URL {raw:?}: {error}"))?;
@@ -205,9 +221,11 @@ fn validate_transport(transport: &TransportAddr, mode: &IrohRelayMode) -> anyhow
 /// mesh-llm serving node (they are not in iroh's own prod relay map).
 ///
 /// Kept in sync with `effective_relay_urls(RelayPolicy::DefaultPublic, &[])`.
-const MESH_LLM_DEFAULT_RELAYS: &[&str] = &[
+pub(super) const MESH_LLM_DEFAULT_RELAYS: &[&str] = &[
     "https://usw1-2.relay.michaelneale.mesh-llm.iroh.link./",
     "https://aps1-1.relay.michaelneale.mesh-llm.iroh.link./",
+    "https://euc1-1.relay.michaelneale.mesh-llm.iroh.link./",
+    "https://use1-1.relay.michaelneale.mesh-llm.iroh.link./",
 ];
 
 /// Whether `relay` is one of mesh-llm's baked-in default public relays.
@@ -325,6 +343,27 @@ mod tests {
                 "Default mode must validate an endpoint on mesh-llm default relay {relay_url}"
             );
         }
+    }
+
+    #[test]
+    fn sdk_default_relays_are_exactly_the_trusted_default_relays() {
+        let (disabled, configured) = sdk_iroh_relay_config(IrohRelayMode::Default);
+        assert!(!disabled);
+        let configured = configured
+            .into_iter()
+            .map(|url| url.parse::<RelayUrl>().expect("SDK relay URL must parse"))
+            .collect::<Vec<_>>();
+        let trusted = MESH_LLM_DEFAULT_RELAYS
+            .iter()
+            .map(|url| {
+                url.parse::<RelayUrl>()
+                    .expect("trusted relay URL must parse")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(configured, trusted);
+        assert!(configured
+            .iter()
+            .all(|relay| relay_allowed(relay, &IrohRelayMode::Default)));
     }
 
     #[test]

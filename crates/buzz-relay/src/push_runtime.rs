@@ -1,6 +1,9 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
@@ -131,6 +134,8 @@ async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatc
             // the whole batch for retry. Jobs that keep failing are reaped by
             // the periodic sweep once their attempts are exhausted.
             warn!(%community, "push match context load failed: {e}");
+            metrics::counter!("buzz_push_match_jobs_total", "result" => "context_error")
+                .increment(batch.jobs.len() as u64);
             let ids: Vec<Vec<u8>> = batch
                 .jobs
                 .iter()
@@ -158,14 +163,26 @@ async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatc
     let mut pending = Vec::new();
     let mut wakes: Vec<buzz_db::push::WakeRequest> = Vec::new();
     for job in &batch.jobs {
+        let match_queue_seconds = Utc::now()
+            .signed_duration_since(job.event.received_at)
+            .num_milliseconds()
+            .max(0) as f64
+            / 1_000.0;
+        metrics::histogram!("buzz_push_match_queue_seconds").record(match_queue_seconds);
         let event_id = job.event.event.id.as_bytes().to_vec();
         match match_job(job, &context) {
-            Ok(job_wakes) if job_wakes.is_empty() => completed.push(event_id),
+            Ok(job_wakes) if job_wakes.is_empty() => {
+                metrics::counter!("buzz_push_match_jobs_total", "result" => "unmatched")
+                    .increment(1);
+                completed.push(event_id);
+            }
             Ok(job_wakes) => {
+                metrics::counter!("buzz_push_match_jobs_total", "result" => "matched").increment(1);
                 pending.push((event_id, job.attempt));
                 wakes.extend(job_wakes);
             }
             Err(e) => {
+                metrics::counter!("buzz_push_match_jobs_total", "result" => "error").increment(1);
                 warn!(event_id=%job.event.event.id, attempt=job.attempt, "push match failed: {e}");
                 if job.attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
                     // A poison event/lease must not retry forever or pin
@@ -182,8 +199,19 @@ async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatc
     // transaction sends the contributing jobs back for an idempotent rematch
     // (the outbox dedup key absorbs any wakes that did commit elsewhere).
     match state.db.enqueue_push_wakes(community, &wakes).await {
-        Ok(_) => completed.extend(pending.into_iter().map(|(event_id, _)| event_id)),
+        Ok(outcomes) => {
+            for outcome in outcomes {
+                let result = match outcome {
+                    buzz_db::push::EnqueueWakeOutcome::Enqueued(_) => "enqueued",
+                    buzz_db::push::EnqueueWakeOutcome::Duplicate(_) => "duplicate",
+                    buzz_db::push::EnqueueWakeOutcome::InactiveLease => "inactive_lease",
+                };
+                metrics::counter!("buzz_push_wakes_total", "result" => result).increment(1);
+            }
+            completed.extend(pending.into_iter().map(|(event_id, _)| event_id));
+        }
         Err(e) => {
+            metrics::counter!("buzz_push_wake_enqueue_errors_total").increment(1);
             warn!(%community, "push wake batch enqueue failed: {e}");
             for (event_id, attempt) in pending {
                 if attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
@@ -310,10 +338,17 @@ fn push_filter_authorized_for_event(
 
 /// Continuously claim due wakes and deliver them through the push gateway.
 pub async fn run_delivery_worker(state: Arc<AppState>) {
-    let http = reqwest::Client::builder()
+    let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
         .build()
-        .expect("push HTTP client");
+    {
+        Ok(http) => http,
+        Err(error) => {
+            error!(%error, "push HTTP client initialization failed");
+            record_delivery("configuration_error");
+            return;
+        }
+    };
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
@@ -362,13 +397,23 @@ async fn deliver_one(
                 .db
                 .fail_push_wake(claimed.community, claimed.id, claimed.claim_id)
                 .await;
+            record_delivery("suppressed");
             return;
         }
         Err(e) => {
             warn!(wake=%claimed.id, "push revalidation failed: {e}");
+            record_delivery("worker_error");
             return;
         }
     };
+    if outcome.attempt == 1 {
+        let wake_queue_seconds = Utc::now()
+            .signed_duration_since(outcome.queued_at)
+            .num_milliseconds()
+            .max(0) as f64
+            / 1_000.0;
+        metrics::histogram!("buzz_push_wake_queue_seconds").record(wake_queue_seconds);
+    }
     if let Some(channel) = outcome.channel_id {
         match state
             .db
@@ -381,6 +426,7 @@ async fn deliver_one(
                     .db
                     .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                     .await;
+                record_delivery("suppressed");
                 return;
             }
             Err(e) => {
@@ -394,6 +440,7 @@ async fn deliver_one(
                         Utc::now() + TimeDelta::seconds(2),
                     )
                     .await;
+                record_delivery("retry");
                 return;
             }
         }
@@ -411,10 +458,12 @@ async fn deliver_one(
                 .db
                 .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                 .await;
+            record_delivery("suppressed");
             return;
         }
         Err(e) => {
             warn!(wake=%outcome.id, "final push revalidation failed: {e}");
+            record_delivery("worker_error");
             return;
         }
     };
@@ -432,31 +481,47 @@ async fn deliver_one(
                 .db
                 .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                 .await;
+            record_delivery("suppressed");
             return;
         }
     };
     let Some(url) = state.config.push_gateway_delivery_url.as_ref() else {
+        record_delivery("configuration_error");
         return;
     };
-    let body = delivery_body(&outcome.endpoint_grant, outcome.id, outcome.expires_at);
+    let body = match delivery_body(&outcome.endpoint_grant, outcome.id, outcome.expires_at) {
+        Ok(body) => body,
+        Err(error) => {
+            warn!(wake=%outcome.id, %error, "push delivery body encoding failed");
+            record_delivery("worker_error");
+            return;
+        }
+    };
     let auth = match nip98_header(&state.relay_keypair, url.as_str(), &body) {
         Ok(auth) => auth,
         Err(e) => {
             warn!(wake=%outcome.id, "push auth failed: {e}");
+            record_delivery("worker_error");
             return;
         }
     };
     if let Err(error) = serving_write.verify().await {
         warn!(wake=%outcome.id, %error, "push serving lease lost before delivery");
+        record_delivery("suppressed");
         return;
     }
-    let response = match serving_write
+    metrics::counter!("buzz_push_gateway_requests_total").increment(1);
+    let gateway_started = Instant::now();
+    let protected = serving_write
         .protect(send_gateway_request(http, url, body, auth))
-        .await
-    {
+        .await;
+    metrics::histogram!("buzz_push_gateway_request_seconds")
+        .record(gateway_started.elapsed().as_secs_f64());
+    let response = match protected {
         Ok(response) => response,
         Err(error) => {
             warn!(wake=%outcome.id, %error, "push serving lease lost during delivery");
+            record_delivery("suppressed");
             return;
         }
     };
@@ -467,12 +532,14 @@ async fn deliver_one(
                     .db
                     .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
                     .await;
+                record_delivery("accepted");
             }
             _ => {
                 let _ = state
                     .db
                     .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                     .await;
+                record_delivery("failed");
             }
         },
         Ok(r) if r.status() == reqwest::StatusCode::GONE => {
@@ -500,6 +567,7 @@ async fn deliver_one(
                 .db
                 .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                 .await;
+            record_delivery("invalid_endpoint");
         }
         Ok(r) if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
             let delay = match r.json::<DeliveryResponse>().await {
@@ -510,10 +578,10 @@ async fn deliver_one(
                     .unwrap_or(2),
                 _ => 2,
             };
-            retry_or_fail(state, &outcome, delay).await;
+            record_delivery(retry_or_fail(state, &outcome, delay).await);
         }
         Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            retry_or_fail(state, &outcome, 2).await
+            record_delivery(retry_or_fail(state, &outcome, 2).await);
         }
         // A timed-out terminal attempt burns the stable request id. Its replay
         // is indistinguishable from another invalid-grant 404, but sending a
@@ -523,13 +591,17 @@ async fn deliver_one(
                 .db
                 .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
                 .await;
+            record_delivery("replay_terminal");
         }
-        Err(e) if e.is_timeout() || e.is_connect() => retry_or_fail(state, &outcome, 2).await,
+        Err(e) if e.is_timeout() || e.is_connect() => {
+            record_delivery(retry_or_fail(state, &outcome, 2).await);
+        }
         _ => {
             let _ = state
                 .db
                 .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
                 .await;
+            record_delivery("failed");
         }
     }
     if let Err(error) = serving_write.finish().await {
@@ -537,14 +609,17 @@ async fn deliver_one(
     }
 }
 
-fn delivery_body(endpoint_grant: &str, request_id: uuid::Uuid, expires_at: i64) -> Vec<u8> {
-    serde_json::to_vec(&DeliveryRequest {
+fn delivery_body(
+    endpoint_grant: &str,
+    request_id: uuid::Uuid,
+    expires_at: i64,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&DeliveryRequest {
         v: 1,
         endpoint_grant,
         request_id,
         expires_at,
-    })
-    .expect("closed delivery body")
+    })?)
 }
 
 async fn send_gateway_request(
@@ -561,12 +636,21 @@ async fn send_gateway_request(
         .await
 }
 
-async fn retry_or_fail(state: &AppState, wake: &buzz_db::push::ClaimedWake, delay: i64) {
+fn record_delivery(outcome: &'static str) {
+    metrics::counter!("buzz_push_deliveries_total", "outcome" => outcome).increment(1);
+}
+
+async fn retry_or_fail(
+    state: &AppState,
+    wake: &buzz_db::push::ClaimedWake,
+    delay: i64,
+) -> &'static str {
     if wake.attempt >= MAX_ATTEMPTS {
         let _ = state
             .db
             .fail_push_wake(wake.community, wake.id, wake.claim_id)
             .await;
+        "exhausted"
     } else {
         let secs = delay * (1_i64 << (wake.attempt - 1).clamp(0, 6));
         let _ = state
@@ -578,6 +662,7 @@ async fn retry_or_fail(state: &AppState, wake: &buzz_db::push::ClaimedWake, dela
                 Utc::now() + TimeDelta::seconds(secs),
             )
             .await;
+        "retry"
     }
 }
 
@@ -597,14 +682,8 @@ fn nip98_header(keys: &nostr::Keys, url: &str, body: &[u8]) -> anyhow::Result<St
     ))
 }
 
-fn class_rank(class: &str) -> u8 {
-    match class {
-        "silent" => 0,
-        "default" => 1,
-        "time_sensitive" => 2,
-        "urgent" => 3,
-        _ => 0,
-    }
+fn class_rank(_: &str) -> u8 {
+    1
 }
 
 #[cfg(test)]
@@ -675,7 +754,8 @@ mod tests {
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();
         for _ in 0..2 {
-            let body = delivery_body("opaque-grant", request_id, Utc::now().timestamp() + 60);
+            let body =
+                delivery_body("opaque-grant", request_id, Utc::now().timestamp() + 60).unwrap();
             let auth = nip98_header(&keys, url.as_str(), &body).unwrap();
             let response = send_gateway_request(&http, &url, body, auth).await.unwrap();
             assert!(response.status().is_success());

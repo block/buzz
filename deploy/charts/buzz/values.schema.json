@@ -15,6 +15,11 @@
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string" },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$",
+          "description": "Optional immutable OCI image digest. When set, the chart renders repository@digest and ignores tag."
+        },
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
         "pullSecrets": {
           "type": "array",

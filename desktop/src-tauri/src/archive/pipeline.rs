@@ -1,6 +1,6 @@
 //! Archive pipeline — three-phase plan/query/commit split.
 //!
-//! Separated from `mod.rs` to keep that file under the 1000-line gate.
+//! Separated from `mod.rs` to keep that file under the 1500-line gate.
 //!
 //! # Send-safety
 //!

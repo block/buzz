@@ -1,11 +1,92 @@
 import AVFoundation
 import Flutter
 import UIKit
+import UserNotifications
 import XCTest
 
 @testable import Buzz
 
 class RunnerTests: XCTestCase {
+
+  func testVoiceNotePackagingStagesHaveBoundedDeadlines() {
+    XCTAssertEqual(VoiceNotePackager.videoEnvelopeTimeout, 30)
+    XCTAssertEqual(VoiceNotePackager.exportTimeout, 30)
+  }
+
+  func testTimedOutVoiceNoteExportCleansLateOutputWithoutRedelivering() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let outputURL = directory.appendingPathComponent("output.mp4")
+    let videoURL = directory.appendingPathComponent("envelope.mp4")
+    try Data([1]).write(to: outputURL)
+    try Data([2]).write(to: videoURL)
+    let completion = VoiceNoteExportCompletion(
+      outputURL: outputURL,
+      videoURL: videoURL
+    )
+    var cancelCount = 0
+    var deliveryCount = 0
+
+    completion.timeout(
+      cancel: { cancelCount += 1 },
+      deliver: { deliveryCount += 1 }
+    )
+    XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+
+    // AVFoundation may recreate the destination while cancellation settles.
+    try Data([3]).write(to: outputURL)
+    completion.exportDidFinish(
+      succeeded: false,
+      deliver: { deliveryCount += 1 }
+    )
+
+    XCTAssertEqual(cancelCount, 1)
+    XCTAssertEqual(deliveryCount, 1)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+  }
+
+  func testSuccessfulVoiceNoteExportPreservesOutputForFlutter() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let outputURL = directory.appendingPathComponent("output.mp4")
+    let videoURL = directory.appendingPathComponent("envelope.mp4")
+    try Data([1]).write(to: outputURL)
+    try Data([2]).write(to: videoURL)
+    let completion = VoiceNoteExportCompletion(
+      outputURL: outputURL,
+      videoURL: videoURL
+    )
+    var deliveryCount = 0
+
+    completion.exportDidFinish(
+      succeeded: true,
+      deliver: { deliveryCount += 1 }
+    )
+
+    XCTAssertEqual(deliveryCount, 1)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path))
+  }
+
+  func testPushAuthorizationStatusNamesCoverDisplayPermissionStates() {
+    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.notDetermined), "notDetermined")
+    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.denied), "denied")
+    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.authorized), "authorized")
+    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.provisional), "provisional")
+    XCTAssertEqual(AppDelegate.pushAuthorizationStatusName(.ephemeral), "ephemeral")
+  }
 
   func testHuddleActiveTalkerSelectorBoundsAndReactivates() {
     var selector = HuddleActiveTalkerSelector(capacity: 15)

@@ -12,17 +12,13 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
-  coalesceAgentAutocompleteCandidates,
-  coalesceAutocompleteCandidatesByKey,
-  filterAdmittedMentionPubkeys,
   filterCachedAgentSuggestions,
-  getAdmittedAgentPubkeys,
   getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentDirectoryReady,
   isAgentMentionChannelType,
   rememberSelectedAgentPubkeys,
-  shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -35,11 +31,23 @@ import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
-import { flushMentionDebounce } from "./flushMentionDebounce";
+import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
+import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
+import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
-import { extractMentionPubkeys } from "./extractMentionPubkeys";
+import type { MentionIdentity } from "./mentionClipboard";
+import {
+  useMentionPasteBinding,
+  type RegisterMentionPubkey,
+} from "./mentionPasteBinding";
+import { useVerifyMentionIdentities } from "./useVerifyMentionIdentities";
+import {
+  extractMentionPubkeys,
+  mentionMatchCandidates,
+  selectedMentionLabel,
+  selectedMentionLabels,
+} from "./extractMentionPubkeys";
 import {
   extractMentionPersonasFromMaps,
   type PersonaMentionTarget,
@@ -51,19 +59,20 @@ import {
 } from "./useMentionSelection";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import { getMentionMemberPubkeys } from "./mentionMemberPubkeys";
 import {
   appendUniqueName,
   buildTeamMentionCandidates,
-  formatSearchUserDisplayName,
-  formatSearchUserSecondaryLabel,
   formatTeamMention,
-  globalSearchIdentityKey,
   type MentionCandidate,
-  mentionCandidateLabel,
 } from "./mentionCandidates";
-const MENTION_DEBOUNCE_MS = 120;
-const MENTION_SUGGESTION_LIMIT = 50;
-type UseMentionsOptions = { channelType?: ChannelType | null };
+import { buildMentionCandidates } from "./buildMentionCandidates";
+const MENTION_DEBOUNCE_MS = 120,
+  MENTION_SUGGESTION_LIMIT = 50;
+type UseMentionsOptions = {
+  channelType?: ChannelType | null;
+  recentMentionPubkeys?: readonly string[];
+};
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -100,14 +109,8 @@ export function useMentions(
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
-  const managedAgentDirectoryReady =
-    managedAgentsQuery.data !== undefined &&
-    managedAgentsQuery.error === null &&
-    !managedAgentsQuery.isFetching;
-  const relayAgentDirectoryReady =
-    relayAgentsQuery.data !== undefined &&
-    relayAgentsQuery.error === null &&
-    !relayAgentsQuery.isFetching;
+  const managedAgentDirectoryReady = isAgentDirectoryReady(managedAgentsQuery);
+  const relayAgentDirectoryReady = isAgentDirectoryReady(relayAgentsQuery);
   const agentDirectoriesReady =
     managedAgentDirectoryReady && relayAgentDirectoryReady;
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
@@ -170,6 +173,10 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const activeAgentPubkeys = useActiveAgentPubkeys(
+    managedAgentsQuery.data,
+    relayAgentsQuery.data,
+  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -181,15 +188,20 @@ export function useMentions(
     () =>
       getMentionableAgentPubkeys({
         currentPubkey,
+        phase: "prepare",
         eligibilityScope: mentionChannelId
           ? { type: "channel", channelId: mentionChannelId }
-          : { type: "managed-only" },
+          : options?.channelType === "dm"
+            ? { type: "owned", channelId }
+            : { type: "managed-only" },
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
     [
       currentPubkey,
+      channelId,
+      options?.channelType,
       managedAgentPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
@@ -225,11 +237,9 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  // Identity-cached (shared with the timeline's roster derivations) — the
-  // Set is built once per distinct roster instead of per consumer.
   const memberPubkeys = React.useMemo(
-    () => (members ? channelMemberPubkeySet(members) : new Set<string>()),
-    [members],
+    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
+    [channelId, channelsQuery.data, members],
   );
   const agentIdentityPubkeys = React.useMemo(
     () =>
@@ -241,193 +251,54 @@ export function useMentions(
       }),
     [managedAgentPubkeys, members, profiles, relayAgentsQuery.data],
   );
-  const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
-    const candidatesByPubkey = new Map<string, MentionCandidate>();
-    const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
-      const pubkey = normalizePubkey(candidate.pubkey);
-      if (isArchivedDiscovery(pubkey)) {
-        return;
-      }
-      if (
-        shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          pubkey,
-          mentionableAgentPubkeys,
-          directoryReady:
-            candidate.isManagedAgent === true
-              ? managedAgentDirectoryReady
-              : relayAgentDirectoryReady,
-        })
-      ) {
-        return;
-      }
-      const current = candidatesByPubkey.get(pubkey);
-      if (!current) {
-        candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
-        return;
-      }
-      candidatesByPubkey.set(pubkey, {
-        ...current,
-        avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
-        displayName:
-          current.isAgent && !candidate.isAgent
-            ? current.displayName
-            : candidate.isAgent && !current.isAgent
-              ? (candidate.displayName ?? current.displayName)
-              : (current.displayName ?? candidate.displayName),
-        isAgent: current.isAgent || candidate.isAgent,
-        isMember: current.isMember || candidate.isMember,
-        personaId: current.personaId ?? candidate.personaId,
-        personaName: current.personaName ?? candidate.personaName ?? null,
-        role: current.role ?? candidate.role ?? null,
-        secondaryLabel:
-          current.secondaryLabel ?? candidate.secondaryLabel ?? null,
-        ownerPubkey:
-          current.ownerPubkey ??
-          candidate.ownerPubkey ??
-          (candidate.isAgent && candidate.pubkey
-            ? profiles?.[pubkey]?.ownerPubkey
-            : null) ??
-          null,
-        isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
-      });
-    };
-    for (const member of members ?? []) {
-      const pubkey = normalizePubkey(member.pubkey);
-      const linkedPersonaId = activePersonaById.has(pubkey)
-        ? pubkey
-        : undefined;
-      const agentName =
-        managedAgentNamesByPubkey.get(pubkey) ??
-        relayAgentNamesByPubkey.get(pubkey) ??
-        null;
-      const profile = profiles?.[pubkey] ?? null;
-      addCandidate({
-        kind: "identity",
-        pubkey,
-        displayName:
-          member.displayName?.trim() ||
-          agentName ||
-          profile?.displayName?.trim() ||
-          profile?.nip05Handle?.trim() ||
-          null,
-        avatarUrl: profile?.avatarUrl ?? null,
-        isMember: true,
-        personaId:
-          managedAgentPersonaIdsByPubkey.get(pubkey) ?? linkedPersonaId,
-        isAgent:
-          member.isAgent === true ||
-          profile?.isAgent === true ||
-          member.role === "bot" ||
-          managedAgentNamesByPubkey.has(pubkey) ||
-          relayAgentNamesByPubkey.has(pubkey),
-        ownerPubkey: profile?.ownerPubkey ?? null,
-        personaName: personaNameByPubkey.get(pubkey) ?? null,
-        role: member.role,
-        secondaryLabel:
-          profile?.displayName?.trim() && profile?.nip05Handle?.trim()
-            ? profile.nip05Handle
-            : null,
-      });
-    }
-    for (const agent of relayAgentsQuery.data ?? []) {
-      const pubkey = normalizePubkey(agent.pubkey);
-      addCandidate({
-        kind: "identity",
-        pubkey,
-        displayName: agent.name,
-        isMember: false,
-        personaId:
-          managedAgentPersonaIdsByPubkey.get(pubkey) ??
-          (activePersonaById.has(pubkey) ? pubkey : undefined),
-        ownerPubkey: agent.ownerPubkey,
-        isAgent: true,
-      });
-    }
-    for (const agent of managedAgentsQuery.data ?? []) {
-      addCandidate({
-        kind: "identity",
-        pubkey: agent.pubkey,
-        displayName: agent.name,
-        isMember: false,
-        isAgent: true,
-        isManagedAgent: true,
-        personaId: agent.personaId ?? undefined,
-        personaName:
-          personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ?? null,
-        ownerPubkey: currentPubkey,
-      });
-    }
-    if (canSearchGlobalUsers) {
-      for (const user of userSearchResults) {
-        const pubkey = normalizePubkey(user.pubkey);
-        addCandidate({
-          kind: "identity",
-          pubkey,
-          displayName: formatSearchUserDisplayName(user),
-          avatarUrl: user.avatarUrl ?? null,
-          personaId:
-            managedAgentPersonaIdsByPubkey.get(pubkey) ??
-            (activePersonaById.has(pubkey) ? pubkey : undefined),
-          isMember: false,
-          isAgent:
-            user.isAgent ||
-            managedAgentNamesByPubkey.has(pubkey) ||
-            relayAgentNamesByPubkey.has(pubkey),
-          personaName: personaNameByPubkey.get(pubkey) ?? null,
-          secondaryLabel: formatSearchUserSecondaryLabel(user),
-          ownerPubkey: user.ownerPubkey ?? null,
-          isGlobalSearchResult: true,
-          isManagedAgent: managedAgentNamesByPubkey.has(pubkey),
-        });
-      }
-    }
-    const personaCandidates: MentionCandidate[] = activePersonas
-      .filter((persona) => !managedAgentPersonaIds.has(persona.id))
-      .map((persona) => ({
-        kind: "persona" as const,
-        personaId: persona.id,
-        displayName: persona.displayName,
-        avatarUrl: persona.avatarUrl,
-        isMember: false,
-        isAgent: true,
-      }))
-      .filter((candidate) => candidate.displayName.trim().length > 0);
-    return coalesceAgentAutocompleteCandidates(
-      coalesceAutocompleteCandidatesByKey(
-        [...candidatesByPubkey.values(), ...personaCandidates],
-        globalSearchIdentityKey,
-      ),
-      {
+  const mentionCandidates = React.useMemo<MentionCandidate[]>(
+    () =>
+      buildMentionCandidates({
+        activeAgentPubkeys,
+        activePersonaById,
+        activePersonas,
+        canSearchGlobalUsers,
         currentPubkey,
-        getLabel: mentionCandidateLabel,
-        preferredPubkeys: memberPubkeys,
-      },
-    );
-  }, [
-    activePersonaById,
-    activePersonas,
-    userSearchResults,
-    canSearchGlobalUsers,
-    currentPubkey,
-    isArchivedDiscovery,
-    managedAgentDirectoryReady,
-    managedAgentNamesByPubkey,
-    managedAgentPersonaIds,
-    managedAgentPersonaIdsByPubkey,
-    managedAgentsQuery.data,
-    memberPubkeys,
-    members,
-    mentionableAgentPubkeys,
-    personaNameByPubkey,
-    profiles,
-    relayAgentDirectoryReady,
-    relayAgentNamesByPubkey,
-    relayAgentsQuery.data,
-  ]);
-  const admittedAgentPubkeys = React.useMemo(
-    () => getAdmittedAgentPubkeys(mentionCandidates),
-    [mentionCandidates],
+        isArchived: isArchivedDiscovery,
+        managedAgentDirectoryReady,
+        managedAgentNamesByPubkey,
+        managedAgentPersonaIds,
+        managedAgentPersonaIdsByPubkey,
+        managedAgents: managedAgentsQuery.data,
+        memberPubkeys,
+        members,
+        mentionChannelId,
+        mentionableAgentPubkeys,
+        personaNameByPubkey,
+        profiles,
+        relayAgentDirectoryReady,
+        relayAgentNamesByPubkey,
+        relayAgents: relayAgentsQuery.data,
+        userSearchResults,
+      }),
+    [
+      activePersonaById,
+      activeAgentPubkeys,
+      activePersonas,
+      userSearchResults,
+      canSearchGlobalUsers,
+      currentPubkey,
+      isArchivedDiscovery,
+      managedAgentDirectoryReady,
+      managedAgentNamesByPubkey,
+      managedAgentPersonaIds,
+      managedAgentPersonaIdsByPubkey,
+      managedAgentsQuery.data,
+      memberPubkeys,
+      members,
+      mentionChannelId,
+      mentionableAgentPubkeys,
+      personaNameByPubkey,
+      profiles,
+      relayAgentDirectoryReady,
+      relayAgentNamesByPubkey,
+      relayAgentsQuery.data,
+    ],
   );
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
@@ -492,9 +363,7 @@ export function useMentions(
   const latestCursorRef = React.useRef<number>(0);
   const flushedMentionStartIndexRef = React.useRef<number | null>(null);
   const searchableNamesLowerRef = React.useRef<string[]>(searchableNamesLower);
-  React.useEffect(() => {
-    searchableNamesLowerRef.current = searchableNamesLower;
-  }, [searchableNamesLower]);
+  searchableNamesLowerRef.current = searchableNamesLower;
   React.useEffect(
     () => () => {
       if (debounceTimerRef.current !== null) {
@@ -534,6 +403,16 @@ export function useMentions(
     ownerProfilesQuery.data?.profiles,
     profiles,
   ]);
+  const getDefaultAgentSuggestion = useDefaultAgentSuggestion({
+    activePersonaIds,
+    agentProvenanceReady: agentDirectoriesReady,
+    candidates: mentionCandidates,
+    channelType: options?.channelType,
+    currentPubkey,
+    ownerProfiles: ownerProfilesQuery.data?.profiles,
+    profiles,
+    recentMentionPubkeys: options?.recentMentionPubkeys,
+  });
   const fetchMoreSuggestions = React.useCallback(() => {
     if (userSearchQuery.hasNextPage && !userSearchQuery.isFetchingNextPage) {
       void userSearchQuery.fetchNextPage();
@@ -574,22 +453,70 @@ export function useMentions(
   const { mentionSelectedIndex, setMentionSelectedIndex: setSelected } =
     mentionSelection;
   const isMentionOpen = mentionQuery !== null && suggestions.length > 0;
+  // Untrusted clipboard records only become bindable identities once trusted
+  // Buzz state confirms the pair — see `mentionIdentityTrust`.
+  const verifyMentionIdentities = useVerifyMentionIdentities({
+    mentionCandidates,
+    profiles,
+  });
+  // The map write a settled paste uses: it records a decision the user made
+  // earlier, so it must not outrank intent expressed since.
+  const writeMentionPubkey = React.useCallback<RegisterMentionPubkey>(
+    (displayName, pubkey, options) => {
+      const trimmedName = displayName.trim();
+      if (!trimmedName) {
+        return;
+      }
+      mentionMapRef.current.set(trimmedName, pubkey);
+      personaMentionMapRef.current.delete(trimmedName);
+      trimMapToSize(mentionMapRef.current, 200);
+      setSelectedMentionNames((current) =>
+        appendUniqueName(current, trimmedName),
+      );
+      if (options?.isAgent) {
+        selectedAgentMentionPubkeysRef.current.add(normalizePubkey(pubkey));
+        selectedAgentMentionNamesRef.current = appendUniqueName(
+          selectedAgentMentionNamesRef.current,
+          trimmedName,
+        );
+        setSelectedAgentMentionNames(selectedAgentMentionNamesRef.current);
+      }
+    },
+    [],
+  );
+  const pasteBinding = useMentionPasteBinding({
+    registerVerifiedMentionPubkey: writeMentionPubkey,
+    verifyMentionIdentities,
+  });
   const insertMention = React.useCallback(
     (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
-      const displayName = suggestion.displayName;
+      const [boundSuggestion] = selectedMentionLabels(
+        [suggestion],
+        mentionMapRef.current,
+      );
+      const displayName = boundSuggestion.displayName;
       const teamMembers =
-        suggestion.kind === "team" ? suggestion.teamMembers : null;
+        suggestion.kind === "team" && suggestion.teamMembers
+          ? selectedMentionLabels(suggestion.teamMembers, mentionMapRef.current)
+          : null;
       const insertText = teamMembers
         ? formatTeamMention(displayName, teamMembers)
         : `@${displayName} `;
       const mentions = mentionMapRef.current;
       const personaMentions = personaMentionMapRef.current;
-      const selectedMentions = teamMembers ?? [suggestion];
+      const selectedMentions = teamMembers ?? [boundSuggestion];
+      for (const selected of suggestion.teamMembers ?? [suggestion]) {
+        pasteBinding.claimMentionIntent(selected.displayName);
+      }
       for (const selected of selectedMentions) {
+        // A picked name is the user's newest word on that label, so it retires
+        // any pasted identity still being verified for it — persona routing
+        // included, since a settled paste would delete that entry.
+        pasteBinding.claimMentionIntent(selected.displayName);
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);
           mentions.delete(selected.displayName);
@@ -646,30 +573,63 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex, setSelected],
+    [
+      knownAgentPubkeys,
+      mentionStartIndex,
+      pasteBinding.claimMentionIntent,
+      setSelected,
+    ],
   );
+  // Registration is explicit user intent; paste settlement keeps its separate
+  // non-bumping write. Reserve the exact label before claiming either name so
+  // a pending paste cannot take the original name after a qualified selection.
   const registerMentionPubkey = React.useCallback(
     (displayName: string, pubkey: string, options?: { isAgent?: boolean }) => {
-      const trimmedName = displayName.trim();
-      if (!trimmedName) {
-        return;
-      }
-      mentionMapRef.current.set(trimmedName, pubkey);
-      personaMentionMapRef.current.delete(trimmedName);
-      trimMapToSize(mentionMapRef.current, 200);
-      setSelectedMentionNames((current) =>
-        appendUniqueName(current, trimmedName),
+      const label = selectedMentionLabel(
+        displayName.trim(),
+        pubkey,
+        mentionMapRef.current,
       );
-      if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) => {
-          const next = appendUniqueName(current, trimmedName);
-          selectedAgentMentionNamesRef.current = next;
-          return next;
-        });
-      }
+      if (!label) return;
+      pasteBinding.claimMentionIntent(displayName);
+      pasteBinding.claimMentionIntent(label);
+      writeMentionPubkey(label, pubkey, options);
+      return label;
     },
-    [],
+    [pasteBinding.claimMentionIntent, writeMentionPubkey],
   );
+  const getMentionIdentities = React.useCallback((): MentionIdentity[] => {
+    const agentNames = new Set(
+      selectedAgentMentionNamesRef.current.map((name) =>
+        name.trim().toLowerCase(),
+      ),
+    );
+    const identities: MentionIdentity[] = [];
+    const claimed = new Set<string>();
+    const add = (label: string, pubkey: string, isAgent: boolean) => {
+      const trimmed = label.trim();
+      const key = trimmed.toLowerCase();
+      if (!trimmed || !pubkey || claimed.has(key)) return;
+      claimed.add(key);
+      identities.push({ isAgent, label: trimmed, pubkey });
+    };
+    // Explicitly picked mentions first: they are authoritative when a manually
+    // typed member name collides with one the user selected from the picker.
+    for (const [label, pubkey] of mentionMapRef.current) {
+      add(label, pubkey, agentNames.has(label.trim().toLowerCase()));
+    }
+    for (const candidate of mentionCandidates) {
+      if (!candidate.isMember || !candidate.pubkey || !candidate.displayName) {
+        continue;
+      }
+      add(
+        candidate.displayName,
+        candidate.pubkey,
+        knownAgentPubkeys.has(normalizePubkey(candidate.pubkey)),
+      );
+    }
+    return identities;
+  }, [knownAgentPubkeys, mentionCandidates]);
   const insertResolvedMention = React.useCallback(
     ({
       displayName,
@@ -684,11 +644,11 @@ export function useMentions(
       replaceToOffset: number;
       isAgent?: boolean;
     }): AutocompleteEdit => {
-      registerMentionPubkey(displayName, pubkey, { isAgent });
+      const label = registerMentionPubkey(displayName, pubkey, { isAgent });
       return {
         replaceFromOffset,
         replaceToOffset,
-        insertText: `@${displayName.trim()} `,
+        insertText: `@${label ?? displayName.trim()} `,
       };
     },
     [registerMentionPubkey],
@@ -786,23 +746,19 @@ export function useMentions(
     [mentionSelection.prepareSelectionPreference, setSelected],
   );
   const extractMentionPubkeysForCurrentMentions = React.useCallback(
-    (text: string): string[] => {
+    (text: string, competingDisplayNames: readonly string[] = []): string[] => {
       const extracted = extractMentionPubkeys({
         text,
+        competingDisplayNames,
         selectedMentions: mentionMapRef.current,
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,
       });
-      return filterAdmittedMentionPubkeys(
-        extracted,
-        new Set([
-          ...agentIdentityPubkeys,
-          ...selectedAgentMentionPubkeysRef.current,
-        ]),
-        admittedAgentPubkeys,
-      );
+      // Selections are intent, not cached authorization. Never discard a
+      // selected key because a refresh removed it from the picker.
+      return extracted;
     },
-    [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
+    [mentionCandidates],
   );
   const getSelectedAgentPubkeys = React.useRef(
     () => selectedAgentMentionPubkeysRef.current,
@@ -813,7 +769,9 @@ export function useMentions(
     currentPubkey,
     eligibilityScope: mentionChannelId
       ? { type: "channel", channelId: mentionChannelId }
-      : { type: "managed-only" },
+      : options?.channelType === "dm"
+        ? { type: "owned", channelId }
+        : { type: "managed-only" },
     sharedChannelIds,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
@@ -823,8 +781,13 @@ export function useMentions(
         text,
         personaMentionMapRef.current,
         activePersonaById,
+        mentionMatchCandidates({
+          selectedMentions: mentionMapRef.current,
+          selectedDisplayNames: personaMentionMapRef.current.keys(),
+          memberCandidates: mentionCandidates,
+        }).map((candidate) => candidate.displayName),
       ),
-    [activePersonaById],
+    [activePersonaById, mentionCandidates],
   );
   const cancelMentionAutocomplete = React.useCallback(() => {
     autocompleteGenerationRef.current += 1;
@@ -846,12 +809,17 @@ export function useMentions(
     selectedAgentMentionPubkeysRef.current.clear();
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
-  }, [cancelMentionAutocomplete]);
+    // Belt to the occurrence fence's braces: a paste still verifying when the
+    // composer is cleared holds a claim nothing can match afterwards.
+    pasteBinding.clearMentionIntents();
+  }, [cancelMentionAutocomplete, pasteBinding.clearMentionIntents]);
   const { getDraftMentionRefs, restoreDraftMentionRefs } =
     useDraftMentionRouting({
+      memberCandidates: mentionCandidates,
       mentionMapRef,
       personaMentionMapRef,
       selectedAgentNamesRef: selectedAgentMentionNamesRef,
+      selectedAgentPubkeysRef: selectedAgentMentionPubkeysRef,
       cancelAutocomplete: cancelMentionAutocomplete,
       setSelectedNames: setSelectedMentionNames,
       setSelectedAgentNames: setSelectedAgentMentionNames,
@@ -859,10 +827,13 @@ export function useMentions(
   const handleMentionKeyDown = React.useCallback(
     (
       event: React.KeyboardEvent,
+      // `isCodeContext` is only consulted for Space: inside code the typed
+      // text must stay literal, so Space is left to the editor.
+      opts?: { isCodeContext?: () => boolean },
     ): { handled: boolean; suggestion?: MentionSuggestion } => {
-      if (!isMentionOpen) {
-        return { handled: false };
-      }
+      const exactMentionSpace =
+        isPlainSpace(event.nativeEvent) && !opts?.isCodeContext?.();
+      if (!isMentionOpen && !exactMentionSpace) return { handled: false };
       if (event.key === "ArrowDown") {
         event.preventDefault();
         setSelected((current) =>
@@ -877,16 +848,20 @@ export function useMentions(
         );
         return { handled: true };
       }
+      // Shift+Tab is deliberately not a select: it is the keyboard route out
+      // of the editor — into this overlay's Options controls where the
+      // composer offers them, otherwise the browser's own backward focus
+      // move — so those controls stay reachable.
       if (
-        event.key === "Tab" ||
+        exactMentionSpace ||
+        (event.key === "Tab" && !event.shiftKey) ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
           !event.metaKey &&
           !event.altKey &&
           !event.shiftKey)
       ) {
-        event.preventDefault();
-        if (debounceTimerRef.current !== null) {
+        if (debounceTimerRef.current !== null || exactMentionSpace) {
           const flushed = flushMentionDebounce({
             debounceTimerRef,
             latestValueRef,
@@ -899,7 +874,11 @@ export function useMentions(
             currentPubkey,
             ownerProfiles: ownerProfilesQuery.data?.profiles,
             profiles,
+            requireExact: exactMentionSpace,
           });
+          if (exactMentionSpace && flushed?.type !== "match")
+            return { handled: false };
+          event.preventDefault();
           if (flushed?.type === "match") {
             flushedMentionStartIndexRef.current = flushed.startIndex;
             mentionPickerOriginRef.current = "inline";
@@ -911,6 +890,7 @@ export function useMentions(
             return { handled: true };
           }
         }
+        event.preventDefault();
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
       }
       if (event.key === "Escape") {
@@ -936,12 +916,15 @@ export function useMentions(
     ],
   );
   return {
+    bindPastedMentionIdentities: pasteBinding.bindPastedMentionIdentities,
     cancelMentionAutocomplete,
     clearMentions,
+    getDefaultAgentSuggestion,
     extractMentionPersonas,
     extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
     revalidateMentionPubkeys,
     getDraftMentionRefs,
+    getMentionIdentities,
     getMentionDisplayName,
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
@@ -959,6 +942,7 @@ export function useMentions(
     openMentionPicker,
     registerMentionPubkey,
     restoreDraftMentionRefs,
+    settlePendingMentionBindings: pasteBinding.settlePendingMentionBindings,
     suggestions,
     fetchMoreSuggestions,
     hasMoreSuggestions: Boolean(userSearchQuery.hasNextPage),

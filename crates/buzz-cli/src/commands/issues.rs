@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
+use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
@@ -262,6 +263,39 @@ pub async fn cmd_create_issue(
     let link = crate::links::issue_link(&event_id, repo_owner, repo_id);
     crate::client::print_create_response(&resp, "link", &link);
     Ok(())
+}
+
+async fn resolve_issue_repo_target(
+    client: &BuzzClient,
+    repo_owner: Option<&str>,
+    repo_id: Option<&str>,
+    channel: Option<&str>,
+) -> Result<(String, String), CliError> {
+    let owner = repo_owner.map(str::trim).filter(|value| !value.is_empty());
+    let id = repo_id.map(str::trim).filter(|value| !value.is_empty());
+    match (owner, id) {
+        (Some(owner), Some(id)) => Ok((owner.to_string(), id.to_string())),
+        (None, None) => {
+            let channel = channel
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| std::env::var(GIT_ORIGIN_CHANNEL_ENV).ok());
+            let Some(channel) = channel else {
+                return Err(CliError::Usage(
+                    "provide --repo-owner and --repo-id, or --channel (or set BUZZ_GIT_ORIGIN_CHANNEL_ID)".into(),
+                ));
+            };
+            let resolved = crate::commands::project_channel::resolve_or_ensure_repo_for_channel(
+                client, &channel,
+            )
+            .await?;
+            Ok((resolved.repo_owner, resolved.repo_id))
+        }
+        _ => Err(CliError::Usage(
+            "provide both --repo-owner and --repo-id, or --channel".into(),
+        )),
+    }
 }
 
 /// Publish an issue assignment: a kind:1 comment on the issue whose `p`
@@ -561,11 +595,21 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
         IssuesCmd::Create {
             repo_owner,
             repo_id,
+            channel,
             title,
             content,
             label,
             to,
-        } => cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await,
+        } => {
+            let (repo_owner, repo_id) = resolve_issue_repo_target(
+                client,
+                repo_owner.as_deref(),
+                repo_id.as_deref(),
+                channel.as_deref(),
+            )
+            .await?;
+            cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await
+        }
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
         IssuesCmd::List {
             repo_owner,

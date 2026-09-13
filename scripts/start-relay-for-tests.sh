@@ -105,7 +105,7 @@ export PGSCHEMA_PLAN_PASSWORD=buzz_dev
 
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
-  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
+  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
 ok "Schema applied"
 
 # ── Seed the deployment community ────────────────────────────────────────────
@@ -152,6 +152,8 @@ fi
 
 log "Starting relay..."
 
+TEST_RELAY_PRIVATE_KEY="${BUZZ_RELAY_PRIVATE_KEY:-$(openssl rand -hex 32)}"
+
 # Optional NIP-43 membership gating: exported by callers that need a
 # membership-gated relay (e.g. the mesh lifecycle smoke). All three must be
 # set together — the relay fails fast otherwise.
@@ -160,8 +162,8 @@ if [[ "${BUZZ_REQUIRE_RELAY_MEMBERSHIP:-}" == "true" ]]; then
   MEMBERSHIP_ENV+=(
     BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
     RELAY_OWNER_PUBKEY="${RELAY_OWNER_PUBKEY:?RELAY_OWNER_PUBKEY required with BUZZ_REQUIRE_RELAY_MEMBERSHIP=true}"
-    BUZZ_RELAY_PRIVATE_KEY="${BUZZ_RELAY_PRIVATE_KEY:?BUZZ_RELAY_PRIVATE_KEY required with BUZZ_REQUIRE_RELAY_MEMBERSHIP=true}"
   )
+  : "${BUZZ_RELAY_PRIVATE_KEY:?BUZZ_RELAY_PRIVATE_KEY required with BUZZ_REQUIRE_RELAY_MEMBERSHIP=true}"
   log "Membership gating enabled (NIP-43)"
 fi
 
@@ -170,6 +172,7 @@ nohup env \
   REDIS_URL=redis://localhost:6379 \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \
+  BUZZ_RELAY_PRIVATE_KEY="${TEST_RELAY_PRIVATE_KEY}" \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
   BUZZ_RECONCILE_CHANNELS=true \
   BUZZ_GIT_PROBE_WRITERS=8 \

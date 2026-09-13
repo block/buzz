@@ -299,6 +299,8 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: None,
@@ -348,6 +350,7 @@ fn bare_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         relay_mesh: None,
         effort_level: None,
         auto_restart_on_config_change: false,
@@ -359,6 +362,8 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -373,6 +378,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -505,7 +511,7 @@ fn inherited_shared_compute_translates_to_supported_agent_transport() {
     );
     assert_eq!(
         effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("auto")
+        Some(super::super::RELAY_MESH_VIRTUAL_MODEL_ID)
     );
     assert_eq!(
         effective
@@ -620,6 +626,8 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),
         avatar_url: None,
@@ -634,6 +642,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],

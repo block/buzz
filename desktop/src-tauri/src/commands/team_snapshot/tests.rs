@@ -12,6 +12,7 @@ fn member(name: &str) -> AgentSnapshot {
         format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            session_policy: Default::default(),
             name: name.to_string(),
             source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
@@ -55,6 +56,8 @@ fn snapshot(members: Vec<AgentSnapshot>) -> TeamSnapshot {
 fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     let definitions = vec![
         AgentDefinition {
+            session_policy: Default::default(),
+            description: Some("A careful reviewer.".to_string()),
             id: "alice".to_string(),
             display_name: "Alice".to_string(),
             avatar_url: None,
@@ -69,6 +72,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -77,6 +81,8 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             updated_at: "now".to_string(),
         },
         AgentDefinition {
+            session_policy: Default::default(),
+            description: None,
             id: "bob".to_string(),
             display_name: "Bob".to_string(),
             avatar_url: None,
@@ -91,6 +97,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -106,6 +113,8 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
         instructions: Some("Be thorough.".to_string()),
         persona_ids: vec!["alice".to_string(), "bob".to_string()],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -132,6 +141,11 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     assert_eq!(decoded.team.description.as_deref(), Some("Reviews changes"));
     assert_eq!(decoded.team.instructions.as_deref(), Some("Be thorough."));
     assert_eq!(decoded.members.len(), 2);
+    assert_eq!(
+        decoded.members[0].profile.about.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(decoded.members[1].profile.about, None);
     assert!(decoded.members.iter().all(|member| {
         member.memory.level == MemoryLevel::None && member.memory.entries.is_empty()
     }));
@@ -140,6 +154,8 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
 #[test]
 fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     let definitions = vec![AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "alice".to_string(),
         display_name: "Alice".to_string(),
         avatar_url: None,
@@ -154,6 +170,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -168,6 +185,8 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         instructions: None,
         persona_ids: vec!["alice".to_string()],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -178,6 +197,8 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
 
     // Build a fake instance record tied to this team+persona.
     let instance = ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "a".repeat(64),
         name: "Alice".to_string(),
         display_name: None,
@@ -226,6 +247,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
@@ -290,6 +312,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
 #[test]
 fn team_import_definitions_are_built_for_all_members() {
     let mut memory_bearing = member("Alice");
+    memory_bearing.profile.about = Some("  A careful reviewer.  ".to_string());
     memory_bearing.memory = AgentSnapshotMemory {
         level: MemoryLevel::Everything,
         entries: vec![AgentSnapshotMemoryEntry {
@@ -329,6 +352,11 @@ fn team_import_definitions_are_built_for_all_members() {
             && definition.respond_to_allowlist.is_empty()
     }));
     assert_eq!(definitions[0].system_prompt, "Alice prompt");
+    assert_eq!(
+        definitions[0].description.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(definitions[1].description, None);
 }
 
 #[test]
@@ -684,6 +712,8 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
         instructions: None,
         persona_ids: vec![],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,

@@ -14,12 +14,13 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext, LimitType};
+use buzz_auth::{generate_challenge, AuthContext};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
+use crate::rejection::{enforce_ws_admission, request_rejection_message, RejectionTarget};
 use crate::state::{
     run_registered_community_connection, AppState, CommunityConnectionControl,
     CommunityDisconnectReason,
@@ -571,7 +572,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(RelayMessage::notice(
+                    // Correlate to the event id: a bare NOTICE here strands the
+                    // client's pending publish exactly as an over-quota one did.
+                    conn.send(request_rejection_message(
+                        RejectionTarget::Event(event.id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -593,14 +597,18 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 .instrument(span),
             );
         }
-        ClientMessage::Req { sub_id, filters } => {
+        ClientMessage::Req {
+            sub_id,
+            filters,
+            before_ids,
+        } => {
             let conn = Arc::clone(&conn);
             let state = Arc::clone(&state);
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
                     conn.send(request_rejection_message(
-                        Some(&sub_id),
+                        RejectionTarget::Subscription(&sub_id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -609,7 +617,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    handlers::req::handle_req(sub_id, filters, before_ids, conn, state).await;
                     drop(permit);
                 }
                 .instrument(span),
@@ -621,7 +629,8 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(RelayMessage::notice(
+                    conn.send(request_rejection_message(
+                        RejectionTarget::Subscription(&sub_id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -642,104 +651,139 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
     }
 }
 
-fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
-    match sub_id {
-        Some(sub_id) => RelayMessage::closed(sub_id, reason),
-        None => RelayMessage::notice(reason),
-    }
-}
-
-async fn enforce_ws_admission(
-    msg: &ClientMessage,
-    conn: &ConnectionState,
-    state: &AppState,
-) -> bool {
-    let is_event = matches!(msg, ClientMessage::Event(_));
-    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
-        return true;
-    }
-
-    let (pubkey, is_agent) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
-            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
-            _ => return true,
-        }
-    };
-
-    let limits = &state.auth.config().rate_limits;
-    let (ws_window_secs, ws_limit) =
-        crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
-    let ws_result = crate::admission::check_principal(
-        state.admission_rate_limiter.as_ref(),
-        &conn.tenant,
-        &pubkey,
-        LimitType::WsEvents,
-        ws_window_secs,
-        ws_limit,
-    )
-    .await;
-    let sub_id = match msg {
-        ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
-        _ => None,
-    };
-    if !send_admission_result(conn, ws_result, sub_id) {
-        return false;
-    }
-
-    if is_event {
-        let message_limit = if is_agent {
-            limits.agent_standard_messages_per_min
-        } else {
-            limits.human_messages_per_min
-        };
-        let message_result = crate::admission::check_principal(
-            state.admission_rate_limiter.as_ref(),
-            &conn.tenant,
-            &pubkey,
-            LimitType::Messages,
-            60,
-            message_limit,
-        )
-        .await;
-        if !send_admission_result(conn, message_result, None) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn send_admission_result(
-    conn: &ConnectionState,
-    result: Result<(), crate::admission::AdmissionError>,
-    sub_id: Option<&str>,
-) -> bool {
-    match result {
-        Ok(()) => true,
-        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
-            ));
-            false
-        }
-        Err(crate::admission::AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                "rate-limited: shared admission unavailable",
-            ));
-            false
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    use buzz_auth::AuthMethod;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    /// A connection whose outbound frames a test can read back.
+    ///
+    /// Lives here, next to `ConnectionState`, so the crate has one place that
+    /// knows how to build one. Shared with `crate::rejection`'s tests.
+    pub(crate) fn test_conn_with_auth(
+        auth: AuthState,
+    ) -> (Arc<ConnectionState>, mpsc::Receiver<WsMessage>) {
+        let (send_tx, send_rx) = mpsc::channel(4);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(4);
+        let conn = ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                "test.local".to_string(),
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(auth),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        };
+        (Arc::new(conn), send_rx)
+    }
+
+    /// An authenticated connection — the only state admission quotas apply to.
+    pub(crate) fn authenticated_state() -> AuthState {
+        AuthState::Authenticated(AuthContext {
+            pubkey: Keys::generate().public_key(),
+            scopes: Vec::new(),
+            channel_ids: None,
+            auth_method: AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        })
+    }
+
+    pub(crate) fn read_frame(rx: &mut mpsc::Receiver<WsMessage>) -> serde_json::Value {
+        match rx.try_recv().expect("a frame was sent") {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("valid JSON frame"),
+            other => panic!("unexpected websocket message: {other:?}"),
+        }
+    }
+
+    /// Drives the real `handle_text_message` with every handler permit held, so
+    /// the EVENT saturation branch is reached through production dispatch rather
+    /// than by calling its helpers directly.
+    ///
+    /// This must go through `handle_text_message`: a test that renders the
+    /// rejection frame itself stays green when the call site inside the match
+    /// arm is reverted to a bare `NOTICE`.
+    #[tokio::test]
+    async fn saturated_handler_rejects_an_event_on_the_ok_channel() {
+        let state = crate::state::tests::test_state().await;
+        // An unauthenticated connection skips the admission quotas, so the
+        // semaphore is the only gate the frame can trip.
+        let (conn, mut rx) = test_conn_with_auth(AuthState::Failed);
+
+        let permits = state.handler_semaphore.available_permits();
+        let _held = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(permits as u32)
+            .await
+            .expect("hold every handler permit");
+
+        let event = EventBuilder::new(Kind::TextNote, "hello")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let event_id = event.id.to_hex();
+        let raw = serde_json::json!(["EVENT", event]).to_string();
+
+        handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        let frame = read_frame(&mut rx);
+        assert_eq!(
+            frame[0], "OK",
+            "an EVENT turned away for handler saturation must be rejected on the \
+             OK channel — a NOTICE carries no event id, so the client's pending \
+             publish cannot be settled and the send only times out"
+        );
+        assert_eq!(frame[1], event_id);
+        assert_eq!(frame[2], false);
+        assert_eq!(frame[3], "rate-limited: too many concurrent requests");
+    }
+
+    /// The REQ arm of the same branch still settles on CLOSED.
+    #[tokio::test]
+    async fn saturated_handler_rejects_a_req_on_the_closed_channel() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut rx) = test_conn_with_auth(AuthState::Failed);
+
+        let permits = state.handler_semaphore.available_permits();
+        let _held = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(permits as u32)
+            .await
+            .expect("hold every handler permit");
+
+        let raw = serde_json::json!(["REQ", "history-abc", {"kinds": [1]}]).to_string();
+        handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        let frame = read_frame(&mut rx);
+        assert_eq!(frame[0], "CLOSED");
+        assert_eq!(frame[1], "history-abc");
+    }
+
+    /// COUNT refusals follow NIP-45 and close the named query.
+    #[tokio::test]
+    async fn saturated_handler_rejects_a_count_on_the_closed_channel() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut rx) = test_conn_with_auth(AuthState::Failed);
+
+        let permits = state.handler_semaphore.available_permits();
+        let _held = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(permits as u32)
+            .await
+            .expect("hold every handler permit");
+
+        let raw = serde_json::json!(["COUNT", "count-abc", {"kinds": [1]}]).to_string();
+        handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        let frame = read_frame(&mut rx);
+        assert_eq!(frame[0], "CLOSED");
+        assert_eq!(frame[1], "count-abc");
+        assert_eq!(frame[2], "rate-limited: too many concurrent requests");
+    }
 
     #[derive(Debug, Default)]
     struct MockSinkState {
@@ -832,19 +876,6 @@ mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
-    }
-
-    #[test]
-    fn req_rejections_are_subscription_scoped() {
-        let reason = "rate-limited: too many concurrent requests";
-        let closed: serde_json::Value =
-            serde_json::from_str(&request_rejection_message(Some("history-123"), reason))
-                .expect("parse CLOSED");
-        assert_eq!(closed, serde_json::json!(["CLOSED", "history-123", reason]));
-
-        let notice: serde_json::Value =
-            serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
-        assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
     }
 
     #[tokio::test]

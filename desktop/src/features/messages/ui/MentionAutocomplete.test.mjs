@@ -77,6 +77,11 @@ test("agent rows offer automatic mention controls", async () => {
   });
   assert.equal(action.getAttribute("aria-pressed"), "false");
   assert.equal(action.getAttribute("data-state"), "off");
+  const inactivePin = action.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.match(inactivePin?.getAttribute("class") ?? "", /\blucide-pin\b/);
+  assert.equal(inactivePin?.getAttribute("fill"), "none");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, [suggestion]);
@@ -88,15 +93,19 @@ test("agent rows offer automatic mention controls", async () => {
     }),
   );
   const selectedAction = view.getByRole("button", {
-    name: "Stop automatically mentioning Agent Ada",
+    name: "Don't automatically mention Agent Ada in this thread",
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
+  const activePin = selectedAction.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.equal(activePin?.getAttribute("fill"), "currentColor");
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
 
-test("options expand in place without replacing the people list", async () => {
+test("automatic mention setting is visible by default without an options ingress", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
@@ -116,56 +125,55 @@ test("options expand in place without replacing the people list", async () => {
     }),
   );
 
-  const options = view.getByRole("button", { name: "Options" });
-  assert.equal(options.getAttribute("aria-expanded"), "false");
-  assert.match(options.parentElement?.className ?? "", /(?:^|\s)w-24(?:\s|$)/);
-  assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
-  assert.equal(
-    view.queryByRole("switch", { name: "Automatically mention agents" }),
-    null,
-  );
-
-  fireEvent.click(options);
-  assert.equal(options.getAttribute("aria-expanded"), "true");
+  assert.equal(view.queryByRole("button", { name: "Options" }), null);
+  assert.ok(view.getByTestId("mention-options-settings"));
+  const settings = view.getByTestId("mention-options-settings");
+  assert.ok(settings.classList.contains("w-80"));
+  assert.ok(settings.classList.contains("max-w-full"));
+  assert.ok(settings.parentElement?.classList.contains("justify-end"));
   const toggle = view.getByRole("switch", {
     name: "Automatically mention agents",
   });
   assert.equal(toggle.getAttribute("data-state"), "checked");
-  assert.ok(view.getByText("After you mention them once"));
+  assert.ok(view.getByText("Address selected agents in thread replies"));
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
 
   fireEvent.click(toggle);
   assert.deepEqual(changes, [false]);
+});
+
+test("automatic selection updates the visible setting in place", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  const props = {
+    suggestions: [suggestion],
+    selectedIndex: 0,
+    onSelect: () => {},
+    keepMentionedAgentsPinned: false,
+    onKeepMentionedAgentsPinnedChange: () => {},
+  };
+  const view = render(React.createElement(MentionAutocomplete, props));
+  const settings = view.getByTestId("mention-options-settings");
+  const toggle = view.getByRole("switch", {
+    name: "Automatically mention agents",
+  });
+  assert.equal(toggle.getAttribute("data-state"), "unchecked");
 
   view.rerender(
     React.createElement(MentionAutocomplete, {
-      suggestions: [],
-      selectedIndex: 0,
-      onSelect: () => {},
-      keepMentionedAgentsPinned: false,
-      onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
+      ...props,
+      keepMentionedAgentsPinned: true,
+      openOptionsRequest: 1,
     }),
   );
-  assert.equal(view.queryByRole("button", { name: "Options" }), null);
-
-  view.rerender(
-    React.createElement(MentionAutocomplete, {
-      suggestions: [suggestion],
-      selectedIndex: 0,
-      onSelect: () => {},
-      keepMentionedAgentsPinned: false,
-      onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
-    }),
-  );
-  assert.equal(
-    view.getByRole("button", { name: "Options" }).getAttribute("aria-expanded"),
-    "false",
-  );
-  assert.equal(
-    view.queryByRole("switch", { name: "Automatically mention agents" }),
-    null,
-  );
-  assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+  assert.equal(view.getByTestId("mention-options-settings"), settings);
+  assert.equal(toggle.getAttribute("data-state"), "checked");
 });
 
 test("clicking outside dismisses the tray without intercepting its trigger", async () => {
@@ -326,25 +334,56 @@ function suggestion(agentProvenance) {
 
 test("duplicate owned agents mark only the other setup", () => {
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-here"), true),
+    showMentionAgentProvenanceMarker(suggestion("managed-here")),
     false,
   );
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere"), true),
+    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere")),
     true,
   );
 });
 
-test("unique agents omit management provenance", () => {
+test("unique agents mark the same not-locally-managed provenance", () => {
   assert.equal(
-    showMentionAgentProvenanceMarker(suggestion("managed-here"), false),
+    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere")),
+    true,
+  );
+  assert.equal(
+    showMentionAgentProvenanceMarker(suggestion("managed-here")),
     false,
   );
 });
 
 test("agents without trustworthy provenance omit management provenance", () => {
-  assert.equal(
-    showMentionAgentProvenanceMarker(suggestion(undefined), true),
-    false,
-  );
+  assert.equal(showMentionAgentProvenanceMarker(suggestion(undefined)), false);
 });
+
+for (const duplicate of [false, true]) {
+  test(`rendered provenance is truthful (${duplicate ? "duplicate" : "unique"} names)`, async () => {
+    const React = await import("react");
+    const { render } = await import("@testing-library/react");
+    const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+    const { TooltipProvider } = await import("@/shared/ui/tooltip");
+    const remote = suggestion("managed-elsewhere");
+    const suggestions = duplicate
+      ? [remote, { ...suggestion("managed-here"), pubkey: "2".repeat(64) }]
+      : [remote];
+    const view = render(
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(MentionAutocomplete, {
+          suggestions,
+          selectedIndex: 0,
+          onSelect() {},
+        }),
+      ),
+    );
+    const markers = view.getAllByRole("img", {
+      name: "Not managed on this device",
+    });
+    assert.equal(markers.length, 1);
+    assert.equal(markers[0].title, "Not managed on this device");
+    assert.equal(view.queryByTitle("From another Buzz setup"), null);
+  });
+}

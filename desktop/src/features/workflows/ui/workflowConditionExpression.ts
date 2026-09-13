@@ -27,7 +27,7 @@ export type ParsedConditionExpression = {
 };
 
 const AUTHOR_FIELD: ConditionField = {
-  label: "Author pubkey",
+  label: "Author",
   value: "trigger_author",
 };
 const FIELDS_BY_TRIGGER: Record<TriggerType, ConditionField[]> = {
@@ -39,7 +39,7 @@ const FIELDS_BY_TRIGGER: Record<TriggerType, ConditionField[]> = {
   reaction_added: [
     { label: "Reaction emoji", value: "trigger_emoji" },
     AUTHOR_FIELD,
-    { label: "Message event ID", value: "trigger_message_id" },
+    { label: "Message", value: "trigger_message_id" },
   ],
   webhook: [],
   schedule: [],

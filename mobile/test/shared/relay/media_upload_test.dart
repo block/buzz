@@ -1222,6 +1222,148 @@ void main() {
     });
   });
 
+  group('uploadVoiceNote', () {
+    test('keeps ordinary audio attachments on inline audio markdown', () {
+      const descriptor = BlobDescriptor(
+        url: 'https://relay.example/media/meeting.m4a',
+        sha256:
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        size: 3,
+        type: 'audio/mp4',
+        uploaded: 1,
+        filename: 'meeting.m4a',
+      );
+
+      expect(
+        descriptor.toMarkdownImage(),
+        '![audio](https://relay.example/media/meeting.m4a)',
+      );
+    });
+
+    test(
+      'removes generated Android package when fast-start rewrite fails',
+      () async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        final sourceDirectory = await Directory.systemTemp.createTemp(
+          'voice_note_rewrite_source_',
+        );
+        final generatedDirectory = await Directory.systemTemp.createTemp(
+          'voice_note_rewrite_generated_',
+        );
+        final source = File('${sourceDirectory.path}/recording.m4a');
+        final generated = File('${generatedDirectory.path}/packaged.mp4');
+        await source.writeAsBytes(const [1, 2, 3]);
+        await generated.writeAsBytes(const [4, 5, 6]);
+        _setMockMediaUploadPlatformHandler((call) async {
+          if (call.method == 'packageVoiceNoteForUpload') {
+            return generated.path;
+          }
+          return null;
+        });
+        addTearDown(() async {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+          _setMockMediaUploadPlatformHandler((call) async {
+            switch (call.method) {
+              case 'sanitizeImageForUpload':
+                final arguments = call.arguments as Map<Object?, Object?>;
+                return arguments['bytes'] as Uint8List;
+              case 'transcodeImageToJpeg':
+                return _jpegBytes;
+              default:
+                return null;
+            }
+          });
+          if (await sourceDirectory.exists()) {
+            await sourceDirectory.delete(recursive: true);
+          }
+          if (await generatedDirectory.exists()) {
+            await generatedDirectory.delete(recursive: true);
+          }
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        await expectLater(
+          service.uploadVoiceNote(
+            XFile(source.path, mimeType: 'audio/mp4'),
+            duration: const Duration(seconds: 3),
+          ),
+          throwsFormatException,
+        );
+
+        expect(await source.exists(), isTrue);
+        expect(await generated.exists(), isFalse);
+        expect(generatedDirectory.listSync().whereType<File>(), isEmpty);
+      },
+    );
+
+    test('uploads the packaged voice note as a video MP4 audio card', () async {
+      final sourceDirectory = await Directory.systemTemp.createTemp(
+        'voice_note_source_',
+      );
+      final packagedDirectory = await Directory.systemTemp.createTemp(
+        'voice_note_packaged_',
+      );
+      final source = File('${sourceDirectory.path}/voice-note-test.m4a');
+      final packaged = File('${packagedDirectory.path}/voice-note-test.mp4');
+      await source.writeAsBytes(const [1, 2, 3]);
+      await packaged.writeAsBytes(const [4, 5, 6]);
+      var packagedSourcePath = '';
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          expect(request.headers['Content-Type'], 'video/mp4');
+          expect(request.bodyBytes, const [4, 5, 6]);
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/voice-note.mp4',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': request.bodyBytes.length,
+              'type': 'video/mp4',
+              'uploaded': 1,
+              'duration': 3.0,
+            }),
+            HttpStatus.ok,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        packageVoiceNoteForUpload: (path) async {
+          packagedSourcePath = path;
+          return packaged.path;
+        },
+      );
+
+      try {
+        final descriptor = await service.uploadVoiceNote(
+          XFile(source.path, mimeType: 'audio/mp4'),
+          duration: const Duration(milliseconds: 3250),
+        );
+
+        expect(packagedSourcePath, source.path);
+        expect(descriptor.type, 'video/mp4');
+        expect(descriptor.filename, 'voice-note-test.mp4');
+        expect(descriptor.duration, 3.0);
+        expect(descriptor.toImetaTag(), contains('duration 3.0'));
+        expect(
+          descriptor.toMarkdownImage(),
+          '[voice-note-test.mp4](${descriptor.url})',
+        );
+        expect(await packaged.exists(), isFalse);
+      } finally {
+        await sourceDirectory.delete(recursive: true);
+        await packagedDirectory.delete(recursive: true);
+      }
+    });
+  });
+
   group('pickAndUploadVideo', () {
     // Helper: build ftyp header bytes for a given brand.
     Uint8List buildFtypHeader(String brand) {

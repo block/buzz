@@ -1,4 +1,4 @@
-use super::{apply_claude_model_env, apply_effort_env};
+use super::apply_claude_model_env;
 
 /// A1: BUZZ_ACP_MODEL must NOT be present in the spawned-child env after
 /// `apply_claude_model_env`, even if it was set before (dual-authority defect).
@@ -54,74 +54,10 @@ fn a1_anthropic_model_removed_when_no_effective_model() {
     );
 }
 
-// ── B5 effort-authority contract tests ──────────────────────────────────────
+// ── B5 effort-authority contract ─────────────────────────────────────────────
 //
-// These tests verify that `apply_effort_env`, called after `descriptor.env`,
-// makes the canonical persisted effort win over any user-supplied value.
-
-/// B5 (local): canonical effort wins when user env supplies a conflicting value.
-/// Simulates the defect scenario: descriptor.env wrote BUZZ_ACP_EFFORT_LEVEL=low,
-/// then apply_effort_env is called with the canonical "high". The canonical value
-/// must be what survives in the spawned-child env.
-#[test]
-fn b5_canonical_effort_wins_over_user_env_collision() {
-    let mut cmd = std::process::Command::new("true");
-    // Simulate descriptor.env writing a user-supplied value (the pre-fix
-    // ordering: effort written before the loop, then loop overwrote it, or
-    // equivalently: effort written post-loop but with user value also post-loop).
-    cmd.env("BUZZ_ACP_EFFORT_LEVEL", "low");
-
-    // Post-loop canonical application — the fix.
-    apply_effort_env(&mut cmd, Some("high"));
-
-    let env_map: std::collections::HashMap<_, _> = cmd.get_envs().collect();
-    let effort = env_map.get(std::ffi::OsStr::new("BUZZ_ACP_EFFORT_LEVEL"));
-    assert!(effort.is_some(), "BUZZ_ACP_EFFORT_LEVEL must be present");
-    assert_eq!(
-        effort.unwrap().unwrap_or_default(),
-        "high",
-        "canonical effort must win over the user-supplied 'low' — B5 authority ordering"
-    );
-}
-
-/// B5 (local): when no canonical effort is persisted (effort_level is None),
-/// user env passthrough is preserved — the descriptor.env entry seeds startup effort.
-/// Simulates: descriptor.env wrote BUZZ_ACP_EFFORT_LEVEL=low (already in command),
-/// then apply_effort_env(None) is called — user value must survive.
-#[test]
-fn b5_user_effort_env_survives_when_no_canonical_value() {
-    let mut cmd = std::process::Command::new("true");
-    // Simulate descriptor.env loop having written a user-supplied value first.
-    cmd.env("BUZZ_ACP_EFFORT_LEVEL", "low");
-
-    // No canonical value — apply_effort_env(None) is a no-op so the user
-    // value already written by the descriptor.env loop survives intact.
-    apply_effort_env(&mut cmd, None);
-
-    let env_map: std::collections::HashMap<_, _> = cmd.get_envs().collect();
-    let effort = env_map.get(std::ffi::OsStr::new("BUZZ_ACP_EFFORT_LEVEL"));
-    assert!(effort.is_some(), "BUZZ_ACP_EFFORT_LEVEL must be present");
-    assert_eq!(
-        effort.unwrap().unwrap_or_default(),
-        "low",
-        "user-supplied effort must survive when no canonical value is persisted"
-    );
-}
-
-/// B5 (local): canonical effort is present in the spawned env even when user
-/// env did NOT supply a conflicting value (basic injection contract).
-#[test]
-fn b5_canonical_effort_injected_when_no_user_collision() {
-    let mut cmd = std::process::Command::new("true");
-    // No user-supplied BUZZ_ACP_EFFORT_LEVEL in descriptor.env.
-    apply_effort_env(&mut cmd, Some("medium"));
-
-    let env_map: std::collections::HashMap<_, _> = cmd.get_envs().collect();
-    let effort = env_map.get(std::ffi::OsStr::new("BUZZ_ACP_EFFORT_LEVEL"));
-    assert!(effort.is_some(), "BUZZ_ACP_EFFORT_LEVEL must be present");
-    assert_eq!(
-        effort.unwrap().unwrap_or_default(),
-        "medium",
-        "canonical effort must be injected when no collision"
-    );
-}
+// Startup-effort application moved out of this module into the single
+// harness-agnostic projection (`config_bridge::effort`). Its authority,
+// collision, and single-key contract is exercised by
+// `config_bridge::effort::tests`; there is no longer a Claude-local effort
+// helper to test here.

@@ -199,6 +199,18 @@
     z-index: 1;
   }
 
+  .buzz-huddle-speaking-avatar-agent::after {
+    content: none;
+  }
+
+  .buzz-huddle-speaking-squircle {
+    opacity: var(--buzz-huddle-speaker-opacity, 0);
+    transform: scale(1.04);
+    transition: opacity 80ms linear;
+    will-change: opacity;
+    z-index: 1;
+  }
+
   @keyframes buzz-huddle-participant-tile-enter {
     from {
       opacity: 0;
@@ -240,8 +252,7 @@
       isolation: auto;
     }
 
-    .buzz-huddle-speaking-avatar::after {
-      transform: scale(1.04);
+    .buzz-huddle-speaking-squircle {
       transition: none;
       will-change: auto;
     }

@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -680,7 +680,9 @@ CREATE TABLE moderation_reports (
     -- Reporter's optional free-text context (mod-queue-only; never public).
     note                TEXT,
     status              TEXT NOT NULL DEFAULT 'open'
-                        CHECK (status IN ('open', 'resolved', 'dismissed', 'escalated')),
+                        CHECK (status IN ('open', 'processing', 'resolved', 'dismissed', 'escalated')),
+    -- Non-null when status='processing': the relay_admin_actions row that claimed this report.
+    active_action_id    UUID,
     resolved_by         BYTEA,
     resolved_at         TIMESTAMPTZ,
     -- moderation_actions row that resolved this report, if any.
@@ -762,6 +764,9 @@ CREATE TABLE moderation_actions (
     -- NIP-OA: which principal matched a ban ('self' | 'owner'); audit-only,
     -- the client never learns which.
     matched_principal TEXT CHECK (matched_principal IS NULL OR matched_principal IN ('self', 'owner')),
+    -- Deployment authority type for HTTP-initiated actions.
+    actor_authority   TEXT NOT NULL DEFAULT 'community'
+                      CHECK (actor_authority IN ('community', 'relay_operator', 'relay_moderator')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
@@ -829,6 +834,8 @@ CREATE TABLE product_feedback (
     tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
     event_created_at TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Operator-managed lifecycle status.
+    status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'reviewed', 'archived')),
     UNIQUE (event_id)
 );
 CREATE INDEX idx_product_feedback_received
@@ -920,7 +927,7 @@ BEGIN
     -- Keep this allowlist identical to the relay's validated NIP-PL descriptor.
     -- Centralizing it on the events table covers every durable producer,
     -- including internal paths that bypass live dispatch.
-    IF NEW.kind IN (7, 9, 1059, 40007, 46010) THEN
+    IF NEW.kind IN (9, 40002, 45001, 45003) THEN
         PERFORM pg_advisory_xact_lock_shared(
             hashtextextended('buzz_push_gate:' || NEW.community_id::text, 0));
         IF EXISTS (
@@ -1127,7 +1134,7 @@ CREATE TABLE push_gateway_installations (
     app_attest_key_id BYTEA NOT NULL UNIQUE CHECK (octet_length(app_attest_key_id) BETWEEN 1 AND 128),
     app_attest_public_key BYTEA NOT NULL CHECK (octet_length(app_attest_public_key) BETWEEN 33 AND 256),
     assertion_counter BIGINT NOT NULL CHECK (assertion_counter BETWEEN 0 AND 4294967295),
-    app_profile TEXT NOT NULL CHECK (app_profile IN ('buzz-ios-production','buzz-ios-sandbox')),
+    app_profile TEXT NOT NULL CHECK (app_profile = 'buzz-ios-dogfood'),
     token_ciphertext BYTEA NOT NULL CHECK (octet_length(token_ciphertext) BETWEEN 1 AND 2048),
     token_fingerprint BYTEA NOT NULL CHECK (length(token_fingerprint) = 32),
     endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),
@@ -1199,6 +1206,8 @@ CREATE TABLE replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
+) WITH (
+    vacuum_truncate = false
 );
 
 INSERT INTO replica_heartbeat (id) VALUES (1);
@@ -1476,12 +1485,9 @@ $$;
 CREATE FUNCTION community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
     SELECT target::TEXT = ANY (ARRAY[
-        'community_deletion_requests',
-        'community_deletion_approvals',
-        'community_deletion_checkpoints',
-        'community_serving_write_leases',
-        'community_deletion_executor_heartbeats',
-        'product_feedback',
+        'community_deletion_requests', 'community_deletion_approvals',
+        'community_deletion_checkpoints', 'community_serving_write_leases',
+        'community_deletion_executor_heartbeats', 'product_feedback',
         'rate_limit_violations'
     ]::TEXT[])
 $$;
@@ -1747,3 +1753,143 @@ SELECT attach_community_write_fence('users');
 SELECT attach_community_write_fence('workflow_approvals');
 SELECT attach_community_write_fence('workflow_runs');
 SELECT attach_community_write_fence('workflows');
+
+-- ── Relay operator/moderator roster ──────────────────────────────────────────
+-- Deployment-level principals staffed via the admin API. Config-backed operators
+-- (RELAY_OPERATOR_PUBKEYS, RELAY_OWNER_PUBKEY owner-fallback) are NOT seeded here;
+-- they are authoritative in config and outrank any DB row.
+
+CREATE TABLE relay_operators (
+    pubkey      BYTEA NOT NULL PRIMARY KEY CHECK (length(pubkey) = 32),
+    role        TEXT NOT NULL CHECK (role IN ('operator', 'moderator')),
+    added_by    BYTEA NOT NULL CHECK (length(added_by) = 32),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_operators', 'deployment-global operator/moderator roster; no community_id intentionally');
+
+-- ── Relay admin actions (HTTP enforcement state machine) ──────────────────────
+-- One row per HTTP report-resolution enforcement action. Tracks the durable
+-- state machine from claim → enforcing → succeeded|failed|cancelled.
+
+CREATE TABLE relay_admin_actions (
+    id              UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    report_id       UUID NOT NULL,
+    report_community_id UUID NOT NULL,
+    -- Client-generated idempotency key (signed in NIP-98 request body).
+    request_id      UUID NOT NULL,
+    -- Principal who claimed the report.
+    actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    actor_role      TEXT NOT NULL CHECK (actor_role IN ('operator', 'moderator')),
+    -- The enforcement action requested.
+    action          TEXT NOT NULL,
+    reason          TEXT,
+    -- Timeout expiration for timeout actions; NULL otherwise.
+    timeout_until   TIMESTAMPTZ,
+    -- Durable state machine: pending → enforcing → succeeded|failed|cancelled.
+    state           TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'enforcing', 'succeeded', 'failed', 'cancelled')),
+    -- Step marker: the last durably committed mutation step (NULL = none yet).
+    -- Values: 'mutation_committed' (core DB mutation done), 'artifacts_done' (tombstone/notice done).
+    step_marker     TEXT CHECK (step_marker IN ('mutation_committed', 'artifacts_done')),
+    -- Principal who cancelled a pre-mutation failed action; NULL until cancelled.
+    -- Attributes the cancel transition on the action row itself, mirroring
+    -- moderation_reports.resolved_by for report resolution.
+    cancelled_by    BYTEA CHECK (cancelled_by IS NULL OR length(cancelled_by) = 32),
+    -- Error from the last failure, if any.
+    error_message   TEXT,
+    -- Per-action exclusive lease (migration 0037): fences concurrent same-request
+    -- retries and lets the recovery worker claim/re-drive stranded actions.
+    action_lease_token      UUID,
+    action_lease_expires_at TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Report-scoped idempotency: one action per (report, request_id).
+    UNIQUE (report_community_id, report_id, request_id),
+    FOREIGN KEY (report_community_id, report_id)
+        REFERENCES moderation_reports (community_id, id)
+);
+
+CREATE INDEX idx_relay_admin_actions_report
+    ON relay_admin_actions (report_community_id, report_id);
+CREATE INDEX idx_relay_admin_actions_state
+    ON relay_admin_actions (state)
+    WHERE state IN ('pending', 'enforcing');
+-- Recovery worker (migration 0037): find stranded actions by lease expiry.
+CREATE INDEX idx_relay_admin_actions_lease
+    ON relay_admin_actions (action_lease_expires_at)
+    WHERE state IN ('pending', 'enforcing');
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_admin_actions', 'deployment-global enforcement state machine; community_id is embedded in report FK');
+
+-- ── Relay admin outbox (durable enforcement delivery) ────────────────────────
+-- Transactional outbox for durable artifact/notice delivery.
+
+CREATE TABLE relay_admin_outbox (
+    id          UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    action_id   UUID NOT NULL REFERENCES relay_admin_actions(id),
+    -- Delivery task type: 'tombstone' | 'system_message' | 'reporter_notice'.
+    task_type   TEXT NOT NULL,
+    -- Task payload (JSON).
+    payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Lease-based delivery: held_by identifies the worker pod.
+    held_by     TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    -- Delivery state: pending → delivered | failed.
+    state       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending', 'delivered', 'failed')),
+    -- Deduplication key: prevents re-creating an artifact after delivery.
+    dedup_key   TEXT UNIQUE,
+    error_message TEXT,
+    -- Retryable delivery with backoff (migration 0037): failures reschedule via
+    -- retry_after rather than terminating immediately.
+    attempt_count INT NOT NULL DEFAULT 0,
+    retry_after   TIMESTAMPTZ,
+    -- Per-claim ownership fence (migration 0038): completion/failure updates
+    -- require the token written at claim time, so a stale worker cannot overwrite
+    -- a newer worker's terminal update.
+    outbox_claim_token UUID,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_relay_admin_outbox_action
+    ON relay_admin_outbox (action_id);
+CREATE INDEX idx_relay_admin_outbox_pending
+    ON relay_admin_outbox (retry_after, created_at)
+    WHERE state = 'pending';
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_admin_outbox', 'deployment-global enforcement artifact delivery queue');
+
+-- ── Relay operator audit (append-only roster mutation trail) ─────────────────
+-- One row per PUT/DELETE /operators/{pubkey} mutation. The roster is the
+-- deployment-wide root of trust and its mutations overwrite/remove in place;
+-- this append-only trail records who granted, elevated, or revoked whom, and
+-- when, so privilege changes are as auditable as the enforcement actions those
+-- principals perform. Written only inside the upsert/delete transactions; no
+-- UPDATE/DELETE path.
+
+CREATE TABLE relay_operator_audit (
+    id            UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_pubkey  BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    target_pubkey BYTEA NOT NULL CHECK (length(target_pubkey) = 32),
+    op            TEXT NOT NULL CHECK (op IN ('grant', 'revoke')),
+    prev_role     TEXT CHECK (prev_role IN ('operator', 'moderator')),
+    new_role      TEXT CHECK (new_role IN ('operator', 'moderator')),
+    -- created_at is wall-clock occurrence time (clock_timestamp()), informational
+    -- only — not monotonic, so it never establishes order. `seq` is the sole
+    -- chronology key: mutations write their audit row under the serializing lock,
+    -- so identity order equals the true privilege chain. Reads use ORDER BY seq.
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    seq           BIGINT GENERATED ALWAYS AS IDENTITY
+);
+
+CREATE INDEX idx_relay_operator_audit_target
+    ON relay_operator_audit (target_pubkey, seq);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
+

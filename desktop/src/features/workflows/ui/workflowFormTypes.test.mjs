@@ -315,3 +315,74 @@ test("absent reply_in_thread parses as false", () => {
   assert.equal(parsed.ok, true);
   assert.equal(parsed.state.steps[0].replyInThread, false);
 });
+
+// Handoff vectors, round-trip verified with nostr-tools nip19.
+const KEY_HEX =
+  "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
+const KEY_NPUB =
+  "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
+
+test("stored hex to/from keys display as npubs in the form", () => {
+  const parsed = yamlToFormState(
+    `name: Keys
+trigger: { on: message_posted }
+steps: [{ id: s1, action: send_dm, to: ${KEY_HEX}, text: hi }, { id: s2, action: request_approval, from: ${KEY_HEX}, message: ok }]
+`,
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.state.steps[0].to, KEY_NPUB);
+  assert.equal(parsed.state.steps[1].from, KEY_NPUB);
+});
+
+test("npub to/from keys serialize to canonical hex; other spellings pass through", () => {
+  const dm = formStateToYaml({
+    ...DEFAULT_FORM_STATE,
+    name: "Keys",
+    steps: [{ id: "s1", action: "send_dm", to: KEY_NPUB, text: "hi" }],
+  });
+  assert.match(dm, new RegExp(`to: ${KEY_HEX}`));
+  assert.doesNotMatch(dm, /npub1/);
+
+  const approval = formStateToYaml({
+    ...DEFAULT_FORM_STATE,
+    name: "Keys",
+    steps: [
+      { id: "s1", action: "request_approval", from: KEY_NPUB, message: "ok" },
+    ],
+  });
+  assert.match(approval, new RegExp(`from: ${KEY_HEX}`));
+
+  // A hex spelling serializes unchanged, and a corrupted-checksum npub is
+  // never bound as an identity — it stays exactly as the author wrote it
+  // for the YAML editor to surface.
+  const hexDm = formStateToYaml({
+    ...DEFAULT_FORM_STATE,
+    name: "Keys",
+    steps: [{ id: "s1", action: "send_dm", to: KEY_HEX, text: "hi" }],
+  });
+  assert.match(hexDm, new RegExp(`to: ${KEY_HEX}`));
+
+  const corrupt = `${KEY_NPUB.slice(0, -2)}qq`;
+  const corruptDm = formStateToYaml({
+    ...DEFAULT_FORM_STATE,
+    name: "Keys",
+    steps: [{ id: "s1", action: "send_dm", to: corrupt, text: "hi" }],
+  });
+  assert.match(corruptDm, new RegExp(`to: ${corrupt.replace(/\./g, "\\.")}`));
+});
+
+test("templates and roles pass through both directions untouched", () => {
+  const parsed = yamlToFormState(
+    `name: Keys
+trigger: { on: message_posted }
+steps: [{ id: s1, action: send_dm, to: "{{trigger.author}}", text: hi }, { id: s2, action: request_approval, from: manager, message: ok }]
+`,
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.state.steps[0].to, "{{trigger.author}}");
+  assert.equal(parsed.state.steps[1].from, "manager");
+
+  const reserialized = formStateToYaml(parsed.state);
+  assert.match(reserialized, /to: "\{\{trigger\.author\}\}"/);
+  assert.match(reserialized, /from: manager/);
+});
