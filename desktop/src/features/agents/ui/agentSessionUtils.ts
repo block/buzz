@@ -306,3 +306,21 @@ export function formatElapsed(ms: number): string {
   const hours = Math.floor(totalMinutes / 60);
   return `${hours}h ${minutes}m ${seconds}s`;
 }
+
+/**
+ * Format how long ago a past moment was (epoch-ms delta), for a coarse label
+ * that doesn't tick every second.
+ * Tiers: `<60s → "just now"` · `<60m → "Nm ago"` · `<24h → "Nh ago"` · `≥24h → "Nd ago"`.
+ * Non-positive deltas clamp to "just now": a small negative is reachable when a
+ * clock-skew correction lands a recorded moment slightly ahead of the desktop
+ * clock, and must never render as "-1m ago".
+ */
+export function formatAgo(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return "just now";
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ago`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h ago`;
+  return `${Math.floor(totalHours / 24)}d ago`;
+}

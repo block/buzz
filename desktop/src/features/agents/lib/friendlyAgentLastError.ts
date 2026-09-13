@@ -1,3 +1,5 @@
+import { titleCase } from "@/features/agents/ui/agentSessionUtils";
+
 /**
  * Promote certain machine-readable `lastError` strings to user-facing copy.
  *
@@ -125,4 +127,57 @@ export function friendlyTurnErrorCopy(raw: string, code: unknown): string {
   const numeric = code == null ? null : Number(code);
   const safe = Number.isFinite(numeric) ? (numeric as number) : null;
   return friendlyAgentLastError(raw, safe)?.copy ?? raw;
+}
+
+/**
+ * User-facing labels for the closed set of `error_class` discriminants from
+ * `classify_turn_failure` (`crates/buzz-acp/src/lib.rs`), plus the `outcome`
+ * strings used as a fallback when a pre-`error_class` harness omits the field.
+ * Living here, beside the rest of the user-facing error copy, keeps the raw
+ * machine token from reaching the UI.
+ */
+const TURN_ERROR_CLASS_LABELS: Record<string, string> = {
+  // error_class discriminants
+  agent_error: "Agent error",
+  cancelled: "Cancelled",
+  error: "Error",
+  exited: "Agent exited",
+  panic: "Agent crashed",
+  protocol: "Protocol error",
+  timeout: "Timed out",
+  transport: "Connection lost",
+  // outcome-only fallbacks
+  hard_timeout: "Hard timeout",
+  idle_timeout: "Idle timeout",
+};
+
+/**
+ * Display label for a turn failure's class. Falls back to the coarse `outcome`
+ * when the harness predates `error_class`, and to title-casing for any token
+ * added to the Rust enum before this map catches up — so a new class degrades
+ * to "Some New Class" rather than leaking `some_new_class`.
+ */
+export function friendlyTurnErrorClass(
+  errorClass: string | null,
+  outcome: string,
+): string {
+  const raw = errorClass ?? outcome;
+  return TURN_ERROR_CLASS_LABELS[raw] ?? titleCase(raw);
+}
+
+/**
+ * Whether the turn-failure line should render alongside a process-level error.
+ *
+ * A nonzero process exit is already surfaced by `friendlyAgentLastError`, and
+ * the turn killed by that same exit reports `error_class: "exited"` — rendering
+ * both makes one crash read as two independent errors. The turn line yields,
+ * since the process line is the more actionable of the two. Every other class
+ * describes a failure the process error does NOT explain (a timeout, a protocol
+ * fault), so it still shows.
+ */
+export function shouldShowTurnFailure(
+  failure: { errorClass: string | null },
+  hasProcessError: boolean,
+): boolean {
+  return !(hasProcessError && failure.errorClass === "exited");
 }
