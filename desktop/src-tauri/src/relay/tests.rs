@@ -3,9 +3,35 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, is_relay_membership_required_error, parse_command_response,
+    relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
+
+
+// ── is_relay_membership_required_error ─────────────────────────────────
+
+#[test]
+fn membership_required_matches_relay_error_code_and_message() {
+    use reqwest::StatusCode;
+
+    assert!(is_relay_membership_required_error(
+        StatusCode::FORBIDDEN,
+        "relay returned 403 Forbidden: relay_membership_required",
+    ));
+    assert!(is_relay_membership_required_error(
+        StatusCode::FORBIDDEN,
+        "You must be a relay member to access this relay",
+    ));
+    assert!(!is_relay_membership_required_error(
+        StatusCode::FORBIDDEN,
+        "relay returned 403 Forbidden: forbidden",
+    ));
+    assert!(!is_relay_membership_required_error(
+        StatusCode::UNAUTHORIZED,
+        "relay_membership_required",
+    ));
+}
 
 // ── extract_retry_in_hint ────────────────────────────────────────────────
 
