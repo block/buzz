@@ -52,12 +52,14 @@ pub async fn show_native_notification(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn ensure_startup_registration(app: &tauri::AppHandle) {
-    windows::ensure_startup_registration(app);
+pub(crate) fn ensure_startup_registration(app: &tauri::AppHandle) -> Result<(), String> {
+    windows::ensure_startup_registration(app)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn ensure_startup_registration(_app: &tauri::AppHandle) {}
+pub(crate) fn ensure_startup_registration(_app: &tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -146,7 +148,7 @@ mod linux {
 mod windows {
     use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
     use std::collections::VecDeque;
-    use std::sync::{Mutex, Once, OnceLock};
+    use std::sync::{Mutex, OnceLock};
     use tauri::Emitter;
     use tauri_winrt_notification::{Duration, Toast};
     use windows::{
@@ -155,45 +157,36 @@ mod windows {
     };
 
     const MAX_PENDING_ACTIVATIONS: usize = 64;
-    static STARTUP_REGISTRATION: Once = Once::new();
+    static STARTUP_REGISTRATION: OnceLock<Result<(), String>> = OnceLock::new();
     static PENDING_ACTIVATIONS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
 
-    pub fn ensure_startup_registration(app: &tauri::AppHandle) {
-        STARTUP_REGISTRATION.call_once(|| {
-            let app = app.clone();
-            let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
-            std::thread::spawn(move || {
+    pub fn ensure_startup_registration(app: &tauri::AppHandle) -> Result<(), String> {
+        STARTUP_REGISTRATION
+            .get_or_init(|| {
                 let app_id = app.config().identifier.clone();
-                set_process_aumid(&app_id);
-                if let Err(error) = write_aumid_registry_entry(&app, &app_id) {
-                    eprintln!("buzz-desktop: failed to register Windows AUMID: {error}");
-                }
-                if let Err(error) = write_notification_settings_entry(&app_id) {
-                    eprintln!(
-                        "buzz-desktop: failed to register Windows notification settings: {error}"
-                    );
-                }
-                if let Err(error) = ensure_start_menu_shortcut(&app, &app_id) {
-                    eprintln!("buzz-desktop: failed to repair Windows shortcut AUMID: {error}");
-                }
-                let _ = ready_sender.send(());
-            });
-            let _ = ready_receiver.recv();
-        });
+                set_process_aumid(&app_id)?;
+                write_aumid_registry_entry(app, &app_id)?;
+                write_notification_settings_entry(&app_id)?;
+                ensure_start_menu_shortcut(app, &app_id)
+            })
+            .clone()
     }
 
     fn to_wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn set_process_aumid(app_id: &str) {
+    fn set_process_aumid(app_id: &str) -> Result<(), String> {
         use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
         let app_id = to_wide(app_id);
         let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
         if result < 0 {
-            eprintln!("buzz-desktop: failed to set Windows process AUMID: 0x{result:08X}");
+            return Err(format!(
+                "failed to set Windows process AUMID: 0x{result:08X}"
+            ));
         }
+        Ok(())
     }
 
     fn write_notification_settings_entry(app_id: &str) -> Result<(), String> {
