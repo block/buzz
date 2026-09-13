@@ -142,6 +142,31 @@ fn relay_limitation(max_message_length: usize) -> RelayLimitation {
     }
 }
 
+/// Operator-facing relay name advertised in NIP-11, from `RELAY_NAME`.
+///
+/// Self-hosted deployments are a distinct workspace to the people in them, but
+/// every relay currently introduces itself as "Buzz Relay" — the product's
+/// name, not the operator's. Clients surface this string, so an operator has no
+/// way to make their own instance read as theirs. Blank or whitespace-only
+/// values fall back to the default rather than advertising an empty name.
+fn relay_display_name() -> String {
+    non_empty_env("RELAY_NAME").unwrap_or_else(|| "Buzz Relay".to_string())
+}
+
+/// Relay description advertised in NIP-11, from `RELAY_DESCRIPTION`.
+fn relay_description() -> String {
+    non_empty_env("RELAY_DESCRIPTION")
+        .unwrap_or_else(|| "Buzz — private team communication relay".to_string())
+}
+
+/// Reads an env var, treating unset and blank as equivalent.
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 impl RelayInfo {
     /// Builds the relay's NIP-11 information document.
     ///
@@ -200,8 +225,8 @@ impl RelayInfo {
         });
 
         Self {
-            name: "Buzz Relay".to_string(),
-            description: "Buzz — private team communication relay".to_string(),
+            name: relay_display_name(),
+            description: relay_description(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             pubkey: None,
             contact: None,
@@ -402,6 +427,35 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static NAME_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn relay_name_and_description_come_from_env_and_ignore_blanks() {
+        let _guard = NAME_ENV_MUTEX.lock().unwrap();
+
+        // Unset: the historical defaults, so existing deployments do not move.
+        std::env::remove_var("RELAY_NAME");
+        std::env::remove_var("RELAY_DESCRIPTION");
+        assert_eq!(relay_display_name(), "Buzz Relay");
+        assert_eq!(
+            relay_description(),
+            "Buzz — private team communication relay"
+        );
+
+        // Set: the operator's own identity, trimmed.
+        std::env::set_var("RELAY_NAME", "  Cofoundy  ");
+        std::env::set_var("RELAY_DESCRIPTION", "Cofoundy team relay");
+        assert_eq!(relay_display_name(), "Cofoundy");
+        assert_eq!(relay_description(), "Cofoundy team relay");
+
+        // Blank is not a name — advertising "" would be worse than the default.
+        std::env::set_var("RELAY_NAME", "   ");
+        assert_eq!(relay_display_name(), "Buzz Relay");
+
+        std::env::remove_var("RELAY_NAME");
+        std::env::remove_var("RELAY_DESCRIPTION");
+    }
 
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
