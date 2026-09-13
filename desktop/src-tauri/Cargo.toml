@@ -37,6 +37,7 @@ tauri-build = { version = "2", features = [] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
+rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
