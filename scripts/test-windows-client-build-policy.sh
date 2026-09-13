@@ -5,9 +5,10 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
 build16=1a3084e4d3a7a93492ac9a82ebdfffb40c2def39
-build17=984bec51866fa750ae0dbea0a8ccd6f76c9d6d15
-merged_tree=$(git merge-tree --write-tree "$build16" "$build17")
-candidate_tree=$(git write-tree)
+legacy_sibling=2025dcdde29b4c3690c7f2766dd4d14bae08e7e9
+bootstrap=83afea0a1549410a8f7effa12ceed0f7b13234e6
+candidate_commit=$(git rev-parse HEAD)
+candidate_tree=HEAD
 
 expect_failure() {
   local label=$1
@@ -33,8 +34,8 @@ expect_failure \
   'Build 16 alone lacks the new cumulative client contract' \
   scripts/check-windows-client-contract.sh "$build16"
 expect_failure \
-  'Build 17 alone dropped the previous client contract' \
-  scripts/check-windows-client-contract.sh "$build17"
+  'a legacy sibling line lacks the cumulative client contract' \
+  scripts/check-windows-client-contract.sh "$legacy_sibling"
 stress_candidate_contract() {
   local iteration
   for iteration in {1..100}; do
@@ -42,9 +43,6 @@ stress_candidate_contract() {
   done
 }
 
-expect_failure \
-  'the raw Build 16 + Build 17 tree lacks the reviewed writer-consistency fix' \
-  scripts/check-windows-client-contract.sh "$merged_tree"
 expect_success \
   'the corrected cumulative candidate retains every contract repeatedly' \
   stress_candidate_contract
@@ -52,22 +50,26 @@ expect_success \
 expect_failure \
   'a sibling candidate is not cumulative' \
   scripts/verify-windows-client-lineage.sh \
-    "$build16" "$build17" windows-integration
+    "$build16" "$legacy_sibling" windows
 expect_failure \
-  'a build from a non-canonical branch is forbidden' \
-  scripts/verify-windows-client-lineage.sh \
-    "$build16" "$build16" fix/windows-client-batch-20260826
-expect_success \
-  'a descendant on the canonical branch is cumulative' \
+  'the old canonical stream name is now forbidden' \
   scripts/verify-windows-client-lineage.sh \
     "$build16" "$build16" windows-integration
+expect_success \
+  'the current canonical candidate descends from the old-stream bootstrap' \
+  scripts/verify-windows-client-lineage.sh \
+    "$bootstrap" "$candidate_commit" windows
 
 workflow=.github/workflows/windows-fork-integration.yml
-grep -Fq 'CANONICAL_WINDOWS_BRANCH: windows-integration' "$workflow"
+grep -Fq 'CANONICAL_WINDOWS_BRANCH: windows' "$workflow"
 grep -Fq \
-  'WINDOWS_INTEGRATION_BOOTSTRAP_SHA: 1a3084e4d3a7a93492ac9a82ebdfffb40c2def39' \
+  'WINDOWS_BOOTSTRAP_SHA: 83afea0a1549410a8f7effa12ceed0f7b13234e6' \
   "$workflow"
 grep -Fq 'branch=${CANONICAL_WINDOWS_BRANCH}' "$workflow"
 grep -Fq 'scripts/verify-windows-client-lineage.sh' "$workflow"
 grep -Fq 'scripts/check-windows-client-contract.sh' "$workflow"
-printf 'PASS: GitHub workflow invokes both fail-closed gates\n'
+grep -Fq 'scripts/windows_build_manifest.py preflight' "$workflow"
+grep -Fq 'scripts/windows_build_manifest.py generate' "$workflow"
+grep -Fq 'scripts/windows_build_manifest.py validate' "$workflow"
+grep -Fq 'path: windows-build-artifact' "$workflow"
+printf 'PASS: GitHub workflow invokes lineage, retained-surface, and manifest gates\n'

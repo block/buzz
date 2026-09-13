@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buzz.cholewa.online/schemas/mybuzz-windows-nsis-manifest-v1.schema.json",
+  "title": "MyBuzz Windows unsigned NSIS build manifest v1",
+  "description": "Closed contract for one unsigned final NSIS installer. candidate_sha and provider.head_sha must equal freeze_sha; artifact name and path must match.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "release_id",
+    "freeze_sha",
+    "candidate_sha",
+    "build_request_event_id",
+    "pipeline_event_id",
+    "provider",
+    "digests",
+    "signing",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mybuzz-windows-nsis-manifest-v1",
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+    },
+    "freeze_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "candidate_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "build_request_event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "pipeline_event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "repository",
+        "workflow",
+        "run_id",
+        "run_attempt",
+        "head_sha"
+      ],
+      "properties": {
+        "name": {
+          "const": "github-actions",
+          "type": "string"
+        },
+        "repository": {
+          "const": "Jari81/buzz",
+          "type": "string"
+        },
+        "workflow": {
+          "const": ".github/workflows/windows-fork-integration.yml",
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$"
+        },
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_sha256",
+        "manifest_schema_sha256",
+        "generator_sha256"
+      ],
+      "properties": {
+        "workflow_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "generator_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "unsigned",
+          "type": "string"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "mime",
+          "name",
+          "path",
+          "bytes",
+          "sha256",
+          "signing"
+        ],
+        "properties": {
+          "type": {
+            "const": "nsis-installer",
+            "type": "string"
+          },
+          "mime": {
+            "const": "application/vnd.microsoft.portable-executable",
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}\\.exe$"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}\\.exe$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "signing": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "unsigned",
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

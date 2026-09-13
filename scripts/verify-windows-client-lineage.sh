@@ -9,7 +9,7 @@ fi
 previous_sha=$1
 candidate_sha=$2
 branch=$3
-canonical_branch=windows-integration
+canonical_branch=windows
 
 if [[ "$branch" != "$canonical_branch" ]]; then
   printf 'Windows builds are allowed only from %s; got %s\n' \
