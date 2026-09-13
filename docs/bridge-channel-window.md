@@ -27,19 +27,23 @@ full-event query; they never see a wrong-but-plausible timeline.
 
 ## Request
 
-A standard bridge filter plus extension fields:
+A standard bridge filter plus extension fields. The HTTP bridge accepts a JSON
+**array of filters**, so send the following complete request body to `POST
+/query` (not the inner filter object by itself):
 
 ```json
-{
-  "kinds": [9],
-  "#h": ["<channel-uuid>"],
-  "limit": 50,
-  "top_level": true,
-  "include_summaries": true,
-  "include_aux": true,
-  "until": 1751500000,
-  "before_id": "<64-hex event id>"
-}
+[
+  {
+    "kinds": [9],
+    "#h": ["<channel-uuid>"],
+    "limit": 50,
+    "top_level": true,
+    "include_summaries": true,
+    "include_aux": true,
+    "until": 1751500000,
+    "before_id": "<64-hex event id>"
+  }
+]
 ```
 
 - `top_level: true` — routes this filter to the top-level SQL view.
