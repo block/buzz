@@ -41,8 +41,7 @@ pub async fn show_native_notification(
 
     #[cfg(target_os = "windows")]
     {
-        windows::show(app, title, body, target);
-        Ok(())
+        windows::show(app, title, body, target).await
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -124,22 +123,26 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
     use tauri_winrt_notification::{Duration, Toast};
 
-    pub fn show(
+    pub async fn show(
         app: tauri::AppHandle,
         title: String,
         body: Option<String>,
         target: Option<serde_json::Value>,
-    ) {
+    ) -> Result<(), String> {
         // The Tauri identifier (e.g. "xyz.block.buzz.app") is the
         // AppUserModelID that Windows uses to group notifications and
         // surface the app in Settings > Notifications.
         let app_id = app.config().identifier.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let notification_app = app.clone();
 
-        std::thread::spawn(move || {
-            let app_clone = app.clone();
+        // Tauri's main thread owns an initialized Windows apartment. Construct
+        // and post WinRT notifications there, then report the real result.
+        app.run_on_main_thread(move || {
+            let activation_app = notification_app.clone();
             let result = Toast::new(&app_id)
                 .title(&title)
                 .text1(body.as_deref().unwrap_or(""))
@@ -149,14 +152,17 @@ mod windows {
                     // _action is None for the default (body) click and
                     // Some(arg) for button clicks. We only use the default
                     // click, matching the Linux behaviour.
-                    let _ = app_clone.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, &target);
+                    let _ = activation_app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, &target);
                     Ok(())
                 })
-                .show();
+                .show()
+                .map_err(|error| format!("failed to post Windows notification: {error}"));
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed to schedule Windows notification: {error}"))?;
 
-            if let Err(error) = result {
-                eprintln!("buzz-desktop: failed to post Windows notification: {error}");
-            }
-        });
+        receiver
+            .await
+            .map_err(|_| "Windows notification task ended before posting".to_string())?
     }
 }

@@ -94,9 +94,14 @@ function parseNotificationTarget(
   const kind = typeof candidate.kind === "number" ? candidate.kind : null;
   const pubkey =
     typeof candidate.pubkey === "string" ? candidate.pubkey : undefined;
-  const openInThread = candidate.openInThread === true;
   const threadRootId =
     typeof candidate.threadRootId === "string" ? candidate.threadRootId : null;
+  // Notifications can outlive an app upgrade. Legacy payloads did not carry
+  // openInThread, so only those infer branch navigation from their root id.
+  const openInThread =
+    typeof candidate.openInThread === "boolean"
+      ? candidate.openInThread
+      : threadRootId !== null;
 
   if (!channelId && !eventId) {
     return null;
@@ -216,14 +221,19 @@ export async function ensureDesktopNotificationPermissionGranted(
   getPermissionState = getDesktopNotificationPermissionState,
   requestAccess = requestDesktopNotificationAccess,
 ): Promise<boolean> {
-  const currentPermission = await getPermissionState();
-  if (currentPermission === "granted") {
-    return true;
-  }
-  if (currentPermission !== "default") {
+  try {
+    const currentPermission = await getPermissionState();
+    if (currentPermission === "granted") {
+      return true;
+    }
+    if (currentPermission !== "default") {
+      return false;
+    }
+    return (await requestAccess()) === "granted";
+  } catch (error) {
+    console.warn("Failed to determine desktop notification permission", error);
     return false;
   }
-  return (await requestAccess()) === "granted";
 }
 
 export async function listenForDesktopNotificationActions(

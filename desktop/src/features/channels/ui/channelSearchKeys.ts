@@ -36,3 +36,10 @@ export function buildAutoSendClearPatch(): Partial<
 > {
   return { autoSend: null };
 }
+
+/** Clear every URL field that belongs to a targeted message navigation. */
+export function buildMessageRouteTargetClearPatch(): Partial<
+  Record<ChannelSearchKey, string | null>
+> {
+  return { messageId: null, messageView: null, threadRootId: null };
+}

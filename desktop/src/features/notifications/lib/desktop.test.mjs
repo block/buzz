@@ -62,6 +62,30 @@ test("permission gate rejects denied state without requesting access", async () 
   assert.equal(requested, false);
 });
 
+test("permission gate returns false when checking state fails", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const granted = await ensureDesktopNotificationPermissionGranted(
+    async () => {
+      throw new Error("state unavailable");
+    },
+    async () => "granted",
+  );
+
+  assert.equal(granted, false);
+});
+
+test("permission gate returns false when requesting access fails", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const granted = await ensureDesktopNotificationPermissionGranted(
+    async () => "default",
+    async () => {
+      throw new Error("request unavailable");
+    },
+  );
+
+  assert.equal(granted, false);
+});
+
 test("constructor failure is a delivery miss and does not prevent a later notification", async (t) => {
   const warnings = [];
   t.mock.method(console, "warn", (...args) => warnings.push(args));

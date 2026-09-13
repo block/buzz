@@ -185,6 +185,28 @@ test("notification activation retains thread routing for branch replies", async 
   assert.deepEqual(calls, ["root"]);
 });
 
+for (const kind of [45001, 45003]) {
+  test(`notification activation retains kind-aware routing for forum kind ${kind}`, async () => {
+    const calls = [];
+    await activateDesktopNotificationTarget(
+      {
+        channelId: "forum-channel",
+        eventId: "forum-event",
+        kind,
+        openInThread: false,
+      },
+      {
+        goChannel: async () => calls.push("channel"),
+        goHome: async () => calls.push("home"),
+        openSearchHit: async (hit) => calls.push(hit.kind),
+        revealWindow: async () => {},
+      },
+    );
+
+    assert.deepEqual(calls, [kind]);
+  });
+}
+
 test("notification activation falls back to forced channel navigation", async () => {
   const calls = [];
   await activateDesktopNotificationTarget(

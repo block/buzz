@@ -79,6 +79,35 @@ export async function deliverFeedNotificationBatch(
   await Promise.all(items.map((item) => deliver(item)));
 }
 
+export async function ensureFeedNotificationPermission(
+  attempt: { hasRequested: boolean },
+  setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
+  getPermissionState = getDesktopNotificationPermissionState,
+  requestAccess = requestDesktopNotificationAccess,
+): Promise<boolean> {
+  try {
+    if (!attempt.hasRequested) {
+      const currentPermission = await getPermissionState();
+      if (currentPermission !== "default") {
+        return currentPermission === "granted";
+      }
+      attempt.hasRequested = true;
+    }
+
+    // requestDesktopNotificationAccess owns app-wide single-flight state;
+    // repeated calls join an in-progress OS permission prompt.
+    const result = await requestAccess();
+    if (result !== "granted") {
+      void setDesktopEnabled(false);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.warn("Failed to request desktop notification permission", error);
+    return false;
+  }
+}
+
 export function useFeedDesktopNotifications(
   feed: HomeFeedResponse | undefined,
   pubkey: string | undefined,
@@ -95,32 +124,20 @@ export function useFeedDesktopNotifications(
     new Set(readStoredSeenFeedIds(normalizedPubkey)),
   );
   const hasInitializedFeedRef = React.useRef(false);
-  const hasAutoRequestedRef = React.useRef(false);
+  const permissionAttemptRef = React.useRef({ hasRequested: false });
 
   React.useEffect(() => {
     seenItemIdsRef.current = new Set(readStoredSeenFeedIds(normalizedPubkey));
     hasInitializedFeedRef.current = false;
-    hasAutoRequestedRef.current = false;
+    permissionAttemptRef.current.hasRequested = false;
   }, [normalizedPubkey]);
 
-  const autoRequestPermissionIfNeeded = React.useEffectEvent(async () => {
-    if (hasAutoRequestedRef.current) {
-      return (await getDesktopNotificationPermissionState()) === "granted";
-    }
-
-    const currentPermission = await getDesktopNotificationPermissionState();
-    if (currentPermission !== "default") {
-      return currentPermission === "granted";
-    }
-
-    hasAutoRequestedRef.current = true;
-    const result = await requestDesktopNotificationAccess();
-    if (result !== "granted") {
-      void setDesktopEnabled(false);
-      return false;
-    }
-    return true;
-  });
+  const autoRequestPermissionIfNeeded = React.useEffectEvent(() =>
+    ensureFeedNotificationPermission(
+      permissionAttemptRef.current,
+      setDesktopEnabled,
+    ),
+  );
 
   const deliverFeedNotification = React.useEffectEvent(
     async (item: FeedItem, senderName?: string) => {

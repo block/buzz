@@ -95,6 +95,19 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
   // target. macOS foregrounds the app anyway; WebKit fires window focus.
   pendingActivations = [
     { channelId: "channel-1", eventId: "event-1", kind: 9 },
+    {
+      channelId: "channel-1",
+      eventId: "legacy-reply",
+      kind: 9,
+      threadRootId: "legacy-root",
+    },
+    {
+      channelId: "channel-1",
+      eventId: "timeline-reply",
+      kind: 9,
+      openInThread: false,
+      threadRootId: "legacy-root",
+    },
   ];
   window.dispatchEvent(new Event("focus"));
   await flushPendingWork();
@@ -108,7 +121,30 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
       eventId: "event-1",
       kind: 9,
       pubkey: undefined,
+      openInThread: false,
       threadRootId: null,
+    },
+    {
+      channelId: "channel-1",
+      channelName: null,
+      content: undefined,
+      createdAt: null,
+      eventId: "legacy-reply",
+      kind: 9,
+      pubkey: undefined,
+      openInThread: true,
+      threadRootId: "legacy-root",
+    },
+    {
+      channelId: "channel-1",
+      channelName: null,
+      content: undefined,
+      createdAt: null,
+      eventId: "timeline-reply",
+      kind: 9,
+      pubkey: undefined,
+      openInThread: false,
+      threadRootId: "legacy-root",
     },
   ]);
 
@@ -118,7 +154,7 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
   ];
   window.dispatchEvent(new Event("focus"));
   await flushPendingWork();
-  assert.equal(received.length, 1, "disposed listener must not re-drain");
+  assert.equal(received.length, 3, "disposed listener must not re-drain");
   // Leave the queue empty so the next test's mount-time drain starts clean.
   pendingActivations = [];
 });
