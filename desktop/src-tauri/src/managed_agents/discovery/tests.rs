@@ -71,6 +71,92 @@ fn normalizes_claude_and_codex_args_to_empty() {
 }
 
 #[test]
+fn preset_commands_keep_their_declared_args() {
+    // Regression: presets resolved to `None` in `default_agent_args`, so a
+    // record with empty `agent_args` spawned the harness bare. `devin` with no
+    // args opens the interactive TUI on a stdio pipe and exits immediately,
+    // which surfaced as "agent initialize failed: Agent process exited
+    // unexpectedly" for every agent in the pool.
+    assert_eq!(
+        normalize_agent_args("devin", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor-agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("omp", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("openclaw", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    // Multi-arg preset: the whole vector survives, not just the first entry.
+    assert_eq!(
+        normalize_agent_args("grok", Vec::new()),
+        vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string()
+        ]
+    );
+}
+
+#[test]
+fn preset_args_resolve_through_path_prefixes_and_runtime_ids() {
+    // Records can store a resolved binary path or the runtime id rather than
+    // the bare command; both must reach the same preset entry.
+    assert_eq!(
+        normalize_agent_args("/Users/me/.local/bin/devin", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor", Vec::new()),
+        vec!["acp".to_string()]
+    );
+}
+
+#[test]
+fn explicit_preset_args_win_over_declared_defaults() {
+    assert_eq!(
+        normalize_agent_args("devin", vec!["acp".into(), "--verbose".into()]),
+        vec!["acp".to_string(), "--verbose".to_string()]
+    );
+}
+
+#[test]
+fn adapter_presets_stay_argless() {
+    // amp-acp and hermes-acp declare no args; a stray "acp" is dropped the
+    // same way it is for claude-code-acp.
+    assert_eq!(
+        normalize_agent_args("amp-acp", Vec::new()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("amp-acp", vec!["acp".into()]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("hermes-acp", Vec::new()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn unknown_commands_still_resolve_to_no_args() {
+    assert_eq!(
+        normalize_agent_args("some-custom-harness", Vec::new()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("some-custom-harness", vec!["--flag".into()]),
+        vec!["--flag".to_string()]
+    );
+}
+
+#[test]
 fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("buzz-agent"),
