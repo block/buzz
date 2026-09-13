@@ -3,7 +3,8 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, parse_command_response, relay_http_base_url, InterceptedResponse,
+    MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -195,8 +196,8 @@ fn loopback_wss_localhost_preserves_authority() {
 #[test]
 fn intercepted_cloudflare_host_returns_some() {
     let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
-    assert!(result.is_some());
-    let msg = result.unwrap();
+    assert_eq!(result, Some(InterceptedResponse::CloudflareAccess));
+    let msg = result.unwrap().message();
     assert!(
         msg.starts_with("relay unreachable:"),
         "should have unreachable prefix"
@@ -208,8 +209,8 @@ fn intercepted_cloudflare_host_returns_some() {
 fn intercepted_cloudflare_apex_host_returns_some() {
     // The apex domain itself should also match.
     let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
-    assert!(result.is_some());
-    let msg = result.unwrap();
+    assert_eq!(result, Some(InterceptedResponse::CloudflareAccess));
+    let msg = result.unwrap().message();
     assert!(msg.starts_with("relay unreachable:"));
     assert!(msg.contains("Cloudflare"));
 }
@@ -218,8 +219,8 @@ fn intercepted_cloudflare_apex_host_returns_some() {
 fn intercepted_non_cloudflare_html_returns_some() {
     let result =
         classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
-    assert!(result.is_some());
-    let msg = result.unwrap();
+    assert_eq!(result, Some(InterceptedResponse::UnexpectedHtml));
+    let msg = result.unwrap().message();
     assert!(msg.starts_with("relay unreachable:"));
 }
 
@@ -233,8 +234,8 @@ fn normal_relay_json_returns_none() {
 fn content_type_case_insensitive() {
     // Uppercase content-type must still be detected.
     let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
-    assert!(result.is_some());
-    assert!(result.unwrap().starts_with("relay unreachable:"));
+    assert_eq!(result, Some(InterceptedResponse::UnexpectedHtml));
+    assert!(result.unwrap().message().starts_with("relay unreachable:"));
 }
 
 #[test]
@@ -251,6 +252,97 @@ fn evil_suffix_does_not_match_cloudflare() {
 
 // classify_request_error requires a real reqwest::Error (not publicly
 // constructable) — tested indirectly through integration; skipped here.
+
+// Exercise the merged query helper, including recovery, fresh authorization,
+// auth-tag preservation, and the deadline on the retried response body.
+#[tokio::test]
+async fn query_access_retry_preserves_auth_tag_and_body_timeout() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    for stall_body in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let access_host = "login.cloudflareaccess.com";
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    assert!(request.len() < 16384);
+                    if request.ends_with(b"[]") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let response = match step {
+                    0 => format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{access_host}:{}/login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        addr.port()
+                    ),
+                    1 => "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                    _ => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        if stall_body { "" } else { "[]" }
+                    ),
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+                if step == 2 && stall_body {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            requests
+        });
+        let clients = super::AppHttpClient::new(
+            reqwest::Client::builder()
+                .resolve(access_host, addr)
+                .build()
+                .unwrap(),
+        );
+        let url = format!("http://{addr}/query");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::send_query_request(
+                &clients,
+                &url,
+                "Nostr original-auth",
+                Some("owner-auth-tag"),
+                b"[]",
+                Duration::from_millis(200),
+                || Ok("Nostr fresh-auth".to_string()),
+            ),
+        )
+        .await
+        .expect("query recovery must remain bounded");
+        if stall_body {
+            assert_eq!(result.unwrap_err(), "relay unreachable: request timed out");
+        } else {
+            assert!(result.unwrap().is_empty());
+        }
+        let requests = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(requests[0]
+            .to_lowercase()
+            .contains("authorization: nostr original-auth"));
+        assert!(requests[2]
+            .to_lowercase()
+            .contains("authorization: nostr fresh-auth"));
+        for request in [&requests[0], &requests[2]] {
+            assert!(request.starts_with("POST /query HTTP/1.1"));
+            assert!(request
+                .to_lowercase()
+                .contains("x-auth-tag: owner-auth-tag"));
+            assert!(request.ends_with("[]"));
+        }
+    }
+}
 
 // ── /query per-request timeout → classified error ────────────────────────
 //
@@ -290,12 +382,13 @@ async fn stalled_query_request_times_out_with_classified_error() {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         super::send_query_request(
-            &client,
+            &super::AppHttpClient::new(client),
             &url,
             "Nostr test-auth",
             None,
-            b"[]".to_vec(),
+            b"[]",
             Duration::from_millis(200),
+            || panic!("ordinary relay responses must not refresh auth"),
         ),
     )
     .await
@@ -350,12 +443,13 @@ async fn stalled_response_body_times_out_with_classified_error() {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         super::send_query_request(
-            &client,
+            &super::AppHttpClient::new(client),
             &url,
             "Nostr test-auth",
             None,
-            b"[]".to_vec(),
+            b"[]",
             Duration::from_millis(200),
+            || panic!("ordinary relay responses must not refresh auth"),
         ),
     )
     .await
@@ -411,12 +505,13 @@ async fn stalled_error_response_body_times_out_with_classified_error() {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         super::send_query_request(
-            &client,
+            &super::AppHttpClient::new(client),
             &url,
             "Nostr test-auth",
             None,
-            b"[]".to_vec(),
+            b"[]",
             Duration::from_millis(200),
+            || panic!("ordinary relay responses must not refresh auth"),
         ),
     )
     .await
@@ -468,12 +563,13 @@ async fn non_stalled_error_response_yields_status_message() {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         super::send_query_request(
-            &client,
+            &super::AppHttpClient::new(client),
             &url,
             "Nostr test-auth",
             None,
-            b"[]".to_vec(),
+            b"[]",
             Duration::from_millis(200),
+            || panic!("ordinary relay responses must not refresh auth"),
         ),
     )
     .await
