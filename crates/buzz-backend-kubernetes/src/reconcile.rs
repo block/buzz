@@ -383,7 +383,18 @@ pub async fn deploy(
         }
 
         let observed = observe_pod(substrate, identity).await?;
-        match classify::classify(observed.as_ref(), &desired) {
+        let action = classify::classify(observed.as_ref(), &desired);
+        if matches!(&action, Action::Create | Action::Delete { .. }) {
+            if let Some(environment_ref) = cfg.environment_ref.as_deref() {
+                if !substrate.secret_exists(environment_ref).await? {
+                    return Err(format!(
+                        "provider_config.environment_ref {environment_ref:?} does not exist in namespace {:?}; create or reconcile that Secret before starting the agent",
+                        cfg.namespace
+                    ));
+                }
+            }
+        }
+        match action {
             // The only success edge: the harness container is running.
             Action::NoOp { agent_id } => return Ok(agent_id),
 
@@ -684,6 +695,7 @@ mod tests {
             resources: Resources::default(),
             inactivity_seconds: Some(7200),
             service_account: None,
+            environment_ref: None,
         }
     }
 
@@ -1525,6 +1537,21 @@ mod tests {
             fake.mutations().is_empty(),
             "wrote something after a namespace denial: {:?}",
             fake.mutations()
+        );
+    }
+
+    #[test]
+    fn missing_external_environment_fails_before_any_agent_mutation() {
+        let mut cfg = config();
+        cfg.environment_ref = Some("erp-hermes-runtime".into());
+        let substrate = Fake::default();
+        let error = run(&substrate, &identity(), &cfg).unwrap_err();
+        assert!(error.contains("environment_ref"), "got: {error}");
+        assert!(error.contains("erp-hermes-runtime"), "got: {error}");
+        assert_eq!(
+            substrate.mutations(),
+            vec!["ensure_namespace buzz-agents-test"],
+            "missing external environment must fail before Secret or Pod creation"
         );
     }
 

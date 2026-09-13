@@ -1,7 +1,7 @@
 //! `provider_config` parsing and the `info` config schema
 //! (spec §`provider_config` v1 fields, `docs/remote-agents.md:1384-1389`).
 //!
-//! Nine fields, all optional except `image` (required at parse time; the
+//! Ten fields, all optional except `image` (required at parse time; the
 //! schema offers the published sprig image as a prefill default — §Image).
 //! No credential field exists, by I2: cluster auth comes from ambient
 //! kubeconfig resolution and nothing else (`:196-198`).
@@ -71,6 +71,10 @@ pub struct ProviderConfig {
     /// `None` when `inactivity_seconds` was 0 — refused in v1, see [`parse`].
     pub inactivity_seconds: Option<u64>,
     pub service_account: Option<String>,
+    /// Optional pre-existing Secret whose variables are loaded before the
+    /// provider-owned identity Secret. The reference is non-secret metadata;
+    /// values remain owned by the cluster secret manager.
+    pub environment_ref: Option<String>,
 }
 
 /// Read an optional non-empty string field. Rejects non-string scalars rather
@@ -116,6 +120,22 @@ fn valid_namespace(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Kubernetes Secret names are DNS subdomains. Keep validation local so a
+/// typo fails before the provider creates any per-agent resources.
+fn valid_environment_ref(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && part.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && part.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
 }
 
 pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
@@ -165,6 +185,17 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         Some(n) => Some(n),
     };
 
+    let environment_ref = optional_string(cfg, "environment_ref")?;
+    if environment_ref
+        .as_deref()
+        .is_some_and(|name| !valid_environment_ref(name))
+    {
+        return Err(format!(
+            "provider_config.environment_ref {:?} is not a valid Kubernetes Secret name",
+            environment_ref.as_deref().unwrap_or_default()
+        ));
+    }
+
     Ok(ProviderConfig {
         context: optional_string(cfg, "context")?,
         namespace,
@@ -172,6 +203,7 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         resources,
         inactivity_seconds,
         service_account: optional_string(cfg, "service_account")?,
+        environment_ref,
     })
 }
 
@@ -236,6 +268,11 @@ pub fn config_schema() -> serde_json::Value {
                 "type": "string",
                 "title": "Service account",
                 "description": "Scheduling/RBAC identity only. No API token is mounted."
+            },
+            "environment_ref": {
+                "type": "string",
+                "title": "Existing environment Secret",
+                "description": "Optional Secret in this namespace managed by External Secrets or another cluster operator. Its values are loaded without being copied into Buzz configuration; Buzz-owned identity variables always win."
             }
         },
         "required": ["namespace", "image"]
@@ -265,6 +302,7 @@ mod tests {
         assert_eq!(c.inactivity_seconds, Some(DEFAULT_INACTIVITY_SECONDS));
         assert_eq!(c.context, None);
         assert_eq!(c.service_account, None);
+        assert_eq!(c.environment_ref, None);
     }
 
     #[test]
@@ -359,6 +397,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validates_existing_environment_reference() {
+        let mut cfg = minimal();
+        cfg["environment_ref"] = "yamon-erp-hermes-runtime".into();
+        assert_eq!(
+            parse(&cfg).unwrap().environment_ref.as_deref(),
+            Some("yamon-erp-hermes-runtime")
+        );
+        for bad in ["UPPER", "-leading", "trailing-", "has_underscore", "a..b"] {
+            cfg["environment_ref"] = bad.into();
+            assert!(parse(&cfg).is_err(), "accepted environment_ref {bad:?}");
+        }
+    }
+
     /// I2 corollary: there is no config path for cluster credentials, so a
     /// caller that tries to supply one gets no effect from it. Asserting the
     /// parsed struct has no such field is the closest a test can get to
@@ -423,10 +475,10 @@ mod tests {
         );
     }
 
-    /// Nine fields exactly (§`provider_config` v1 fields). The cap is 20; the
+    /// Ten fields exactly (§`provider_config` v1 fields). The cap is 20; the
     /// count is pinned so a field added without a spec change is caught here.
     #[test]
-    fn schema_declares_exactly_the_nine_v1_fields() {
+    fn schema_declares_exactly_the_ten_fields() {
         let schema = config_schema();
         let props = schema["properties"].as_object().unwrap();
         let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
@@ -437,6 +489,7 @@ mod tests {
                 "context",
                 "cpu_limit",
                 "cpu_request",
+                "environment_ref",
                 "image",
                 "inactivity_seconds",
                 "memory_limit",

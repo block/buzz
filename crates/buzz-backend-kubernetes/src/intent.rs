@@ -73,6 +73,9 @@ pub struct IntentTemplate {
     pub cpu_limit: String,
     pub memory_limit: String,
     pub service_account: Option<String>,
+    /// Optional cluster-managed environment Secret name. Names are not
+    /// credentials, but changing the reference changes the pod contract.
+    pub environment_ref: Option<String>,
     pub restart_policy: &'static str,
     pub termination_grace_period_seconds: i64,
     /// Env *keys* only, sorted. Keys are pod-shape (a renamed key changes the
@@ -110,6 +113,7 @@ impl IntentTemplate {
         image: &ImageRef,
         resources: &crate::config::Resources,
         service_account: Option<&str>,
+        environment_ref: Option<&str>,
         env_keys: impl IntoIterator<Item = String>,
     ) -> Self {
         let mut env_keys: Vec<String> = env_keys.into_iter().collect();
@@ -123,6 +127,7 @@ impl IntentTemplate {
             cpu_limit: resources.cpu_limit.clone(),
             memory_limit: resources.memory_limit.clone(),
             service_account: service_account.map(str::to_string),
+            environment_ref: environment_ref.map(str::to_string),
             restart_policy: crate::config::RESTART_POLICY,
             termination_grace_period_seconds: crate::config::TERMINATION_GRACE_SECONDS,
             env_keys,
@@ -153,6 +158,7 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            None,
             ["BUZZ_RELAY_URL".to_string(), "GOOSE_MODE".to_string()],
         )
     }
@@ -178,12 +184,14 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            None,
             ["A".to_string(), "B".to_string(), "C".to_string()],
         );
         let b = IntentTemplate::new(
             "ns",
             &image('a'),
             &Resources::default(),
+            None,
             None,
             ["C".to_string(), "A".to_string(), "B".to_string()],
         );
@@ -234,6 +242,10 @@ mod tests {
             (
                 "service_account",
                 Box::new(|t: &mut IntentTemplate| t.service_account = Some("sa".into())),
+            ),
+            (
+                "environment_ref",
+                Box::new(|t: &mut IntentTemplate| t.environment_ref = Some("external-env".into())),
             ),
             (
                 "restart_policy",
