@@ -28,6 +28,7 @@ use tauri::{
 const TRAY_ID: &str = "buzz-tray";
 const OPEN_BUZZ_ID: &str = "tray-open-buzz";
 const NEW_CHANNEL_ID: &str = "tray-new-channel";
+pub(crate) const OPEN_SETTINGS_ID: &str = "open-settings";
 const QUIT_ID: &str = "tray-quit";
 const OPEN_CHANNEL_PREFIX: &str = "tray-open-channel:";
 const OPEN_CHANNEL_ACTIVITY_SEPARATOR: char = '|';
@@ -200,6 +201,7 @@ struct TrayActivityMenuItem<R: Runtime> {
 
 struct TrayActionQueue {
     community_generation: u64,
+    settings_actions_enabled: bool,
     pending_actions: Vec<TrayAction>,
 }
 
@@ -212,6 +214,7 @@ struct TrayMenuState<R: Runtime> {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum TrayAction {
     NewChannel,
+    OpenSettings,
     OpenChannel {
         #[serde(rename = "channelId")]
         channel_id: String,
@@ -237,12 +240,10 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn queue_tray_action<R: Runtime>(app: &AppHandle<R>, mut action: TrayAction) {
-    let state = app.state::<TrayMenuState<R>>();
-    let Ok(mut queue) = state.action_queue.lock() else {
-        eprintln!("buzz-desktop: tray action queue is unavailable");
-        return;
-    };
+fn enqueue_action(queue: &mut TrayActionQueue, mut action: TrayAction) -> bool {
+    if matches!(action, TrayAction::OpenSettings) && !queue.settings_actions_enabled {
+        return false;
+    }
     if let TrayAction::OpenChannel {
         community_generation,
         ..
@@ -251,6 +252,18 @@ fn queue_tray_action<R: Runtime>(app: &AppHandle<R>, mut action: TrayAction) {
         *community_generation = queue.community_generation;
     }
     queue.pending_actions.push(action);
+    true
+}
+
+fn queue_tray_action<R: Runtime>(app: &AppHandle<R>, action: TrayAction) {
+    let state = app.state::<TrayMenuState<R>>();
+    let Ok(mut queue) = state.action_queue.lock() else {
+        eprintln!("buzz-desktop: tray action queue is unavailable");
+        return;
+    };
+    if !enqueue_action(&mut queue, action) {
+        return;
+    }
     drop(queue);
 
     if let Err(error) = app.emit("tray-action-available", ()) {
@@ -341,6 +354,13 @@ fn build_menu<R: Runtime>(
         None::<&str>,
     )?)?;
     append_separator(app, &menu)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        OPEN_SETTINGS_ID,
+        "Settings",
+        true,
+        None::<&str>,
+    )?)?;
     menu.append(&MenuItem::with_id(
         app,
         QUIT_ID,
@@ -444,12 +464,16 @@ fn apply_activity_presentation<R: Runtime>(
     Ok(())
 }
 
-fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
+pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         OPEN_BUZZ_ID => show_main_window(app),
         NEW_CHANNEL_ID => {
             show_main_window(app);
             queue_tray_action(app, TrayAction::NewChannel);
+        }
+        OPEN_SETTINGS_ID => {
+            show_main_window(app);
+            queue_tray_action(app, TrayAction::OpenSettings);
         }
         QUIT_ID => app.exit(0),
         _ => {
@@ -483,6 +507,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         activity_items: Mutex::new(activity_items),
         action_queue: Mutex::new(TrayActionQueue {
             community_generation: 0,
+            settings_actions_enabled: false,
             pending_actions: Vec::new(),
         }),
     });
@@ -510,9 +535,35 @@ pub fn take_tray_actions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<TrayAction
     Ok(std::mem::take(&mut queue.pending_actions))
 }
 
+fn set_settings_actions_enabled(queue: &mut TrayActionQueue, enabled: bool) {
+    queue.settings_actions_enabled = enabled;
+    if !enabled {
+        queue
+            .pending_actions
+            .retain(|action| !matches!(action, TrayAction::OpenSettings));
+    }
+}
+
+/// Controls whether native Settings menu selections can be queued. Disabling
+/// also clears Settings actions that raced with the logged-in shell unmounting.
+#[tauri::command]
+pub fn set_settings_tray_actions_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    let state = app.state::<TrayMenuState<R>>();
+    let mut queue = state
+        .action_queue
+        .lock()
+        .map_err(|_| "Buzz tray action queue is unavailable".to_string())?;
+    set_settings_actions_enabled(&mut queue, enabled);
+    Ok(())
+}
+
 fn requeue_actions(queue: &mut TrayActionQueue, mut actions: Vec<TrayAction>) {
     actions.retain(|action| match action {
         TrayAction::NewChannel => true,
+        TrayAction::OpenSettings => queue.settings_actions_enabled,
         TrayAction::OpenChannel {
             community_generation,
             ..
@@ -552,7 +603,7 @@ pub fn clear_tray_agent_activity<R: Runtime>(app: AppHandle<R>) -> Result<(), St
     queue.community_generation = queue.community_generation.wrapping_add(1);
     queue
         .pending_actions
-        .retain(|action| matches!(action, TrayAction::NewChannel));
+        .retain(|action| matches!(action, TrayAction::NewChannel | TrayAction::OpenSettings));
     drop(queue);
 
     update_tray_agent_activity(app, Vec::new(), Vec::new())
@@ -614,7 +665,9 @@ pub fn update_tray_agent_activity<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{requeue_actions, TrayAction, TrayActionQueue};
+    use super::{
+        enqueue_action, requeue_actions, set_settings_actions_enabled, TrayAction, TrayActionQueue,
+    };
 
     #[test]
     fn open_channel_action_serializes_with_frontend_field_names() {
@@ -634,9 +687,50 @@ mod tests {
     }
 
     #[test]
+    fn open_settings_action_serializes_with_frontend_field_names() {
+        assert_eq!(
+            serde_json::to_value(TrayAction::OpenSettings).expect("tray action should serialize"),
+            serde_json::json!({ "kind": "openSettings" })
+        );
+    }
+
+    #[test]
+    fn settings_actions_are_ignored_until_app_shell_is_ready() {
+        let mut queue = TrayActionQueue {
+            community_generation: 2,
+            settings_actions_enabled: false,
+            pending_actions: vec![TrayAction::NewChannel],
+        };
+
+        assert!(!enqueue_action(&mut queue, TrayAction::OpenSettings));
+        queue.settings_actions_enabled = true;
+        assert!(enqueue_action(&mut queue, TrayAction::OpenSettings));
+
+        assert_eq!(
+            queue.pending_actions,
+            vec![TrayAction::NewChannel, TrayAction::OpenSettings]
+        );
+    }
+
+    #[test]
+    fn disabling_settings_actions_clears_queued_and_in_flight_settings() {
+        let mut queue = TrayActionQueue {
+            community_generation: 2,
+            settings_actions_enabled: true,
+            pending_actions: vec![TrayAction::NewChannel, TrayAction::OpenSettings],
+        };
+
+        set_settings_actions_enabled(&mut queue, false);
+        requeue_actions(&mut queue, vec![TrayAction::OpenSettings]);
+
+        assert_eq!(queue.pending_actions, vec![TrayAction::NewChannel]);
+    }
+
+    #[test]
     fn stale_channel_actions_are_not_requeued_after_community_change() {
         let mut queue = TrayActionQueue {
             community_generation: 2,
+            settings_actions_enabled: true,
             pending_actions: Vec::new(),
         };
 
@@ -652,14 +746,21 @@ mod tests {
     }
 
     #[test]
-    fn new_channel_actions_survive_community_change() {
+    fn installation_global_actions_survive_community_change() {
         let mut queue = TrayActionQueue {
             community_generation: 2,
+            settings_actions_enabled: true,
             pending_actions: Vec::new(),
         };
 
-        requeue_actions(&mut queue, vec![TrayAction::NewChannel]);
+        requeue_actions(
+            &mut queue,
+            vec![TrayAction::NewChannel, TrayAction::OpenSettings],
+        );
 
-        assert_eq!(queue.pending_actions, vec![TrayAction::NewChannel]);
+        assert_eq!(
+            queue.pending_actions,
+            vec![TrayAction::NewChannel, TrayAction::OpenSettings]
+        );
     }
 }
