@@ -43,6 +43,7 @@ import 'message_content.dart';
 import 'reaction_row.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import 'resolve_thread_reply_channel.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'sticky_date_header.dart';
@@ -949,15 +950,24 @@ class ThreadDetailPage extends HookConsumerWidget {
                               content,
                               mentionPubkeys, {
                               mediaTags = const <List<String>>[],
-                            }) => sendMessage.call(
-                              channelId: channelId,
-                              content: content,
-                              mentionPubkeys: mentionPubkeys,
-                              channel: channel,
-                              parentEventId: threadHead.id,
-                              rootEventId: effectiveRootId,
-                              mediaTags: mediaTags,
-                            ),
+                            }) async {
+                              final resolvedChannel =
+                                  await resolveThreadReplyChannel(
+                                    channel: channel,
+                                    channelId: channelId,
+                                    loadChannels: () =>
+                                        ref.read(channelsProvider.future),
+                                  );
+                              await sendMessage.call(
+                                channelId: channelId,
+                                content: content,
+                                mentionPubkeys: mentionPubkeys,
+                                channel: resolvedChannel,
+                                parentEventId: threadHead.id,
+                                rootEventId: effectiveRootId,
+                                mediaTags: mediaTags,
+                              );
+                            },
                       ),
                     ],
                   ),
