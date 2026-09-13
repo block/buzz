@@ -12,6 +12,12 @@ const _channelLiveEventKinds = [
   EventKind.channelThreadSummary,
 ];
 
+// Nostr event timestamps come from each publisher's device clock. Start the
+// live subscription with a bounded overlap so a slightly fast Android clock
+// cannot make replies from another device look "too old" to deliver. The
+// initial history sync and event-id merge below make replayed events harmless.
+const _liveSubscriptionClockSkewOverlapSeconds = 5 * 60;
+
 /// Provides the message list for a specific channel. Registers a live
 /// subscription first, then syncs history via the server-assembled channel
 /// window fast path, falling back to the legacy websocket history path when the
@@ -86,7 +92,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             tags: {
               '#h': [channelId],
             },
-            since: _currentUnixSeconds(),
+            since:
+                _currentUnixSeconds() -
+                _liveSubscriptionClockSkewOverlapSeconds,
             limit: 200,
           ),
           _handleLiveEvent,

@@ -45,6 +45,14 @@ void main() {
         EventKind.channelThreadSummary,
       ]);
       expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      expect(
+        relaySession.liveFilters.single.since,
+        inInclusiveRange(now - 305, now - 300),
+        reason:
+            'the live subscription must overlap history so publisher clock '
+            'skew cannot hide replies',
+      );
       expect(relaySession.liveFilters.single.limit, 200);
       expect(
         relaySession.queryFilters.first.kinds,
