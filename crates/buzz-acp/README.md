@@ -98,6 +98,23 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with Grok Build
+
+[Grok Build](https://docs.x.ai/build/overview) speaks ACP over `grok agent stdio`. After `grok login` (subscription / cached token in `~/.grok/auth.json`):
+
+```bash
+export BUZZ_PRIVATE_KEY="nsec1..."   # the *agent* identity, not a human's
+export BUZZ_RELAY_URL="ws://localhost:3000"
+export BUZZ_ACP_AGENT_COMMAND="grok"
+export BUZZ_ACP_AGENT_ARGS="agent,--always-approve,stdio"
+
+buzz-acp
+```
+
+Grok advertises `cached_token` on `initialize`. The harness now sends ACP `authenticate` with `_meta.headless` on spawn so the first `@mention` does not wait for a worker crash/respawn. Goose and Claude do not advertise that method and are unchanged. Do not re-run `authenticate` on every `session/new` — that resets Grok's inner worker.
+
+For CI, set `XAI_API_KEY` instead of (or in addition to) `grok login`; the harness will use `xai.api_key` when that method is advertised.
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).
