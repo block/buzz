@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
 
 export type AddCommunityDeepLinkPayload = {
@@ -99,6 +99,11 @@ function acceptPendingCommunityDeepLink(
 }
 
 async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
+  // The pending-deep-link queue is populated by the Rust backend and only
+  // exists in the native Tauri shell — invoke() throws without Tauri
+  // internals in a browser (web) runtime.
+  if (!isTauri()) return;
+
   while (true) {
     const pending = await invoke<PendingCommunityDeepLink | null>(
       "take_pending_community_deep_link",
@@ -148,6 +153,13 @@ export async function listenForDeepLinks(
       }
     })();
   };
+  // OS-level deep links (`buzz://…`) only exist in the native Tauri shell —
+  // `listen()` throws without Tauri internals in a browser (web) runtime. The
+  // pending-link queue that `drain` reads is native-only too, so there is
+  // nothing for an availability subscription to wake here: guard before
+  // subscribing rather than registering a callback that can never do work.
+  if (!isTauri()) return () => {};
+
   const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
@@ -172,6 +184,11 @@ let navigationDrainGeneration = 0;
 let navigationDrainEnabled = true;
 
 export async function resetNavigationDeepLinkDrain(): Promise<void> {
+  // No native queue exists outside the Tauri shell, so there is nothing to
+  // clear and nothing that could have been queued — invoke() would just throw
+  // and reject this await in the caller's community-init path.
+  if (!isTauri()) return;
+
   const generation = ++navigationDrainGeneration;
   // Fail closed while the outgoing community's native queue is being cleared.
   // A rejected clear leaves that queue's identity unknown, so no later listener
@@ -243,6 +260,9 @@ export async function listenForNavigationDeepLinks(
     payload: MessageDeepLinkPayload,
   ) => boolean | Promise<boolean>,
 ): Promise<UnlistenFn> {
+  // OS-level deep link — no-op outside the native Tauri shell.
+  if (!isTauri()) return () => {};
+
   let drainRunning = false;
   let drainRequested = false;
   const drain = () => {
@@ -284,6 +304,9 @@ export async function listenForNavigationDeepLinks(
 export function listenForEntityDeepLinks(
   onOpen: (href: string) => boolean,
 ): Promise<UnlistenFn> {
+  // OS-level deep link — no-op outside the native Tauri shell.
+  if (!isTauri()) return Promise.resolve(() => {});
+
   let drainRunning = false;
   let drainRequested = false;
   const drain = () => {
@@ -332,6 +355,8 @@ export function listenForEntityDeepLinks(
 export function listenForNostrBindDeepLinks(
   onOpen: (payload: NostrBindDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
+  // OS-level deep link — no-op outside the native Tauri shell.
+  if (!isTauri()) return Promise.resolve(() => {});
   return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });
