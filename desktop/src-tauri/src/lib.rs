@@ -236,6 +236,7 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            commands::ensure_startup_registration(&app_handle);
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
@@ -663,6 +664,8 @@ pub fn run() {
             show_native_notification,
             #[cfg(target_os = "windows")]
             windows_notification_permission_state,
+            #[cfg(target_os = "windows")]
+            take_pending_windows_activations,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
             #[cfg(target_os = "macos")]

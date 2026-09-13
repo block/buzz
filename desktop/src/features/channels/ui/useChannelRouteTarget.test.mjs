@@ -98,3 +98,43 @@ test("timeline intent preserves the exact id of a broadcast reply row", async ()
   hook.unmount();
   cleanup();
 });
+
+test("different view intents are handled independently for the same target", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { useChannelRouteTarget } = await import("./useChannelRouteTarget.ts");
+  const calls = [];
+  const root = {
+    id: "root",
+    parentId: null,
+    rootId: null,
+    tags: [],
+  };
+
+  const hook = renderHook(
+    ({ targetMessageView }) =>
+      useChannelRouteTarget({
+        activeChannel: { id: "channel", channelType: "stream" },
+        activeChannelId: "channel",
+        closeAgentSession: () => {},
+        requireThreadEditResolution: () => true,
+        setEditTargetId: () => {},
+        setExpandedThreadReplyIds: () => {},
+        setOpenThreadHeadId: () => calls.push("open-thread"),
+        setProfilePanelPubkey: () => {},
+        setThreadReplyTargetId: () => {},
+        setThreadScrollTargetId: () => {},
+        targetMessageId: "root",
+        targetMessageView,
+        timelineMessages: [root],
+      }),
+    { initialProps: { targetMessageView: undefined } },
+  );
+
+  assert.deepEqual(calls, ["open-thread"]);
+  await act(async () => {
+    hook.rerender({ targetMessageView: "timeline" });
+  });
+  assert.deepEqual(calls, ["open-thread"]);
+  hook.unmount();
+  cleanup();
+});

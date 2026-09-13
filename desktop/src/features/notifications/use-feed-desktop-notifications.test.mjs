@@ -124,7 +124,61 @@ test("a concurrent feed batch joins the pending permission request", async () =>
   assert.deepEqual(await Promise.all([first, second]), ["granted", "granted"]);
 });
 
-test("a delivery failure remains unseen and retries on the next feed result", async (t) => {
+test("the production permission request is single-flight across feed batches", async () => {
+  const { requestDesktopNotificationAccess } = await import("./lib/desktop.ts");
+  const previousInternals = window.__TAURI_INTERNALS__;
+  const previousIsTauri = globalThis.isTauri;
+  const previousNotification = window.Notification;
+  const previousPlatform = navigator.platform;
+  let releaseRequest;
+  let requestCalls = 0;
+  const request = new Promise((resolve) => {
+    releaseRequest = resolve;
+  });
+
+  Object.defineProperty(window, "Notification", {
+    configurable: true,
+    value: { permission: "default" },
+  });
+  globalThis.isTauri = true;
+  Object.defineProperty(navigator, "platform", {
+    configurable: true,
+    value: "Win32",
+  });
+  window.__TAURI_INTERNALS__ = {
+    invoke(command) {
+      assert.equal(command, "windows_notification_permission_state");
+      requestCalls += 1;
+      return request;
+    },
+  };
+
+  try {
+    const first = requestDesktopNotificationAccess();
+    await Promise.resolve();
+    const second = requestDesktopNotificationAccess();
+
+    assert.equal(requestCalls, 1);
+    releaseRequest("granted");
+    assert.deepEqual(await Promise.all([first, second]), [
+      "granted",
+      "granted",
+    ]);
+  } finally {
+    window.__TAURI_INTERNALS__ = previousInternals;
+    globalThis.isTauri = previousIsTauri;
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: previousNotification,
+    });
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: previousPlatform,
+    });
+  }
+});
+
+test("a delivery failure remains retryable across a hook remount", async (t) => {
   t.mock.method(console, "warn", () => {});
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const { useFeedDesktopNotifications } = await import(
@@ -199,8 +253,15 @@ test("a delivery failure remains unseen and retries on the next feed result", as
     [],
   );
 
+  hook.unmount();
+  cleanup();
+
   shouldFail = false;
-  hook.rerender({ feed: { feed: { mentions: [item], needsAction: [] } } });
+  const remountedHook = renderHook(({ feed }) => render(feed), {
+    initialProps: {
+      feed: { feed: { mentions: [item], needsAction: [] } },
+    },
+  });
   await settle();
   assert.deepEqual(delivered, ["retry-alert"]);
   assert.deepEqual(
@@ -208,6 +269,6 @@ test("a delivery failure remains unseen and retries on the next feed result", as
     ["retry-alert"],
   );
 
-  hook.unmount();
+  remountedHook.unmount();
   cleanup();
 });

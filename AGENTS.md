@@ -142,6 +142,14 @@ lane subprocesses resolve the pinned flutter/dart/lefthook even when an
 unactivated shell has Homebrew first. Activating Hermit remains recommended for
 non-hook commands.
 
+**Windows tool resolution:** the committed files under `bin\` (for example
+`bin\cargo`, `bin\rustc`, `bin\pnpm`, and `bin\node`) are Hermit package
+entries, not native Windows executables. Do not invoke those paths directly,
+and do not assume a bare command is valid when `Get-Command` resolves it into
+the repository's `bin\` directory. For Windows validation, run the actual
+installed `.exe`/`.cmd` tools, or use their full paths, and verify the resolved
+`Source` is not under this repository before running a build or test.
+
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
 Additional rules:

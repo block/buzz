@@ -52,11 +52,25 @@ pub async fn show_native_notification(
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn ensure_startup_registration(app: &tauri::AppHandle) {
+    windows::ensure_startup_registration(app);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn ensure_startup_registration(_app: &tauri::AppHandle) {}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 pub async fn windows_notification_permission_state(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     windows::permission_state(app).await.map(str::to_string)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn take_pending_windows_activations() -> Result<Vec<serde_json::Value>, String> {
+    windows::take_pending_windows_activations()
 }
 
 #[cfg(target_os = "linux")]
@@ -131,12 +145,304 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, Once, OnceLock};
     use tauri::Emitter;
     use tauri_winrt_notification::{Duration, Toast};
     use windows::{
         core::HSTRING,
         UI::Notifications::{NotificationSetting, ToastNotificationManager},
     };
+
+    const MAX_PENDING_ACTIVATIONS: usize = 64;
+    static STARTUP_REGISTRATION: Once = Once::new();
+    static PENDING_ACTIVATIONS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
+
+    pub fn ensure_startup_registration(app: &tauri::AppHandle) {
+        STARTUP_REGISTRATION.call_once(|| {
+            let app = app.clone();
+            let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let app_id = app.config().identifier.clone();
+                set_process_aumid(&app_id);
+                if let Err(error) = write_aumid_registry_entry(&app, &app_id) {
+                    eprintln!("buzz-desktop: failed to register Windows AUMID: {error}");
+                }
+                if let Err(error) = write_notification_settings_entry(&app_id) {
+                    eprintln!(
+                        "buzz-desktop: failed to register Windows notification settings: {error}"
+                    );
+                }
+                if let Err(error) = ensure_start_menu_shortcut(&app, &app_id) {
+                    eprintln!("buzz-desktop: failed to repair Windows shortcut AUMID: {error}");
+                }
+                let _ = ready_sender.send(());
+            });
+            let _ = ready_receiver.recv();
+        });
+    }
+
+    fn to_wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn set_process_aumid(app_id: &str) {
+        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+        let app_id = to_wide(app_id);
+        let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
+        if result < 0 {
+            eprintln!("buzz-desktop: failed to set Windows process AUMID: 0x{result:08X}");
+        }
+    }
+
+    fn write_notification_settings_entry(app_id: &str) -> Result<(), String> {
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+            KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
+        };
+
+        let subkey = to_wide(&format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\{app_id}"
+        ));
+        unsafe {
+            let mut existing: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_READ,
+                &mut existing,
+            ) == 0
+            {
+                RegCloseKey(existing);
+                return Ok(());
+            }
+
+            let mut key: HKEY = std::ptr::null_mut();
+            let status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut key,
+                std::ptr::null_mut(),
+            );
+            if status != 0 {
+                return Err(format!("RegCreateKeyExW failed with status {status}"));
+            }
+
+            let show_name = to_wide("ShowInActionCenter");
+            let enabled_name = to_wide("Enabled");
+            let value: u32 = 1;
+            let show_status = RegSetValueExW(
+                key,
+                show_name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&value as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+            let enabled_status = RegSetValueExW(
+                key,
+                enabled_name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&value as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+            RegCloseKey(key);
+            if show_status != 0 {
+                return Err(format!(
+                    "RegSetValueExW(ShowInActionCenter) failed: {show_status}"
+                ));
+            }
+            if enabled_status != 0 {
+                return Err(format!("RegSetValueExW(Enabled) failed: {enabled_status}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_aumid_registry_entry(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+            REG_OPTION_NON_VOLATILE, REG_SZ,
+        };
+
+        let display_name = app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "Buzz".to_string());
+        let icon_path = std::env::current_exe()
+            .map_err(|error| format!("could not resolve current executable: {error}"))?
+            .to_string_lossy()
+            .into_owned();
+        let subkey = to_wide(&format!("Software\\Classes\\AppUserModelId\\{app_id}"));
+        let display_name_key = to_wide("DisplayName");
+        let display_name_value = to_wide(&display_name);
+        let icon_key = to_wide("IconUri");
+        let icon_value = to_wide(&icon_path);
+
+        unsafe {
+            let mut key: HKEY = std::ptr::null_mut();
+            let status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut key,
+                std::ptr::null_mut(),
+            );
+            if status != 0 {
+                return Err(format!("RegCreateKeyExW failed with status {status}"));
+            }
+            let display_status = RegSetValueExW(
+                key,
+                display_name_key.as_ptr(),
+                0,
+                REG_SZ,
+                display_name_value.as_ptr().cast(),
+                (display_name_value.len() * 2) as u32,
+            );
+            let icon_status = RegSetValueExW(
+                key,
+                icon_key.as_ptr(),
+                0,
+                REG_SZ,
+                icon_value.as_ptr().cast(),
+                (icon_value.len() * 2) as u32,
+            );
+            RegCloseKey(key);
+            if display_status != 0 {
+                return Err(format!(
+                    "RegSetValueExW(DisplayName) failed: {display_status}"
+                ));
+            }
+            if icon_status != 0 {
+                return Err(format!("RegSetValueExW(IconUri) failed: {icon_status}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_start_menu_shortcut(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {
+        use windows::core::{Interface, PCWSTR};
+        use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+        use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
+        };
+        use windows::Win32::UI::Shell::{
+            FOLDERID_Programs, IShellLinkW, PropertiesSystem::IPropertyStore, SHGetKnownFolderPath,
+            ShellLink, KF_FLAG_CREATE,
+        };
+
+        let product_name = app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "Buzz".to_string());
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("could not resolve current executable: {error}"))?;
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if initialized.is_err() {
+            return Err(format!("CoInitializeEx failed: {initialized:?}"));
+        }
+
+        let result = (|| -> Result<(), String> {
+            let programs_path_ptr = unsafe {
+                SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_CREATE, None)
+                    .map_err(|error| format!("SHGetKnownFolderPath failed: {error}"))?
+            };
+            let programs_path_result = unsafe { programs_path_ptr.to_string() };
+            unsafe {
+                CoTaskMemFree(Some(programs_path_ptr.0.cast()));
+            }
+            let programs_path = programs_path_result
+                .map_err(|error| format!("invalid Start Menu path: {error}"))?;
+
+            let subfolder = format!("{programs_path}\\{product_name}");
+            let nested_path = format!("{subfolder}\\{product_name}.lnk");
+            let flat_path = format!("{programs_path}\\{product_name}.lnk");
+            let shortcut_path = if std::path::Path::new(&nested_path).exists() {
+                nested_path
+            } else if std::path::Path::new(&flat_path).exists() {
+                flat_path
+            } else {
+                std::fs::create_dir_all(&subfolder)
+                    .map_err(|error| format!("could not create Start Menu folder: {error}"))?;
+                nested_path
+            };
+            let shortcut_path = to_wide(&shortcut_path);
+            let executable = to_wide(&executable.to_string_lossy());
+            let link: IShellLinkW = unsafe {
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|error| format!("CoCreateInstance(ShellLink) failed: {error}"))?
+            };
+            let persist: IPersistFile = link
+                .cast()
+                .map_err(|error| format!("IShellLinkW -> IPersistFile failed: {error}"))?;
+            if unsafe { persist.Load(PCWSTR(shortcut_path.as_ptr()), STGM_READWRITE) }.is_err() {
+                unsafe {
+                    link.SetPath(PCWSTR(executable.as_ptr()))
+                        .map_err(|error| format!("IShellLinkW::SetPath failed: {error}"))?;
+                    link.SetIconLocation(PCWSTR(executable.as_ptr()), 0)
+                        .map_err(|error| format!("IShellLinkW::SetIconLocation failed: {error}"))?;
+                }
+            }
+            let properties: IPropertyStore = link
+                .cast()
+                .map_err(|error| format!("IShellLinkW -> IPropertyStore failed: {error}"))?;
+            let value = PROPVARIANT::from(app_id);
+            unsafe {
+                properties
+                    .SetValue(&PKEY_AppUserModel_ID, &value)
+                    .map_err(|error| format!("IPropertyStore::SetValue failed: {error}"))?;
+                properties
+                    .Commit()
+                    .map_err(|error| format!("IPropertyStore::Commit failed: {error}"))?;
+                persist
+                    .Save(PCWSTR(shortcut_path.as_ptr()), true)
+                    .map_err(|error| format!("IPersistFile::Save failed: {error}"))?;
+            }
+            Ok(())
+        })();
+
+        unsafe { CoUninitialize() };
+        result
+    }
+
+    fn queue_activation(target: Option<serde_json::Value>) {
+        let Some(target) = target else {
+            return;
+        };
+        let queue = PENDING_ACTIVATIONS.get_or_init(Default::default);
+        let Ok(mut queue) = queue.lock() else {
+            eprintln!("buzz-desktop: Windows activation queue is unavailable");
+            return;
+        };
+        if queue.len() == MAX_PENDING_ACTIVATIONS {
+            queue.pop_front();
+        }
+        queue.push_back(target);
+    }
+
+    pub fn take_pending_windows_activations() -> Result<Vec<serde_json::Value>, String> {
+        let queue = PENDING_ACTIVATIONS.get_or_init(Default::default);
+        let mut queue = queue
+            .lock()
+            .map_err(|_| "Windows activation queue is unavailable".to_string())?;
+        Ok(queue.drain(..).collect())
+    }
 
     fn permission_state_label(setting: NotificationSetting) -> &'static str {
         if setting == NotificationSetting::Enabled {
@@ -193,6 +499,7 @@ mod windows {
                     // _action is None for the default (body) click and
                     // Some(arg) for button clicks. We only use the default
                     // click, matching the Linux behaviour.
+                    queue_activation(target.clone());
                     let _ = activation_app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, &target);
                     Ok(())
                 })
@@ -225,6 +532,18 @@ mod windows {
             ] {
                 assert_eq!(permission_state_label(setting), "denied");
             }
+        }
+
+        #[test]
+        fn activation_queue_is_bounded() {
+            let _ = take_pending_windows_activations();
+            for index in 0..=MAX_PENDING_ACTIVATIONS {
+                queue_activation(Some(serde_json::json!({ "index": index })));
+            }
+
+            let activations = take_pending_windows_activations().expect("activation queue");
+            assert_eq!(activations.len(), MAX_PENDING_ACTIVATIONS);
+            assert_eq!(activations[0]["index"], 1);
         }
     }
 }

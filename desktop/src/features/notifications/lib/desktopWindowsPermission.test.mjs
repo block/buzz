@@ -3,6 +3,7 @@ import test from "node:test";
 
 let nativePermission = "denied";
 let nativeQueries = 0;
+let nativePermissionError = false;
 const testWindow = {
   Notification: Object.assign(function StubNotification() {}, {
     permission: "denied",
@@ -11,6 +12,9 @@ const testWindow = {
     invoke(command) {
       if (command === "windows_notification_permission_state") {
         nativeQueries++;
+        if (nativePermissionError) {
+          return Promise.reject(new Error("Windows permission query failed"));
+        }
         return Promise.resolve(nativePermission);
       }
       return Promise.reject(new Error(`unexpected command: ${command}`));
@@ -51,4 +55,14 @@ test("Windows access requests re-query the native setting", async () => {
   const before = nativeQueries;
   assert.equal(await requestDesktopNotificationAccess(), "granted");
   assert.equal(nativeQueries, before + 1);
+});
+
+test("Windows delivery returns false when the native permission query fails", async (t) => {
+  const { sendDesktopNotification } = await import("./desktop.ts");
+  t.mock.method(console, "warn", () => {});
+  nativePermissionError = true;
+
+  assert.equal(await sendDesktopNotification({ title: "Unavailable" }), false);
+
+  nativePermissionError = false;
 });

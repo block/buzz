@@ -16,6 +16,8 @@ import {
 // queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
+const TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS =
+  "take_pending_windows_activations";
 const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
 const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
 const WINDOWS_NOTIFICATION_PERMISSION_STATE =
@@ -258,8 +260,13 @@ export async function listenForDesktopNotificationActions(
 
   if (isTauri()) {
     const usesMacActivationQueue = isMacPlatform();
+    const usesWindowsActivationQueue = isWindowsPlatform();
+    const usesActivationQueue =
+      usesMacActivationQueue || usesWindowsActivationQueue;
 
-    if (!isLinuxPlatform() && !isWindowsPlatform() && !usesMacActivationQueue) {
+    // Keep the plugin action path for other Tauri targets, such as Android;
+    // Linux, macOS, and Windows use the native event/activation paths above.
+    if (!isLinuxPlatform() && !usesActivationQueue) {
       try {
         pluginListener = await onAction((notification) => {
           const target = parseNotificationTarget(
@@ -279,9 +286,11 @@ export async function listenForDesktopNotificationActions(
     // Linux forwards the target as the event payload. macOS queues targets in
     // Rust first so cold-start clicks survive until this listener is mounted.
     const dispatchNativeActivations = async (payload?: unknown) => {
-      if (usesMacActivationQueue) {
+      if (usesActivationQueue) {
         const targets = await invoke<unknown[]>(
-          TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
+          usesMacActivationQueue
+            ? TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS
+            : TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS,
         );
         for (const pendingTarget of targets) {
           const target = parseNotificationTarget(pendingTarget);
@@ -314,7 +323,7 @@ export async function listenForDesktopNotificationActions(
       nativeUnlisten = null;
     }
 
-    if (nativeUnlisten && usesMacActivationQueue) {
+    if (nativeUnlisten && usesActivationQueue) {
       try {
         await dispatchNativeActivations();
       } catch (error) {
@@ -325,7 +334,7 @@ export async function listenForDesktopNotificationActions(
       }
     }
 
-    if (usesMacActivationQueue) {
+    if (usesActivationQueue) {
       // Belt and suspenders for block/buzz#3509: the Rust delegate queues the
       // target before emitting, so a lost emit strands the activation with
       // nothing re-draining it. macOS always foregrounds the app on a
@@ -335,7 +344,7 @@ export async function listenForDesktopNotificationActions(
       const redrain = () => {
         void dispatchNativeActivations().catch((error) => {
           console.error(
-            "Failed to drain macOS notification activations on focus",
+            "Failed to drain pending notification activations on focus",
             error,
           );
         });
@@ -462,7 +471,15 @@ export async function revealDesktopAppWindow(): Promise<void> {
 export async function sendDesktopNotification(
   payload: DesktopNotificationPayload,
 ): Promise<boolean> {
-  if ((await getDesktopNotificationPermissionState()) !== "granted") {
+  let permission: DesktopNotificationPermissionState;
+  try {
+    permission = await getDesktopNotificationPermissionState();
+  } catch (error) {
+    console.warn("Failed to determine desktop notification permission", error);
+    return false;
+  }
+
+  if (permission !== "granted") {
     return false;
   }
 

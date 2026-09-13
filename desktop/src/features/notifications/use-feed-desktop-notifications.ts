@@ -27,10 +27,15 @@ import {
 import type { NotificationSettings } from "./hooks";
 
 const HOME_FEED_SEEN_STORAGE_KEY = "buzz-home-feed-seen.v1";
+const HOME_FEED_RETRY_STORAGE_KEY = "buzz-home-feed-retry.v1";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 
 function homeFeedSeenStorageKey(pubkey: string) {
   return `${HOME_FEED_SEEN_STORAGE_KEY}:${pubkey}`;
+}
+
+function homeFeedRetryStorageKey(pubkey: string) {
+  return `${HOME_FEED_RETRY_STORAGE_KEY}:${pubkey}`;
 }
 
 export function readStoredSeenFeedIds(pubkey: string): string[] {
@@ -64,6 +69,41 @@ export function writeStoredSeenFeedIds(pubkey: string, ids: string[]) {
 
   window.localStorage.setItem(
     homeFeedSeenStorageKey(pubkey),
+    JSON.stringify(ids.slice(-HOME_FEED_SEEN_MAX_ITEMS)),
+  );
+}
+
+export function readStoredRetryFeedIds(pubkey: string): string[] {
+  if (typeof window === "undefined" || pubkey.length === 0) {
+    return [];
+  }
+
+  const rawValue = window.localStorage.getItem(homeFeedRetryStorageKey(pubkey));
+  if (!rawValue) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((value): value is string => typeof value === "string")
+      .slice(-HOME_FEED_SEEN_MAX_ITEMS);
+  } catch {
+    return [];
+  }
+}
+
+export function writeStoredRetryFeedIds(pubkey: string, ids: string[]) {
+  if (typeof window === "undefined" || pubkey.length === 0) {
+    return;
+  }
+
+  window.localStorage.setItem(
+    homeFeedRetryStorageKey(pubkey),
     JSON.stringify(ids.slice(-HOME_FEED_SEEN_MAX_ITEMS)),
   );
 }
@@ -160,6 +200,9 @@ export function useFeedDesktopNotifications(
   const seenItemIdsRef = React.useRef<Set<string>>(
     new Set(readStoredSeenFeedIds(normalizedPubkey)),
   );
+  const retryItemIdsRef = React.useRef<Set<string>>(
+    new Set(readStoredRetryFeedIds(normalizedPubkey)),
+  );
   const hasInitializedFeedRef = React.useRef(false);
   const permissionAttemptRef = React.useRef({ hasRequested: false });
   const inFlightItemIdsRef = React.useRef(new Set<string>());
@@ -167,6 +210,7 @@ export function useFeedDesktopNotifications(
 
   React.useEffect(() => {
     seenItemIdsRef.current = new Set(readStoredSeenFeedIds(normalizedPubkey));
+    retryItemIdsRef.current = new Set(readStoredRetryFeedIds(normalizedPubkey));
     hasInitializedFeedRef.current = false;
     permissionAttemptRef.current.hasRequested = false;
     inFlightItemIdsRef.current.clear();
@@ -179,6 +223,15 @@ export function useFeedDesktopNotifications(
       inFlightItemIdsRef.current.clear();
     };
   }, [normalizedPubkey]);
+
+  React.useEffect(() => {
+    if (enabled) {
+      return;
+    }
+
+    notificationGenerationRef.current += 1;
+    inFlightItemIdsRef.current.clear();
+  }, [enabled]);
 
   const autoRequestPermissionIfNeeded = React.useEffectEvent(() =>
     ensureFeedNotificationPermission(
@@ -225,11 +278,12 @@ export function useFeedDesktopNotifications(
       hasInitializedFeedRef.current = true;
       if (currentFeedItems.length > 0) {
         seenItemIdsRef.current = new Set(
-          currentFeedItems.map((item) => item.id),
+          currentFeedItems
+            .filter((item) => !retryItemIdsRef.current.has(item.id))
+            .map((item) => item.id),
         );
         writeStoredSeenFeedIds(normalizedPubkey, [...seenItemIdsRef.current]);
       }
-      return;
     }
 
     const nextSeenItemIds = new Set(seenItemIdsRef.current);
@@ -256,7 +310,8 @@ export function useFeedDesktopNotifications(
     for (const item of currentFeedItems) {
       if (
         !pendingItemIds.has(item.id) &&
-        !inFlightItemIdsRef.current.has(item.id)
+        !inFlightItemIdsRef.current.has(item.id) &&
+        !retryItemIdsRef.current.has(item.id)
       ) {
         nextSeenItemIds.add(item.id);
       }
@@ -279,12 +334,22 @@ export function useFeedDesktopNotifications(
     if (newItems.length > 0) {
       for (const item of newItems) {
         inFlightItemIdsRef.current.add(item.id);
+        retryItemIdsRef.current.add(item.id);
       }
+      writeStoredRetryFeedIds(normalizedPubkey, [...retryItemIdsRef.current]);
       const generation = notificationGenerationRef.current;
       void deliverFeedNotificationBatch(
         newItems,
-        autoRequestPermissionIfNeeded,
+        async () => {
+          if (!enabled || generation !== notificationGenerationRef.current) {
+            return "error";
+          }
+          return autoRequestPermissionIfNeeded();
+        },
         async (item) => {
+          if (!enabled || generation !== notificationGenerationRef.current) {
+            return false;
+          }
           const resolvedLabel = profiles
             ? resolveUserLabel({
                 pubkey: item.pubkey,
@@ -306,6 +371,13 @@ export function useFeedDesktopNotifications(
         for (const item of newItems) {
           inFlightItemIdsRef.current.delete(item.id);
         }
+        for (const id of result.handledIds) {
+          retryItemIdsRef.current.delete(id);
+        }
+        for (const id of result.retryableIds) {
+          retryItemIdsRef.current.add(id);
+        }
+        writeStoredRetryFeedIds(normalizedPubkey, [...retryItemIdsRef.current]);
         if (result.handledIds.length === 0) {
           return;
         }

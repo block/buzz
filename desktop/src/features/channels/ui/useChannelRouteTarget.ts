@@ -103,7 +103,7 @@ export function useChannelRouteTarget({
       return;
     }
 
-    const targetKey = `${activeChannelId ?? "none"}:${targetMessageId}`;
+    const targetKey = `${activeChannelId ?? "none"}:${targetMessageId}:${targetMessageView ?? "default"}`;
     if (handledThreadRouteTargetRef.current !== targetKey) {
       handledThreadRouteTargetRef.current = null;
     }
