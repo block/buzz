@@ -1,5 +1,5 @@
 //! UC route selection must change only the route, never effort or model identity.
-use buzz_agent::model_capabilities::{resolve, DatabricksV2Route};
+use buzz_model_catalog::model_capabilities::{resolve, DatabricksV2Route};
 
 #[test]
 fn gpt_fqn_route_preserves_neutral_capabilities() {

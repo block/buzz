@@ -1,62 +1,116 @@
 #![forbid(unsafe_code)]
-mod agent;
-pub mod auth;
-mod builtin;
-pub mod catalog;
-pub mod config;
-mod handoff;
-mod hints;
-mod llm;
-mod mcp;
-pub mod model_capabilities;
-mod permission;
-pub mod types;
-mod wire;
+//! buzz-agent's ACP server, with Goose as the agent loop.
+//!
+//! This is the layer `buzz-acp` actually talks to, and it is deliberately
+//! unchanged in contract from `crates/buzz-agent/src/lib.rs` (960 lines):
+//! the same six JSON-RPC methods, the same `agentInfo.name = "buzz-agent"`,
+//! the same `activeRunId` steering handshake, the same `usage_update`
+//! ordering. Only the loop underneath is Goose's.
+//!
+//! Not standard ACP, and preserved here on purpose (each of these is
+//! something `buzz-acp` or the desktop UI depends on):
+//!
+//! * `_goose/unstable/session/steer` with `expectedRunId` optimistic
+//!   concurrency, and `activeRunId` advertised via
+//!   `params.update._meta.goose.activeRunId` — note the `_meta` nests *inside*
+//!   `update` (`buzz-acp/src/acp.rs:1607-1613`). Get the depth wrong and the
+//!   harness silently falls back to cancel+re-prompt forever.
+//! * `usage_update` on the `_goose/unstable/session/update` channel, emitted
+//!   *before* the `session/prompt` response, suppressed when no tokens were
+//!   seen (`buzz-agent/src/lib.rs:701-712`).
+//! * `keepalive` — see `agent.rs`.
 
-pub use catalog::{
-    discover_databricks_models, discover_databricks_models_with_cache_dir, ModelEntry,
-};
-pub use config::Provider;
+pub mod agent;
+pub mod config;
+pub mod hooks;
+pub mod loop_drive;
+pub mod mcp;
+pub mod model;
+mod model_config;
+pub mod ops;
+pub mod permission;
+pub mod prompt;
+pub mod provider;
+pub mod skills;
+pub mod steer;
+pub mod tools;
+pub mod turn_state;
+pub mod types;
+pub mod wire;
+
+// Databricks model discovery and the Windows shell-env contract moved to
+// `buzz-model-catalog` when this crate took on goose: the desktop cannot link
+// goose (native `sqlite3` collision with its own rusqlite), and it only ever
+// needed those two things. See that crate's lib.rs for the full reasoning.
 pub use types::AgentError;
 
-/// Environment keys the Windows Git Bash resolver may inspect. `spawn_one()`
-/// forwards every key in this list into its otherwise-cleared MCP child; Doctor
-/// uses the same contract so a ready agent can always start its shell tool.
-#[cfg(windows)]
-pub const WINDOWS_SHELL_RESOLUTION_ENV: &[&str] = &[
-    "PATH",
-    "BUZZ_SHELL",
-    "GIT_BASH",
-    "SystemRoot",
-    "ProgramFiles",
-    "ProgramFiles(x86)",
-    "LOCALAPPDATA",
-];
-
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tokio::io::BufReader;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
-use crate::agent::RunCtx;
-use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
-use crate::hints::SkillEntry;
-use crate::llm::Llm;
-use crate::mcp::McpRegistry;
-use crate::types::{ContentBlock, HistoryItem};
-use crate::wire::{
+use config::{Config, MAX_PROMPT_BYTES, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
+use types::McpServerStdio;
+use wire::{
     classify, goose_session_update, Inbound, InitializeParams, SessionCancelParams,
-    SessionNewParams, SessionPromptParams, SessionSetModelParams, SessionSteerParams, WireMsg,
-    WireSender, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
+    SessionNewParams, SessionPromptParams, SessionSetModelParams, SessionSteerParams, WireSender,
+    INVALID_PARAMS, METHOD_NOT_FOUND,
 };
 
-struct App {
+/// One live ACP session, wrapping a Goose `Agent`.
+struct Session {
+    mcp: Arc<crate::mcp::McpRegistry>,
+    /// Session id, shared with goose so tool dispatch and provider request
+    /// attribution agree on a name. No database sits behind it: the
+    /// conversation lives in `history` and in the turn's own
+    /// [`crate::turn_state::TurnState`].
+    goose_session_id: String,
+    /// The conversation so far, across turns.
+    ///
+    /// buzz-agent owns this because a Buzz agent's durable record is the
+    /// relay, not a local store. Held here so a second `session/prompt` sees
+    /// what the first one said.
+    history: Vec<goose_provider_types::conversation::message::Message>,
+    /// Working directory for the session, as given at `session/new`.
+    working_dir: std::path::PathBuf,
+    /// Provider + model config in force. Held by buzz rather than pushed into
+    /// goose's `Agent`, because `update_provider` writes to the session store.
+    model: crate::model::SessionModel,
+    busy: bool,
+    /// Set for the duration of a turn; advertised to steer-capable clients.
+    active_run_id: Option<String>,
+    cancel: Option<CancellationToken>,
+    /// Set by `session/set_model`, consumed by the next `session/prompt`.
+    /// Applying it at prompt time rather than immediately matches buzz-agent:
+    /// the override takes effect "from the next prompt" and never mutates a
+    /// turn already in flight (`buzz-agent/src/lib.rs:494-502`).
+    pending_model: Option<String>,
+    /// Name of the MCP extension carrying `_Stop`/`_PostCompact`, if any.
+    /// See [`crate::hooks`] for why we dispatch these ourselves.
+    hook_extension: Option<String>,
+    /// This session's system prompt. Owned here rather than inside goose's
+    /// `Agent`, because buzz-agent builds the prompt itself each round.
+    prompt: crate::prompt::SessionPrompt,
+    /// Mid-turn steer queue. goose's own is `pub(crate)` to `Agent::reply`,
+    /// which buzz-agent no longer calls. See [`crate::steer`].
+    steers: crate::steer::SteerQueue,
+    accumulated_input_tokens: u64,
+    accumulated_output_tokens: u64,
+    /// Subset of `accumulated_input_tokens`, published as cache-read tokens.
+    accumulated_cached_input_tokens: crate::types::CacheTotalState,
+    /// Cache-written subset, billed independently from cache reads.
+    accumulated_cache_write_tokens: crate::types::CacheTotalState,
+    /// Session-cumulative provider total with sticky unknown semantics.
+    accumulated_total_tokens: crate::types::TurnTotalState,
+    /// Proven publisher identity across every usage-bearing turn. `Some(None)`
+    /// is sticky once any turn is untrusted or disagrees.
+    accumulated_pricing_identity: Option<Option<crate::types::PricingIdentity>>,
+}
+
+pub struct App {
     cfg: Config,
-    llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
     /// ACP protocol version negotiated at `initialize`, stored for the whole
     /// connection lifetime. The `session/request_permission` wire shape derives
@@ -64,220 +118,146 @@ struct App {
     /// client always receives exactly the shape it negotiated. Defaults to
     /// [`PROTOCOL_VERSION`] before `initialize`; no prompt (and thus no
     /// permission ask) can run before then.
-    negotiated_version: AtomicU32,
+    negotiated_version: std::sync::atomic::AtomicU32,
     /// Owns the entire `session/request_permission` correlation lifecycle:
     /// process-wide admission, id allocation, response delivery, and abort-safe
     /// cleanup. See [`permission::PermissionBroker`].
     permissions: Arc<permission::PermissionBroker>,
-    /// Cached model catalog for Databricks providers. Populated lazily on the
-    /// first successful `session/new` discovery call. Failed discovery is never
-    /// cached: static-token authentication errors reject session creation, while
-    /// OAuth authentication and non-auth errors use the configured model for that
-    /// response and retry on the next session.
-    models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
-struct Session {
-    id: String,
-    mcp: Arc<McpRegistry>,
-    /// Skills discovered at session creation; used by the built-in `load_skill` tool.
-    skills: Vec<SkillEntry>,
-    history: Vec<HistoryItem>,
-    cancel_tx: watch::Sender<bool>,
-    busy: bool,
-    /// Run id of the in-flight prompt, set when a prompt starts and cleared
-    /// when it ends. `None` means no active run — a steer request targeting
-    /// this session is rejected. Steer-capable clients learn this value from
-    /// the `params.update._meta.goose.activeRunId` field on `session/update`.
-    active_run_id: Option<String>,
-    /// Sender for mid-turn steer messages. Created fresh per prompt (like
-    /// `cancel_tx`); the running prompt loop holds the matching receiver and
-    /// drains queued steers at round boundaries. `None` when no prompt is in
-    /// flight.
-    steer_tx: Option<mpsc::UnboundedSender<Vec<ContentBlock>>>,
-    original_task: Option<String>,
-    handoff_count: usize,
-    /// Cache-summed input tokens the provider reported for this session's most
-    /// recent request, or `None` before the first response (or after a handoff
-    /// resets the context). Drives the token-based handoff gate; see
-    /// [`RunCtx::should_handoff`].
-    last_request_input_tokens: Option<u64>,
-    /// History byte size when `last_request_input_tokens` was measured, paired
-    /// with it so the gate can account for history appended since.
-    last_request_history_bytes: Option<usize>,
-    effective_system_prompt: Arc<str>,
-    /// Per-session model override set by `session/set_model`. When `Some`,
-    /// overrides `App::cfg.model` for all LLM calls on this session. Persists
-    /// across `session/prompt` calls until changed.
-    effective_model: Option<String>,
-    /// Session-cumulative input tokens across all turns. Sent in the
-    /// `_goose/unstable/session/update` usage notification so buzz-acp's
-    /// `UsageTracker` can compute per-turn deltas symmetrically with goose.
-    /// `TurnIOState`: `Unseen` before any turn reports; `Exact(n)` while running;
-    /// `Poisoned` if any turn's sum overflowed — permanently poisons the session.
-    accumulated_input_tokens: crate::types::TurnIOState,
-    /// Session-cumulative output tokens across all turns.
-    /// Same `Unseen`/`Exact(n)`/`Poisoned` contract as `accumulated_input_tokens`.
-    accumulated_output_tokens: crate::types::TurnIOState,
-    /// Session-cumulative cache-served input tokens across all turns — a subset
-    /// of `accumulated_input_tokens`, not an addition to it. Tri-state:
-    ///
-    /// - `Unseen`: no turn has ever reported this category.
-    /// - `Exact(n)`: every usage-bearing response in every turn reported this
-    ///   category; `n` is the cumulative sum.
-    /// - `Unknown`: at least one usage-bearing response ever omitted the
-    ///   category — permanently poisoned for this session.
-    accumulated_cached_input_tokens: crate::types::CacheTotalState,
-    /// Session-cumulative cache-written input tokens across all turns — also a
-    /// subset of `accumulated_input_tokens`, not an addition to it.
-    /// Same `Unseen`/`Exact`/`Unknown` tri-state contract as
-    /// `accumulated_cached_input_tokens`.
-    accumulated_cache_write_tokens: crate::types::CacheTotalState,
-    /// Session-cumulative total-token state across all turns.
-    ///
-    /// Mirrors the per-turn `TurnTotalState` tri-state: starts `Unseen`,
-    /// becomes `Exact(n)` as turns with genuine provider totals complete,
-    /// transitions permanently to `Unknown` when any turn lacks a total or
-    /// when the cumulative would otherwise decrease. Only emitted in the
-    /// `usage_update` notification when `Exact`.
-    accumulated_total_state: crate::types::TurnTotalState,
-}
+/// Build a Goose agent for one ACP session.
+///
+/// Note `Agent::with_config` loads **zero** extensions — a tool-free agent is
+/// the default, not something we switch off (goose `agent.rs:362-420`). Tools
+/// arrive only via the `mcpServers` the harness declares in `session/new`,
+/// which is how `buzz-dev-mcp` (shell/read_file/str_replace/todo + the
+/// `_Stop`/`_PostCompact` hooks + the `buzz`/`rg`/`tree` PATH shim) is wired.
+async fn build_agent(
+    cfg: &Config,
+    cwd: &str,
+    system_prompt: Option<&str>,
+    mcp_servers: &[McpServerStdio],
+) -> Result<
+    (
+        Arc<crate::mcp::McpRegistry>,
+        String,
+        crate::model::SessionModel,
+        Option<String>,
+        crate::prompt::SessionPrompt,
+    ),
+    AgentError,
+> {
+    let provider_name = std::env::var("GOOSE_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+    let model_name = cfg
+        .model
+        .clone()
+        .or_else(|| std::env::var("GOOSE_MODEL").ok())
+        .ok_or_else(|| AgentError::Llm("no model configured".into()))?;
+    let provider = build_provider(&provider_name).await?;
+    let model_config = crate::model_config::from_env(&provider_name, &model_name)
+        .map_err(|error| AgentError::LlmModelNotFound(error.to_string()))?;
+    let model = crate::model::SessionModel::new(provider, model_config, model_name);
 
-fn die(msg: String) -> ! {
-    tracing::error!("{msg}");
-    std::process::exit(2);
-}
-
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if matches!(args.get(1).map(String::as_str), Some("auth")) {
-        return tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(auth_subcommand(&args[2..]));
-    }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main());
-    Ok(())
-}
-
-/// Authenticate to Databricks and store credentials under an optional explicit
-/// cache root. `None` preserves buzz-agent's production cache location.
-pub async fn authenticate_databricks_with_cache_dir(
-    host: &str,
-    cache_dir: Option<&std::path::Path>,
-) -> Result<(), AgentError> {
-    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(
-        host,
-        cache_dir.map(std::path::Path::to_path_buf),
-    ))?
-    .interactive_login()
-    .await
-}
-
-pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
-    authenticate_databricks_with_cache_dir(host, None).await
-}
-
-/// `buzz-agent auth <provider>` — run the interactive auth flow for a
-/// provider and persist the result, then exit. Today this supports Databricks
-/// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
-/// machine.
-async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = args.first().map(String::as_str);
-    match provider {
-        Some("databricks" | "databricks_v2" | "databricks-v2") => {
-            let host = std::env::var("DATABRICKS_HOST")
-                .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
-            authenticate_databricks(&host).await?;
-            eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
-            Ok(())
+    let prompt = crate::prompt::SessionPrompt::new(cfg.goose_mode);
+    if let Some(system_prompt) = system_prompt.or(cfg.system_prompt.as_deref()) {
+        if !system_prompt.trim().is_empty() {
+            prompt.set_override(system_prompt.to_string()).await;
         }
-        Some(other) => Err(format!("auth: unknown provider {other:?}").into()),
-        None => Err("auth: provider required (try: buzz-agent auth databricks)".into()),
     }
+
+    let mcp = Arc::new(crate::mcp::McpRegistry::spawn_all(cfg, mcp_servers, cwd).await?);
+    let skill_index = crate::skills::skill_index(mcp.skills());
+    if !skill_index.is_empty() {
+        prompt.add_extra("skills", skill_index).await;
+    }
+    let hook_extension = mcp.hook_extension("_Stop");
+    if let Some(extension) = &hook_extension {
+        prompt
+            .add_extra("buzz_hook_tools", hook_tool_guidance())
+            .await;
+        tracing::info!(extension, "lifecycle hooks available");
+    }
+    Ok((mcp, uuid_like(), model, hook_extension, prompt))
 }
 
-async fn async_main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
-    let cfg = Config::from_env().unwrap_or_else(|e| die(e));
-    let llm = Arc::new(Llm::new(&cfg).unwrap_or_else(|e| die(e.to_string())));
-    let max_line = cfg.max_line_bytes;
+/// Keep the model's hands off the lifecycle hooks.
+///
+/// They are ordinary MCP tools on the wire, so a generic harness advertises
+/// them. buzz-agent solved this by hiding them; we cannot (see `build_agent`),
+/// so we ask instead.
+fn hook_tool_guidance() -> String {
+    "Tools whose names begin with an underscore (`_Stop`, `_PostCompact`) are \
+     lifecycle hooks invoked automatically by the runtime. Never call them \
+     yourself. Use the `todo` tool to manage your task list."
+        .to_string()
+}
+
+pub async fn serve(cfg: Config) -> anyhow::Result<()> {
+    let (wire_tx, wire_rx) = tokio::sync::mpsc::channel(256);
+    // Keep the join handle: on EOF we must await it so queued frames -- including
+    // the final response of a turn that finished on the same tick -- actually
+    // reach stdout before the runtime is dropped.
+    let writer = tokio::spawn(wire::writer_task(wire_rx));
+
     let permissions = Arc::new(permission::PermissionBroker::new(
         cfg.max_pending_permissions,
         cfg.permission_timeout,
     ));
     let app = Arc::new(App {
         cfg,
-        llm,
         sessions: Mutex::new(HashMap::new()),
-        negotiated_version: AtomicU32::new(PROTOCOL_VERSION),
+        negotiated_version: std::sync::atomic::AtomicU32::new(PROTOCOL_VERSION),
         permissions,
-        models_cache: tokio::sync::OnceCell::new(),
     });
-    let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
-    let mut writer = tokio::spawn(wire::writer_task(wire_rx));
-    // Whichever ends first drives shutdown. The reader ending is the normal
-    // path (stdin EOF/error). The writer ending while the reader still runs
-    // means stdout is closed/broken: no reply can ever be written, so we must
-    // stop reading and cancel every session rather than leave the process
-    // reading input while outstanding permission asks wait out their full
-    // deadline for a response that can never arrive.
-    tokio::select! {
-        r = read_loop(
-            BufReader::new(tokio::io::stdin()),
-            app.clone(),
-            wire_tx,
-            max_line,
-        ) => {
-            if let Err(e) = r {
-                tracing::error!("io: reader: {e}");
+
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    loop {
+        match wire::read_bounded_line(&mut stdin, config::MAX_LINE_BYTES).await {
+            Ok(None) => break,
+            Ok(Some(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(msg) => dispatch(&app, msg, &wire_tx).await,
+                    Err(e) => {
+                        wire::send(
+                            &wire_tx,
+                            wire::err(
+                                Value::Null,
+                                wire::PARSE_ERROR,
+                                &format!("jsonrpc: parse: {e}"),
+                            ),
+                        )
+                        .await;
+                    }
+                }
             }
-            cancel_all_sessions(&app).await;
-            let _ = writer.await;
-        }
-        _ = &mut writer => {
-            tracing::error!("io: writer exited (stdout closed); shutting down connection");
-            cancel_all_sessions(&app).await;
-        }
-    }
-}
-
-/// Signal every live session to cancel. Run on connection teardown so in-flight
-/// prompts — including any waiting on a `session/request_permission` response —
-/// resolve promptly instead of waiting out their deadline.
-async fn cancel_all_sessions(app: &Arc<App>) {
-    for session in app.sessions.lock().await.values() {
-        let _ = session.cancel_tx.send(true);
-    }
-}
-
-async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
-    mut stdin: R,
-    app: Arc<App>,
-    wire_tx: WireSender,
-    max_line: usize,
-) -> std::io::Result<()> {
-    while let Some(line) = wire::read_bounded_line(&mut stdin, max_line).await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => dispatch(&app, msg, &wire_tx).await,
             Err(e) => {
-                wire::send(
-                    &wire_tx,
-                    wire::err(Value::Null, PARSE_ERROR, &format!("jsonrpc: parse: {e}")),
-                )
-                .await;
+                tracing::error!("io: {e}");
+                break;
             }
         }
     }
+
+    // Orderly shutdown. Both halves matter and both were missing:
+    //
+    // 1. Cancel every in-flight turn. Dropping a CancellationToken does NOT
+    //    cancel it, so goose would never send `notifications/cancelled` to its
+    //    MCP children and they would outlive us as orphans -- exactly the
+    //    failure `agent::run_turn` goes to lengths to avoid on session/cancel.
+    // 2. Await the writer. `wire_tx` is a bounded mpsc drained by a detached
+    //    task; returning here would discard anything still queued.
+    {
+        let sessions = app.sessions.lock().await;
+        for session in sessions.values() {
+            if let Some(token) = &session.cancel {
+                token.cancel();
+            }
+        }
+    }
+    drop(wire_tx);
+    let _ = writer.await;
     Ok(())
 }
 
@@ -286,7 +266,11 @@ async fn dispatch(app: &Arc<App>, msg: Value, wire_tx: &WireSender) {
         Inbound::Request { id, method, params } => {
             handle_request(app, id, method, params, wire_tx).await
         }
-        Inbound::Notification { method, params } => handle_notification(app, &method, params).await,
+        Inbound::Notification { method, params } => {
+            if method == "session/cancel" {
+                cancel_session(app, params).await;
+            }
+        }
         // Client's answer to a `session/request_permission` we issued. The
         // broker matches it to a live correlation id (waking that waiter) or
         // ignores an unknown/late id.
@@ -309,23 +293,21 @@ async fn handle_request(
         "session/new" => {
             let app = app.clone();
             let wire_tx = wire_tx.clone();
+            // Spawned so a slow MCP init can't block the read loop — otherwise
+            // `session/cancel` can't be received.
             tokio::spawn(async move { session_new(&app, id, params, &wire_tx).await });
         }
-        "session/prompt" => spawn_prompt(app.clone(), id, params, wire_tx.clone()),
-        "session/set_model" => {
-            set_model_session(app, id, params, wire_tx).await;
+        "session/prompt" => {
+            let app = app.clone();
+            let wire_tx = wire_tx.clone();
+            tokio::spawn(async move { session_prompt(&app, id, params, &wire_tx).await });
         }
+        "session/set_model" => set_model(app, id, params, wire_tx).await,
         "session/cancel" => {
             cancel_session(app, params).await;
             wire::send(wire_tx, wire::ok(id, Value::Null)).await;
         }
-        // goose-compatible non-standard extension: inject user input into the
-        // currently active prompt without starting a new one. Mirrors goose's
-        // `_goose/unstable/session/steer` wire contract so a single client-side
-        // delivery path serves both agents.
-        "_goose/unstable/session/steer" => {
-            steer_session(app, id, params, wire_tx).await;
-        }
+        "_goose/unstable/session/steer" => steer(app, id, params, wire_tx).await,
         _ => {
             wire::send(
                 wire_tx,
@@ -340,41 +322,41 @@ async fn handle_request(
     }
 }
 
-async fn handle_notification(app: &Arc<App>, method: &str, params: Value) {
-    if method == "session/cancel" {
-        cancel_session(app, params).await;
-    }
-}
-
 async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
-    let p: InitializeParams = match decode(params, "initialize") {
+    let p: InitializeParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
+        Err(e) => {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, &format!("initialize: {e}")),
+            )
+            .await
+        }
     };
-    // Honest negotiation: respond with the minimum of what the client
-    // requested and what we support.
-    // NOTE: gating `[Base]` injection on `protocol_version < 2` is a deliberate
-    // temporary measure — we are squatting on ACP v2 ahead of the upstream ACP
-    // RFD. Revisit when that RFD merges; otherwise a genuine upstream-v2 agent
-    // would silently lose `[Base]`.
-    let negotiated_version = p.protocol_version.min(PROTOCOL_VERSION);
-    // Store the negotiated version for the connection lifetime: the
-    // `session/request_permission` wire shape derives from this value, never
-    // from a later mutable session field, so a strict client always receives
-    // exactly the shape it negotiated at `initialize`.
+    // Honest negotiation: min(client, ours). Buzz squats on v2 ahead of the
+    // upstream ACP RFD (#1237); see buzz-agent/src/lib.rs:279-283.
+    let negotiated = p.protocol_version.min(PROTOCOL_VERSION);
+    // Store it for the connection lifetime: the `session/request_permission`
+    // wire shape derives from this value, never from a later mutable session
+    // field, so a strict client always receives exactly the shape it
+    // negotiated at `initialize`.
     app.negotiated_version
-        .store(negotiated_version, Ordering::Relaxed);
+        .store(negotiated, std::sync::atomic::Ordering::Relaxed);
     wire::send(
         wire_tx,
         wire::ok(
             id,
             json!({
-                "protocolVersion": negotiated_version,
+                "protocolVersion": negotiated,
                 "agentCapabilities": {
                     "loadSession": false,
                     "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
+                // Identity is unchanged on purpose: this is still buzz-agent.
+                // The `harness` field of the encrypted kind-44200 turn metric
+                // derives from this (`buzz-acp/src/pool.rs:3350`), so changing
+                // it would blank any dashboard filtering on it.
                 "agentInfo": { "name": "buzz-agent", "version": env!("CARGO_PKG_VERSION") },
             }),
         ),
@@ -382,738 +364,637 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
     .await;
 }
 
-/// Resolve a Databricks model catalog for one `session/new` call.
-///
-/// The active filter is part of the result's authority: discovery failure may
-/// not fall back to a configured model when it is present, because that would
-/// bypass the same restriction applied to a successful catalog.
-///
-/// Tries to use a previously cached successful discovery result. If the cache
-/// is empty, runs `discover` and — on success — populates the cache. On failure
-/// the error is returned and the cell remains empty so the next session retries.
-///
-/// Extracted from `session_new` so tests can drive this path with an injected
-/// discovery future without requiring a full `App` / transport stack.
-async fn resolve_models_catalog(
-    cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
-    discover: impl std::future::Future<Output = Result<Vec<ModelEntry>, AgentError>>,
-) -> Result<Vec<ModelEntry>, AgentError> {
-    cache.get_or_try_init(|| discover).await.cloned()
-}
-
-/// Return the configured model as an unfiltered discovery fallback.
-///
-/// This value is never written to `models_cache`; failed discovery must be retried by
-/// the next session rather than pinning degraded state for the process lifetime.
-///
-/// Only reached from the Databricks provider arm below, so the curated label is
-/// looked up from the Databricks manifest; `id` stays the raw configured value.
-fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
-    let model = model.trim().to_string();
-    let name = crate::model_capabilities::databricks_registry_label(&model)
-        .unwrap_or(&model)
-        .to_string();
-    vec![ModelEntry { id: model, name }]
-}
-
-/// A discovery failure may use the configured model only when no visibility
-/// filter is active. Returning that model under an active filter would silently
-/// bypass the operator's authoritative catalog restriction.
-fn discovery_error_fallback(cfg: &Config) -> Vec<ModelEntry> {
-    if cfg.databricks_model_filter.is_some() {
-        Vec::new()
-    } else {
-        configured_model_fallback(&cfg.model)
-    }
-}
-
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
-    let p: SessionNewParams = match decode(params, "session/new") {
+    let p: SessionNewParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
+        Err(e) => {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, &format!("session/new: {e}")),
+            )
+            .await
+        }
     };
-    if p.cwd.is_empty() || !Path::new(&p.cwd).is_absolute() {
-        return reject(
+
+    if !std::path::Path::new(&p.cwd).is_absolute() {
+        return wire::send(
             wire_tx,
-            id,
-            INVALID_PARAMS,
-            "session/new: cwd must be an absolute path",
+            wire::err(id, INVALID_PARAMS, "session/new: cwd must be absolute"),
         )
         .await;
     }
-    // Check cap without holding lock across MCP spawn (which may be slow).
-    {
-        let sessions = app.sessions.lock().await;
-        if sessions.len() >= app.cfg.max_sessions {
-            return reject(
+
+    if let Some(sp) = &p.system_prompt {
+        if sp.len() > MAX_SYSTEM_PROMPT_BYTES {
+            return wire::send(
                 wire_tx,
-                id,
-                INVALID_PARAMS,
-                "session/new: max sessions reached",
+                wire::err(id, INVALID_PARAMS, "session/new: systemPrompt too large"),
             )
             .await;
         }
     }
-    let (hints_text, skills) = if app.cfg.hints_enabled {
-        hints::build_hints_section(std::path::Path::new(&p.cwd))
-    } else {
-        (String::new(), Vec::new())
-    };
-    let effective_system_prompt: Arc<str> = {
-        // When the harness provides a systemPrompt (base_prompt + persona), use
-        // it as the primary content and suppress the default. The default is only
-        // a fallback for legacy harnesses that don't send systemPrompt.
-        let base = match p.system_prompt.as_deref() {
-            Some(client_prompt) if !client_prompt.trim().is_empty() => client_prompt.to_owned(),
-            _ => app.cfg.system_prompt.clone(),
-        };
-        let prompt = if hints_text.is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{hints_text}")
-        };
-        // Reject combined prompts exceeding 512KB.
-        if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
-            return reject(
-                wire_tx,
-                id,
-                INVALID_PARAMS,
-                &format!(
-                    "session/new: combined system prompt exceeds {}KB limit ({} bytes)",
-                    MAX_SYSTEM_PROMPT_BYTES / 1024,
-                    prompt.len()
-                ),
-            )
-            .await;
-        }
-        Arc::from(prompt)
-    };
-    // Resolve the model catalog before spawning MCP servers or registering a
-    // session. A configured static credential cannot recover interactively, so
-    // its authentication failure rejects before allocation. OAuth authentication
-    // failures and other catalog failures use only the configured model for this
-    // response, without caching, so session/prompt can run the existing PKCE flow.
-    let available_models: Vec<Value> = {
-        use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = match resolve_models_catalog(
-                    &app.models_cache,
-                    discover_databricks_models(&app.cfg),
-                )
-                .await
-                {
-                    Ok(models) => models,
-                    Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
-                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
-                            .await;
-                    }
-                    Err(error @ AgentError::LlmAuth(_)) => {
-                        tracing::warn!(
-                            error = %error,
-                            filter_active = app.cfg.databricks_model_filter.is_some(),
-                            "Databricks OAuth model catalog unavailable; using filter-aware fallback"
-                        );
-                        discovery_error_fallback(&app.cfg)
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            filter_active = app.cfg.databricks_model_filter.is_some(),
-                            "Databricks model catalog unavailable; using filter-aware fallback"
-                        );
-                        discovery_error_fallback(&app.cfg)
-                    }
-                };
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
+
+    // Cheap early reject. The authoritative check is re-done under the insert
+    // guard below -- `session/new` is dispatched on its own task, so N
+    // concurrent calls would otherwise all pass this and all insert.
+    if app.sessions.lock().await.len() >= app.cfg.max_sessions {
+        return wire::send(
+            wire_tx,
+            wire::err(id, INVALID_PARAMS, "session/new: max sessions reached"),
+        )
+        .await;
+    }
+
+    let (mcp, goose_session_id, model, hook_extension, prompt) =
+        match build_agent(&app.cfg, &p.cwd, p.system_prompt.as_deref(), &p.mcp_servers).await {
+            Ok(v) => v,
+            Err(e) => {
+                return wire::send(wire_tx, wire::err(id, e.json_rpc_code(), &e.to_string())).await
             }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
-        }
-    };
-
-    let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
-        Ok(m) => Arc::new(m),
-        Err(e) => return reject(wire_tx, id, e.json_rpc_code(), &e.to_string()).await,
-    };
-    let session_id = match session_token() {
-        Ok(t) => format!("ses_{t}"),
-        Err(e) => return reject(wire_tx, id, -32000, &e).await,
-    };
-    let (cancel_tx, _) = watch::channel(false);
-    let mut sessions = app.sessions.lock().await;
-    // Re-check cap (another session may have been created while we spawned MCP).
-    if sessions.len() >= app.cfg.max_sessions {
-        return reject(
-            wire_tx,
-            id,
-            INVALID_PARAMS,
-            "session/new: max sessions reached",
-        )
-        .await;
-    }
-    sessions.insert(
-        session_id.clone(),
-        Session {
-            id: session_id.clone(),
-            mcp,
-            skills,
-            history: Vec::new(),
-            cancel_tx,
-            busy: false,
-            active_run_id: None,
-            steer_tx: None,
-            original_task: None,
-            handoff_count: 0,
-            last_request_input_tokens: None,
-            last_request_history_bytes: None,
-            effective_system_prompt,
-            effective_model: None,
-            accumulated_input_tokens: crate::types::TurnIOState::Unseen,
-            accumulated_output_tokens: crate::types::TurnIOState::Unseen,
-            accumulated_cached_input_tokens: crate::types::CacheTotalState::Unseen,
-            accumulated_cache_write_tokens: crate::types::CacheTotalState::Unseen,
-            accumulated_total_state: crate::types::TurnTotalState::Unseen,
-        },
-    );
-    drop(sessions);
-
-    wire::send(
-        wire_tx,
-        wire::ok(
-            id,
-            json!({
-                "sessionId": session_id,
-                "models": {
-                    "currentModelId": app.cfg.model,
-                    "availableModels": available_models,
-                },
-            }),
-        ),
-    )
-    .await;
-}
-
-fn decode<T: serde::de::DeserializeOwned>(params: Value, stage: &str) -> Result<T, String> {
-    serde_json::from_value(params).map_err(|e| format!("{stage}: {e}"))
-}
-
-async fn reject(wire_tx: &WireSender, id: Value, code: i32, message: &str) {
-    wire::send(wire_tx, wire::err(id, code, message)).await;
-}
-
-async fn cancel_session(app: &Arc<App>, params: Value) {
-    if let Ok(p) = serde_json::from_value::<SessionCancelParams>(params) {
-        if let Some(s) = app.sessions.lock().await.get(&p.session_id) {
-            let _ = s.cancel_tx.send(true);
-        }
-    }
-}
-
-/// Handle `session/set_model`: apply a per-session model override immediately.
-///
-/// Validation:
-/// - Unknown `sessionId` → `invalid_params`.
-/// - Empty `modelId` → `invalid_params`.
-///
-/// On success: stores `model_id` on the session and responds `{ sessionId, modelId }`.
-/// The override is picked up by the next `session/prompt` call on this session.
-async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
-    let p: SessionSetModelParams = match decode(params, "session/set_model") {
-        Ok(p) => p,
-        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
-    };
-    if p.model_id.trim().is_empty() {
-        return reject(
-            wire_tx,
-            id,
-            INVALID_PARAMS,
-            "session/set_model: modelId must not be empty",
-        )
-        .await;
-    }
-    let mut sessions = app.sessions.lock().await;
-    let Some(s) = sessions.get_mut(&p.session_id) else {
-        return reject(
-            wire_tx,
-            id,
-            INVALID_PARAMS,
-            "session/set_model: unknown session",
-        )
-        .await;
-    };
-    s.effective_model = Some(p.model_id.clone());
-    tracing::info!(
-        session_id = %p.session_id,
-        model_id = %p.model_id,
-        "session/set_model: model overridden"
-    );
-    drop(sessions);
-    wire::send(
-        wire_tx,
-        wire::ok(
-            id,
-            json!({ "sessionId": p.session_id, "modelId": p.model_id }),
-        ),
-    )
-    .await;
-}
-
-/// Handle `_goose/unstable/session/steer`: queue user input into the in-flight
-/// prompt. Validation mirrors goose's `on_steer_session`:
-///   - empty prompt → `invalid_params`
-///   - no active run (no prompt in flight) → `invalid_params`
-///   - `expectedRunId` mismatch → `invalid_params` (caller is steering a turn
-///     that already ended or rotated; it must fall back to cancel+merge)
-///
-/// On success the message is queued for pickup at the next round boundary and
-/// we reply `{ runId, messageId }`, then emit a `queuedSteer` session/update so
-/// the client can correlate the accepted steer with its eventual pickup.
-async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
-    let p: SessionSteerParams = match decode(params, "_goose/unstable/session/steer") {
-        Ok(p) => p,
-        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
-    };
-    if p.prompt.is_empty() {
-        return reject(
-            wire_tx,
-            id,
-            INVALID_PARAMS,
-            "steer: prompt must not be empty",
-        )
-        .await;
-    }
-    if p.expected_run_id.is_empty() {
-        return reject(
-            wire_tx,
-            id,
-            INVALID_PARAMS,
-            "steer: expectedRunId must not be empty",
-        )
-        .await;
-    }
-    let message_id = format!("steer_{}", session_token().unwrap_or_else(|_| "x".into()));
-    let run_id = {
-        let sessions = app.sessions.lock().await;
-        let Some(s) = sessions.get(&p.session_id) else {
-            return reject(wire_tx, id, INVALID_PARAMS, "steer: unknown session").await;
         };
-        let Some(active) = s.active_run_id.as_deref() else {
-            return reject(wire_tx, id, INVALID_PARAMS, "steer: no active run to steer").await;
-        };
-        if active != p.expected_run_id {
-            return reject(
+
+    let sid = format!("ses_{}", goose_session_id);
+
+    // Keep a handle for catalog discovery below; the Session takes ownership.
+    let session_model = model.clone();
+    let current_model = app
+        .cfg
+        .model
+        .clone()
+        .or_else(|| std::env::var("GOOSE_MODEL").ok())
+        .unwrap_or_default();
+
+    {
+        let mut sessions = app.sessions.lock().await;
+        // Re-check under the guard we insert with: build_agent above spawns MCP
+        // children and does a provider round-trip, so other session/new tasks
+        // can land in that window.
+        if sessions.len() >= app.cfg.max_sessions {
+            return wire::send(
                 wire_tx,
-                id,
-                INVALID_PARAMS,
-                &format!(
-                    "steer: expected active run id `{}` but found `{active}`",
-                    p.expected_run_id
+                wire::err(id, INVALID_PARAMS, "session/new: max sessions reached"),
+            )
+            .await;
+        }
+        sessions.insert(
+            sid.clone(),
+            Session {
+                mcp,
+                goose_session_id,
+                history: Vec::new(),
+                working_dir: std::path::PathBuf::from(&p.cwd),
+                model,
+                busy: false,
+                active_run_id: None,
+                cancel: None,
+                pending_model: None,
+                hook_extension,
+                prompt,
+                steers: crate::steer::SteerQueue::new(),
+                accumulated_input_tokens: 0,
+                accumulated_output_tokens: 0,
+                accumulated_cached_input_tokens: crate::types::CacheTotalState::Unseen,
+                accumulated_cache_write_tokens: crate::types::CacheTotalState::Unseen,
+                accumulated_total_tokens: crate::types::TurnTotalState::Unseen,
+                accumulated_pricing_identity: None,
+            },
+        );
+    }
+
+    // Advertise the model catalog. `buzz-acp` reads `models.availableModels`
+    // off this response (`acp.rs:1866`, `:1900`) to drive the desktop
+    // ModelPicker and to resolve `session/set_model` targets
+    // (`resolve_model_switch_method`, `acp.rs:1876`). Omitting it degrades the
+    // picker to "current model only" — which is what buzz-agent's `catalog.rs`
+    // existed to prevent.
+    //
+    // Goose builds the same structure internally (`build_model_state`,
+    // acp/response_builder.rs:130) but it is `pub(super)`, so an embedder
+    // cannot call it. The underlying data is public, though:
+    // `Provider::fetch_supported_models` (goose-provider-types/base.rs:425).
+    let mut result = json!({ "sessionId": sid });
+    if let Some(models) = discover_models(&session_model, &current_model).await {
+        result["models"] = models;
+    }
+
+    wire::send(wire_tx, wire::ok(id, result)).await;
+}
+
+/// Human label for a model id, from the capability manifest when it knows the id.
+///
+/// The manifest's label registry is Databricks-scoped today, so this is a no-op
+/// for every other provider — which is the correct behaviour either way: an
+/// unknown id must reach the picker as itself, never blanked or guessed.
+fn curated_model_label(id: &str) -> String {
+    buzz_model_catalog::model_capabilities::databricks_registry_label(id)
+        .unwrap_or(id)
+        .to_string()
+}
+
+/// Build the `{currentModelId, availableModels}` object for `session/new`.
+///
+/// Mirrors goose's own `build_model_state`, including its rule that the
+/// current model is prepended when the provider's list omits it — otherwise
+/// `buzz-acp` cannot resolve a switch back to it.
+///
+/// Returns `None` when the provider cannot enumerate models (many can't;
+/// `fetch_supported_models` defaults to an empty list). A missing catalog is
+/// degraded UX, never a session failure — buzz-agent's Databricks discovery
+/// made the same choice (`catalog.rs:52-80`).
+///
+/// `name` is curated through the capability manifest (#5597): the provider APIs
+/// return no display-name field, so a raw id like `databricks-gpt-5-5` would
+/// otherwise reach the picker verbatim instead of `GPT-5.5`. Ids the manifest
+/// does not know pass through unchanged, which is also the non-Databricks case.
+async fn discover_models(model: &crate::model::SessionModel, current_model: &str) -> Option<Value> {
+    let provider = model.provider().await;
+    let ids = provider.fetch_supported_models().await.ok()?;
+
+    let mut available: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({ "modelId": id, "name": curated_model_label(id) }))
+        .collect();
+
+    if !ids.iter().any(|id| id == current_model) {
+        available.insert(
+            0,
+            json!({ "modelId": current_model, "name": curated_model_label(current_model) }),
+        );
+    }
+
+    if available.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "currentModelId": current_model,
+        "availableModels": available,
+    }))
+}
+
+async fn session_prompt(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    let p: SessionPromptParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, &format!("session/prompt: {e}")),
+            )
+            .await
+        }
+    };
+
+    let prompt_bytes: usize = p
+        .prompt
+        .iter()
+        .map(|b| match b {
+            types::ContentBlock::Text { text } => text.len(),
+            types::ContentBlock::ResourceLink { uri } => uri.len(),
+            types::ContentBlock::Unsupported => 0,
+        })
+        .sum();
+    if prompt_bytes > MAX_PROMPT_BYTES {
+        return wire::send(
+            wire_tx,
+            wire::err(id, INVALID_PARAMS, "session/prompt: prompt too large"),
+        )
+        .await;
+    }
+
+    let run_id = format!("run_{}", uuid_like());
+    let cancel = CancellationToken::new();
+
+    // Single-flight per session, and capture the agent handle.
+    let (
+        mcp,
+        goose_session_id,
+        pending_model,
+        hook_extension,
+        prompt,
+        steers,
+        history,
+        working_dir,
+        model,
+    ) = {
+        let mut sessions = app.sessions.lock().await;
+        let Some(s) = sessions.get_mut(&p.session_id) else {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, "session/prompt: unknown session"),
+            )
+            .await;
+        };
+        if s.busy {
+            return wire::send(
+                wire_tx,
+                wire::err(
+                    id,
+                    INVALID_PARAMS,
+                    "session/prompt: prompt already in flight",
                 ),
             )
             .await;
         }
-        // A live run always has a steer_tx; if the channel is gone the run is
-        // tearing down — treat as no active run rather than queue into the void.
-        match &s.steer_tx {
-            Some(tx) if tx.send(p.prompt).is_ok() => active.to_owned(),
-            _ => return reject(wire_tx, id, INVALID_PARAMS, "steer: no active run to steer").await,
-        }
+        s.busy = true;
+        s.active_run_id = Some(run_id.clone());
+        s.cancel = Some(cancel.clone());
+        // Take the pending override so a `session/set_model` applies exactly
+        // once, from the next prompt onward (buzz-agent `lib.rs:494-502`).
+        (
+            s.mcp.clone(),
+            s.goose_session_id.clone(),
+            s.pending_model.take(),
+            s.hook_extension.clone(),
+            s.prompt.clone(),
+            s.steers.clone(),
+            s.history.clone(),
+            s.working_dir.clone(),
+            s.model.clone(),
+        )
     };
-    wire::send(
-        wire_tx,
-        wire::ok(id, json!({ "runId": run_id, "messageId": message_id })),
-    )
-    .await;
-    // Best-effort correlation hint for the client; mirrors goose's
-    // `send_queued_steer_update`. Not load-bearing for delivery.
+
+    // Apply a pending `session/set_model` before the turn starts.
+    if let Some(model_id) = pending_model {
+        if let Err(e) = apply_model(&model, &model_id).await {
+            {
+                let mut sessions = app.sessions.lock().await;
+                if let Some(s) = sessions.get_mut(&p.session_id) {
+                    s.busy = false;
+                    s.active_run_id = None;
+                    s.cancel = None;
+                }
+            }
+            return wire::send(wire_tx, wire::err(id, e.json_rpc_code(), &e.to_string())).await;
+        }
+    }
+
+    // Snapshot the exact model identity this turn will use after applying any
+    // pending switch. A later `session/set_model` may queue the following turn,
+    // but must not relabel usage from this one.
+    let (_provider, _config, turn_model_id) = model.snapshot().await;
+
+    // Advertise the run id so steer-capable clients can target this turn.
+    // `_meta` nests INSIDE `update` — see the module docs.
     wire::send(
         wire_tx,
         wire::session_update_with_goose_meta(
             &p.session_id,
             json!({ "sessionUpdate": "session_info_update" }),
-            json!({ "queuedSteer": { "messageId": message_id, "runId": run_id } }),
-        ),
-    )
-    .await;
-}
-
-fn spawn_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {
-    tokio::spawn(async move { run_prompt(app, id, params, wire_tx).await });
-}
-
-async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {
-    let p: SessionPromptParams = match decode(params, "session/prompt") {
-        Ok(p) => p,
-        Err(m) => return reject(&wire_tx, id, INVALID_PARAMS, &m).await,
-    };
-    let (
-        sid,
-        mcp,
-        skills,
-        mut history,
-        mut original_task,
-        mut handoff_count,
-        mut last_request_input_tokens,
-        mut last_request_history_bytes,
-        mut cancel_rx,
-        effective_system_prompt,
-        effective_model_override,
-        run_id,
-        mut steer_rx,
-        usage_baseline,
-    ) = match acquire_session(&app, &p.session_id).await {
-        Ok(v) => v,
-        Err(reason) => {
-            return reject(
-                &wire_tx,
-                id,
-                INVALID_PARAMS,
-                &format!("session/prompt: {reason}"),
-            )
-            .await
-        }
-    };
-    // Advertise the active run id so steer-capable clients can target this turn
-    // via `expectedRunId`. Mirrors goose's `send_active_run_update`.
-    wire::send(
-        &wire_tx,
-        wire::session_update_with_goose_meta(
-            &sid,
-            json!({ "sessionUpdate": "session_info_update" }),
             json!({ "activeRunId": run_id }),
         ),
     )
     .await;
-    // Resolve effective model: session override wins over config default.
-    let effective_model_str = effective_model_override
-        .as_deref()
-        .unwrap_or(&app.cfg.model);
-    let mut turn_input_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
-    let mut turn_output_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
-    let mut turn_cached_input_tokens: crate::types::CacheTotalState =
-        crate::types::CacheTotalState::Unseen;
-    let mut turn_cache_write_tokens: crate::types::CacheTotalState =
-        crate::types::CacheTotalState::Unseen;
-    let mut turn_total_state = crate::types::TurnTotalState::Unseen;
-    // Per-turn billing identity accumulator — three-state:
-    //   None          = no usage-bearing response seen yet (initial)
-    //   Some(Some(pi))= all usage-bearing responses carry the same proven identity
-    //   Some(None)    = poisoned (mixed identities, unproven response, etc.)
-    // Not stored in Session (not session-cumulative); used only for the final
-    // end-of-turn wire emission.
-    let mut turn_pricing_identity: Option<Option<crate::types::PricingIdentity>> = None;
-    let mut ctx = RunCtx {
-        cfg: &app.cfg,
-        effective_model: effective_model_str,
-        session_id: &sid,
-        system_prompt: &effective_system_prompt,
-        llm: &app.llm,
-        mcp: &mcp,
-        permissions: &app.permissions,
-        protocol_version: app.negotiated_version.load(Ordering::Relaxed),
-        skills: &skills,
-        wire: &wire_tx,
-        cancel: &mut cancel_rx,
-        steer: &mut steer_rx,
-        history: &mut history,
-        original_task: &mut original_task,
-        handoff_count: &mut handoff_count,
-        run_id,
-        last_request_input_tokens: &mut last_request_input_tokens,
-        last_request_history_bytes: &mut last_request_history_bytes,
-        turn_input_tokens: &mut turn_input_tokens,
-        turn_output_tokens: &mut turn_output_tokens,
-        turn_cached_input_tokens: &mut turn_cached_input_tokens,
-        turn_cache_write_tokens: &mut turn_cache_write_tokens,
-        turn_total_state: &mut turn_total_state,
-        turn_pricing_identity: &mut turn_pricing_identity,
-        usage_baseline,
+
+    let (result, tokens, conversation) = loop_drive::run_turn(
+        loop_drive::TurnContext {
+            mcp: &mcp,
+            session_id: &goose_session_id,
+            wire_tx,
+            cancel: &cancel,
+            hook_extension: hook_extension.as_deref(),
+            require_reply: app.cfg.require_reply,
+            max_rounds: app.cfg.max_rounds,
+            max_token_recoveries: app.cfg.max_token_recoveries,
+            prompt: &prompt,
+            steers: &steers,
+            working_dir,
+            history: &history,
+            model: &model,
+            permissions: &app.permissions,
+            protocol_version: app
+                .negotiated_version
+                .load(std::sync::atomic::Ordering::Relaxed),
+        },
+        goose_provider_types::conversation::message::Message::user()
+            .with_text(agent::prompt_to_text(&p.prompt)),
+    )
+    .await;
+
+    // Clear run state so a late steer can't queue into a finished turn.
+    let accumulated = {
+        let mut sessions = app.sessions.lock().await;
+        sessions.get_mut(&p.session_id).map(|s| {
+            // Carry the turn's conversation forward. Without this the next
+            // prompt starts from an empty history and the agent forgets what
+            // it just said. Bounded: compaction hides old messages rather
+            // than deleting them, so a long-lived session sheds the oldest
+            // hidden ones once the buffer exceeds its byte budget.
+            let mut conversation = conversation;
+            crate::turn_state::evict_hidden_history(&mut conversation, app.cfg.max_history_bytes);
+            s.history = conversation;
+            s.busy = false;
+            s.active_run_id = None;
+            s.cancel = None;
+            s.accumulated_input_tokens = s
+                .accumulated_input_tokens
+                .saturating_add(tokens.input.unwrap_or(0));
+            s.accumulated_output_tokens = s
+                .accumulated_output_tokens
+                .saturating_add(tokens.output.unwrap_or(0));
+            s.accumulated_cached_input_tokens = s
+                .accumulated_cached_input_tokens
+                .merge_session(tokens.cached_input);
+            s.accumulated_cache_write_tokens = s
+                .accumulated_cache_write_tokens
+                .merge_session(tokens.cache_write);
+            s.accumulated_total_tokens = s.accumulated_total_tokens.merge_session(tokens.total);
+            s.accumulated_pricing_identity = match (
+                s.accumulated_pricing_identity.take(),
+                tokens.pricing_identity.clone(),
+            ) {
+                (None, identity) => identity,
+                (Some(Some(current)), Some(Some(turn))) if current == turn => Some(Some(current)),
+                (Some(_), Some(_)) => Some(None),
+                (current, None) => current,
+            };
+            (
+                s.accumulated_input_tokens,
+                s.accumulated_output_tokens,
+                s.accumulated_cached_input_tokens,
+                s.accumulated_cache_write_tokens,
+                s.accumulated_total_tokens,
+                s.accumulated_pricing_identity.clone(),
+            )
+        })
     };
-    let result = ctx.run(p.prompt).await;
-    if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
-        s.busy = false;
-        // Clear run state so a late steer can't queue into a finished turn.
-        s.active_run_id = None;
-        s.steer_tx = None;
-        s.history = history;
-        s.original_task = original_task;
-        s.handoff_count = handoff_count;
-        s.last_request_input_tokens = last_request_input_tokens;
-        s.last_request_history_bytes = last_request_history_bytes;
-    }
-    // Update session-cumulative token counters and emit the usage notification
-    // BEFORE sending the session/prompt response. buzz-acp's UsageTracker
-    // processes the notification while the turn is still in-flight (i.e. before
-    // the response triggers take_turn_usage()), which is required for the
-    // begin_turn gate to recognise it as publishable.
-    //
-    // Only emit when at least one token count was observed — a turn with no
-    // provider response (validation failure, pre-response cancellation) carries
-    // no information and must not produce a kind 44200 record per NIP-AM.
-    if !matches!(turn_input_tokens, crate::types::TurnIOState::Unseen)
-        || !matches!(turn_output_tokens, crate::types::TurnIOState::Unseen)
-    {
-        let accumulated = {
-            let mut sessions = app.sessions.lock().await;
-            if let Some(s) = sessions.get_mut(&sid) {
-                // merge_session: Poisoned poisons permanently; Exact sums with
-                // overflow-check → Poisoned on wrap; Unseen leaves unchanged.
-                s.accumulated_input_tokens =
-                    s.accumulated_input_tokens.merge_session(turn_input_tokens);
-                s.accumulated_output_tokens = s
-                    .accumulated_output_tokens
-                    .merge_session(turn_output_tokens);
-                // D1 tri-state merge: merge_session propagates Unknown when
-                // the turn was poisoned (any usage-bearing round omitted the
-                // category), and is a no-op when the turn was Unseen (no
-                // usage-bearing response at all).
-                s.accumulated_cached_input_tokens = s
-                    .accumulated_cached_input_tokens
-                    .merge_session(turn_cached_input_tokens);
-                s.accumulated_cache_write_tokens = s
-                    .accumulated_cache_write_tokens
-                    .merge_session(turn_cache_write_tokens);
-                // Fold the per-turn total state into the session cumulative.
-                // Unknown poisons the session permanently; Exact adds to running sum;
-                // Unseen (turn emitted no usage) leaves the cumulative unchanged.
-                // Uses TurnTotalState::merge_session, which applies the same
-                // checked-add / overflow-poisons contract as the per-response fold.
-                s.accumulated_total_state =
-                    s.accumulated_total_state.merge_session(turn_total_state);
-                Some((
-                    s.accumulated_input_tokens,
-                    s.accumulated_output_tokens,
-                    s.accumulated_cached_input_tokens,
-                    s.accumulated_cache_write_tokens,
-                    s.accumulated_total_state,
-                ))
-            } else {
-                // Session is gone — the accumulated baseline no longer exists, so
-                // there is nothing correct to emit. Skip the usage notification.
-                None
-            }
-        };
-        if let Some((
-            accumulated_in,
-            accumulated_out,
-            accumulated_cached,
-            accumulated_written,
-            accumulated_total,
-        )) = accumulated
+
+    wire::send(
+        wire_tx,
+        wire::session_update_with_goose_meta(
+            &p.session_id,
+            json!({ "sessionUpdate": "session_info_update" }),
+            json!({ "activeRunId": Value::Null }),
+        ),
+    )
+    .await;
+
+    // ORDERING IS LOAD-BEARING: emit usage BEFORE the prompt response.
+    // buzz-acp's UsageTracker processes this while the turn is still in
+    // flight; the response triggers take_turn_usage(). Reversing these
+    // produces zero kind-44200 events, silently.
+    if tokens.observed() {
+        if let Some((acc_in, acc_out, acc_cached, acc_written, acc_total, acc_identity)) =
+            accumulated
         {
-            // Same builder the run loop uses for its per-round reports, so the
-            // final notification is shape-identical to the ones that preceded
-            // it and a consumer taking the high-water mark lands on this one.
             let update = wire::usage_update_payload(
-                accumulated_in.exact_value(),
-                accumulated_out.exact_value(),
-                accumulated_cached.exact_value(),
-                accumulated_written.exact_value(),
-                accumulated_total,
-                effective_model_str,
-                // Pass the proven per-turn identity if consistent; absent otherwise.
-                turn_pricing_identity
-                    .as_ref()
-                    .and_then(|inner| inner.as_ref()),
+                Some(acc_in),
+                Some(acc_out),
+                acc_cached.exact_value(),
+                acc_written.exact_value(),
+                acc_total,
+                &turn_model_id,
+                acc_identity.as_ref().and_then(|identity| identity.as_ref()),
             );
-            wire::send(&wire_tx, goose_session_update(&sid, update)).await;
+            wire::send(wire_tx, goose_session_update(&p.session_id, update)).await;
         }
     }
+
     match result {
         Ok(stop) => {
             wire::send(
-                &wire_tx,
+                wire_tx,
                 wire::ok(id, json!({ "stopReason": stop.as_wire() })),
             )
             .await
         }
-        Err(e) => wire::send(&wire_tx, wire::err(id, e.json_rpc_code(), &e.to_string())).await,
+        Err(e) => wire::send(wire_tx, wire::err(id, e.json_rpc_code(), &e.to_string())).await,
     }
 }
 
-async fn acquire_session(
-    app: &Arc<App>,
-    session_id: &str,
-) -> Result<
-    (
-        String,
-        Arc<McpRegistry>,
-        Vec<SkillEntry>,
-        Vec<HistoryItem>,
-        Option<String>,
-        usize,
-        Option<u64>,
-        Option<usize>,
-        watch::Receiver<bool>,
-        Arc<str>,
-        Option<String>,
-        String,
-        mpsc::UnboundedReceiver<Vec<ContentBlock>>,
-        crate::types::SessionUsageBaseline,
-    ),
-    &'static str,
-> {
+async fn set_model(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    let p: SessionSetModelParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, &format!("session/set_model: {e}")),
+            )
+            .await
+        }
+    };
+    if p.model_id.trim().is_empty() {
+        return wire::send(
+            wire_tx,
+            wire::err(id, INVALID_PARAMS, "session/set_model: empty modelId"),
+        )
+        .await;
+    }
     let mut sessions = app.sessions.lock().await;
-    let s = sessions.get_mut(session_id).ok_or("unknown session")?;
-    if s.busy {
-        return Err("prompt already in flight");
+    match sessions.get_mut(&p.session_id) {
+        Some(s) => {
+            s.pending_model = Some(p.model_id);
+            drop(sessions);
+            wire::send(wire_tx, wire::ok(id, Value::Null)).await;
+        }
+        None => {
+            drop(sessions);
+            wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, "session/set_model: unknown session"),
+            )
+            .await
+        }
     }
-    // Generate the run id before mutating session state. On RNG failure we reject
-    // the prompt cleanly: the session stays idle and the caller can retry. Generating
-    // after `s.busy = true` with `?` would wedge the session permanently busy.
-    let run_id = format!(
-        "run_{}",
-        session_token().map_err(|_| "rng failure; retry prompt")?
-    );
-    s.busy = true;
-    let (tx, rx) = watch::channel(false);
-    s.cancel_tx = tx;
-    // Skills are read-only after session creation; clone the Vec so RunCtx
-    // can hold a reference without holding the sessions lock.
-    let skills = s.skills.clone();
-    // Fresh run id + steer channel for this turn. The run id lets steer-capable
-    // clients target *this* turn (rejecting steers aimed at a turn that already
-    // ended); the channel carries mid-turn injections to the run loop.
-    s.active_run_id = Some(run_id.clone());
-    let (steer_tx, steer_rx) = mpsc::unbounded_channel();
-    s.steer_tx = Some(steer_tx);
-    let effective_model = s.effective_model.clone();
-    Ok((
-        s.id.clone(),
-        s.mcp.clone(),
-        skills,
-        std::mem::take(&mut s.history),
-        s.original_task.take(),
-        s.handoff_count,
-        s.last_request_input_tokens,
-        s.last_request_history_bytes,
-        rx,
-        Arc::clone(&s.effective_system_prompt),
-        effective_model,
-        run_id,
-        steer_rx,
-        // Snapshot rather than a handle: the run loop reports cumulative usage
-        // after every LLM round, and taking the sessions lock on each of those
-        // would serialise concurrent sessions behind one another's provider
-        // round-trips. Nothing else advances these counters while this turn
-        // holds `busy`, so the snapshot cannot go stale under it.
-        crate::types::SessionUsageBaseline {
-            input_tokens: s.accumulated_input_tokens,
-            output_tokens: s.accumulated_output_tokens,
-            cached_input_tokens: s.accumulated_cached_input_tokens,
-            cache_write_tokens: s.accumulated_cache_write_tokens,
-            total_state: s.accumulated_total_state,
-        },
-    ))
 }
 
-fn session_token() -> Result<String, String> {
-    let mut b = [0u8; 8];
-    getrandom::fill(&mut b).map_err(|e| format!("rng: getrandom failed: {e}"))?;
-    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+/// Non-cancelling mid-turn steering.
+///
+/// Goose's own `steer()` has exactly buzz-agent's semantics: the message is
+/// queued and drained at the *round boundary* (goose `agent.rs:1951-1974`),
+/// the turn is not restarted, and a pending steer even prevents the turn from
+/// ending (`agent.rs:2876-2878`).
+async fn steer(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    let p: SessionSteerParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, &format!("steer: {e}")),
+            )
+            .await
+        }
+    };
+
+    // Reject an empty steer before touching the session map, matching main.
+    // buzz-acp maps a successful steer to SteerAck::Ok and considers the user's
+    // message delivered, so acknowledging a no-op would swallow it silently and
+    // suppress the cancel+merge fallback (`buzz-acp/src/pool.rs:329-366`).
+    let text = agent::prompt_to_text(&p.prompt);
+    if text.trim().is_empty() {
+        return wire::send(
+            wire_tx,
+            wire::err(id, INVALID_PARAMS, "steer: prompt must not be empty"),
+        )
+        .await;
+    }
+
+    let steers = {
+        let sessions = app.sessions.lock().await;
+        let Some(s) = sessions.get(&p.session_id) else {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, "steer: unknown session"),
+            )
+            .await;
+        };
+        // Optimistic concurrency: the harness distinguishes "no active run"
+        // from "run id mismatch" to decide whether to fire its cancel+merge
+        // fallback (`buzz-acp/src/pool.rs:329-366`).
+        let Some(active) = s.active_run_id.as_deref() else {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, "steer: no active run"),
+            )
+            .await;
+        };
+        if active != p.expected_run_id {
+            return wire::send(
+                wire_tx,
+                wire::err(id, INVALID_PARAMS, "steer: run id mismatch"),
+            )
+            .await;
+        }
+        s.steers.clone()
+    };
+
+    let message_id = format!("steer_{}", uuid_like());
+    // `with_steer()` marks the message so downstream consumers can tell a
+    // steer apart from an ordinary user turn -- goose's own steer path sets
+    // it (`agent.rs:540`), and its ACP surface republishes it as
+    // `_meta.goose.steer`. buzz-acp does not read it today, but an unmarked
+    // steer is indistinguishable from the user having simply sent another
+    // message, which is exactly the distinction the flag exists to keep.
+    steers
+        .push(
+            goose_provider_types::conversation::message::Message::user()
+                .with_text(text)
+                .with_steer(),
+        )
+        .await;
+
+    wire::send(
+        wire_tx,
+        wire::ok(
+            id,
+            json!({ "runId": p.expected_run_id, "messageId": message_id }),
+        ),
+    )
+    .await;
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::catalog::ModelEntry;
-    use crate::types::AgentError;
+async fn cancel_session(app: &Arc<App>, params: Value) {
+    let Ok(p) = serde_json::from_value::<SessionCancelParams>(params) else {
+        return;
+    };
+    let sessions = app.sessions.lock().await;
+    if let Some(s) = sessions.get(&p.session_id) {
+        if let Some(c) = &s.cancel {
+            // Goose plumbs this token down into MCP tool calls and sends
+            // `notifications/cancelled` per in-flight request
+            // (goose `mcp_client.rs:687-690`) — a cooperative drain rather
+            // than a hard abort, matching buzz-agent's contract.
+            c.cancel();
+        }
+    }
+}
 
-    /// Regression: a discovery error must not pin the models_cache for the process lifetime.
-    ///
-    /// `resolve_models_catalog` uses `get_or_try_init` so an `Err` leaves the `OnceCell`
-    /// empty and the next `session/new` retries discovery. This test calls
-    /// `resolve_models_catalog` directly — the same function `session_new` calls — so
-    /// reverting `session_new` to `get_or_init` (or any other cache-on-error variant) would
-    /// break this test, not just the standalone `OnceCell` semantics.
-    #[tokio::test]
-    async fn models_cache_does_not_pin_on_discovery_error() {
-        let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
+/// Swap the model for an existing session.
+///
+/// Rebuilds the configured Buzz provider and installs it with the new
+/// `ModelConfig`. `SharedProvider` is an
+/// `Arc<Mutex<Option<..>>>` precisely so this is hot-swappable
+/// (goose `agents/types.rs:11-12`).
+/// Construct the goose provider. See [`crate::provider`].
+async fn build_provider(
+    provider_name: &str,
+) -> Result<Arc<dyn goose_providers::base::Provider>, AgentError> {
+    crate::provider::build(provider_name).await
+}
 
-        // First call — discovery failure is surfaced and leaves the cell empty.
-        let error = crate::resolve_models_catalog(&cache, async {
-            Err::<Vec<ModelEntry>, AgentError>(AgentError::Llm("transient failure".into()))
-        })
-        .await
-        .unwrap_err();
-        assert!(matches!(error, AgentError::Llm(_)));
+async fn apply_model(model: &crate::model::SessionModel, model_id: &str) -> Result<(), AgentError> {
+    let provider_name = std::env::var("GOOSE_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+    let provider = build_provider(&provider_name).await?;
+    let model_config = crate::model_config::from_env(&provider_name, model_id)
+        .map_err(|e| AgentError::LlmModelNotFound(e.to_string()))?;
+    // Swapped on buzz's own handle. `Agent::update_provider` would do the same
+    // thing plus a write to goose's session row; see [`crate::model`].
+    model
+        .set(provider, model_config, model_id.to_string())
+        .await;
+    Ok(())
+}
 
-        // Second call — discovery succeeds. Cell is now populated and returned.
-        let discovered = vec![ModelEntry {
-            id: "databricks-meta-llama-3-1-70b-instruct".into(),
-            name: "databricks-meta-llama-3-1-70b-instruct".into(),
-        }];
-        let discovered_clone = discovered.clone();
-        let second = crate::resolve_models_catalog(&cache, async move {
-            Ok::<Vec<ModelEntry>, AgentError>(discovered_clone)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            second, discovered,
-            "second call must return the discovered catalog"
-        );
-        assert!(
-            cache.get().is_some(),
-            "cell must be populated after successful discovery"
-        );
-        assert_eq!(
-            cache.get().unwrap(),
-            &discovered,
-            "cache must hold the successful discovery result"
-        );
+/// Preserve buzz-agent's error taxonomy across provider construction, so the
+/// harness's JSON-RPC code mapping (-32001 auth, -32002 model-not-found) keeps
+/// its meaning.
+pub(crate) fn map_provider_error(msg: &str) -> AgentError {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("auth") || lower.contains("401") || lower.contains("api key") {
+        AgentError::LlmAuth(msg.to_string())
+    } else if lower.contains("model") && lower.contains("not found") {
+        AgentError::LlmModelNotFound(msg.to_string())
+    } else {
+        AgentError::Llm(msg.to_string())
+    }
+}
+
+/// Short random id. Not a UUID; just needs to be unguessable enough that a
+/// stale steer can't collide with a live run.
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // `buzz-agent auth <provider>` — interactive login, then exit.
+    //
+    // Preserved from the pre-goose crate. Goose owns provider auth for the
+    // agent loop, but nothing in goose performs an *interactive* Databricks
+    // PKCE login, and `buzz-model-catalog/src/auth.rs:417` still tells users
+    // to run this exact command when the token cache is empty.
+    let args: Vec<String> = std::env::args().collect();
+    if matches!(args.get(1).map(String::as_str), Some("auth")) {
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(auth_subcommand(&args[2..]));
     }
 
-    #[tokio::test]
-    async fn models_catalog_does_not_cache_oauth_auth_fallback() {
-        let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
-        let error = crate::resolve_models_catalog(&cache, async {
-            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("sign in again".into()))
-        })
-        .await
-        .unwrap_err();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
 
-        assert!(matches!(error, AgentError::LlmAuth(_)));
-        assert!(cache.get().is_none());
+    let cfg = Config::from_env();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve(cfg))?;
+    Ok(())
+}
 
-        let discovered = vec![ModelEntry {
-            id: "authenticated-model".into(),
-            name: "authenticated-model".into(),
-        }];
-        let result = crate::resolve_models_catalog(&cache, async {
-            Ok::<Vec<ModelEntry>, AgentError>(discovered.clone())
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(result, discovered);
-        assert_eq!(cache.get(), Some(&discovered));
-    }
-
-    #[test]
-    fn configured_model_fallback_is_trimmed_and_singular() {
-        // Unknown id: trimmed, and the raw id passes through as the name.
-        assert_eq!(
-            crate::configured_model_fallback("  configured-model  "),
-            vec![ModelEntry {
-                id: "configured-model".into(),
-                name: "configured-model".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn configured_model_fallback_curates_known_databricks_id() {
-        // A configured Databricks id known to the manifest gets its curated
-        // label; `id` stays the raw wire/config value.
-        assert_eq!(
-            crate::configured_model_fallback("databricks-gpt-5-5"),
-            vec![ModelEntry {
-                id: "databricks-gpt-5-5".into(),
-                name: "GPT-5.5".into(),
-            }]
-        );
+/// `buzz-agent auth <provider>` — run a provider's interactive auth flow and
+/// persist the result. Needs a browser. Reads `DATABRICKS_HOST` from env.
+///
+/// The cached token is what lets both the agent loop and the desktop model
+/// picker work without a static `DATABRICKS_TOKEN`.
+async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match args.first().map(String::as_str) {
+        Some("databricks" | "databricks_v2" | "databricks-v2") => {
+            let host = std::env::var("DATABRICKS_HOST")
+                .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
+            buzz_model_catalog::authenticate_databricks(&host).await?;
+            eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
+            Ok(())
+        }
+        Some(other) => Err(format!("auth: unknown provider {other:?}").into()),
+        None => Err("auth: provider required (try: buzz-agent auth databricks)".into()),
     }
 }

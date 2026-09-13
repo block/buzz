@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::Form;
 use axum::{routing::get, routing::post, Json, Router};
-use buzz_agent::auth::{
+use buzz_model_catalog::auth::{
     AuthError, AuthIntent, BrowserOpener, PkceOAuthConfig, PkceOAuthTokenSource,
 };
 use serde::Deserialize;

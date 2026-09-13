@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -379,6 +380,10 @@ pub struct PkceOAuthTokenSource {
     /// lock serializes slow-path work; this cell keeps the fast path off disk
     /// during a turn and off the lock entirely.
     state: Mutex<Option<CachedToken>>,
+    /// Set synchronously by Goose's provider retry hook after a 401. The next
+    /// headless bearer request consumes it and asks the coordinator to refresh
+    /// that exact rejected credential.
+    current_bearer_rejected: AtomicBool,
 }
 
 impl PkceOAuthTokenSource {
@@ -435,7 +440,33 @@ impl PkceOAuthTokenSource {
             cache_path,
             opener,
             state: Mutex::new(initial),
+            current_bearer_rejected: AtomicBool::new(false),
         }))
+    }
+
+    /// Mark the currently cached bearer as rejected by the provider.
+    ///
+    /// Goose's retry hook is synchronous, so it records only the signal here;
+    /// the next async headless acquisition resolves the token identity and
+    /// performs the coordinated refresh.
+    pub fn reject_current_bearer(&self) {
+        self.current_bearer_rejected.store(true, Ordering::Release);
+    }
+
+    /// Consume a provider-rejection signal and return the rejected bearer.
+    async fn take_rejected_bearer(&self) -> Result<Option<String>, AgentError> {
+        if !self.current_bearer_rejected.swap(false, Ordering::AcqRel) {
+            return Ok(None);
+        }
+        let state = self.state.lock().await;
+        state
+            .as_ref()
+            .map(|token| Some(token.access_token.clone()))
+            .ok_or_else(|| {
+                AgentError::LlmAuth(
+                    "provider rejected bearer but no cached token is available".into(),
+                )
+            })
     }
 
     /// Path of the cross-process advisory lock file guarding slow-path auth
@@ -1294,7 +1325,8 @@ impl TokenSource for PkceOAuthTokenSource {
     ///
     /// [`interactive_login`]: PkceOAuthTokenSource::interactive_login
     async fn bearer(&self) -> Result<String, AgentError> {
-        self.acquire(AuthIntent::Headless, None)
+        let rejected = self.take_rejected_bearer().await?;
+        self.acquire(AuthIntent::Headless, rejected.as_deref())
             .await
             .map_err(Into::into)
     }
@@ -1304,7 +1336,8 @@ impl TokenSource for PkceOAuthTokenSource {
     /// no-browser requirement at the call site (and so other [`TokenSource`]
     /// impls that *would* browse in `bearer` can still expose a safe path).
     async fn bearer_no_browser(&self) -> Result<String, AgentError> {
-        self.acquire(AuthIntent::Headless, None)
+        let rejected = self.take_rejected_bearer().await?;
+        self.acquire(AuthIntent::Headless, rejected.as_deref())
             .await
             .map_err(Into::into)
     }
@@ -2598,6 +2631,34 @@ mod tests {
             AgentError::LlmAuth(_) => {} // correct: terminal, no browser
             other => panic!("expected terminal LlmAuth, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_current_bearer_forces_headless_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://invalid.example.test/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+        let future_expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        *source.state.lock().await = Some(CachedToken {
+            access_token: "rejected-but-locally-fresh".into(),
+            refresh_token: None,
+            expires_at: Some(future_expiry),
+        });
+
+        source.reject_current_bearer();
+        let result = source.bearer_no_browser().await;
+
+        assert!(matches!(result, Err(AgentError::LlmAuth(_))));
     }
 
     /// `bearer_no_browser` with an empty cache and no refresh token must
