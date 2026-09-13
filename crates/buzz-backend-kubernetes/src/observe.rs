@@ -125,7 +125,10 @@ pub fn referenced_secret(pod: &Pod) -> Option<String> {
         .containers
         .iter()
         .flat_map(|c| c.env_from.iter().flatten())
-        .find_map(|source| source.secret_ref.as_ref().map(|r| r.name.clone()))
+        // The provider-owned per-attempt identity Secret is always last. An
+        // optional cluster-managed environment source may precede it.
+        .filter_map(|source| source.secret_ref.as_ref().map(|r| r.name.clone()))
+        .next_back()
 }
 
 /// Classify a pull failure from the kubelet's message.

@@ -111,13 +111,28 @@ pub fn build_pod(
         // No `command`/`args`: the image's entrypoint execs the harness as
         // PID 1 (§Entrypoint). Overriding it here would be how a provider
         // accidentally puts a shell in front of the signal receiver.
-        env_from: Some(vec![EnvFromSource {
-            secret_ref: Some(SecretEnvSource {
-                name: identity.secret_name(generation),
-                optional: Some(false),
-            }),
-            ..Default::default()
-        }]),
+        // Cluster-managed application values load first. The provider-owned
+        // identity Secret loads last so an external Secret can never override
+        // BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, or any other launch authority.
+        env_from: Some(
+            cfg.environment_ref
+                .iter()
+                .map(|name| EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: name.clone(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                })
+                .chain(std::iter::once(EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: identity.secret_name(generation),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }))
+                .collect(),
+        ),
         resources: Some(ResourceRequirements {
             requests: Some(requests),
             limits: Some(limits),
@@ -192,6 +207,7 @@ pub fn intent_template(
         &cfg.image,
         &cfg.resources,
         cfg.service_account.as_deref(),
+        cfg.environment_ref.as_deref(),
         env_keys,
     )
 }
@@ -342,11 +358,44 @@ mod tests {
         let id = identity();
         let cfg = provider_config();
         let pod = build_pod(&id, &cfg, "gen00042", &Fingerprint::from_annotation("f"));
-        let source = &spec(&pod).containers[0].env_from.as_ref().unwrap()[0];
+        let source = spec(&pod).containers[0]
+            .env_from
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap();
         let secret_ref = source.secret_ref.as_ref().unwrap();
         assert_eq!(secret_ref.name, id.secret_name("gen00042"));
         assert_eq!(secret_ref.optional, Some(false));
         assert!(source.config_map_ref.is_none());
+    }
+
+    #[test]
+    fn cluster_environment_loads_before_provider_identity() {
+        let id = identity();
+        let mut cfg = provider_config();
+        cfg.environment_ref = Some("erp-hermes-runtime".into());
+        let pod = build_pod(&id, &cfg, "gen00042", &Fingerprint::from_annotation("f"));
+        let sources = spec(&pod).containers[0].env_from.as_ref().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[0]
+                .secret_ref
+                .as_ref()
+                .map(|source| source.name.as_str()),
+            Some("erp-hermes-runtime")
+        );
+        assert_eq!(
+            sources[1]
+                .secret_ref
+                .as_ref()
+                .map(|source| source.name.as_str()),
+            Some(id.secret_name("gen00042").as_str())
+        );
+        assert_eq!(
+            sources[0].secret_ref.as_ref().unwrap().optional,
+            Some(false)
+        );
     }
 
     /// Identity, ownership marker, and the recorded intent all travel on the
@@ -434,7 +483,12 @@ mod tests {
         assert_eq!(read(&pod_a), read(&pod_b));
         // ...while the Secret they reference differs.
         let secret_of = |p: &Pod| {
-            spec(p).containers[0].env_from.as_ref().unwrap()[0]
+            spec(p).containers[0]
+                .env_from
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
                 .secret_ref
                 .as_ref()
                 .unwrap()

@@ -1396,9 +1396,16 @@ removable with `kubectl delete`.
 ### `provider_config` v1 fields
 
 `context`, `namespace`, `image`, `cpu_request`, `memory_request`,
-`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account` —
-9 of the 20-field validation cap. Node selectors, tolerations, and PVCs are
-deliberately baked out of v1 to preserve budget.
+`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account`,
+`environment_ref` — 10 of the 20-field validation cap. `environment_ref`
+names an existing Secret in the selected namespace. It lets External Secrets
+or another cluster operator own application credentials without copying their
+values into Desktop configuration. The provider-owned per-attempt identity
+Secret loads after that reference, so cluster-managed values cannot override
+the agent nsec, owner authorization, relay, or lifecycle nonce. The provider
+fails before creating or replacing agent resources when the referenced Secret
+is absent. Node selectors, tolerations, and PVCs are deliberately baked out of
+v1 to preserve budget.
 
 ### Distribution
 
