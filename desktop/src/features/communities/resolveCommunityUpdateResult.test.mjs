@@ -105,3 +105,53 @@ test("resolveCommunityUpdateResult_same_relay_url_is_not_duplicate_of_self", () 
   });
   assert.deepEqual(result, { kind: "unchanged" });
 });
+
+// ---------------------------------------------------------------------------
+// Clearing an optional field to `undefined` (repos_dir / token save bug)
+// ---------------------------------------------------------------------------
+
+test("resolveCommunityUpdateResult_clearing_reposDir_alone_is_registered_as_updated", () => {
+  // Clearing an existing reposDir sends { reposDir: undefined } as the only
+  // key. Regression guard: this must not be treated as "field omitted."
+  const communitiesWithReposDir = [
+    { ...COMMUNITIES[0], reposDir: "/Users/sheldrone/code" },
+    COMMUNITIES[1],
+  ];
+  const result = resolveCommunityUpdateResult(
+    communitiesWithReposDir,
+    "ws-1",
+    "ws-1",
+    { reposDir: undefined },
+  );
+  assert.deepEqual(result, { kind: "updated", requiresReinit: true });
+});
+
+test("resolveCommunityUpdateResult_clearing_token_alone_is_registered_as_updated", () => {
+  const communitiesWithToken = [
+    { ...COMMUNITIES[0], token: "buzz_existing" },
+    COMMUNITIES[1],
+  ];
+  const result = resolveCommunityUpdateResult(
+    communitiesWithToken,
+    "ws-1",
+    "ws-1",
+    { token: undefined },
+  );
+  assert.deepEqual(result, { kind: "updated", requiresReinit: true });
+});
+
+test("resolveCommunityUpdateResult_omitting_reposDir_key_entirely_is_unchanged", () => {
+  // The other side of the fix: a field genuinely not present in `updates`
+  // (not even as `undefined`) must still be a no-op, same as before.
+  const communitiesWithReposDir = [
+    { ...COMMUNITIES[0], reposDir: "/Users/sheldrone/code" },
+    COMMUNITIES[1],
+  ];
+  const result = resolveCommunityUpdateResult(
+    communitiesWithReposDir,
+    "ws-1",
+    "ws-1",
+    { name: "Community A" },
+  );
+  assert.deepEqual(result, { kind: "unchanged" });
+});
