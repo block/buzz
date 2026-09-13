@@ -1,4 +1,12 @@
 import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
+import {
+  clearOwnOutbox,
+  markLegacyConsumed,
+  reclaimOutbox,
+  resumeWholeBlobOutbox,
+  writeOwnOutbox,
+} from "./sidebarSyncWatermark";
+import { claimLegacy } from "./mergeLaneStorage.shared";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 export const MAX_CHANNEL_SECTIONS = 100;
@@ -80,6 +88,13 @@ export function parseChannelSectionPayload(
 ): ChannelSectionStore | null {
   if (typeof json !== "object" || json === null) return null;
   const obj = json as Record<string, unknown>;
+  // Reject payloads from a future schema version we cannot safely interpret:
+  // a v2+ blob on the relay must trigger the retain/retry path so a later local
+  // edit never publishes over authoritative state this client does not understand
+  // (matches sort/stars/mutes parsers and Carl P1). Local-storage reads always
+  // go through `parseRaw`, which checks `version !== 1` before calling here, so
+  // this guard does not change the local-storage parse contract.
+  if (obj.version !== 1) return null;
   const sections: ChannelSection[] = Array.isArray(obj.sections)
     ? obj.sections.flatMap((entry: unknown): ChannelSection[] => {
         if (typeof entry !== "object" || entry === null) return [];
@@ -134,12 +149,26 @@ function parseRaw(raw: string | null): ChannelSectionStore | null {
 /**
  * Read the section store for `pubkey` scoped to `relayUrl`.
  *
- * On first access for a scoped key, migrates any existing data from the
- * legacy pubkey-only key so users don't lose their sections on upgrade.
- * After a successful migration write the legacy key is deleted, making
- * this a globally one-time operation — subsequent empty scoped-key reads
- * (i.e. a different relay) won't see legacy data and won't trigger
- * cross-relay contamination via the seed-publish path.
+ * Enforces one invariant on every read: a scoped copy is exposed only while no
+ * importable legacy (pubkey-only) key remains. If a non-empty legacy key still
+ * exists — whether because this is the first scoped read or because a prior
+ * migration wrote the scoped copy but could not delete the legacy key — we
+ * finish the claim inline: write the scoped copy if absent, delete the legacy
+ * key, and expose the value only once that delete provably took. On any storage
+ * failure we return `DEFAULT_STORE`, which cannot seed-publish (bootstrap gates
+ * on a non-empty local store), leaving the claim to complete on a later read
+ * once storage recovers. This makes "scoped data is owned only when the legacy
+ * key is gone" a property the reader proves every read, not a promise a
+ * one-shot migration hopes to keep under failing storage — so relay A's
+ * sections can never seed-publish onto a first-visited relay B (Carl P1).
+ *
+ * Concurrent windows are safe without an atomic claim. Each window (main and
+ * huddle) takes its scope from the app-wide active community at mount, so the
+ * first scoped read for a live legacy key runs before any second relay scope
+ * can exist; that read either claims the legacy key or hits the failure path
+ * above. A race migrates the identical legacy value to the identical scoped key
+ * (idempotent), and the loser's post-delete confirmation fails and exposes
+ * `DEFAULT_STORE`.
  */
 export function readChannelSectionsStore(
   pubkey: string,
@@ -147,33 +176,28 @@ export function readChannelSectionsStore(
 ): ChannelSectionStore {
   try {
     const key = storageKey(pubkey, relayUrl);
-    const raw = window.localStorage.getItem(key);
+    const scoped = parseRaw(window.localStorage.getItem(key));
 
-    // Scoped key already has data — use it directly.
-    if (raw !== null) {
-      return parseRaw(raw) ?? DEFAULT_STORE;
-    }
+    // Unscoped read: the key IS the legacy key, so there is nothing to claim.
+    if (!relayUrl) return scoped ?? DEFAULT_STORE;
 
-    // No scoped data yet.  If we were given a relay scope, attempt a
-    // one-time migration from the legacy pubkey-only key.
-    if (relayUrl) {
-      const legacyKey = storageKey(pubkey);
-      const legacyRaw = window.localStorage.getItem(legacyKey);
-      const migrated = parseRaw(legacyRaw);
-      if (migrated && migrated.sections.length > 0) {
-        // Persist under the scoped key and remove the legacy key so this
-        // migration cannot fire again for any other relay scope.
-        try {
-          window.localStorage.setItem(key, JSON.stringify(migrated));
-          window.localStorage.removeItem(legacyKey);
-        } catch {
-          // Ignore write failures — we still return the migrated value.
-        }
-        return migrated;
-      }
-    }
+    const legacyKey = storageKey(pubkey);
+    const legacy = parseRaw(window.localStorage.getItem(legacyKey));
+    const legacyHasData = legacy !== null && legacy.sections.length > 0;
 
-    return DEFAULT_STORE;
+    // No importable legacy value remains — an existing scoped copy is proven
+    // owned. This short-circuits every read after a completed claim.
+    if (!legacyHasData) return scoped ?? DEFAULT_STORE;
+
+    // A consumable legacy key still coexists with (or would seed) the scoped
+    // key; neither is safe to expose until that legacy key is provably gone.
+    return claimLegacy(
+      key,
+      legacyKey,
+      scoped ?? legacy,
+      scoped !== null,
+      DEFAULT_STORE,
+    );
   } catch {
     return DEFAULT_STORE;
   }
@@ -193,4 +217,109 @@ export function writeChannelSectionsStore(
   } catch {
     return false;
   }
+}
+
+const OUTBOX_KEY_PREFIX = "buzz-channel-sections-outbox.v1";
+
+// The single shared key written by builds before the outbox was keyed
+// per-window. Enumerated as one more record so an edit persisted by a prior
+// build still resumes, and reclaimed by the same relay-gated rule.
+function legacyOutboxKey(pubkey: string, relayUrl: string): string {
+  return `${OUTBOX_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalizeRelayUrl(relayUrl))}`;
+}
+
+/**
+ * Persist this window's unpublished edit under its own outbox key. Written
+ * synchronously on every edit as a single unconditional `setItem` (no shared-
+ * key read-modify-write); resumed on next mount so an edit made <2s before
+ * quit/community-switch is never dropped. `queuedAt` stamps the write so resume
+ * replays only the newest queued blob (whole-blob LWW). Returns whether the
+ * intent is now durably held in this window's own v2 key (see `writeOwnOutbox`).
+ */
+export function writeChannelSectionsOutbox(
+  pubkey: string,
+  store: ChannelSectionStore,
+  relayUrl: string,
+  nowSecs?: number,
+): boolean {
+  return writeOwnOutbox(
+    OUTBOX_KEY_PREFIX,
+    pubkey,
+    relayUrl,
+    boundChannelSectionsStore(store),
+    nowSecs,
+  );
+}
+
+/**
+ * The whole-blob outbox record to resume on boot, or null when none exists.
+ * Whole-blob LWW: only the max-`queuedAt` record is replayed. Returns the
+ * winning store plus, when that winner is a not-yet-consumed legacy blob, the
+ * raw string the caller marks consumed (via `markChannelSectionsLegacyConsumed`)
+ * once it has durably re-queued the intent — the legacy key is never deleted,
+ * so this one-shot marker is what stops it republishing above the head forever.
+ */
+export function readChannelSectionsOutbox(
+  pubkey: string,
+  relayUrl: string,
+): {
+  store: ChannelSectionStore;
+  legacyRawToConsume: string | null;
+  queuedAt: number;
+} | null {
+  return resumeWholeBlobOutbox(
+    OUTBOX_KEY_PREFIX,
+    legacyOutboxKey(pubkey, relayUrl),
+    pubkey,
+    relayUrl,
+    parseChannelSectionPayload,
+  );
+}
+
+/**
+ * Mark a replayed legacy sections blob consumed so it is not resumed again on a
+ * later boot. Call only AFTER the intent is durably held in this window's own
+ * v2 key (its synchronous publish path), so a crash before this write replays
+ * the legacy blob once more rather than losing it.
+ */
+export function markChannelSectionsLegacyConsumed(
+  pubkey: string,
+  relayUrl: string,
+  raw: string,
+): void {
+  markLegacyConsumed(OUTBOX_KEY_PREFIX, pubkey, relayUrl, raw);
+}
+
+/** Clear this window's own outbox key (its edit published or is a no-op). */
+export function clearChannelSectionsOutbox(
+  pubkey: string,
+  relayUrl: string,
+): void {
+  clearOwnOutbox(OUTBOX_KEY_PREFIX, pubkey, relayUrl);
+}
+
+/**
+ * Reclaim foreign outbox keys the relay head itself STRICTLY supersedes: a
+ * whole-blob record queued strictly before the durable head's `created_at`
+ * (`queuedAt` < `headCreatedAt`) lost LWW to a blob the relay already holds, so
+ * dropping it matches the relay's own resolution. A same-second record
+ * (`queuedAt` == `headCreatedAt`) is kept — one-second clock granularity cannot
+ * prove it lost, so it drains only when a strictly-newer head lands. A record
+ * queued after the head is live intent and is likewise kept. Records are
+ * write-once so the delete needs no recheck; never touches this window's own
+ * keys or the legacy shared key. Call only after a successful fetch.
+ */
+export function reclaimSupersededSectionsOutbox(
+  pubkey: string,
+  relayUrl: string,
+  headCreatedAt: number,
+): void {
+  reclaimOutbox(
+    OUTBOX_KEY_PREFIX,
+    legacyOutboxKey(pubkey, relayUrl),
+    pubkey,
+    relayUrl,
+    parseChannelSectionPayload,
+    (record) => record.queuedAt < headCreatedAt,
+  );
 }

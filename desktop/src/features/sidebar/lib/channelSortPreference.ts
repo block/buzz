@@ -1,5 +1,12 @@
 import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 import type { Channel } from "@/shared/api/types";
+import {
+  clearOwnOutbox,
+  markLegacyConsumed,
+  reclaimOutbox,
+  resumeWholeBlobOutbox,
+  writeOwnOutbox,
+} from "./sidebarSyncWatermark";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sort.v1";
 export const MAX_CHANNEL_SORT_GROUPS = 104;
@@ -131,6 +138,107 @@ export function writeChannelSortStore(
   } catch {
     return false;
   }
+}
+
+const OUTBOX_KEY_PREFIX = "buzz-channel-sort-outbox.v1";
+
+// The single shared key written by builds before the outbox was keyed
+// per-window. Enumerated as one more record so an edit persisted by a prior
+// build still resumes, and reclaimed by the same relay-gated rule.
+function legacyOutboxKey(pubkey: string, relayUrl: string): string {
+  return `${OUTBOX_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalizeRelayUrl(relayUrl))}`;
+}
+
+/**
+ * Persist this window's unpublished sort edit under its own outbox key. Written
+ * synchronously on every edit as a single unconditional `setItem` (no shared-
+ * key read-modify-write); resumed on next mount so an edit made <2s before
+ * quit/community-switch is never dropped. `queuedAt` stamps the write so resume
+ * replays only the newest queued blob (whole-blob LWW).
+ */
+export function writeChannelSortOutbox(
+  pubkey: string,
+  store: ChannelSortStore,
+  relayUrl: string,
+  nowSecs?: number,
+): boolean {
+  return writeOwnOutbox(
+    OUTBOX_KEY_PREFIX,
+    pubkey,
+    relayUrl,
+    boundChannelSortStore(store),
+    nowSecs,
+  );
+}
+
+/**
+ * The whole-blob outbox record to resume on boot, or null when none exists.
+ * Whole-blob LWW: only the max-`queuedAt` record is replayed. Returns the
+ * winning store plus, when that winner is a not-yet-consumed legacy blob, the
+ * raw string the caller marks consumed (via `markChannelSortLegacyConsumed`)
+ * once it has durably re-queued the intent — the legacy key is never deleted,
+ * so this one-shot marker is what stops it republishing above the head forever.
+ */
+export function readChannelSortOutbox(
+  pubkey: string,
+  relayUrl: string,
+): {
+  store: ChannelSortStore;
+  legacyRawToConsume: string | null;
+  queuedAt: number;
+} | null {
+  return resumeWholeBlobOutbox(
+    OUTBOX_KEY_PREFIX,
+    legacyOutboxKey(pubkey, relayUrl),
+    pubkey,
+    relayUrl,
+    parseChannelSortPayload,
+  );
+}
+
+/**
+ * Mark a replayed legacy sort blob consumed so it is not resumed again on a
+ * later boot. Call only AFTER the intent is durably held in this window's own
+ * v2 key (its synchronous publish path), so a crash before this write replays
+ * the legacy blob once more rather than losing it.
+ */
+export function markChannelSortLegacyConsumed(
+  pubkey: string,
+  relayUrl: string,
+  raw: string,
+): void {
+  markLegacyConsumed(OUTBOX_KEY_PREFIX, pubkey, relayUrl, raw);
+}
+
+/** Clear this window's own outbox key (its edit published or is a no-op). */
+export function clearChannelSortOutbox(pubkey: string, relayUrl: string): void {
+  clearOwnOutbox(OUTBOX_KEY_PREFIX, pubkey, relayUrl);
+}
+
+/**
+ * Reclaim foreign outbox keys the relay head itself STRICTLY supersedes: a
+ * whole-blob record queued strictly before the durable head's `created_at`
+ * (`queuedAt` < `headCreatedAt`) lost LWW to a blob the relay already holds, so
+ * dropping it matches the relay's own resolution. A same-second record
+ * (`queuedAt` == `headCreatedAt`) is kept — one-second clock granularity cannot
+ * prove it lost, so it drains only when a strictly-newer head lands. A record
+ * queued after the head is live intent and is likewise kept. Records are
+ * write-once so the delete needs no recheck; never touches this window's own
+ * keys or the legacy shared key. Call only after a successful fetch.
+ */
+export function reclaimSupersededSortOutbox(
+  pubkey: string,
+  relayUrl: string,
+  headCreatedAt: number,
+): void {
+  reclaimOutbox(
+    OUTBOX_KEY_PREFIX,
+    legacyOutboxKey(pubkey, relayUrl),
+    pubkey,
+    relayUrl,
+    parseChannelSortPayload,
+    (record) => record.queuedAt < headCreatedAt,
+  );
 }
 
 export function sortModeForGroup(
