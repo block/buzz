@@ -122,7 +122,12 @@ Commands:
 
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
+                          (also proxies /pair* to the pairing-relay sidecar)
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+
+Pairing:
+  Set BUZZ_PAIRING_RELAY_URL in .env (see .env.example). TLS installs use
+  wss://<domain>/pair; non-Caddy installs use the published pair port.
 MSG
     ;;
   *)
