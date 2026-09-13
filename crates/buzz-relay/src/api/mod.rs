@@ -209,6 +209,67 @@ pub mod relay_members {
         }
     }
 
+    /// Decide which NIP-OA owner to record for a caller that is already admitted.
+    ///
+    /// `admitted_via` is what [`enforce_relay_membership`] returned: `Some` only
+    /// when admission itself went through delegation, which already proved the
+    /// owner is a relay member. `None` means the caller got in on its own — an
+    /// open relay, or a *direct* relay member.
+    ///
+    /// The direct-member case is the one this exists for. A closed relay never
+    /// reached owner extraction for it, because [`enforce_relay_membership`]
+    /// returns `Ok(None)` as soon as membership is established, so an agent that
+    /// was added to `relay_members` had no owner on file however many valid
+    /// attestations it presented (#4223, #4937).
+    ///
+    /// On a closed relay the attested owner must itself be a relay member.
+    /// [`materialize_nip_oa_owner`] is first-write-wins and the recorded owner
+    /// selects the agent rate class, so accepting an unverified owner would let
+    /// any member attest itself with a throwaway key — elevating its own rate
+    /// class and permanently binding the mapping against the real owner.
+    ///
+    /// `allow_nip_oa_auth` deliberately does not gate this. That flag governs
+    /// whether NIP-OA may *grant membership* on a closed relay; nothing here
+    /// grants access, the caller is already in.
+    pub async fn resolve_nip_oa_owner(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        admitted_via: Option<nostr::PublicKey>,
+    ) -> Option<nostr::PublicKey> {
+        if admitted_via.is_some() {
+            return admitted_via;
+        }
+
+        let owner = extract_nip_oa_owner(pubkey_bytes, auth_tag_header, signed_auth_created_at)?;
+        if !state.config.require_relay_membership {
+            return Some(owner);
+        }
+
+        let owner_hex = owner.to_hex();
+        match state.db.is_relay_member(community, &owner_hex).await {
+            Ok(true) => Some(owner),
+            Ok(false) => {
+                info!(
+                    agent = %hex::encode(pubkey_bytes),
+                    owner = %owner_hex,
+                    "NIP-OA owner is not a relay member; not recording the attested mapping"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    owner = %owner_hex,
+                    error = %e,
+                    "relay membership check (NIP-OA owner) failed; not recording the mapping"
+                );
+                None
+            }
+        }
+    }
+
     /// Persist a cryptographically verified NIP-OA agent→owner relationship.
     ///
     /// Both principals are ensured first because `agent_owner_pubkey` has a
