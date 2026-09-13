@@ -20,6 +20,7 @@ import {
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
@@ -91,14 +92,21 @@ const INITIAL_RENDER_READY_EVENT = "initial-render-ready";
 
 type BootSplashPhase = "holding" | "fading" | "done";
 
-function useInitialRenderReady() {
+function useInitialRenderReady(themeReady: boolean) {
+  const emittedRef = useRef(false);
+
   useLayoutEffect(() => {
-    if (!isTauri()) {
+    if (!themeReady || emittedRef.current || !isTauri()) {
       return;
     }
 
+    emittedRef.current = true;
+    window.__BUZZ_E2E_COMMAND_LOG__?.push({
+      command: INITIAL_RENDER_READY_EVENT,
+      payload: null,
+    });
     void emit(INITIAL_RENDER_READY_EVENT);
-  }, []);
+  }, [themeReady]);
 }
 
 // E2E runs skip the hold (it would slow every spec's boot and block pointer
@@ -800,7 +808,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
 export function App() {
   useReloadShortcut();
   useCloseWindowShortcut();
-  useInitialRenderReady();
+  const { isLoading: isThemeLoading } = useTheme();
+  useInitialRenderReady(!isThemeLoading);
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
   const [queryClient] = useState(createBuzzQueryClient);
 
