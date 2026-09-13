@@ -214,9 +214,14 @@ export function useChannelPaneHandlers({
   );
 
   const handleOpenThread = React.useCallback(
-    (message: { id: string }) => {
+    (message: {
+      id: string;
+      rootId?: string | null;
+      parentId?: string | null;
+    }) => {
+      const rootId = message.rootId ?? message.parentId ?? message.id;
       if (!requireThreadEditResolution()) return;
-      if (openThreadHeadIdRef.current === message.id) {
+      if (openThreadHeadIdRef.current === rootId && message.id === rootId) {
         deferPanelState(() => {
           onOptimisticOpenThreadHeadIdChange(null);
           setOpenThreadHeadId(null);
@@ -229,8 +234,8 @@ export function useChannelPaneHandlers({
       }
 
       deferPanelState(() => {
-        onOptimisticOpenThreadHeadIdChange(message.id);
-        setOpenThreadHeadId(message.id);
+        onOptimisticOpenThreadHeadIdChange(rootId);
+        setOpenThreadHeadId(rootId);
         setThreadReplyTargetId(message.id);
         setThreadScrollTargetId(null);
         setExpandedThreadReplyIds(new Set());

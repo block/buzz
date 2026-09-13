@@ -195,6 +195,7 @@ function MessageComposerImpl({
     useDraftPersistLifecycle({
       effectiveDraftKey,
       channelId,
+      replyContextId: replyTarget?.id ?? null,
       loadDraft: drafts.loadDraft,
       persistDraft: drafts.persistDraft,
       getMentionRefs: mentions.getDraftMentionRefs,

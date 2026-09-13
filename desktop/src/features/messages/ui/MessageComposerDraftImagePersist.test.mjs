@@ -881,3 +881,83 @@ test("discarding_a_draft_drops_its_retained_local_files", () => {
 
   assert.deepEqual(takeQueuedAttachmentsForDraft("chan-deleted"), []);
 });
+
+test("thread draft lifecycle preserves response context across key switches and StrictMode", async () => {
+  setupStore("thread-response-context");
+  let draftKey = "thread:root";
+  let contextId = "response-a";
+  let editor = "";
+  persistDraftEntry(draftKey, "unfinished", "channel", [IMG_A], []);
+  function Harness() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: "channel",
+      replyContextId: contextId,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [IMG_A],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editor = content;
+      },
+      clearContent: () => {
+        editor = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: { current: new Set() },
+      syncComposerContentFromEditor: () => editor,
+    });
+    return null;
+  }
+  const handle = await mountStrictMode(Harness);
+  assert.equal(loadDraftEntry("thread:root").replyContextId, "response-a");
+  contextId = "response-b";
+  await handle.rerender();
+  draftKey = "thread:other";
+  contextId = null;
+  await handle.rerender();
+  assert.equal(
+    loadDraftEntry("thread:root").replyContextId,
+    "response-b",
+    "incoming draft must not overwrite outgoing context",
+  );
+  assert.equal(loadDraftEntry("thread:root").pendingImeta.length, 1);
+  await handle.unmount();
+});
+
+test("thread selection restores context and accepts later cancellation and explicit selection", async () => {
+  const { useThreadDraftSelection } = await import("./threadDraftSelection.ts");
+  setupStore("restored-thread-selection");
+  persistDraftEntry(
+    "thread:root",
+    "unfinished",
+    "channel",
+    [],
+    [],
+    [],
+    "response",
+  );
+  let selection;
+  let parentTargetId = "root";
+  function Harness() {
+    selection = useThreadDraftSelection({
+      draftKey: "thread:root",
+      rootId: "root",
+      parentTargetId,
+      loadDraft: loadDraftEntry,
+    });
+    return null;
+  }
+  const handle = await mountStrictMode(Harness);
+  assert.equal(selection.contextId, "response");
+  await act(async () => selection.setContextId(null));
+  assert.equal(selection.contextId, null);
+  await act(async () => selection.setContextId("another-response"));
+  assert.equal(selection.contextId, "another-response");
+  parentTargetId = "explicit-response";
+  await handle.rerender();
+  assert.equal(selection.contextId, "explicit-response");
+  await handle.unmount();
+});

@@ -22,6 +22,7 @@ class ComposeDraft {
   final String channelId;
   final String? threadHeadId;
   final String text;
+  final String? replyContextId;
 
   /// Literal picker labels bound to exact keys, never authorization metadata.
   /// An empty key/value is a malformed-record tombstone; send must refuse it.
@@ -35,6 +36,7 @@ class ComposeDraft {
     required this.text,
     required this.updatedAt,
     this.mentionKeys = const {},
+    this.replyContextId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -42,6 +44,7 @@ class ComposeDraft {
     'channel_id': channelId,
     if (threadHeadId != null) 'thread_head_id': threadHeadId,
     'text': text,
+    if (replyContextId != null) 'reply_context_id': replyContextId,
     'mention_keys': mentionKeys,
     'updated_at': updatedAt,
   };
@@ -81,6 +84,9 @@ class ComposeDraft {
           : null,
       mentionKeys: Map.unmodifiable(mentionKeys),
       text: text,
+      replyContextId: raw['reply_context_id'] is String
+          ? raw['reply_context_id'] as String
+          : null,
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
   }
@@ -135,6 +141,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     required String key,
     required String channelId,
     String? threadHeadId,
+    String? replyContextId,
     required String text,
     Map<String, String> mentionKeys = const {},
   }) {
@@ -144,6 +151,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
     if (existing?.text == text &&
+        existing?.replyContextId == replyContextId &&
         mapEquals(existing?.mentionKeys, mentionKeys)) {
       return;
     }
@@ -151,6 +159,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       key: key,
       channelId: channelId,
       threadHeadId: threadHeadId,
+      replyContextId: replyContextId,
       text: text,
       mentionKeys: Map.unmodifiable(mentionKeys),
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,

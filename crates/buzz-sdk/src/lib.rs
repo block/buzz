@@ -25,11 +25,12 @@ pub use buzz_core::kind;
 /// Thread reference for reply builders (NIP-10 markers).
 ///
 /// - Direct reply (root == parent): emits `["e", root, "", "reply"]`
-/// - Nested reply (root ≠ parent): emits `["e", root, "", "root"]` + `["e", parent, "", "reply"]`
+/// - Reply to a response: emits the same root reply tag plus `["reply-context", parent]`.
+///   The selected response is context, never another nesting level.
 pub struct ThreadRef {
     /// The root event of the thread.
     pub root_event_id: nostr::EventId,
-    /// The immediate parent being replied to.
+    /// The selected message being answered; retained as reply context when not the root.
     pub parent_event_id: nostr::EventId,
 }
 

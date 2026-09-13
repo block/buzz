@@ -45,7 +45,16 @@ export function useChannelPanelHistoryState() {
   const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
 
   const setOpenThreadHeadId = React.useCallback<PanelValueSetter>(
-    (value, options) => applyPatch({ thread: value }, options),
+    (value, options) =>
+      applyPatch(
+        {
+          thread: value,
+          // Route hydration replaces panel state; a deliberate open/close starts
+          // another draft visit and must not carry a previous Drafts selection.
+          ...(options?.replace ? {} : { threadDraft: null }),
+        },
+        options,
+      ),
     [applyPatch],
   );
 

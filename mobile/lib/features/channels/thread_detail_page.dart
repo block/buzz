@@ -44,11 +44,11 @@ import 'reaction_row.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
-import 'small_avatar.dart';
+import '../activity/compose_drafts_provider.dart';
 import 'sticky_date_header.dart';
 import 'timeline_message.dart';
+import 'single_level_thread.dart';
 
-part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_page/message_list.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
@@ -63,10 +63,25 @@ const _landingHighlightOpacity = 0.12;
 
 /// Full-screen thread detail page.
 ///
-/// Shows the thread head message, direct replies, typing indicators scoped to
+/// Shows the original message, flat chronological replies, typing scoped to
 /// the thread, and a compose bar for replying.
 class ThreadDetailPage extends HookConsumerWidget {
-  final TimelineMessage threadHead;
+  final TimelineMessage _selectedHead;
+
+  String get canonicalRootId =>
+      _selectedHead.rootId ?? _selectedHead.parentId ?? _selectedHead.id;
+
+  TimelineMessage get threadHead {
+    final rootId = canonicalRootId;
+    return allMessages.where((message) => message.id == rootId).firstOrNull ??
+        TimelineMessage(
+          id: rootId,
+          pubkey: '',
+          createdAt: _selectedHead.createdAt,
+          content: 'Loading original message…',
+        );
+  }
+
   final List<TimelineMessage> allMessages;
   final String channelId;
   final String? currentPubkey;
@@ -80,7 +95,7 @@ class ThreadDetailPage extends HookConsumerWidget {
 
   const ThreadDetailPage({
     super.key,
-    required this.threadHead,
+    required TimelineMessage threadHead,
     required this.allMessages,
     required this.channelId,
     required this.currentPubkey,
@@ -88,13 +103,43 @@ class ThreadDetailPage extends HookConsumerWidget {
     required this.isArchived,
     this.initialMessageId,
     this.jumpThreadTailForTesting,
-  });
+  }) : _selectedHead = threadHead;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
+    final queryRootId = canonicalRootId;
+    final repliesArgs = ThreadRepliesArgs(
+      channelId: channelId,
+      rootId: queryRootId,
+    );
+    final rootEvents = allMessages.any((message) => message.id == queryRootId)
+        ? const <NostrEvent>[]
+        : ref.watch(threadRootProvider(repliesArgs)).value ??
+              const <NostrEvent>[];
+    final threadHead =
+        formatTimeline(
+          rootEvents,
+          currentPubkey: currentPubkey,
+        ).where((message) => message.id == queryRootId).firstOrNull ??
+        this.threadHead;
+    // Keep a pre-upgrade response draft separate from a concurrent root draft.
+    final draftThreadHeadId = useMemoized(() {
+      final legacyId = _selectedHead.id;
+      final legacy = ref
+          .read(composeDraftsProvider.notifier)
+          .draftFor(composeDraftKey(channelId, threadHeadId: legacyId));
+      return legacyId != queryRootId && legacy != null ? legacyId : queryRootId;
+    }, [channelId, queryRootId, _selectedHead.id]);
+    final savedDraft = ref
+        .read(composeDraftsProvider.notifier)
+        .draftFor(composeDraftKey(channelId, threadHeadId: draftThreadHeadId));
+    final replyTarget = useState<String?>(
+      savedDraft?.replyContextId ??
+          (_selectedHead.id != queryRootId ? _selectedHead.id : null),
+    );
     final restoreComposerFocus = useRef<VoidCallback?>(null);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
@@ -109,14 +154,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
     );
-    // Relay thread queries are keyed by the outermost root, even when this
-    // page displays a nested branch. Query that root, then select this head's
-    // direct children from the returned subtree below.
-    final queryRootId = threadHead.rootId ?? threadHead.id;
-    final repliesArgs = ThreadRepliesArgs(
-      channelId: channelId,
-      rootId: queryRootId,
-    );
     final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
     final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
     final relayRepliesAvailable = relayReplyState.value != null;
@@ -130,7 +167,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         const <NostrEvent>[];
     final replyMessages = repliesState.whenData((events) {
       return formatTimeline(
-        mergeThreadEvents(events, liveChannelEvents),
+        mergeThreadEvents([...rootEvents, ...events], liveChannelEvents),
         currentPubkey: currentPubkey,
       );
     });
@@ -222,16 +259,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       ],
     );
 
-    // Index all messages by parentId so we can find direct children of any
-    // message and compute thread summaries for nested threads.
-    final childrenByParent = <String, List<TimelineMessage>>{};
-    for (final msg in allMsgs) {
-      final pid = msg.parentId;
-      if (pid == null) continue;
-      childrenByParent.putIfAbsent(pid, () => []).add(msg);
-    }
-
-    final replies = childrenByParent[threadHead.id] ?? const [];
+    final replies = flatThreadReplies(allMsgs, queryRootId);
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
     final itemScrollController = useMemoized(ItemScrollController.new);
@@ -821,169 +849,211 @@ class ThreadDetailPage extends HookConsumerWidget {
         Navigator.canPop(context) &&
         Theme.of(context).platform == TargetPlatform.iOS;
 
-    return FrostedScaffold(
-      resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: FrostedAppBar(
-        leading: usesNativeIosGlassBackButton
-            ? IosGlassNavigationButton(
-                key: const ValueKey('thread-ios-glass-back'),
-                icon: IosGlassNavigationIcon.back,
-                semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
-                width: iosGlassChannelHeaderLeadingWidth,
-                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                nativeViewSuppressed: messageActionBackdropActive,
-              )
-            : null,
-        iconColor: context.colors.primary,
-        title: Padding(
-          padding: EdgeInsets.only(
-            left: usesNativeIosGlassBackButton
-                ? iosGlassChannelHeaderTitleSpacing
-                : 0,
+    return ThreadReplyScope(
+      onReply: (message) {
+        replyTarget.value = message.id == threadHead.id ? null : message.id;
+        composerFocusNode.requestFocus();
+      },
+      onReveal: (id) {
+        final index = id == threadHead.id
+            ? 0
+            : replies.indexWhere((message) => message.id == id) + 1;
+        if (index == 0 && id != threadHead.id) return;
+        highlightedMessageId.value = id;
+        if (itemScrollController.isAttached) {
+          itemScrollController.jumpTo(index: index);
+        }
+      },
+      child: FrostedScaffold(
+        resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
+        appBar: FrostedAppBar(
+          leading: usesNativeIosGlassBackButton
+              ? IosGlassNavigationButton(
+                  key: const ValueKey('thread-ios-glass-back'),
+                  icon: IosGlassNavigationIcon.back,
+                  semanticLabel: 'Back',
+                  onPressed: () => Navigator.of(context).maybePop(),
+                  width: iosGlassChannelHeaderLeadingWidth,
+                  buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                  nativeViewSuppressed: messageActionBackdropActive,
+                )
+              : null,
+          iconColor: context.colors.primary,
+          title: Padding(
+            padding: EdgeInsets.only(
+              left: usesNativeIosGlassBackButton
+                  ? iosGlassChannelHeaderTitleSpacing
+                  : 0,
+            ),
+            child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
           ),
-          child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
+          titleStyle: channelTitleTextStyle,
         ),
-        titleStyle: channelTitleTextStyle,
-      ),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          Column(
-            children: [
-              Expanded(
-                child: _ThreadMessageList(
-                  viewport: listViewport,
-                  onUserScrollStart: () {
-                    hidesLatestForInitialTailSettle.value = false;
-                    hidesLatestForComposerTailCorrection.value = false;
-                    initialTailSettle.abandon();
-                    initialViewportReady.value = true;
-                    tailCorrectionInProgress.value = false;
-                    isNavigatingToThreadTail.value = false;
-                    tailIntent.beginDrag();
-                    userOptedOutOfTailFollow.value = true;
-                    userDragDetachedTailFollow.value = true;
-                    followsThreadTail.value = false;
-                  },
-                  onUserScrollEnd: () {
-                    tailIntent.endDrag();
-                    tailIntent.schedule(
-                      allowed: userOptedOutOfTailFollow.value,
-                      revalidate: () =>
-                          context.mounted &&
-                          itemScrollController.isAttached &&
-                          !tailIntent.isDragging &&
-                          userOptedOutOfTailFollow.value,
-                      action: () {
-                        _resumeThreadTailFollow(
-                          isVisible: threadTailIsVisible,
-                          userOptedOut: userOptedOutOfTailFollow,
-                          followsTail: followsThreadTail,
-                        );
-                        if (!userOptedOutOfTailFollow.value) {
-                          userDragDetachedTailFollow.value = false;
-                        }
-                      },
-                    );
-                  },
-                  visible: threadViewportVisible,
-                  itemScrollController: itemScrollController,
-                  itemPositionsListener: itemPositionsListener,
-                  bottomInset: timelineBottomInset,
-                  replies: replies,
-                  localSendAnimations: localSendAnimations,
-                  trackActiveScrollPosition: trackActiveScrollPosition,
-                  headIsDeleted: liveDeletionHidesHead,
-                  head: liveHead,
-                  stickyDayTimestamp: stickyDayTimestamp,
-                  channelNames: channelNamesMap,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  highlightedMessageId: highlightedMessageId.value,
-                  allMessages: allMsgs,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                  composerFocusNode: composerFocusNode,
-                  restoreComposerFocus: () =>
-                      restoreComposerFocus.value?.call(),
-                  childrenByParent: childrenByParent,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            Column(
+              children: [
+                Expanded(
+                  child: _ThreadMessageList(
+                    viewport: listViewport,
+                    onUserScrollStart: () {
+                      hidesLatestForInitialTailSettle.value = false;
+                      hidesLatestForComposerTailCorrection.value = false;
+                      initialTailSettle.abandon();
+                      initialViewportReady.value = true;
+                      tailCorrectionInProgress.value = false;
+                      isNavigatingToThreadTail.value = false;
+                      tailIntent.beginDrag();
+                      userOptedOutOfTailFollow.value = true;
+                      userDragDetachedTailFollow.value = true;
+                      followsThreadTail.value = false;
+                    },
+                    onUserScrollEnd: () {
+                      tailIntent.endDrag();
+                      tailIntent.schedule(
+                        allowed: userOptedOutOfTailFollow.value,
+                        revalidate: () =>
+                            context.mounted &&
+                            itemScrollController.isAttached &&
+                            !tailIntent.isDragging &&
+                            userOptedOutOfTailFollow.value,
+                        action: () {
+                          _resumeThreadTailFollow(
+                            isVisible: threadTailIsVisible,
+                            userOptedOut: userOptedOutOfTailFollow,
+                            followsTail: followsThreadTail,
+                          );
+                          if (!userOptedOutOfTailFollow.value) {
+                            userDragDetachedTailFollow.value = false;
+                          }
+                        },
+                      );
+                    },
+                    visible: threadViewportVisible,
+                    itemScrollController: itemScrollController,
+                    itemPositionsListener: itemPositionsListener,
+                    bottomInset: timelineBottomInset,
+                    replies: replies,
+                    localSendAnimations: localSendAnimations,
+                    trackActiveScrollPosition: trackActiveScrollPosition,
+                    headIsDeleted: liveDeletionHidesHead,
+                    head: liveHead,
+                    stickyDayTimestamp: stickyDayTimestamp,
+                    channelNames: channelNamesMap,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    highlightedMessageId: highlightedMessageId.value,
+                    allMessages: allMsgs,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                    composerFocusNode: composerFocusNode,
+                    restoreComposerFocus: () =>
+                        restoreComposerFocus.value?.call(),
+                  ),
+                ),
+                if (!isMember || isArchived)
+                  _ThreadTypingIndicator(
+                    entries: threadTyping,
+                    animated: false,
+                  ),
+              ],
+            ),
+            if (threadViewportVisible)
+              Positioned(
+                left: 0,
+                right: 0,
+                top: frostedAppBarHeight(context) + Grid.twelve,
+                child: StickyDateHeader(
+                  key: const ValueKey('thread-sticky-date-header'),
+                  state: stickyDateHeaderState,
                 ),
               ),
-              if (!isMember || isArchived)
-                _ThreadTypingIndicator(entries: threadTyping, animated: false),
-            ],
-          ),
-          if (threadViewportVisible)
-            Positioned(
-              left: 0,
-              right: 0,
-              top: frostedAppBarHeight(context) + Grid.twelve,
-              child: StickyDateHeader(
-                key: const ValueKey('thread-sticky-date-header'),
-                state: stickyDateHeaderState,
-              ),
-            ),
-          if (isMember && !isArchived)
-            AndroidImeLift(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: ComposerDockSizeReporter(
-                  key: const ValueKey('thread-composer-dock'),
-                  onHeightChanged: updateComposerDockHeight,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _ThreadTypingIndicator(entries: threadTyping),
-                      ComposeBar(
-                        channelId: channelId,
-                        focusNode: composerFocusNode,
-                        onFocusRestorerChanged: (restoreFocus) =>
-                            restoreComposerFocus.value = restoreFocus,
-                        hintText: 'Reply in thread\u2026',
-                        threadHeadId: threadHead.id,
-                        rootId: effectiveRootId,
-                        onFocusRequested: followThreadTailFromComposer,
-                        onSend:
-                            (
-                              content,
-                              mentionPubkeys, {
-                              mediaTags = const <List<String>>[],
-                            }) => sendMessage.call(
-                              channelId: channelId,
-                              content: content,
-                              mentionPubkeys: mentionPubkeys,
-                              channel: channel,
-                              parentEventId: threadHead.id,
-                              rootEventId: effectiveRootId,
-                              mediaTags: mediaTags,
-                            ),
-                      ),
-                    ],
+            if (isMember && !isArchived)
+              AndroidImeLift(
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: ComposerDockSizeReporter(
+                    key: const ValueKey('thread-composer-dock'),
+                    onHeightChanged: updateComposerDockHeight,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _ThreadTypingIndicator(entries: threadTyping),
+                        if (replyTarget.value != null)
+                          Row(
+                            children: [
+                              const SizedBox(width: Grid.gutter),
+                              const Expanded(
+                                child: Text('Replying to message'),
+                              ),
+                              IconButton(
+                                tooltip: 'Cancel reply context',
+                                icon: const Icon(Icons.close),
+                                onPressed: () => replyTarget.value = null,
+                              ),
+                            ],
+                          ),
+                        ComposeBar(
+                          channelId: channelId,
+                          focusNode: composerFocusNode,
+                          onFocusRestorerChanged: (restoreFocus) =>
+                              restoreComposerFocus.value = restoreFocus,
+                          hintText: 'Reply in thread\u2026',
+                          threadHeadId: threadHead.id,
+                          draftThreadHeadId: draftThreadHeadId,
+                          replyContextId: replyTarget.value,
+                          rootId: effectiveRootId,
+                          onFocusRequested: followThreadTailFromComposer,
+                          onSend:
+                              (
+                                content,
+                                mentionPubkeys, {
+                                mediaTags = const <List<String>>[],
+                              }) async {
+                                final selected = replyTarget.value;
+                                await sendMessage.call(
+                                  channelId: channelId,
+                                  content: content,
+                                  mentionPubkeys: mentionPubkeys,
+                                  channel: channel,
+                                  parentEventId: selected ?? threadHead.id,
+                                  rootEventId: effectiveRootId,
+                                  mediaTags: mediaTags,
+                                );
+                                if (context.mounted &&
+                                    replyTarget.value == selected) {
+                                  replyTarget.value = null;
+                                }
+                              },
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: navigationBottomInset + Grid.xs,
-            child: Center(
-              child: JumpToLatestSwitcher(
-                id: 'thread',
-                visible:
-                    threadViewportVisible &&
-                    hasFetchedReplies &&
-                    !isNavigatingToThreadTail.value &&
-                    !hidesLatestForInitialTailSettle.value &&
-                    !hidesLatestForComposerTailCorrection.value &&
-                    !(composerHasFocus && !userDragDetachedTailFollow.value) &&
-                    !isAtThreadTail.value,
-                onPressed: scrollToThreadLatest,
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: navigationBottomInset + Grid.xs,
+              child: Center(
+                child: JumpToLatestSwitcher(
+                  id: 'thread',
+                  visible:
+                      threadViewportVisible &&
+                      hasFetchedReplies &&
+                      !isNavigatingToThreadTail.value &&
+                      !hidesLatestForInitialTailSettle.value &&
+                      !hidesLatestForComposerTailCorrection.value &&
+                      !(composerHasFocus &&
+                          !userDragDetachedTailFollow.value) &&
+                      !isAtThreadTail.value,
+                  onPressed: scrollToThreadLatest,
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

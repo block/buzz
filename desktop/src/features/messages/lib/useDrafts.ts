@@ -65,6 +65,8 @@ export type DraftState = {
   pendingImeta: ImetaMedia[];
   /** Stable identity references for autocomplete-selected mentions in content. */
   mentionRefs?: DraftMentionRef[];
+  /** Selected response; separate from the canonical root and draft key. */
+  replyContextId?: string | null;
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
   /**
@@ -281,6 +283,8 @@ function isValidDraftState(v: unknown): v is DraftState {
   }
   // Migration: drafts written before mention routing was persisted have no
   // mentionRefs. Preserve them as ordinary drafts with no selected identities.
+  if (d.replyContextId != null && typeof d.replyContextId !== "string")
+    return false;
   if (d.mentionRefs === undefined) {
     (d as DraftState).mentionRefs = [];
   } else if (
@@ -386,6 +390,7 @@ export function clearDraftEntry(draftKey: string): void {
 function draftStatesEqual(a: DraftState, b: DraftState): boolean {
   if (
     a.content !== b.content ||
+    a.replyContextId !== b.replyContextId ||
     a.selectionStart !== b.selectionStart ||
     a.selectionEnd !== b.selectionEnd ||
     a.channelId !== b.channelId ||
@@ -503,6 +508,7 @@ export function persistDraftEntry(
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
   mentionRefs: DraftMentionRef[] = [],
+  replyContextId?: string | null,
 ): void {
   const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
   if (hasContent) {
@@ -518,6 +524,10 @@ export function persistDraftEntry(
       updatedAt: now,
       pendingImeta,
       mentionRefs,
+      replyContextId:
+        replyContextId === undefined
+          ? existing?.replyContextId
+          : replyContextId,
       spoileredAttachmentUrls,
       status: "active",
     });
@@ -629,6 +639,7 @@ export function useDrafts() {
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
       mentionRefs: DraftMentionRef[] = [],
+      replyContextId?: string | null,
     ) =>
       persistDraftEntry(
         draftKey,
@@ -637,6 +648,7 @@ export function useDrafts() {
         pendingImeta,
         spoileredAttachmentUrls,
         mentionRefs,
+        replyContextId,
       ),
     [],
   );

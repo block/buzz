@@ -38,6 +38,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
+import 'single_level_thread.dart';
 
 part 'message_actions/reaction_popover.dart';
 part 'message_actions/quick_reaction_row.dart';
@@ -572,6 +573,11 @@ class _FastActionsRow extends ConsumerWidget {
           label: 'Reply',
           onTap: () {
             Navigator.of(context).pop();
+            final scope = ThreadReplyScope.maybeOf(pageContext);
+            if (scope != null) {
+              scope.onReply(message);
+              return;
+            }
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(

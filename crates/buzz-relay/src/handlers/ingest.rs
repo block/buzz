@@ -819,11 +819,20 @@ pub(crate) async fn resolve_nip10_thread_meta(
     channel_id: Uuid,
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
+    let contexts: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|v| v == "reply-context"))
+        .collect();
+    if contexts.len() > 1 {
+        return Err("invalid: at most one reply-context is allowed".into());
+    }
     let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
 
     let (root_hex, parent_hex) = match markers.resolve() {
         Some(pair) => pair,
-        None => return Ok(None),
+        None if contexts.is_empty() => return Ok(None),
+        None => return Err("invalid: reply-context requires a thread reply".into()),
     };
 
     let parent_bytes =
@@ -898,6 +907,29 @@ pub(crate) async fn resolve_nip10_thread_meta(
             (parent_root, root_created, depth)
         }
     };
+
+    if state
+        .config
+        .single_level_reply_communities
+        .contains(community_id.as_uuid())
+        && depth > 1
+    {
+        return Err(
+            "restricted: replies must target the original thread message; update your client"
+                .into(),
+        );
+    }
+    if let Some(context) = contexts.first() {
+        let parts = context.as_slice();
+        if parts.len() != 2 {
+            return Err("invalid: reply-context requires one event ID".into());
+        }
+        let context_ancestry =
+            resolve_relay_reply_thread_meta(community_id, &parts[1], channel_id, state).await?;
+        if context_ancestry.root_event_id != final_root_bytes {
+            return Err("invalid: reply-context belongs to a different thread".into());
+        }
+    }
 
     let broadcast = event.tags.iter().any(|t| {
         let parts = t.as_slice();
@@ -985,11 +1017,6 @@ impl ReplyAncestry {
         hex::encode(&self.root_event_id)
     }
 
-    /// Parent event ID as lowercase hex, for the NIP-10 `reply` tag.
-    pub fn parent_hex(&self) -> String {
-        hex::encode(&self.parent_event_id)
-    }
-
     /// Build the DB thread-metadata params for the signed reply event.
     pub fn into_thread_meta(
         self,
@@ -1055,8 +1082,8 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
         parent_meta_result.map_err(|e| format!("db error looking up thread metadata: {e}"))?;
 
     // Root = parent's root if the parent is itself a reply, else the parent.
-    // Depth = parent depth + 1 (a direct reply to a top-level message is depth 1).
-    let (root_bytes, root_created, depth) = match parent_meta {
+    // The selected response is context only, so its historical depth is irrelevant.
+    let (root_bytes, root_created) = match parent_meta {
         Some(meta) => {
             let effective_root = meta.root_event_id.unwrap_or_else(|| parent_bytes.clone());
             let root_ts = if effective_root == parent_bytes {
@@ -1071,33 +1098,29 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
             } else {
                 parent_created
             };
-            (effective_root, root_ts, meta.depth + 1)
+            (effective_root, root_ts)
         }
         // No metadata row ⇒ recover the parent's ancestry from its own NIP-10
-        // tags. A marked (but not-yet-indexed) nested parent yields depth 2, not
-        // a false top-level depth 1.
+        // tags so an unindexed response still resolves to its original root.
         None => {
-            derive_ancestry_from_parent_tags(
+            let (root, created, _) = derive_ancestry_from_parent_tags(
                 community_id,
                 &parent_event.event,
                 &parent_bytes,
                 parent_created,
                 state,
             )
-            .await
+            .await;
+            (root, created)
         }
     };
 
-    if depth > 100 {
-        return Err("thread depth limit exceeded".to_string());
-    }
-
     Ok(ReplyAncestry {
-        parent_event_id: parent_bytes,
-        parent_event_created_at: parent_created,
+        parent_event_id: root_bytes.clone(),
+        parent_event_created_at: root_created,
         root_event_id: root_bytes,
         root_event_created_at: root_created,
-        depth,
+        depth: 1,
     })
 }
 

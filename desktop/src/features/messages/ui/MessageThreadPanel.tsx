@@ -1,3 +1,9 @@
+import { useSearch } from "@tanstack/react-router";
+import { loadDraftEntry } from "@/features/messages/lib/useDrafts";
+import {
+  resolveThreadDraftKey,
+  useThreadDraftSelection,
+} from "./threadDraftSelection";
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -180,7 +186,7 @@ export function MessageThreadPanel({
   onExpandReplies,
   onScrollTargetResolved,
   onScrollTargetSettled,
-  onSelectReplyTarget,
+  onSelectReplyTarget: _onSelectReplyTarget,
   onSend,
   onSendToChannel,
   onToggleReaction,
@@ -233,18 +239,68 @@ export function MessageThreadPanel({
   const hasComposerBottomActivity =
     activityAccessoryVisible || threadTypingPubkeys.length > 0;
 
-  // Live ref so onCaptureSendContext can read reply state at submit time
-  // (before any async mention-flow awaits change navigation state).
-  const replyTargetMessageRef = React.useRef(replyTargetMessage);
-  replyTargetMessageRef.current = replyTargetMessage;
-
+  const draftSearch = useSearch({ strict: false } as never) as {
+    threadDraft?: string;
+    thread?: string;
+  };
+  const requestedDraftKey =
+    draftSearch.threadDraft ??
+    autoSendDraftKey ??
+    (draftSearch.thread ? `thread:${draftSearch.thread}` : null);
+  const draftVisit = `${channelId}:${threadHeadId}:${requestedDraftKey}`;
+  const selectedDraft = React.useRef<{ visit: string; key: string } | null>(
+    null,
+  );
+  const resolvedDraftKey = resolveThreadDraftKey({
+    rootId: threadHeadId ?? "",
+    channelId: channelId ?? "",
+    requestedKeys: [requestedDraftKey],
+    messageIds: new Set(threadReplies.map((entry) => entry.message.id)),
+    loadDraft: loadDraftEntry,
+  });
+  // Keep the accepted key after a successful send removes its stored record.
+  if (
+    selectedDraft.current?.visit !== draftVisit ||
+    resolvedDraftKey === requestedDraftKey
+  ) {
+    selectedDraft.current = { visit: draftVisit, key: resolvedDraftKey };
+  }
+  const composerDraftKey = selectedDraft.current.key;
+  const {
+    contextId: draftReplyContextId,
+    setContextId: setDraftReplyContextId,
+  } = useThreadDraftSelection({
+    draftKey: composerDraftKey,
+    rootId: threadHeadId ?? "",
+    parentTargetId: replyTargetMessage?.id ?? null,
+    loadDraft: loadDraftEntry,
+  });
+  const replyContextRef = React.useRef(draftReplyContextId);
+  replyContextRef.current = draftReplyContextId;
   const onCaptureSendContext = React.useCallback(
     () => ({
-      parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
+      parentEventId: replyContextRef.current ?? threadHeadId,
       threadHeadId,
     }),
     [threadHeadId],
   );
+  const selectReplyContext = (message: TimelineMessage) => {
+    setDraftReplyContextId(
+      replyContextRef.current === message.id || message.id === threadHeadId
+        ? null
+        : message.id,
+    );
+    onCancelEdit?.();
+  };
+  const cancelReplyContext = () => {
+    setDraftReplyContextId(null);
+    onCancelReply();
+  };
+  const sendWithReplyContext: typeof onSend = async (...args) => {
+    const selected = replyContextRef.current;
+    await onSend(...args);
+    if (replyContextRef.current === selected) setDraftReplyContextId(null);
+  };
 
   const collapseThreadHeadReplies = React.useCallback(() => {
     if (!threadHeadId) {
@@ -282,14 +338,16 @@ export function MessageThreadPanel({
     [collapseThreadHeadReplies, onExpandReplies, threadHeadId],
   );
 
-  const composerReplyTarget =
-    replyTargetMessage && threadHead && replyTargetMessage.id !== threadHead.id
-      ? {
-          author: replyTargetMessage.author,
-          body: replyTargetMessage.body,
-          id: replyTargetMessage.id,
-        }
-      : null;
+  const selectedContextMessage = threadReplies.find(
+    (entry) => entry.message.id === draftReplyContextId,
+  )?.message;
+  const composerReplyTarget = draftReplyContextId
+    ? {
+        id: draftReplyContextId,
+        author: selectedContextMessage?.author ?? "message",
+        body: selectedContextMessage?.body ?? "Saved reply context",
+      }
+    : null;
 
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
@@ -736,7 +794,7 @@ export function MessageThreadPanel({
                           }
                           onMarkUnread={onMarkUnread}
                           onMarkRead={onMarkRead}
-                          onReply={onSelectReplyTarget}
+                          onReply={selectReplyContext}
                           onSendToChannel={stableSendToChannel}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}
@@ -845,17 +903,19 @@ export function MessageThreadPanel({
               )}
               layoutMode="dock"
               disabled={disabled || isSending || !channelId}
-              draftKey={`thread:${threadHead.id}`}
+              draftKey={composerDraftKey}
               autoSubmitDraftKey={autoSendDraftKey}
               onAutoSubmitComplete={onAutoSubmitComplete}
               editTarget={editTarget}
               isSending={isSending}
               onCancelEdit={onCancelEdit}
-              onCancelReply={composerReplyTarget ? onCancelReply : undefined}
+              onCancelReply={
+                composerReplyTarget ? cancelReplyContext : undefined
+              }
               onCaptureSendContext={onCaptureSendContext}
               onEditLastOwnMessage={onEditLastOwnMessage}
               onEditSave={onEditSave}
-              onSend={onSend}
+              onSend={sendWithReplyContext}
               placeholder={
                 isHuddleTranscript
                   ? "Message the huddle"

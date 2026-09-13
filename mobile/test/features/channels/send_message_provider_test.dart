@@ -10,6 +10,41 @@ import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test(
+    'reply to response signs the root parent and retains context and mentions',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+      final root = 'a' * 64;
+      final selected = 'b' * 64;
+      final result = send(
+        channelId: _channelId,
+        content: 'reply',
+        parentEventId: selected,
+        rootEventId: root,
+        mentionPubkeys: ['c' * 64],
+      );
+      await session.published;
+      expect(session.event.tags.where((t) => t[0] == 'e').toList(), [
+        ['e', root, '', 'reply'],
+      ]);
+      expect(session.event.tags, contains(equals(['reply-context', selected])));
+      expect(session.event.tags, contains(equals(['p', 'c' * 64])));
+      session.accept();
+      await result;
+    },
+  );
+
+  test(
     'adds the signed message locally before relay acknowledgement',
     () async {
       final session = _PendingPublishRelaySession();

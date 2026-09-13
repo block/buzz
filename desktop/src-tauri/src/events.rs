@@ -58,8 +58,8 @@ fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
         Ok(vec![tag(vec!["e", &root, "", "reply"])?])
     } else {
         Ok(vec![
-            tag(vec!["e", &root, "", "root"])?,
-            tag(vec!["e", &parent, "", "reply"])?,
+            tag(vec!["e", &root, "", "reply"])?,
+            tag(vec!["reply-context", &parent])?,
         ])
     }
 }
@@ -769,6 +769,25 @@ pub use workflows::{
 mod tests {
     use super::*;
     use nostr::Keys;
+    #[test]
+    fn reply_to_response_uses_root_and_retains_context() {
+        let root = EventId::from_hex(&"aa".repeat(32)).unwrap();
+        let selected = EventId::from_hex(&"bb".repeat(32)).unwrap();
+        let tags = thread_tags(&ThreadRef {
+            root_event_id: root,
+            parent_event_id: selected,
+        })
+        .unwrap();
+        let parts: Vec<_> = tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
+        assert_eq!(
+            parts,
+            vec![
+                vec!["e".to_string(), root.to_hex(), "".into(), "reply".into()],
+                vec!["reply-context".to_string(), selected.to_hex()]
+            ]
+        );
+    }
+
     #[test]
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
