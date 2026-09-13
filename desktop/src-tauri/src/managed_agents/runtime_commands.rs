@@ -265,6 +265,9 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
+    if record.disable_local_spawn {
+        return Err("local spawn disabled — runtime is externally managed".into());
+    }
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
@@ -474,7 +477,11 @@ pub async fn reconcile_managed_agent_runtimes(
     for community in communities {
         for record in records
             .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| {
+                record.start_on_app_launch
+                    && record.backend == BackendKind::Local
+                    && !record.disable_local_spawn
+            })
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.
