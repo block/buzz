@@ -1476,6 +1476,50 @@ test.describe("community rail", () => {
     expect(reloadBoxB.y).toBeLessThan(reloadBoxA.y);
   });
 
+  test("a press reporting no button held does not arm a rail drag or eat the next click", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    // B must not already be the active community, or the assertion at the end
+    // would hold with the click never landing.
+    await expect(buttonA).toHaveAttribute("aria-current", "true");
+    await expect(buttonB).not.toHaveAttribute("aria-current", "true");
+
+    const boxA = await buttonA.boundingBox();
+    const boxB = await buttonB.boundingBox();
+    if (!boxA || !boxB) throw new Error("community buttons not laid out");
+
+    // The press the macOS webview reports for tap-to-click: no button held, and
+    // the release deferred past the next input. page.mouse.down() always
+    // reports a held button, so it has to be dispatched directly.
+    await buttonA.dispatchEvent("pointerdown", {
+      button: 0,
+      buttons: 0,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "mouse",
+      clientX: boxA.x + boxA.width / 2,
+      clientY: boxA.y + boxA.height / 2,
+    });
+    await page.mouse.move(boxA.x + boxA.width / 2, boxA.y + boxA.height / 2);
+
+    // Travelling to the other community is well past the 6px activation
+    // distance; a drag armed here would swallow the click that follows and the
+    // community switch would silently fail.
+    await page.mouse.move(boxB.x + boxB.width / 2, boxB.y + boxB.height / 2, {
+      steps: 10,
+    });
+    await page.mouse.down();
+    await page.mouse.up();
+
+    await expect(buttonB).toHaveAttribute("aria-current", "true");
+  });
+
   test("keyboard reorder: Space to pick up, ArrowUp to move, Space to drop updates stored order", async ({
     page,
   }) => {
