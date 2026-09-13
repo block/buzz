@@ -218,6 +218,13 @@ export function CommunityOnboardingFlow({
 
   useClaimInvite();
 
+  // Redeeming an invite from the membership-denied screen puts the
+  // transaction back into `claiming`. The denial is a local flag, so without
+  // this the claim would run behind a screen that still says "not a member".
+  React.useEffect(() => {
+    if (transaction?.stage === "claiming") setIsMembershipDenied(false);
+  }, [transaction?.stage]);
+
   React.useEffect(() => {
     if (transaction?.stage === "connecting") onConnect();
   }, [onConnect, transaction?.stage]);
