@@ -18,6 +18,8 @@ const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
 const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
 const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
+const WINDOWS_NOTIFICATION_PERMISSION_STATE =
+  "windows_notification_permission_state";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -158,15 +160,13 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
     }
   }
 
-  // On Windows, WebView2's Notification.permission can report "denied" even
-  // when the WinRT toast API is available. Skip the browser-level check and
-  // go straight to the Tauri plugin, which queries the native WinRT status.
+  // Windows has enabled/disabled toast settings, not a browser-style prompt
+  // lifecycle. Query the AppUserModelID's native ToastNotifier setting so a
+  // system block remains terminal until the user changes Windows Settings.
   if (isTauri() && isWindowsPlatform()) {
-    try {
-      return (await isPermissionGranted()) ? "granted" : "default";
-    } catch {
-      return "default";
-    }
+    return invoke<NotificationPermission>(
+      WINDOWS_NOTIFICATION_PERMISSION_STATE,
+    );
   }
 
   if (window.Notification.permission !== "default") {
@@ -197,19 +197,18 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
   }
 
   const request =
-    isTauri() && isMacPlatform()
-      ? invoke<NotificationPermission>(REQUEST_MACOS_NOTIFICATION_ACCESS).catch(
-          (error) => {
+    isTauri() && isWindowsPlatform()
+      ? getDesktopNotificationPermissionState()
+      : isTauri() && isMacPlatform()
+        ? invoke<NotificationPermission>(
+            REQUEST_MACOS_NOTIFICATION_ACCESS,
+          ).catch((error) => {
             if (shouldUseMacDevelopmentFallback(error)) {
               return requestPermission();
             }
             throw error;
-          },
-        )
-      : // On Windows, always use the Tauri plugin's requestPermission() which
-        // triggers the WinRT notification permission prompt. The browser-level
-        // Notification.requestPermission() is unreliable in WebView2.
-        requestPermission();
+          })
+        : requestPermission();
   pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });

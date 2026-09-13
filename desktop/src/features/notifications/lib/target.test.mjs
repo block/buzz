@@ -103,3 +103,25 @@ test("builds a complete click-through target from a feed item", () => {
     threadRootId: "root-id",
   });
 });
+
+test("broadcast reply feed targets stay on their exact timeline row", () => {
+  const target = buildFeedItemNotificationTarget({
+    id: "broadcast-event",
+    kind: 9,
+    pubkey: "sender",
+    content: "announcement reply",
+    createdAt: 456,
+    channelId: "channel-id",
+    channelName: "ship-room",
+    tags: [
+      ["e", "root-id", "", "root"],
+      ["e", "parent-id", "", "reply"],
+      ["broadcast", "1"],
+    ],
+    category: "mention",
+  });
+
+  assert.equal(target.eventId, "broadcast-event");
+  assert.equal(target.openInThread, false);
+  assert.equal(target.threadRootId, null);
+});

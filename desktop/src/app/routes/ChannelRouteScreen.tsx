@@ -306,6 +306,7 @@ export function ChannelRouteScreen({
         projects={projectsQuery.data ?? [projectHome]}
         targetMessageEvents={targetMessageEvents}
         targetMessageId={targetMessageId}
+        targetMessageView={targetMessageView}
       />
     );
   }

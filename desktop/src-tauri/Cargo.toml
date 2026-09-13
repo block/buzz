@@ -69,6 +69,7 @@ user-idle = { version = "0.6", default-features = false }
 # Native Windows toast notifications so the app registers with Windows Settings
 # > System > Notifications and click actions work through WinRT.
 tauri-winrt-notification = "0.7"
+windows = { version = "0.61", features = ["UI_Notifications"] }
 
 [dependencies]
 atomic-write-file = "0.3"

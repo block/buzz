@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
-import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
+import {
+  HOME_MENTION_EVENT_KINDS,
+  KIND_HUDDLE_STARTED,
+  KIND_REACTION,
+  KIND_STREAM_MESSAGE_DIFF,
+  KIND_SYSTEM_MESSAGE,
+} from "@/shared/constants/kinds";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
@@ -351,6 +357,80 @@ test("untagged auxiliary event keeps its single-channel context in the timeline 
     assert.ok(reaction);
     assert.deepEqual(reaction.tags.at(-1), ["h", "channel-1"]);
     assert.equal(mentions, 0);
+  } finally {
+    h.restore();
+  }
+});
+
+test("live rows and auxiliary events survive authoritative window projection", async () => {
+  const h = await mount(channels(1));
+  try {
+    const channelId = "channel-0";
+    const parent = message("parent", {
+      created_at: Math.floor(Date.now() / 1000) - 10,
+    });
+    h.queryClient.setQueryData(h.channelWindowKey(channelId), {
+      pages: [
+        {
+          startCursor: null,
+          rows: [{ event: parent, thread: null }],
+          aux: [],
+          nextCursor: null,
+          hasMore: false,
+        },
+      ],
+      liveOverlay: [],
+      liveAux: [],
+      liveSummaries: {},
+    });
+    h.queryClient.setQueryData(h.channelMessagesKey(channelId), [parent]);
+
+    const sub = h.subscriptions[0];
+    for (const [id, kind] of [
+      ["diff", KIND_STREAM_MESSAGE_DIFF],
+      ["system", KIND_SYSTEM_MESSAGE],
+      ["huddle", KIND_HUDDLE_STARTED],
+      ["reaction", KIND_REACTION],
+    ]) {
+      await h.deliver(sub, message(id, { kind }));
+    }
+    await h.deliver(
+      sub,
+      message("thread-only", {
+        tags: [
+          ["h", channelId],
+          ["e", "parent", "", "root"],
+          ["e", "parent", "", "reply"],
+        ],
+      }),
+    );
+    await h.deliver(sub, message("next-row"));
+
+    const window = h.queryClient.getQueryData(h.channelWindowKey(channelId));
+    assert.deepEqual(
+      new Set(window.liveOverlay.map((event) => event.id)),
+      new Set(["diff", "system", "huddle", "next-row"]),
+    );
+    assert.deepEqual(
+      window.liveAux.map((event) => event.id),
+      ["reaction"],
+    );
+    assert.deepEqual(
+      new Set(
+        h.queryClient
+          .getQueryData(h.channelMessagesKey(channelId))
+          .map((event) => event.id),
+      ),
+      new Set([
+        "parent",
+        "diff",
+        "system",
+        "huddle",
+        "reaction",
+        "thread-only",
+        "next-row",
+      ]),
+    );
   } finally {
     h.restore();
   }

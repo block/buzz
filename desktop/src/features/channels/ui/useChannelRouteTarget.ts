@@ -49,6 +49,9 @@ function getRouteMainTimelineTargetId(
     return targetMessageId;
   }
 
+  // Ordinary replies are intentionally absent from the main timeline. Keep
+  // timeline navigation on the containing root; only broadcast replies have
+  // a rendered row whose exact id can be targeted there.
   return targetMessage.rootId ?? targetMessage.parentId;
 }
 
@@ -118,11 +121,13 @@ export function useChannelRouteTarget({
       return;
     }
 
+    // Explicit timeline intent outranks ancestry-based thread navigation.
+    if (targetMessageView === "timeline") {
+      handledThreadRouteTargetRef.current = targetKey;
+      return;
+    }
+
     if (!targetMessage.parentId) {
-      if (targetMessageView === "timeline") {
-        handledThreadRouteTargetRef.current = targetKey;
-        return;
-      }
       if (!requireThreadEditResolution()) {
         return;
       }

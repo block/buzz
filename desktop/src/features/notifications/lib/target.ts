@@ -1,4 +1,7 @@
-import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import type { DesktopNotificationTarget } from "./desktop";
 
@@ -35,6 +38,11 @@ export function buildEventNotificationTarget(
 export function buildFeedItemNotificationTarget(
   item: FeedItem,
 ): DesktopNotificationTarget {
+  const threadRootId = getThreadReference(item.tags).rootId;
+  // Broadcast replies retain ancestry tags for context but render as their
+  // own channel-timeline rows, so activation must not open a thread panel.
+  const openInThread = threadRootId !== null && !isBroadcastReply(item.tags);
+
   return {
     channelId: item.channelId,
     channelName: item.channelName,
@@ -43,7 +51,7 @@ export function buildFeedItemNotificationTarget(
     eventId: item.id,
     kind: item.kind,
     pubkey: item.pubkey,
-    openInThread: getThreadReference(item.tags).rootId !== null,
-    threadRootId: getThreadReference(item.tags).rootId ?? null,
+    openInThread,
+    threadRootId: openInThread ? threadRootId : null,
   };
 }

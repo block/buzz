@@ -51,6 +51,14 @@ pub async fn show_native_notification(
     }
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub async fn windows_notification_permission_state(
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    windows::permission_state(app).await.map(str::to_string)
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
@@ -123,8 +131,41 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
-    use tauri::{Emitter, Manager};
+    use tauri::Emitter;
     use tauri_winrt_notification::{Duration, Toast};
+    use windows::{
+        core::HSTRING,
+        UI::Notifications::{NotificationSetting, ToastNotificationManager},
+    };
+
+    fn permission_state_label(setting: NotificationSetting) -> &'static str {
+        if setting == NotificationSetting::Enabled {
+            "granted"
+        } else {
+            "denied"
+        }
+    }
+
+    pub async fn permission_state(app: tauri::AppHandle) -> Result<&'static str, String> {
+        let app_id = app.config().identifier.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        app.run_on_main_thread(move || {
+            let result =
+                ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
+                    .and_then(|notifier| notifier.Setting())
+                    .map(permission_state_label)
+                    .map_err(|error| {
+                        format!("failed to query Windows notification setting: {error}")
+                    });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed to schedule Windows notification query: {error}"))?;
+
+        receiver
+            .await
+            .map_err(|_| "Windows notification query ended before completing".to_string())?
+    }
 
     pub async fn show(
         app: tauri::AppHandle,
@@ -164,5 +205,26 @@ mod windows {
         receiver
             .await
             .map_err(|_| "Windows notification task ended before posting".to_string())?
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_enabled_notification_setting_is_granted() {
+            assert_eq!(
+                permission_state_label(NotificationSetting::Enabled),
+                "granted"
+            );
+            for setting in [
+                NotificationSetting::DisabledForApplication,
+                NotificationSetting::DisabledForUser,
+                NotificationSetting::DisabledByGroupPolicy,
+                NotificationSetting::DisabledByManifest,
+            ] {
+                assert_eq!(permission_state_label(setting), "denied");
+            }
+        }
     }
 }

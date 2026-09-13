@@ -661,6 +661,8 @@ pub fn run() {
             get_event,
             get_events,
             show_native_notification,
+            #[cfg(target_os = "windows")]
+            windows_notification_permission_state,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
             #[cfg(target_os = "macos")]

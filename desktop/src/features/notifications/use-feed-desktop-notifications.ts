@@ -68,15 +68,44 @@ export function writeStoredSeenFeedIds(pubkey: string, ids: string[]) {
   );
 }
 
+export type FeedNotificationPermissionOutcome = "granted" | "denied" | "error";
+
+export type FeedNotificationBatchResult = {
+  handledIds: string[];
+  retryableIds: string[];
+};
+
 export async function deliverFeedNotificationBatch(
   items: readonly FeedItem[],
-  ensurePermissionGranted: () => Promise<boolean>,
-  deliver: (item: FeedItem) => Promise<void>,
-): Promise<void> {
-  if (!(await ensurePermissionGranted())) {
-    return;
+  ensurePermission: () => Promise<FeedNotificationPermissionOutcome>,
+  deliver: (item: FeedItem) => Promise<boolean>,
+): Promise<FeedNotificationBatchResult> {
+  const permission = await ensurePermission();
+  if (permission !== "granted") {
+    const ids = items.map((item) => item.id);
+    return permission === "denied"
+      ? { handledIds: ids, retryableIds: [] }
+      : { handledIds: [], retryableIds: ids };
   }
-  await Promise.all(items.map((item) => deliver(item)));
+
+  const outcomes = await Promise.all(
+    items.map(async (item) => {
+      try {
+        return { id: item.id, delivered: await deliver(item) };
+      } catch (error) {
+        console.warn("Failed to deliver feed notification", item.id, error);
+        return { id: item.id, delivered: false };
+      }
+    }),
+  );
+  return {
+    handledIds: outcomes
+      .filter((outcome) => outcome.delivered)
+      .map((outcome) => outcome.id),
+    retryableIds: outcomes
+      .filter((outcome) => !outcome.delivered)
+      .map((outcome) => outcome.id),
+  };
 }
 
 export async function ensureFeedNotificationPermission(
@@ -84,12 +113,18 @@ export async function ensureFeedNotificationPermission(
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   getPermissionState = getDesktopNotificationPermissionState,
   requestAccess = requestDesktopNotificationAccess,
-): Promise<boolean> {
+): Promise<FeedNotificationPermissionOutcome> {
   try {
     if (!attempt.hasRequested) {
       const currentPermission = await getPermissionState();
       if (currentPermission !== "default") {
-        return currentPermission === "granted";
+        if (currentPermission === "granted") {
+          return "granted";
+        }
+        void setDesktopEnabled(false).catch((error) => {
+          console.warn("Failed to disable desktop notifications", error);
+        });
+        return "denied";
       }
       attempt.hasRequested = true;
     }
@@ -98,13 +133,15 @@ export async function ensureFeedNotificationPermission(
     // repeated calls join an in-progress OS permission prompt.
     const result = await requestAccess();
     if (result !== "granted") {
-      void setDesktopEnabled(false);
-      return false;
+      void setDesktopEnabled(false).catch((error) => {
+        console.warn("Failed to disable desktop notifications", error);
+      });
+      return "denied";
     }
-    return true;
+    return "granted";
   } catch (error) {
     console.warn("Failed to request desktop notification permission", error);
-    return false;
+    return "error";
   }
 }
 
@@ -125,11 +162,22 @@ export function useFeedDesktopNotifications(
   );
   const hasInitializedFeedRef = React.useRef(false);
   const permissionAttemptRef = React.useRef({ hasRequested: false });
+  const inFlightItemIdsRef = React.useRef(new Set<string>());
+  const notificationGenerationRef = React.useRef(0);
 
   React.useEffect(() => {
     seenItemIdsRef.current = new Set(readStoredSeenFeedIds(normalizedPubkey));
     hasInitializedFeedRef.current = false;
     permissionAttemptRef.current.hasRequested = false;
+    inFlightItemIdsRef.current.clear();
+    const generation = notificationGenerationRef.current + 1;
+    notificationGenerationRef.current = generation;
+    return () => {
+      if (notificationGenerationRef.current === generation) {
+        notificationGenerationRef.current += 1;
+      }
+      inFlightItemIdsRef.current.clear();
+    };
   }, [normalizedPubkey]);
 
   const autoRequestPermissionIfNeeded = React.useEffectEvent(() =>
@@ -155,6 +203,7 @@ export function useFeedDesktopNotifications(
         const slot = slotForFeedKind(item.kind, item.category);
         playNotificationSound(resolveSlotSound(settings, slot));
       }
+      return didSend;
     },
   );
 
@@ -194,6 +243,7 @@ export function useFeedDesktopNotifications(
           channels,
         )
           .filter((item) => !nextSeenItemIds.has(item.id))
+          .filter((item) => !inFlightItemIdsRef.current.has(item.id))
           .filter(
             (item) =>
               !item.channelId ||
@@ -202,8 +252,14 @@ export function useFeedDesktopNotifications(
           )
       : [];
 
+    const pendingItemIds = new Set(newItems.map((item) => item.id));
     for (const item of currentFeedItems) {
-      nextSeenItemIds.add(item.id);
+      if (
+        !pendingItemIds.has(item.id) &&
+        !inFlightItemIdsRef.current.has(item.id)
+      ) {
+        nextSeenItemIds.add(item.id);
+      }
     }
 
     // Prevent unbounded growth — keep only the most recent entries.
@@ -221,6 +277,10 @@ export function useFeedDesktopNotifications(
     writeStoredSeenFeedIds(normalizedPubkey, [...nextSeenItemIds]);
 
     if (newItems.length > 0) {
+      for (const item of newItems) {
+        inFlightItemIdsRef.current.add(item.id);
+      }
+      const generation = notificationGenerationRef.current;
       void deliverFeedNotificationBatch(
         newItems,
         autoRequestPermissionIfNeeded,
@@ -237,9 +297,27 @@ export function useFeedDesktopNotifications(
             resolvedLabel && resolvedLabel !== truncateNpub(item.pubkey)
               ? resolvedLabel
               : undefined;
-          await deliverFeedNotification(item, senderName);
+          return deliverFeedNotification(item, senderName);
         },
-      );
+      ).then((result) => {
+        if (generation !== notificationGenerationRef.current) {
+          return;
+        }
+        for (const item of newItems) {
+          inFlightItemIdsRef.current.delete(item.id);
+        }
+        if (result.handledIds.length === 0) {
+          return;
+        }
+
+        const handled = new Set(seenItemIdsRef.current);
+        for (const id of result.handledIds) {
+          handled.add(id);
+        }
+        const handledIds = [...handled].slice(-HOME_FEED_SEEN_MAX_ITEMS);
+        seenItemIdsRef.current = new Set(handledIds);
+        writeStoredSeenFeedIds(normalizedPubkey, handledIds);
+      });
     }
   }, [
     enabled,
