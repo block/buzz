@@ -260,16 +260,23 @@ test("invite asks Safari users to choose their Mac download", async ({
   await context.close();
 });
 
-test("invite download falls back for mobile and non-desktop devices", async ({
+const APP_STORE_URL =
+  "https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271";
+const PLAY_STORE_URL =
+  "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
+const RELEASES_URL = "https://github.com/block/buzz/releases";
+
+test("invite download sends each non-desktop device where its app lives", async ({
   browser,
 }) => {
-  const unsupportedDevices = [
+  const nonDesktopDevices = [
     {
       name: "iPhone Safari",
       platform: "iPhone",
       userAgent:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
       maxTouchPoints: 5,
+      expected: APP_STORE_URL,
     },
     {
       name: "iPadOS desktop mode",
@@ -277,6 +284,7 @@ test("invite download falls back for mobile and non-desktop devices", async ({
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15",
       maxTouchPoints: 5,
+      expected: APP_STORE_URL,
     },
     {
       name: "Android phone",
@@ -284,16 +292,29 @@ test("invite download falls back for mobile and non-desktop devices", async ({
       userAgent:
         "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
       maxTouchPoints: 5,
+      expected: PLAY_STORE_URL,
     },
+    // No store listing serves these two, so they keep the releases-page
+    // fallback: ChromeOS is not a Play Store target here, and Fire tablets
+    // ship through Amazon's Appstore.
     {
       name: "ChromeOS",
       platform: "Linux x86_64",
       userAgent: "Mozilla/5.0 (X11; CrOS x86_64 16093.68.0) AppleWebKit/537.36",
       maxTouchPoints: 0,
+      expected: RELEASES_URL,
+    },
+    {
+      name: "Fire tablet (Silk)",
+      platform: "Linux armv8l",
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 9; KFMAWI) AppleWebKit/537.36 Silk/126.0 like Chrome/126.0.0.0 Safari/537.36",
+      maxTouchPoints: 5,
+      expected: RELEASES_URL,
     },
   ];
 
-  for (const device of unsupportedDevices) {
+  for (const device of nonDesktopDevices) {
     const context = await browser.newContext({ userAgent: device.userAgent });
     await context.addInitScript(({ platform, maxTouchPoints }) => {
       Object.defineProperties(navigator, {
@@ -343,7 +364,7 @@ test("invite download falls back for mobile and non-desktop devices", async ({
     await expect(
       page.getByRole("link", { name: "Download it now" }),
       device.name,
-    ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
+    ).toHaveAttribute("href", device.expected);
     await context.close();
   }
 });
