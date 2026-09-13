@@ -30,6 +30,38 @@ pub(super) fn migration_marker_name(service: &str, default_name: &str) -> String
     }
 }
 
+/// Filename of the marker written once a successful keyring migration deletes
+/// the legacy `identity.key`. Its presence is the only durable signal that a
+/// key once lived in the keyring — used to tell a genuine first-ever launch
+/// (no key anywhere, generating is correct) from a post-migration boot whose
+/// keyring is merely unreachable (the key IS in the keyring, must NOT generate).
+const MIGRATION_MARKER_NAME: &str = "identity.migrated";
+
+/// Path of the migration-completed marker within `data_dir`.
+pub(super) fn migration_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(migration_marker_name(
+        keyring_service(),
+        MIGRATION_MARKER_NAME,
+    ))
+}
+
+/// Atomically write (and fsync) the migration-completed marker. The content is
+/// irrelevant — only the file's durable existence is the signal — so a single
+/// byte keeps it minimal. Atomicity + fsync guarantee that once this returns
+/// `Ok`, the marker survives a crash, which is what makes deleting the legacy
+/// file afterward safe.
+pub(super) fn write_migration_marker(marker_path: &std::path::Path) -> Result<(), String> {
+    use atomic_write_file::AtomicWriteFile;
+    use std::io::Write;
+
+    let mut file = AtomicWriteFile::open(marker_path)
+        .map_err(|e| format!("open migration marker for atomic write: {e}"))?;
+    file.write_all(b"1")
+        .map_err(|e| format!("write migration marker: {e}"))?;
+    file.commit()
+        .map_err(|e| format!("commit migration marker: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dev_keyring_service, migration_marker_name};
