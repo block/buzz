@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_manager.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -47,15 +48,17 @@ void main() {
   ChannelSectionsManager buildManager({
     required RelaySessionNotifier relaySession,
     Duration startupRetryBaseDelay = const Duration(milliseconds: 5),
+    SignedEventRelay? signedEventRelay,
+    void Function()? onChanged,
   }) {
     return ChannelSectionsManager(
       pubkey: keychain.public,
       prefs: prefs,
       crypto: crypto,
       relaySession: relaySession,
-      signedEventRelay: null,
+      signedEventRelay: signedEventRelay,
       remoteEnabled: true,
-      onChanged: () {},
+      onChanged: onChanged ?? () {},
       startupRetryBaseDelay: startupRetryBaseDelay,
     );
   }
@@ -268,6 +271,162 @@ void main() {
     );
     manager.dispose(flushPending: false);
   });
+
+  test(
+    'local mutations notify synchronously after state and persistence update',
+    () async {
+      await setUpEnv();
+      late ChannelSectionsManager manager;
+      var callbackCount = 0;
+
+      manager = buildManager(
+        relaySession: _RateLimitedRelaySession(failuresBeforeSuccess: 0),
+        onChanged: () {
+          callbackCount++;
+          expect(
+            prefs.getString(channelSectionsKey(keychain.public)),
+            jsonEncode(manager.store.toJson()),
+            reason: 'persistence must be visible before onChanged returns',
+          );
+        },
+      );
+
+      void expectEffectiveMutation(String description, void Function() mutate) {
+        final countBefore = callbackCount;
+        mutate();
+        expect(
+          manager.store.sections,
+          isNotEmpty,
+          reason: '$description must update manager.store',
+        );
+        expect(
+          prefs.getString(channelSectionsKey(keychain.public)),
+          jsonEncode(manager.store.toJson()),
+          reason: '$description must persist before notifying',
+        );
+        expect(
+          callbackCount,
+          countBefore + 1,
+          reason: '$description must notify exactly once synchronously',
+        );
+      }
+
+      expectEffectiveMutation('first create', () {
+        manager.createSection(' Alpha ');
+      });
+      expectEffectiveMutation('second create', () {
+        manager.createSection(' Beta ');
+      });
+      final alpha = manager.store.sections[0];
+      final beta = manager.store.sections[1];
+
+      final persistedBeforeNoOp = prefs.getString(
+        channelSectionsKey(keychain.public),
+      );
+      manager.moveSectionUp(alpha.id);
+      expect(
+        callbackCount,
+        2,
+        reason: 'moving the first section up is a no-op',
+      );
+      expect(
+        prefs.getString(channelSectionsKey(keychain.public)),
+        persistedBeforeNoOp,
+        reason: 'a no-op move must not persist or notify',
+      );
+
+      expectEffectiveMutation('move down', () {
+        manager.moveSectionDown(alpha.id);
+      });
+      final persistedAfterMoveDown = prefs.getString(
+        channelSectionsKey(keychain.public),
+      );
+      manager.moveSectionDown(alpha.id);
+      expect(
+        callbackCount,
+        3,
+        reason: 'moving the last section down is a no-op',
+      );
+      expect(
+        prefs.getString(channelSectionsKey(keychain.public)),
+        persistedAfterMoveDown,
+        reason: 'a no-op move must not persist or notify',
+      );
+      expectEffectiveMutation('move up', () {
+        manager.moveSectionUp(alpha.id);
+      });
+      expectEffectiveMutation('rename', () {
+        manager.renameSection(alpha.id, ' Renamed ');
+      });
+      expectEffectiveMutation('assign', () {
+        manager.assignChannel('channel-1', alpha.id);
+      });
+      expectEffectiveMutation('unassign', () {
+        manager.unassignChannel('channel-1');
+      });
+      expectEffectiveMutation('delete', () {
+        manager.deleteSection(beta.id);
+      });
+
+      expect(callbackCount, 8);
+      expect(manager.store.sections, hasLength(1));
+      expect(manager.store.sections.single.name, 'Renamed');
+      expect(manager.store.assignments, isEmpty);
+      manager.dispose(flushPending: false);
+    },
+  );
+
+  test(
+    'disposing from onChanged flushes the effective mutation publication',
+    () async {
+      await setUpEnv();
+      late ChannelSectionsManager manager;
+      var callbackCount = 0;
+      final signedRelay = _RecordingSignedEventRelay();
+
+      manager = buildManager(
+        relaySession: _RateLimitedRelaySession(failuresBeforeSuccess: 0),
+        signedEventRelay: signedRelay,
+        onChanged: () {
+          callbackCount++;
+          expect(manager.store.sections.single.name, 'Alpha');
+          expect(
+            prefs.getString(channelSectionsKey(keychain.public)),
+            jsonEncode(manager.store.toJson()),
+          );
+          manager.dispose();
+        },
+      );
+
+      manager.createSection(' Alpha ');
+
+      expect(callbackCount, 1);
+      expect(manager.store.sections.single.name, 'Alpha');
+      expect(
+        prefs.getString(channelSectionsKey(keychain.public)),
+        jsonEncode(manager.store.toJson()),
+      );
+      final submitted = await signedRelay.submitted.future.timeout(
+        const Duration(seconds: 2),
+      );
+
+      expect(signedRelay.submitCount, 1);
+      expect(submitted.kind, EventKind.readState);
+      expect(
+        submitted.tags,
+        contains(orderedEquals(['d', 'channel-sections'])),
+      );
+      expect(
+        submitted.tags,
+        contains(orderedEquals(['t', 'channel-sections'])),
+      );
+      final published =
+          jsonDecode(crypto.decrypt(submitted.content)) as Map<String, dynamic>;
+      expect(published['sections'], hasLength(1));
+      expect((published['sections'] as List).single['name'], 'Alpha');
+      expect(published['assignments'], isEmpty);
+    },
+  );
 }
 
 Future<void> _waitUntil(
@@ -403,5 +562,56 @@ class _RateLimitedRelaySession extends RelaySessionNotifier {
         _closedCallbacks.removeAt(index);
       }
     };
+  }
+}
+
+class _SubmittedEvent {
+  final int kind;
+  final String content;
+  final List<List<String>> tags;
+  final int? createdAt;
+
+  const _SubmittedEvent(this.kind, this.content, this.tags, this.createdAt);
+}
+
+class _RecordingSignedEventRelay implements SignedEventRelay {
+  final submitted = Completer<_SubmittedEvent>();
+  int submitCount = 0;
+
+  @override
+  String? get pubkey => null;
+
+  @override
+  Future<NostrEvent> submit({
+    required int kind,
+    required String content,
+    required List<List<String>> tags,
+    int? createdAt,
+    void Function(NostrEvent event)? onSigned,
+  }) async {
+    submitCount++;
+    onSigned?.call(
+      const NostrEvent(
+        id: 'signed-event',
+        pubkey: '',
+        createdAt: 0,
+        kind: 0,
+        tags: [],
+        content: '',
+        sig: '',
+      ),
+    );
+    if (!submitted.isCompleted) {
+      submitted.complete(_SubmittedEvent(kind, content, tags, createdAt));
+    }
+    return const NostrEvent(
+      id: 'ack',
+      pubkey: '',
+      createdAt: 0,
+      kind: 0,
+      tags: [],
+      content: '',
+      sig: '',
+    );
   }
 }
