@@ -46,12 +46,14 @@ use std::sync::OnceLock;
 
 use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
 use buzz_core::tenant::CommunityId;
-use buzz_db::workflow::RunStatus;
+use buzz_db::workflow::{RunStatus, ScheduledWorkflowCursor, LIST_MAX_LIMIT};
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+const SCHEDULE_TICK_SECS: u64 = 60;
 
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
@@ -476,8 +478,9 @@ impl WorkflowEngine {
     /// trigger, checks whether the cron expression or interval has elapsed
     /// and spawns execution if so.
     ///
-    /// Uses window-based matching for cron expressions to handle tick drift:
-    /// `schedule.after(&(now - 60s)).next() <= now` instead of `includes(now)`.
+    /// Uses window-based matching for cron expressions to handle tick drift.
+    /// The window spans the actual elapsed time since the prior successful
+    /// scan, so database and execution work cannot open gaps between ticks.
     ///
     /// Interval tracking is anchored on the durable scheduled-fire claim:
     /// `last_fired` is an in-memory pre-filter, but the
@@ -489,18 +492,50 @@ impl WorkflowEngine {
     pub async fn run(self: &Arc<Self>) {
         tracing::info!("WorkflowEngine cron loop started (60s tick)");
 
+        let mut previous_scan_at = Utc::now();
+
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
+            // Sleep after the prior scan rather than using a fixed-rate ticker.
+            // This keeps interval prefilter samples at least one full tick apart
+            // even when a scan crosses a minute boundary.
+            tokio::time::sleep(std::time::Duration::from_secs(SCHEDULE_TICK_SECS)).await;
             let now = Utc::now();
+            self.run_scheduled_scan(&mut previous_scan_at, now).await;
+        }
+    }
 
-            let workflows = match self.db.list_all_enabled_workflows().await {
+    /// Run one complete scheduler scan.
+    ///
+    /// Advances `previous_scan_at` only after every frozen-snapshot page has
+    /// been read. A failed or partial scan retains the prior watermark so the
+    /// next successful scan covers the entire elapsed cron window.
+    async fn run_scheduled_scan(
+        self: &Arc<Self>,
+        previous_scan_at: &mut DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut cursor = None;
+        let mut active_ids = std::collections::HashSet::new();
+
+        loop {
+            let workflows = match self
+                .db
+                .list_enabled_schedule_workflows_page(cursor, now, LIST_MAX_LIMIT)
+                .await
+            {
                 Ok(wf) => wf,
                 Err(e) => {
                     tracing::error!("Cron tick: failed to load workflows: {e}");
-                    continue;
+                    return false;
                 }
             };
+
+            if workflows.is_empty() {
+                break;
+            }
+
+            cursor = workflows.last().map(ScheduledWorkflowCursor::from);
+            active_ids.extend(workflows.iter().map(|w| (w.community_id, w.id)));
 
             for workflow in &workflows {
                 // The same workflow UUID may exist in another community; carry
@@ -542,10 +577,13 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
-                        Some(instant) => (instant, "cron"),
-                        None => continue,
-                    },
+                    } => {
+                        match scheduler_cron_fire_instant(expr, *previous_scan_at, now, workflow.id)
+                        {
+                            Some(instant) => (instant, "cron"),
+                            None => continue,
+                        }
+                    }
                     schema::TriggerDef::Schedule {
                         cron: None,
                         interval: Some(dur),
@@ -737,42 +775,42 @@ impl WorkflowEngine {
                         .await;
                 });
             }
-
-            // Fix 1: prune stale last_fired entries for workflows that are no longer
-            // active/enabled. Without this the DashMap grows monotonically as
-            // workflows are deleted or disabled. Keyed by `(community_id, id)` so
-            // entries are matched to the same scope they were inserted under.
-            let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
-                workflows.iter().map(|w| (w.community_id, w.id)).collect();
-            self.last_fired.retain(|key, _| active_ids.contains(key));
         }
+
+        // Fix 1: prune stale last_fired entries for workflows that are no longer
+        // active/enabled. Without this the DashMap grows monotonically as
+        // workflows are deleted or disabled. Keyed by `(community_id, id)` so
+        // entries are matched to the same scope they were inserted under.
+        self.last_fired.retain(|key, _| active_ids.contains(key));
+        *previous_scan_at = now;
+        true
     }
 }
 
-/// Find the cron schedule instant that fired within the `window_secs`-wide
-/// window ending at `now`, if any.
+/// Resolve the cron instant due since the scheduler's prior successful scan.
 ///
-/// Uses window-based matching: finds the next scheduled time after
-/// `(now - window_secs)` and returns it when it falls at or before `now`.
-/// This tolerates tick drift gracefully — a 61s tick won't miss a
-/// minute-granularity cron expression. The returned instant is the cron's own
-/// scheduled time (not `now`), so every pod evaluating the same expression in
-/// the same window computes the *same* value — making it a safe, deterministic
-/// claim anchor for cross-pod at-most-once firing.
-///
-/// Returns `None` (and logs a warning) if the expression is invalid or nothing
-/// is due in the window.
-fn cron_fire_instant(
+/// The exact lower bound avoids both gaps and rounded overlap. If multiple
+/// instants elapsed after a prolonged failed scan, only the latest is claimed;
+/// replaying every missed invocation could create an unbounded side-effect
+/// burst when service resumes.
+fn scheduler_cron_fire_instant(
     expr: &str,
+    previous_scan_at: DateTime<Utc>,
     now: DateTime<Utc>,
-    window_secs: i64,
     workflow_id: Uuid,
 ) -> Option<DateTime<Utc>> {
+    if now <= previous_scan_at {
+        return None;
+    }
+
     let normalized = schema::normalize_cron(expr);
     match normalized.parse::<cron::Schedule>() {
         Ok(sched) => {
-            let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
+            let search_end = now + chrono::Duration::nanoseconds(1);
+            sched
+                .after(&search_end)
+                .next_back()
+                .filter(|instant| *instant > previous_scan_at && *instant <= now)
         }
         Err(e) => {
             tracing::warn!(
@@ -1052,14 +1090,13 @@ mod postgres_tests {
 
     #[test]
     fn cron_fire_instant_matches_within_window() {
-        // "every minute" cron — should always fire within a 60s window.
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:30Z")
             .unwrap()
             .with_timezone(&Utc);
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
-        // The matched instant is the minute boundary 12:00:00, NOT `now`.
         assert_eq!(
-            cron_fire_instant("* * * * *", now, 60, wf_id),
+            scheduler_cron_fire_instant("* * * * *", previous_scan_at, now, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
                     .unwrap()
@@ -1072,9 +1109,10 @@ mod postgres_tests {
     #[test]
     fn cron_fire_instant_returns_none_for_invalid_expr() {
         let now = Utc::now();
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("not-a-cron", now, 60, wf_id).is_none(),
+            scheduler_cron_fire_instant("not-a-cron", previous_scan_at, now, wf_id).is_none(),
             "invalid cron should return None"
         );
     }
@@ -1085,10 +1123,11 @@ mod postgres_tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T14:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
         // "0 0 1 1 *" = midnight on Jan 1 only — June 15 is definitely outside.
         assert!(
-            cron_fire_instant("0 0 1 1 *", now, 60, wf_id).is_none(),
+            scheduler_cron_fire_instant("0 0 1 1 *", previous_scan_at, now, wf_id).is_none(),
             "Jan-1-only cron should not fire on June 15"
         );
     }
@@ -1100,9 +1139,10 @@ mod postgres_tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            scheduler_cron_fire_instant("0 9 * * *", previous_scan_at, now, wf_id),
             Some(now),
             "cron should fire at exact minute boundary, anchored on 09:00:00"
         );
@@ -1117,9 +1157,10 @@ mod postgres_tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:45Z")
             .unwrap()
             .with_timezone(&Utc);
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
         assert_eq!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id),
+            scheduler_cron_fire_instant("0 9 * * *", previous_scan_at, now, wf_id),
             Some(
                 chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
                     .unwrap()
@@ -1130,15 +1171,59 @@ mod postgres_tests {
     }
 
     #[test]
+    fn elapsed_scan_window_covers_work_that_pushes_tick_past_sixty_seconds() {
+        // The prior implementation slept 60 seconds after each scan and still
+        // looked back exactly 60 seconds. Any loop work opened an uncovered
+        // gap. Here the next scan arrives 62 seconds later, and the production
+        // window calculation retains the 09:00 schedule instant.
+        let previous_scan_at = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let scheduled = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            scheduler_cron_fire_instant("0 9 * * *", previous_scan_at, now, wf_id),
+            Some(scheduled),
+            "elapsed scan window must not leave a gap after slow loop work"
+        );
+    }
+
+    #[test]
+    fn elapsed_scan_window_coalesces_multiple_missed_instants_to_latest() {
+        let previous_scan_at = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:02:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let latest = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:02:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+
+        assert_eq!(
+            scheduler_cron_fire_instant("* * * * *", previous_scan_at, now, wf_id),
+            Some(latest),
+            "recovery must fire once at the latest due instant, not replay a burst"
+        );
+    }
+
+    #[test]
     fn cron_fire_instant_returns_none_just_outside_window() {
         // Fixed time: 09:01:01 UTC. Cron "0 9 * * *" fires at 09:00:00.
         // Window [09:00:01, 09:01:01] does NOT contain 09:00:00.
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
             .unwrap()
             .with_timezone(&Utc);
+        let previous_scan_at = now - chrono::Duration::seconds(60);
         let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id).is_none(),
+            scheduler_cron_fire_instant("0 9 * * *", previous_scan_at, now, wf_id).is_none(),
             "cron should not fire 61s after the scheduled time"
         );
     }
@@ -1888,20 +1973,49 @@ steps:
 
     // -- SEC-006: event-path regression (requires Postgres) ----------------
 
-    async fn setup_db() -> buzz_db::Db {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+    fn test_database_url() -> String {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             // Local-only test default; this is not a production credential.
             .unwrap_or_else(|_| {
                 let local_test_database = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
                 local_test_database.to_owned()
-            });
+            })
+    }
+
+    async fn setup_db() -> buzz_db::Db {
         buzz_db::Db::new(&buzz_db::DbConfig {
-            database_url,
+            database_url: test_database_url(),
             ..Default::default()
         })
         .await
         .expect("connect test DB")
+    }
+
+    /// A page-read failure must not offer a replacement watermark to the
+    /// scheduler loop. A closed lazy pool produces a deterministic local
+    /// failure without needing a database server.
+    #[tokio::test]
+    async fn failed_scheduler_scan_retains_prior_watermark() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://buzz:buzz_dev@localhost:5432/buzz") // sadscan:disable np.postgres.1
+            .expect("create lazy test pool");
+        pool.close().await;
+        let engine = Arc::new(WorkflowEngine::new(
+            buzz_db::Db::from_pool(pool),
+            WorkflowConfig::default(),
+        ));
+        let mut previous_scan_at = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:59:59Z")
+            .expect("previous watermark")
+            .with_timezone(&Utc);
+        let original_watermark = previous_scan_at;
+        let now = previous_scan_at + chrono::Duration::seconds(60);
+
+        assert!(
+            !engine.run_scheduled_scan(&mut previous_scan_at, now).await,
+            "failed page reads must not advance the scheduler watermark"
+        );
+        assert_eq!(previous_scan_at, original_watermark);
     }
 
     /// Create a community, a channel owned by `creator`, and add `member` as a
@@ -1945,6 +2059,56 @@ steps:
         .await
         .expect("add member");
         (community, channel_id)
+    }
+
+    /// Exercise pagination through the production scan seam, not just the DB
+    /// page query. Every interval workflow is cold-start seeded, including the
+    /// row beyond the global page cap.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduled_scan_processes_rows_after_global_page_limit() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let pool = sqlx::PgPool::connect(&test_database_url())
+            .await
+            .expect("connect direct test pool");
+
+        sqlx::query(
+            r#"
+            INSERT INTO workflows
+                (id, community_id, name, owner_pubkey, channel_id, definition,
+                 definition_hash, status, enabled, created_at, updated_at)
+            SELECT gen_random_uuid(), $1, 'scan-page-' || n::text, $2, $3,
+                   '{"name":"paged interval","trigger":{"on":"schedule","interval":"1h"},"steps":[],"enabled":true}'::jsonb,
+                   decode(repeat('00', 32), 'hex'), 'active', TRUE,
+                   NOW() - interval '1 second' + n * interval '1 microsecond',
+                   NOW() - interval '1 second' + n * interval '1 microsecond'
+            FROM generate_series(1, 1001) AS n
+            "#,
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .expect("insert paginated interval workflows");
+
+        let engine = Arc::new(WorkflowEngine::new(db, WorkflowConfig::default()));
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let mut previous_scan_at = now - chrono::Duration::seconds(60);
+
+        assert!(
+            engine.run_scheduled_scan(&mut previous_scan_at, now).await,
+            "a complete multi-page scan must return its replacement watermark"
+        );
+        assert_eq!(previous_scan_at, now);
+        assert_eq!(
+            engine.last_fired.len(),
+            1001,
+            "production scan must reach and seed interval rows after the first page"
+        );
     }
 
     fn message_event(channel_id: Uuid) -> buzz_core::StoredEvent {
