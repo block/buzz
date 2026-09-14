@@ -6,7 +6,7 @@ import {
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+import { isLinuxPlatform, isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
 
 // Backend event emitted when a native Linux notification is clicked or a
 // queued macOS activation becomes available. See src-tauri notification code.
@@ -146,6 +146,17 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
     }
   }
 
+  // On Windows, WebView2's Notification.permission can report "denied" even
+  // when the WinRT toast API is available. Skip the browser-level check and
+  // go straight to the Tauri plugin, which queries the native WinRT status.
+  if (isTauri() && isWindowsPlatform()) {
+    try {
+      return (await isPermissionGranted()) ? "granted" : "default";
+    } catch {
+      return "default";
+    }
+  }
+
   if (window.Notification.permission !== "default") {
     return window.Notification.permission;
   }
@@ -183,7 +194,10 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
             throw error;
           },
         )
-      : requestPermission();
+      : // On Windows, always use the Tauri plugin's requestPermission() which
+        // triggers the WinRT notification permission prompt. The browser-level
+        // Notification.requestPermission() is unreliable in WebView2.
+        requestPermission();
   pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });
@@ -215,7 +229,7 @@ export async function listenForDesktopNotificationActions(
   if (isTauri()) {
     const usesMacActivationQueue = isMacPlatform();
 
-    if (!isLinuxPlatform() && !usesMacActivationQueue) {
+    if (!isLinuxPlatform() && !isWindowsPlatform() && !usesMacActivationQueue) {
       try {
         pluginListener = await onAction((notification) => {
           const target = parseNotificationTarget(
@@ -424,8 +438,12 @@ export async function sendDesktopNotification(
 
   // Linux needs a retained D-Bus connection. macOS needs a native notification
   // center delegate because the Tauri plugin does not deliver desktop clicks.
+  // Windows needs WinRT toast notifications so the app registers with
+  // Settings > System > Notifications and click actions work.
+  // Do NOT use the Tauri notification plugin's sendNotification() on Windows —
+  // the native WinRT path handles delivery and click actions exclusively.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && (isLinuxPlatform() || isMacPlatform())) {
+  if (isTauri() && (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,
