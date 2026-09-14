@@ -26,10 +26,10 @@ pub(crate) use metadata::{
     apply_agent_display_env, apply_replay_floor_env, child_rust_log_filter, resolve_session_title,
     runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, REPLAY_FLOOR_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
-
 mod setup_payload;
 use setup_payload::apply_setup_payload_env;
 
+pub(crate) mod provider_env;
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
