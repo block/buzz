@@ -417,6 +417,19 @@ pub fn resolve_thread_target(
     Ok(root_event_id)
 }
 
+/// Build the root-event filter for `messages thread`.
+///
+/// This is the ID + channel-scoped lookup that fetches the top-level event
+/// itself (no kind restriction — any kind can be a thread root). Extracted
+/// as a pure function so the exact filter shape is directly testable.
+fn build_thread_root_filter(event_id: &str, channel_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ids": [event_id],
+        "#h": [channel_id],
+        "limit": 1
+    })
+}
+
 pub async fn cmd_get_thread(
     client: &BuzzClient,
     channel_id: &str,
@@ -437,6 +450,9 @@ pub async fn cmd_get_thread(
     )?;
     let limit = limit.unwrap_or(100).min(500);
 
+    // Two filters ORed in a single HTTP call:
+    // 1. Replies referencing this event via e-tag (scoped to known reply kinds)
+    // 2. The root event itself by ID (no kind restriction — any top-level kind)
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
         "#h": [channel_id],
@@ -446,11 +462,7 @@ pub async fn cmd_get_thread(
     if let Some(d) = depth_limit {
         reply_filter["depth_limit"] = serde_json::json!(d);
     }
-    let root_filter = serde_json::json!({
-        "ids": [root_event_id.as_str()],
-        "#h": [channel_id],
-        "limit": 1
-    });
+    let root_filter = build_thread_root_filter(root_event_id.as_str(), channel_id);
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|event| {
@@ -1084,11 +1096,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
-        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
-        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
+        build_thread_root_filter, channel_id_from_event, cmd_get_thread, cmd_send_message,
+        event_mention_pubkeys, find_root_from_tags, format_events, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions,
+        parse_member_pubkeys, resolve_names_to_pubkeys, resolve_thread_target,
+        thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1217,6 +1229,22 @@ mod tests {
             .unwrap(),
             ID_A
         );
+    }
+
+    #[test]
+    fn thread_root_filter_includes_channel_constraint() {
+        // Regression: the root-event filter must scope by #h so that a
+        // cross-channel ID collision (or a relay that ignores `ids` alone)
+        // cannot return an event from a different channel.
+        let filter = build_thread_root_filter(ID_A, "980a68e9-6cde-4be9-af39-29faed069e22");
+        assert_eq!(filter["ids"], json!([ID_A]));
+        assert_eq!(
+            filter["#h"],
+            json!(["980a68e9-6cde-4be9-af39-29faed069e22"])
+        );
+        assert_eq!(filter["limit"], json!(1));
+        // No kinds key — the root can be any top-level kind.
+        assert!(filter.get("kinds").is_none());
     }
 
     #[test]
