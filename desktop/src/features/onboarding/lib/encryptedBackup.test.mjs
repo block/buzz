@@ -44,17 +44,33 @@ test("background encryption remains silent until download is clicked", () => {
   assert.equal(state.savedPassword, false);
   assert.equal(state.requestId, null);
 });
-test("stale async completions cannot replace current request", () => {
-  const state = reduce([
+test("editing during encryption invalidates the in-flight request", () => {
+  const edited = reduce([
     { type: "set-passphrase", value: "one-two-three-four" },
     { type: "encrypt-started", requestId: 1 },
     { type: "set-passphrase", value: "five-six-seven-eight" },
-    { type: "encrypt-started", requestId: 2 },
-    { type: "encrypt-succeeded", requestId: 1, ncryptsec: "ncryptsec1stale" },
   ]);
-  assert.equal(state.requestId, 2);
-  assert.equal(state.encrypted, null);
-  assert.equal(state.passphrase, "five-six-seven-eight");
+  assert.equal(edited.requestId, null);
+  assert.equal(pendingEncryptPassphrase(edited), "five-six-seven-eight");
+
+  const queued = reduce([{ type: "download-clicked" }], edited);
+  const afterStaleCompletion = reduce(
+    [
+      {
+        type: "encrypt-succeeded",
+        requestId: 1,
+        ncryptsec: "ncryptsec1stale",
+      },
+    ],
+    queued,
+  );
+  assert.equal(afterStaleCompletion.requestId, null);
+  assert.equal(afterStaleCompletion.downloadPending, true);
+  assert.equal(afterStaleCompletion.ncryptsec, null);
+  assert.equal(
+    pendingEncryptPassphrase(afterStaleCompletion),
+    "five-six-seven-eight",
+  );
 });
 test("failure clears submitted password", () => {
   const state = reduce([
