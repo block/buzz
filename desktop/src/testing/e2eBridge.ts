@@ -11598,6 +11598,38 @@ export function maybeInstallE2eTauriMocks() {
           },
         };
       }
+      // Shared BW business operations own multi-step resume/retry decisions in
+      // Rust. This mock only captures IPC shape and scripts visible errors.
+      case "enroll_project_bw_issue":
+      case "accept_project_bw_issue":
+      case "move_project_bw_issue_to_ready":
+      case "start_project_bw_development":
+      case "mark_project_bw_implemented": {
+        const error = activeConfig?.mock?.bwSubmitErrors?.shift();
+        if (error) {
+          throw new Error(error);
+        }
+        return {
+          eventId: `mock-bw-operation-${window.__BUZZ_E2E_COMMAND_PAYLOADS__?.length ?? 0}`,
+          issue: (payload as { input?: { issueId?: string } })?.input?.issueId,
+          alreadyCompleted: false,
+          steps: [],
+          projection: activeConfig?.mock?.bwSnapshot?.projection ?? {},
+        };
+      }
+      case "assign_project_bw_writer": {
+        const error = activeConfig?.mock?.bwAssignmentErrors?.shift();
+        if (error) {
+          throw new Error(error);
+        }
+        return {
+          eventId: `mock-bw-operation-${window.__BUZZ_E2E_COMMAND_PAYLOADS__?.length ?? 0}`,
+          issue: (payload as { input?: { issueId?: string } })?.input?.issueId,
+          alreadyCompleted: false,
+          steps: [],
+          projection: activeConfig?.mock?.bwSnapshot?.projection ?? {},
+        };
+      }
       // P4D: signs and "submits" one of the three creation/triage-scoped BW
       // records (issue-state, issue-update, triage-action). Unlike the real
       // Tauri command, this mock performs no Core validation of its own —

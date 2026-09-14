@@ -145,31 +145,25 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
-
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
                     let window = webview.window();
-
                     #[cfg(target_os = "macos")]
                     {
                         set_initial_window_backing(&window);
-
                         let (initial_render_tx, initial_render_rx) = tokio::sync::oneshot::channel();
                         window
                             .app_handle()
                             .once(INITIAL_RENDER_READY_EVENT, move |_| {
                                 let _ = initial_render_tx.send(());
                             });
-
                         tauri::async_runtime::spawn(async move {
                             wait_for_stable_initial_window_geometry(&window).await;
-
                             if tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 initial_render_rx,
@@ -181,12 +175,10 @@ pub fn run() {
                                     "buzz-desktop: initial render did not commit before reveal timeout"
                                 );
                             }
-
                             reveal_initial_window(&window);
                             clear_initial_window_backing(&window).await;
                         });
                     }
-
                     #[cfg(not(target_os = "macos"))]
                     {
                         reveal_initial_window(&window);
@@ -197,13 +189,11 @@ pub fn run() {
         .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
-
     // The global-shortcut plugin is omitted from test builds: linking it into
     // the lib-test binary makes it fail to load on Windows (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
     #[cfg(not(test))]
     let builder = builder.plugin({
         use tauri_plugin_global_shortcut::ShortcutState;
-
         // Generation counter for the release delay task. Incremented on
         // every press — a delayed release only fires if the generation
         // hasn't changed (i.e. no new press happened during the delay).
@@ -663,6 +653,12 @@ pub fn run() {
             get_project_bw,
             submit_project_bw_record,
             submit_project_bw_assignment,
+            enroll_project_bw_issue,
+            accept_project_bw_issue,
+            assign_project_bw_writer,
+            move_project_bw_issue_to_ready,
+            start_project_bw_development,
+            mark_project_bw_implemented,
             sign_project_issue_status,
             sign_project_issue_assignment,
             sign_project_issue_unassignment,

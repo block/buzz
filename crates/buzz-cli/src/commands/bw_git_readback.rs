@@ -33,15 +33,6 @@ impl Drop for ScratchDirectory {
     }
 }
 
-pub(super) fn validate_git_commit(commit: &str) -> Result<String, CliError> {
-    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CliError::Usage(
-            "commit must be a 40-character Git SHA-1".into(),
-        ));
-    }
-    Ok(commit.to_ascii_lowercase())
-}
-
 fn validate_stream_for_git(stream: &str) -> Result<(), CliError> {
     let bytes = stream.as_bytes();
     let valid = !stream.is_empty()

@@ -941,8 +941,82 @@ pub async fn cmd_issue_status(
 }
 
 pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), CliError> {
-    use crate::IssuesCmd;
+    use crate::{IssueBwCmd, IssuesCmd};
     match cmd {
+        IssuesCmd::Bw(IssueBwCmd::Get {
+            issue,
+            repo_owner,
+            repo_id,
+        }) => {
+            crate::commands::bw::get_issue_projection(client, &issue, &repo_owner, &repo_id).await
+        }
+        IssuesCmd::Bw(IssueBwCmd::Enroll {
+            issue,
+            repo_owner,
+            repo_id,
+        }) => crate::commands::bw::enroll_issue(client, &issue, &repo_owner, &repo_id).await,
+        IssuesCmd::Bw(IssueBwCmd::Accept {
+            issue,
+            repo_owner,
+            repo_id,
+            delegated,
+        }) => {
+            crate::commands::bw::accept_issue(client, &issue, &repo_owner, &repo_id, delegated)
+                .await
+        }
+        IssuesCmd::Bw(IssueBwCmd::AssignWriter {
+            issue,
+            repo_owner,
+            repo_id,
+            writer,
+        }) => {
+            crate::commands::bw::assign_writer(client, &issue, &repo_owner, &repo_id, &writer).await
+        }
+        IssuesCmd::Bw(IssueBwCmd::MoveToReady {
+            issue,
+            repo_owner,
+            repo_id,
+            stream,
+            rework,
+            terminal_set,
+        }) => {
+            crate::commands::bw::move_to_ready(
+                client,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &stream,
+                rework,
+                terminal_set,
+            )
+            .await
+        }
+        IssuesCmd::Bw(IssueBwCmd::StartDevelopment {
+            issue,
+            repo_owner,
+            repo_id,
+        }) => {
+            crate::commands::bw::issue_bw_start_development(client, &issue, &repo_owner, &repo_id)
+                .await
+        }
+        IssuesCmd::Bw(IssueBwCmd::MarkImplemented {
+            issue,
+            repo_owner,
+            repo_id,
+            commit,
+            tests,
+        }) => {
+            let tests = read_or_stdin(&tests)?;
+            crate::commands::bw::issue_bw_mark_implemented(
+                client,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &commit,
+                &tests,
+            )
+            .await
+        }
         IssuesCmd::Comment {
             issue,
             repo_owner,

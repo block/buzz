@@ -284,24 +284,21 @@ test("creating a BW issue signs a 1621 root plus a deliberate enroll transition;
   // No `p` recipient tag: a BW kind:1621 root only ever carries `a`/`subject`.
   expect(signedRoots[0]?.tags.some((tag) => tag[0] === "p")).toBe(false);
 
+  const enrollCalls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "enroll_project_bw_issue",
+    ),
+  );
+  expect(enrollCalls).toHaveLength(1);
+  expect(
+    (enrollCalls[0]?.payload as { input?: { issueId?: string } })?.input
+      ?.issueId,
+  ).toBe(signedRoots[0]?.id);
   const bwCalls = await page.evaluate(() =>
     (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
       (entry) => entry.command === "submit_project_bw_record",
     ),
   );
-  const enrollCalls = bwCalls.filter(
-    (entry) =>
-      (entry.payload as { input?: { record?: string } } | null)?.input
-        ?.record === "issue-state",
-  );
-  expect(enrollCalls).toHaveLength(1);
-  expect(
-    (
-      enrollCalls[0]?.payload as {
-        input?: { content?: { state?: string } };
-      }
-    )?.input?.content?.state,
-  ).toBe("triage");
   const updateCalls = bwCalls.filter(
     (entry) =>
       (entry.payload as { input?: { record?: string } } | null)?.input

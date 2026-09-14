@@ -171,14 +171,12 @@ test("a backlog issue assigns a named writer from the dropdown without displayin
   await writerSelect.selectOption(WRITER);
   await expect(page.getByText("Writer assigned.")).toBeVisible();
 
-  const call = await lastBwCall(page, "submit_project_bw_assignment");
-  expect(
-    (call?.payload as {
-      delegate?: string;
-      operation?: string;
-      prior?: unknown;
-    }) ?? {},
-  ).toMatchObject({ delegate: WRITER, operation: "assignment", prior: null });
+  const call = await lastBwCall(page, "assign_project_bw_writer");
+  expect(call?.payload).toMatchObject({
+    issueId: ROOT,
+    repo: REPO_A,
+    writer: WRITER,
+  });
 });
 
 test("a backlog issue shows only the current writer name and can replace that writer", async ({
@@ -224,21 +222,11 @@ test("a backlog issue shows only the current writer name and can replace that wr
   await writerSelect.selectOption(OTHER_WRITER);
   await expect(page.getByText("Writer changed.")).toBeVisible();
 
-  const calls = await page.evaluate(() =>
-    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
-      (entry) => entry.command === "submit_project_bw_assignment",
-    ),
-  );
-  expect(calls).toHaveLength(2);
-  expect((calls[0].payload as { input: unknown }).input).toMatchObject({
-    delegate: WRITER,
-    operation: "unassignment",
-    prior: ASSIGN_A,
-  });
-  expect((calls[1].payload as { input: unknown }).input).toMatchObject({
-    delegate: OTHER_WRITER,
-    operation: "assignment",
-    prior: expect.stringMatching(/^mock-bw-assignment-\d+$/),
+  const call = await lastBwCall(page, "assign_project_bw_writer");
+  expect(call?.payload).toMatchObject({
+    issueId: ROOT,
+    repo: REPO_A,
+    writer: OTHER_WRITER,
   });
 });
 
@@ -358,13 +346,11 @@ test("backlog with a single-branch repo pre-fills the stream as a read-only fiel
   await expect(panel.getByTestId("bw-ready-submit")).toBeEnabled();
   await panel.getByTestId("bw-ready-submit").click();
 
-  const call = await lastBwCall(page, "submit_project_bw_record");
+  const call = await lastBwCall(page, "move_project_bw_issue_to_ready");
   expect(call?.payload).toMatchObject({
-    record: "issue-state",
-    content: expect.objectContaining({
-      state: "ready",
-      stream: "main",
-    }),
+    issueId: ROOT,
+    repo: REPO_A,
+    stream: "main",
   });
 });
 
@@ -490,42 +476,11 @@ test("ready allows changing the named writer and rebinds ready to the new assign
   await writerSelect.selectOption(OTHER_WRITER);
   await expect(page.getByText("Writer changed.")).toBeVisible();
 
-  const calls = await page.evaluate(() =>
-    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter((entry) =>
-      ["submit_project_bw_assignment", "submit_project_bw_record"].includes(
-        entry.command,
-      ),
-    ),
-  );
-  expect(calls).toHaveLength(3);
-  expect(calls.map((call) => call.command)).toEqual([
-    "submit_project_bw_assignment",
-    "submit_project_bw_assignment",
-    "submit_project_bw_record",
-  ]);
-  expect((calls[0].payload as { input: unknown }).input).toMatchObject({
-    delegate: WRITER,
-    operation: "unassignment",
-    prior: ASSIGN_A,
-  });
-  expect((calls[1].payload as { input: unknown }).input).toMatchObject({
-    delegate: OTHER_WRITER,
-    operation: "assignment",
-    prior: expect.stringMatching(/^mock-bw-assignment-\d+$/),
-  });
-  expect((calls[2].payload as { input: unknown }).input).toMatchObject({
-    record: "issue-state",
-    tags: [
-      ["issue", ROOT],
-      ["previous", issueStateId],
-    ],
-    content: {
-      state: "ready",
-      stream: "windows-integration",
-      assignment: expect.stringMatching(/^mock-bw-assignment-\d+$/),
-      update: UPDATE_A,
-      rework: null,
-    },
+  const call = await lastBwCall(page, "assign_project_bw_writer");
+  expect(call?.payload).toMatchObject({
+    issueId: ROOT,
+    repo: REPO_A,
+    writer: OTHER_WRITER,
   });
 });
 
@@ -562,20 +517,11 @@ test("in-development waits for the selected writer without a desktop completion 
   await expect(panel.getByTestId("bw-implemented-action")).toHaveCount(0);
   await expect(panel.getByTestId("bw-implemented-submit")).toHaveCount(0);
   await panel.getByTestId("bw-reset-ready-submit").click();
-  const call = await lastBwCall(page, "submit_project_bw_record");
+  const call = await lastBwCall(page, "move_project_bw_issue_to_ready");
   expect(call?.payload).toMatchObject({
-    record: "issue-state",
-    tags: [
-      ["issue", ROOT],
-      ["previous", "6".repeat(64)],
-    ],
-    content: {
-      state: "ready",
-      stream: "windows-integration",
-      assignment: ASSIGN_A,
-      update: UPDATE_A,
-      rework: null,
-    },
+    issueId: ROOT,
+    repo: REPO_A,
+    stream: "windows-integration",
   });
 });
 

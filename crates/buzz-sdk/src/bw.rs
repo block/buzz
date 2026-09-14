@@ -7,6 +7,9 @@ use nostr::JsonUtil;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Shared issue workflow operations used by CLI and desktop adapters.
+pub mod operations;
+
 /// The closed NIP-BW record namespace. Artifacts retain their separate 1063 kind.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

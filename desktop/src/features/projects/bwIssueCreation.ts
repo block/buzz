@@ -92,14 +92,8 @@ export async function createProjectBwIssue(
   const issueId = event.id;
 
   try {
-    await invokeTauri("submit_project_bw_record", {
-      input: {
-        repo: input.repoAddress,
-        record: "issue-state",
-        tags: [["issue", issueId]],
-        content: { state: "triage" },
-        delegate: false,
-      },
+    await invokeTauri("enroll_project_bw_issue", {
+      input: { issueId, repo: input.repoAddress },
     });
 
     const acceptanceCriteria = normalizeTemplateLines(input.acceptanceCriteria);

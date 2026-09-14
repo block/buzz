@@ -81,7 +81,6 @@ export function BwAssignmentSection({
         delegate,
         issueId: issue.id,
         repo: project.repoAddress,
-        snapshot,
       });
       toast.success(head.writer ? "Writer changed." : "Writer assigned.");
       await invalidate();

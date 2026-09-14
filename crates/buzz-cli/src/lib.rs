@@ -1644,6 +1644,9 @@ pub enum PrCmd {
 
 #[derive(Subcommand)]
 pub enum IssuesCmd {
+    /// Read and operate on the NIP-BW projection for one issue.
+    #[command(subcommand)]
+    Bw(IssueBwCmd),
     /// Ensure exactly one idempotent NIP-34 issue comment exists for a review handoff
     Comment {
         /// Issue event id (64-char hex)
@@ -1808,6 +1811,93 @@ pub enum IssuesCmd {
         /// Defaults to the truncated assignee pubkeys.
         #[arg(long)]
         label: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IssueBwCmd {
+    /// Read the complete BW projection for one issue.
+    Get {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+    },
+    /// Enroll an issue into the active BW policy.
+    Enroll {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+    },
+    /// Accept an issue and ensure its backlog state exists.
+    Accept {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+        /// Use a matching single-task triage delegation.
+        #[arg(long)]
+        delegated: bool,
+    },
+    /// Select or replace the issue writer.
+    #[command(name = "assign-writer")]
+    AssignWriter {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+        #[arg(long)]
+        writer: String,
+    },
+    /// Move or reset an issue to Ready.
+    #[command(name = "move-to-ready")]
+    MoveToReady {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+        #[arg(long)]
+        stream: String,
+        #[arg(long)]
+        rework: Option<String>,
+        #[arg(long)]
+        terminal_set: Option<String>,
+    },
+    /// Let the selected writer start development.
+    #[command(name = "start-development")]
+    StartDevelopment {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+    },
+    /// Let the selected writer mark the pushed stream head implemented.
+    #[command(name = "mark-implemented")]
+    MarkImplemented {
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        repo_owner: String,
+        #[arg(long)]
+        repo_id: String,
+        #[arg(long)]
+        commit: String,
+        /// Honest test and limitation summary. Use '-' to read from stdin.
+        #[arg(long)]
+        tests: String,
     },
 }
 
@@ -2411,6 +2501,7 @@ mod tests {
             names(&cmd, "issues"),
             vec![
                 "assign",
+                "bw",
                 "comment",
                 "create",
                 "get",
@@ -2419,6 +2510,31 @@ mod tests {
                 "start-development",
                 "status",
                 "unassign",
+            ]
+        );
+        let issues = cmd
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "issues")
+            .expect("issues command");
+        let mut issue_bw_names: Vec<String> = issues
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "bw")
+            .expect("issues bw command")
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+        issue_bw_names.sort();
+        assert_eq!(
+            issue_bw_names,
+            vec![
+                "accept",
+                "assign-writer",
+                "enroll",
+                "get",
+                "mark-implemented",
+                "move-to-ready",
+                "start-development",
             ]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
@@ -2448,7 +2564,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 9),
+            ("issues", 10),
             ("media", 1),
             ("messages", 9),
             ("pack", 2),

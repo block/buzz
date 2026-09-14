@@ -53,24 +53,6 @@ function snapshot(records) {
   };
 }
 
-function assignmentRecord(id, delegate, operation = "assignment", prior) {
-  const tags = [
-    ["e", issueId, "", "root"],
-    ["a", repo],
-    ["p", delegate],
-    ["t", operation],
-  ];
-  if (prior) tags.push(["prior", prior]);
-  return {
-    id,
-    pubkey: "b".repeat(64),
-    created_at: 2,
-    kind: 1,
-    tags,
-    content: operation === "assignment" ? "Assigned" : "Unassigned",
-  };
-}
-
 test("a forked issue-update chain refuses the text update up front without calling out", async () => {
   const forkA = record("1".repeat(64), { record: "issue-update" });
   const forkB = record("2".repeat(64), { record: "issue-update" });
@@ -90,7 +72,7 @@ test("a forked triage-action chain refuses the triage action up front", async ()
   const forkB = record("2".repeat(64), { record: "triage-action" });
   await assert.rejects(
     submitBwTriageAction({
-      fields: { action: "accept" },
+      fields: { action: "need-info", question: "q", recipient: "d".repeat(64) },
       issueId,
       repo,
       snapshot: snapshot([forkA, forkB]),
@@ -103,11 +85,10 @@ function withMockInvoke(handler) {
   globalThis.window = { __TAURI_INTERNALS__: { invoke: handler } };
 }
 
-test("a matching delegation submits delegate:true and skips the previous tag (P4F)", async () => {
-  const existingHead = record("1".repeat(64), { record: "triage-action" });
+test("a matching delegation is passed to the complete accept operation", async () => {
   let captured;
-  withMockInvoke(async (_cmd, args) => {
-    captured = args;
+  withMockInvoke(async (command, args) => {
+    captured = { command, args };
     return { eventId: "z".repeat(64), projection: {} };
   });
   await submitBwTriageAction({
@@ -115,171 +96,87 @@ test("a matching delegation submits delegate:true and skips the previous tag (P4
     fields: { action: "accept" },
     issueId,
     repo,
-    snapshot: snapshot([existingHead]),
   });
-  assert.equal(captured.input.delegate, true);
-  assert.equal(
-    captured.input.tags.some((tag) => tag[0] === "previous"),
-    false,
-  );
+  assert.equal(captured.command, "accept_project_bw_issue");
+  assert.deepEqual(captured.args.input, { delegated: true, issueId, repo });
 });
 
-test("no delegation keeps delegate:false and the ordinary previous chain (P4F)", async () => {
-  const existingHead = record("1".repeat(64), { record: "triage-action" });
+test("ordinary accept delegates the whole chain without delegation", async () => {
   let captured;
-  withMockInvoke(async (_cmd, args) => {
-    captured = args;
+  withMockInvoke(async (command, args) => {
+    captured = { command, args };
     return { eventId: "z".repeat(64), projection: {} };
   });
   await submitBwTriageAction({
     fields: { action: "accept" },
     issueId,
     repo,
-    snapshot: snapshot([existingHead]),
   });
-  assert.equal(captured.input.delegate, false);
-  assert.deepEqual(
-    captured.input.tags.find((tag) => tag[0] === "previous"),
-    ["previous", existingHead.id],
-  );
+  assert.equal(captured.command, "accept_project_bw_issue");
+  assert.deepEqual(captured.args.input, { delegated: false, issueId, repo });
 });
 
-test("in-development is signed by the writer bound into the ready head", async () => {
-  const writer = "d".repeat(64);
-  const assignmentId = "1".repeat(64);
-  const readyId = "2".repeat(64);
-  const current = snapshot([assignmentRecord(assignmentId, writer)]);
-  current.projection.issue_state = {
-    [issueId]: {
-      state: "ready",
-      stream: "windows-integration",
-      assignment: assignmentId,
-    },
-  };
-  current.projection.issue_state_id = { [issueId]: readyId };
+test("in-development delegates the lifecycle operation to Tauri", async () => {
   let captured;
-  withMockInvoke(async (_command, args) => {
-    captured = args.input;
+  withMockInvoke(async (command, args) => {
+    captured = { command, args };
     return { eventId: "3".repeat(64), projection: {} };
   });
 
-  await submitBwInDevelopmentTransition({ issueId, repo, snapshot: current });
-
-  assert.equal(captured.signerPubkey, writer);
-  assert.deepEqual(captured.content, {
-    state: "in-development",
-    stream: "windows-integration",
-    assignment: assignmentId,
+  await submitBwInDevelopmentTransition({
+    issueId,
+    repo,
   });
+
+  assert.equal(captured.command, "start_project_bw_development");
+  assert.deepEqual(captured.args.input, { issueId, repo });
 });
 
-test("changing a ready writer unassigns, assigns, then rebinds ready to the new assignment", async () => {
-  const oldWriter = "c".repeat(64);
+test("changing a ready writer delegates the resumable chain to Tauri", async () => {
   const newWriter = "d".repeat(64);
-  const oldAssignment = "1".repeat(64);
-  const issueStateId = "2".repeat(64);
-  const updateId = "3".repeat(64);
-  const unassignmentId = "4".repeat(64);
-  const newAssignmentId = "5".repeat(64);
-  const readyId = "6".repeat(64);
-  const current = snapshot([assignmentRecord(oldAssignment, oldWriter)]);
-  current.projection.issue_state = {
-    [issueId]: {
-      state: "ready",
-      stream: "windows-integration",
-      assignment: oldAssignment,
-      update: updateId,
-    },
-  };
-  current.projection.issue_state_id = { [issueId]: issueStateId };
-  const calls = [];
-  const ids = [unassignmentId, newAssignmentId, readyId];
+  let captured;
   withMockInvoke(async (command, args) => {
-    calls.push({ command, args });
-    return { eventId: ids[calls.length - 1], projection: {} };
+    captured = { command, args };
+    return { eventId: "6".repeat(64), projection: {} };
   });
 
   await submitBwWriterSelection({
     delegate: newWriter,
     issueId,
     repo,
-    snapshot: current,
+    snapshot: snapshot([]),
   });
 
-  assert.deepEqual(
-    calls.map(({ command }) => command),
-    [
-      "submit_project_bw_assignment",
-      "submit_project_bw_assignment",
-      "submit_project_bw_record",
-    ],
-  );
-  assert.deepEqual(calls[0].args.input, {
-    delegate: oldWriter,
+  assert.equal(captured.command, "assign_project_bw_writer");
+  assert.deepEqual(captured.args.input, {
     issueId,
-    operation: "unassignment",
-    prior: oldAssignment,
     repo,
-  });
-  assert.deepEqual(calls[1].args.input, {
-    delegate: newWriter,
-    issueId,
-    operation: "assignment",
-    prior: unassignmentId,
-    repo,
-  });
-  assert.deepEqual(calls[2].args.input, {
-    repo,
-    record: "issue-state",
-    tags: [
-      ["issue", issueId],
-      ["previous", issueStateId],
-    ],
-    content: {
-      state: "ready",
-      stream: "windows-integration",
-      assignment: newAssignmentId,
-      update: updateId,
-      rework: null,
-    },
-    delegate: false,
+    writer: newWriter,
   });
 });
 
-test("a ready transition whose real chain head is still triage auto-chains the missing backlog record first, then readies off it", async () => {
-  const triageStateId = "3".repeat(64);
-  const acceptAction = record("4".repeat(64), { record: "triage-action" });
-  acceptAction.content = '{"action":"accept"}';
-  const snap = snapshot([acceptAction]);
-  snap.projection.issue_state = { [issueId]: { state: "triage" } };
-  snap.projection.issue_state_id = { [issueId]: triageStateId };
-
-  const calls = [];
-  withMockInvoke(async (_cmd, args) => {
-    calls.push(args);
-    return { eventId: `${calls.length}`.repeat(64), projection: {} };
+test("ready delegates acceptance repair and transition to Tauri", async () => {
+  let captured;
+  withMockInvoke(async (command, args) => {
+    captured = { command, args };
+    return { eventId: "6".repeat(64), projection: {} };
   });
 
   await submitBwReadyTransition({
     issueId,
     repo,
-    snapshot: snap,
+    reworkVerdictId: "4".repeat(64),
+    snapshot: snapshot([]),
     stream: "windows",
+    terminalSetId: "5".repeat(64),
   });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].input.record, "issue-state");
-  assert.deepEqual(calls[0].input.content, {
-    state: "backlog",
-    triage: acceptAction.id,
+  assert.equal(captured.command, "move_project_bw_issue_to_ready");
+  assert.deepEqual(captured.args.input, {
+    issueId,
+    repo,
+    reworkVerdictId: "4".repeat(64),
+    stream: "windows",
+    terminalSetId: "5".repeat(64),
   });
-  assert.deepEqual(
-    calls[0].input.tags.find((tag) => tag[0] === "previous"),
-    ["previous", triageStateId],
-  );
-  assert.equal(calls[1].input.content.state, "ready");
-  assert.deepEqual(
-    calls[1].input.tags.find((tag) => tag[0] === "previous"),
-    ["previous", "1".repeat(64)],
-  );
 });

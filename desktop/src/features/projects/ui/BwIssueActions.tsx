@@ -16,7 +16,6 @@ import {
 } from "@/features/projects/bwProjection";
 import {
   BwConflictError,
-  submitBwAcceptToBacklog,
   submitBwIssueTextUpdate,
   submitBwReadyTransition,
   submitBwRelation,
@@ -64,14 +63,8 @@ function EnrollIntoBw({
     if (pending) return;
     setPending(true);
     try {
-      await invokeTauri("submit_project_bw_record", {
-        input: {
-          repo: project.repoAddress,
-          record: "issue-state",
-          tags: [["issue", issue.id]],
-          content: { state: "triage" },
-          delegate: false,
-        },
+      await invokeTauri("enroll_project_bw_issue", {
+        input: { issueId: issue.id, repo: project.repoAddress },
       });
       toast.success("Issue enrolled into BW.");
       await invalidate();
@@ -277,31 +270,13 @@ function BwTriageActions({
         action,
         identityQuery.data?.pubkey,
       );
-      const accepted = await submitBwTriageAction({
+      await submitBwTriageAction({
         delegate,
         fields,
         issueId: issue.id,
         repo: project.repoAddress,
         snapshot: issue.bw.snapshot,
       });
-      if (action === "accept") {
-        // Core's own display projection already reports "backlog" once this
-        // triage-action head is "accept" (`crates/buzz-core/src/bw/projection.rs`),
-        // but the issue-state chain itself only advances once this separate,
-        // Owner/coordinator-signed record lands (NIP-BW.md: "the accepting
-        // triage action alone does not grant the triage delegate authority
-        // to sign a state record") — otherwise `ready` stays refused with
-        // `bw:reject:causality:state-transition`. Chained here so accept is
-        // one action for the common owner/coordinator case; an unauthorized
-        // delegate's attempt surfaces Core's own role refusal below exactly
-        // like any other refusal in this panel, never a second gate.
-        await submitBwAcceptToBacklog({
-          issueId: issue.id,
-          repo: project.repoAddress,
-          snapshot: issue.bw.snapshot,
-          triageId: accepted.eventId,
-        });
-      }
       toast.success("Triage action recorded.");
       setQuestion("");
       setRecipient("");
@@ -504,7 +479,6 @@ function BwReadyAction({
         issueId: issue.id,
         repo: project.repoAddress,
         reworkVerdictId: reworkVerdictId.trim() || null,
-        snapshot: issue.bw.snapshot,
         stream,
         terminalSetId: terminalSetId.trim() || null,
       });
@@ -716,7 +690,6 @@ function BwWriterRecoveryAction({
       await submitBwReadyTransition({
         issueId: issue.id,
         repo: project.repoAddress,
-        snapshot: issue.bw.snapshot,
         stream,
       });
       toast.success("Issue returned to ready.");

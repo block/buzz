@@ -1,21 +1,13 @@
-// BW record writes for already-enrolled issues (P4D): text/acceptance-
-// criteria edits and the four triage actions available from the fixed
-// triage state (need-info, accept-to-backlog, duplicate, decline). Every
-// write goes through the single generic `submit_project_bw_record` Tauri
-// command; role, causality, policy-binding and reference validity are all
-// decided by the Core `Consumer` on the Rust side, never predicted here.
+// BW writes for already-enrolled issues. Text, non-accept triage actions,
+// and relations retain the generic compatibility commands. Multi-step issue
+// lifecycle actions use narrow Tauri business commands backed by the shared
+// Rust operations layer. Core remains the only role and causality authority.
 // This module's own job is narrower: compute the correct `previous` pointer
 // from the already-fetched snapshot so a stale write cannot silently
 // overwrite a concurrent one, and surface a real fork as a visible conflict
 // instead of guessing a winner.
 import { invokeTauri } from "@/shared/api/tauri";
-import {
-  bwAssignmentHead,
-  bwBoundWriter,
-  bwChainHead,
-  type BwAssignmentOperation,
-  type BwSnapshot,
-} from "./bwProjection";
+import { bwChainHead, type BwSnapshot } from "./bwProjection";
 
 export class BwConflictError extends Error {
   constructor(
@@ -92,6 +84,11 @@ export async function submitBwTriageAction({
   fields: BwTriageActionFields;
   delegate?: boolean;
 }): Promise<{ eventId: string; projection: unknown }> {
+  if (fields.action === "accept") {
+    return invokeTauri("accept_project_bw_issue", {
+      input: { delegated: delegate, issueId, repo },
+    });
+  }
   const { headId, conflict } = bwChainHead(snapshot, issueId, "triage-action");
   if (conflict) {
     throw new BwConflictError();
@@ -113,201 +110,29 @@ export async function submitBwTriageAction({
   });
 }
 
-/** Sign the `issue-state` `backlog` record NIP-BW.md requires after an
- * accepted triage action. Core's own display projection already reports
- * `backlog` once the triage-action head is `accept` (a convenience label,
- * `crates/buzz-core/src/bw/projection.rs`), but the issue-state chain itself
- * has not actually advanced past `triage` until this separate,
- * Owner/coordinator-signed record — referencing that exact triage event —
- * lands ("issue-state and the existing assignment wire": "the accepting
- * triage action alone does not grant the triage delegate authority to sign
- * a state record"). Without it, `ready` and everything after stays refused
- * with `bw:reject:causality:state-transition` since the real previous state
- * is still `triage`.
- *
- * `triageId` is the just-signed accept event's own id, passed explicitly by
- * the caller (`BwIssueActions.tsx` chains this immediately after a
- * successful accept) rather than re-derived from `snapshot` — the
- * already-fetched snapshot predates that write and would still show no
- * triage-action head at all. */
-export async function submitBwAcceptToBacklog({
-  repo,
-  issueId,
-  snapshot,
-  triageId,
-}: {
-  repo: string;
-  issueId: string;
-  snapshot: BwSnapshot;
-  triageId: string;
-}): Promise<{ eventId: string; projection: unknown }> {
-  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
-  const tags: string[][] = [["issue", issueId]];
-  if (previousId) tags.push(["previous", previousId]);
-  return invokeTauri("submit_project_bw_record", {
-    input: {
-      repo,
-      record: "issue-state",
-      tags,
-      content: { state: "backlog", triage: triageId },
-      delegate: false,
-    },
-  });
-}
-
-// P4E: assignment (the *existing* kind:1 wire — no new grammar), relation
-// (parent/child/blocks/duplicate-of) and the ready/in-development/implemented
-// handoff. Every function below computes only the `previous`/`prior` pointer
-// from the already-fetched snapshot and refuses up front on a visible fork;
-// the actual role/causality/evidence decision is exclusively Core's, via
-// `submit_project_bw_assignment` / `submit_project_bw_record`
-// (`desktop/src-tauri/src/commands/project_bw_assignment.rs`,
-// `project_bw_write.rs`).
-
-/** Select or release the sole BW delegate for an issue, chaining off the
- * exact current kind:1 assignment-chain head. Whether this signer may
- * perform the operation at all (Owner or the coordinator active at this
- * moment) is decided exclusively by Core; an unauthorized attempt is
- * refused with its own `bw:reject:role:unauthorized`, never simplified or
- * pre-filtered here. */
-export async function submitBwAssignment({
-  repo,
-  issueId,
-  snapshot,
-  delegate,
-  operation,
-}: {
-  repo: string;
-  issueId: string;
-  snapshot: BwSnapshot;
-  delegate: string;
-  operation: BwAssignmentOperation;
-}): Promise<{ eventId: string; projection: unknown }> {
-  const { headId, conflict } = bwAssignmentHead(snapshot, issueId);
-  if (conflict) {
-    throw new BwConflictError();
-  }
-  return submitBwAssignmentAtPrior({
-    delegate,
-    issueId,
-    operation,
-    prior: headId,
-    repo,
-  });
-}
+// Generic Tauri compatibility commands remain available for text, relation,
+// and low-level callers. Lifecycle sequencing lives in the shared Rust layer.
 
 type BwWriteResult = { eventId: string; projection: unknown };
-
-function submitBwAssignmentAtPrior({
-  repo,
-  issueId,
-  delegate,
-  operation,
-  prior,
-}: {
-  repo: string;
-  issueId: string;
-  delegate: string;
-  operation: BwAssignmentOperation;
-  prior: string | null;
-}): Promise<BwWriteResult> {
-  return invokeTauri("submit_project_bw_assignment", {
-    input: {
-      repo,
-      issueId,
-      delegate,
-      operation,
-      prior,
-    },
-  });
-}
 
 /** Select a writer from the backlog/ready dropdown. Replacing an existing
  * writer is the exact causal `unassignment -> assignment` sequence NIP-BW
  * requires. When the issue is already ready, finish by publishing a new ready
  * head bound to the new assignment; otherwise Start development would still
- * carry the old assignment ID and Core would correctly refuse it. Each step is
- * independently readback-confirmed by its Tauri command. UI callers refetch
- * after a partial failure, so a retry starts from the accepted head. */
+ * carry the old assignment ID and Core would correctly refuse it. The shared
+ * Rust operation reloads history after every partial step and resumes safely. */
 export async function submitBwWriterSelection({
   repo,
   issueId,
-  snapshot,
   delegate,
 }: {
   repo: string;
   issueId: string;
-  snapshot: BwSnapshot;
   delegate: string;
 }): Promise<BwWriteResult> {
-  const head = bwAssignmentHead(snapshot, issueId);
-  if (head.conflict) {
-    throw new BwConflictError();
-  }
-
-  const issueState = snapshot.projection.issue_state[issueId];
-  const ready = issueState?.state === "ready";
-  const issueStateId = snapshot.projection.issue_state_id[issueId] ?? null;
-  if (ready && (!issueStateId || !issueState.stream || !issueState.update)) {
-    throw new Error("This issue has no complete ready state to rebind.");
-  }
-
-  let prior = head.headId;
-  let assignmentId =
-    head.writer === delegate && head.operation === "assignment"
-      ? head.headId
-      : null;
-  let result: BwWriteResult | null = null;
-
-  if (head.writer && head.writer !== delegate) {
-    result = await submitBwAssignmentAtPrior({
-      delegate: head.writer,
-      issueId,
-      operation: "unassignment",
-      prior,
-      repo,
-    });
-    prior = result.eventId;
-  }
-
-  if (!assignmentId) {
-    result = await submitBwAssignmentAtPrior({
-      delegate,
-      issueId,
-      operation: "assignment",
-      prior,
-      repo,
-    });
-    assignmentId = result.eventId;
-  }
-
-  if (ready && issueState.assignment !== assignmentId) {
-    return invokeTauri("submit_project_bw_record", {
-      input: {
-        repo,
-        record: "issue-state",
-        tags: [
-          ["issue", issueId],
-          ["previous", issueStateId],
-        ],
-        content: {
-          state: "ready",
-          stream: issueState.stream,
-          assignment: assignmentId,
-          update: issueState.update,
-          rework: null,
-        },
-        delegate: false,
-      },
-    });
-  }
-
-  return (
-    result ?? {
-      eventId: assignmentId,
-      projection: snapshot.projection,
-    }
-  );
+  return invokeTauri("assign_project_bw_writer", {
+    input: { issueId, repo, writer: delegate },
+  });
 }
 
 /** Move an issue from `backlog` to `ready`: binds a stream, the exact
@@ -320,78 +145,23 @@ export async function submitBwWriterSelection({
 export async function submitBwReadyTransition({
   repo,
   issueId,
-  snapshot,
   stream,
   reworkVerdictId = null,
   terminalSetId = null,
 }: {
   repo: string;
   issueId: string;
-  snapshot: BwSnapshot;
   stream: string;
   reworkVerdictId?: string | null;
   terminalSetId?: string | null;
 }): Promise<{ eventId: string; projection: unknown }> {
-  let previousId = snapshot.projection.issue_state_id[issueId] ?? null;
-  // Core's display projection reports "backlog" as soon as the triage-action
-  // head is "accept" (a convenience label, `bw/projection.rs`), which is
-  // what gates this action into view in the first place — but the
-  // issue-state chain itself only actually reaches "backlog" once that
-  // dedicated record lands (NIP-BW.md). An issue accepted before that record
-  // was chained (or whose accept predates this auto-chain existing at all)
-  // is stuck on a real chain head of "triage" forever otherwise, refused
-  // with `bw:reject:causality:state-transition` on every ready attempt. Heal
-  // it inline here rather than requiring a separate repair step.
-  if (snapshot.projection.issue_state[issueId]?.state === "triage") {
-    const { headId: triageId, conflict: triageConflict } = bwChainHead(
-      snapshot,
-      issueId,
-      "triage-action",
-    );
-    if (triageConflict) {
-      throw new BwConflictError();
-    }
-    if (!triageId) {
-      throw new Error("This issue has not been accepted into backlog yet.");
-    }
-    const backlog = await submitBwAcceptToBacklog({
-      issueId,
-      repo,
-      snapshot,
-      triageId,
-    });
-    previousId = backlog.eventId;
-  }
-  const { headId: updateId, conflict: updateConflict } = bwChainHead(
-    snapshot,
-    issueId,
-    "issue-update",
-  );
-  if (updateConflict) {
-    throw new BwConflictError();
-  }
-  const { headId: assignmentId, conflict: assignmentConflict } =
-    bwAssignmentHead(snapshot, issueId);
-  if (assignmentConflict) {
-    throw new BwConflictError();
-  }
-  const tags: string[][] = [["issue", issueId]];
-  if (previousId) tags.push(["previous", previousId]);
-  const content: Record<string, unknown> = {
-    state: "ready",
-    stream,
-    assignment: assignmentId,
-    update: updateId,
-    rework: reworkVerdictId,
-  };
-  if (terminalSetId) content.terminal_set = terminalSetId;
-  return invokeTauri("submit_project_bw_record", {
+  return invokeTauri("move_project_bw_issue_to_ready", {
     input: {
+      issueId,
       repo,
-      record: "issue-state",
-      tags,
-      content,
-      delegate: false,
+      reworkVerdictId,
+      stream,
+      terminalSetId,
     },
   });
 }
@@ -405,42 +175,12 @@ export async function submitBwReadyTransition({
 export async function submitBwInDevelopmentTransition({
   repo,
   issueId,
-  snapshot,
 }: {
   repo: string;
   issueId: string;
-  snapshot: BwSnapshot;
 }): Promise<{ eventId: string; projection: unknown }> {
-  const previousId = snapshot.projection.issue_state_id[issueId] ?? null;
-  const current = snapshot.projection.issue_state[issueId];
-  if (!previousId || !current?.stream || !current.assignment) {
-    throw new Error(
-      "This issue has no valid ready state with a bound assignment yet.",
-    );
-  }
-  const writer = bwBoundWriter(snapshot, issueId);
-  if (!writer) {
-    throw new Error(
-      "The ready state is not bound to a valid selected writer anymore.",
-    );
-  }
-  const tags: string[][] = [
-    ["issue", issueId],
-    ["previous", previousId],
-  ];
-  return invokeTauri("submit_project_bw_record", {
-    input: {
-      repo,
-      record: "issue-state",
-      tags,
-      content: {
-        state: "in-development",
-        stream: current.stream,
-        assignment: current.assignment,
-      },
-      delegate: false,
-      signerPubkey: writer,
-    },
+  return invokeTauri("start_project_bw_development", {
+    input: { issueId, repo },
   });
 }
 

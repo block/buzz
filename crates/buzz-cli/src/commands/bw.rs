@@ -1,6 +1,4 @@
-use super::bw_git_readback::{
-    genesis_clone_url, resolve_stream_head_blocking, validate_git_commit,
-};
+use super::bw_git_readback::{genesis_clone_url, resolve_stream_head_blocking};
 use crate::{client::BuzzClient, error::CliError};
 use buzz_core::bw::{parse_json, Consumer, Evidence, Trust};
 use nostr::{EventBuilder, JsonUtil, Kind, Tag, Timestamp};
@@ -227,7 +225,7 @@ fn event_id(event: &Value) -> Result<String, CliError> {
 /// an incomplete history look authoritative. Exact referenced events are then
 /// closed over recursively, including foreign bindings that Core must reject.
 async fn live_history(client: &BuzzClient, repo: &str) -> Result<LiveHistory, CliError> {
-    let mut parts = repo.splitn(3, ':');
+    let mut parts = repo.split(':');
     let kind = parts.next();
     let owner = parts.next();
     let repo_id = parts.next();
@@ -336,247 +334,401 @@ async fn live_history(client: &BuzzClient, repo: &str) -> Result<LiveHistory, Cl
     })
 }
 
-fn prepared_start_development(
-    consumer: &Consumer,
-    repo: &str,
-    issue: &str,
-    signer: &str,
-    created_at: u64,
-    auth_tag: Option<&Tag>,
-) -> Result<(buzz_sdk::bw::Publication, Value), CliError> {
-    let projection = consumer.projection();
-    let previous = projection["issue_state_id"][issue]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("issue has no current BW state".into()))?;
-    let state = &projection["issue_state"][issue];
-    if state["state"] != "ready" {
-        return Err(CliError::Usage("BW issue is not ready".into()));
-    }
-    let stream = state["stream"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("ready issue has no stream".into()))?;
-    let assignment = state["assignment"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("ready issue has no selected writer".into()))?;
-    let activation = consumer.activation().map_err(|error| {
-        CliError::Usage(format!(
-            "bw:{}:{}:{}",
-            error.outcome, error.stage, error.code
-        ))
-    })?;
-    let mut tags = vec![
-        vec!["a".to_owned(), repo.to_owned()],
-        vec!["policy".to_owned(), activation.policy],
-        vec!["issue".to_owned(), issue.to_owned()],
-        vec!["previous".to_owned(), previous.to_owned()],
-    ];
-    if let Some(auth_tag) = auth_tag {
-        tags.push(auth_tag.as_slice().to_vec());
-    }
-    let draft = buzz_sdk::bw::record(
-        buzz_sdk::bw::RecordType::IssueState,
-        tags,
-        json!({
-            "state": "in-development",
-            "stream": stream,
-            "assignment": assignment,
-        }),
-    )
-    .map_err(refusal)?;
-    let dry = draft.dry_run().map_err(refusal)?;
-    let candidate = json!({
-        "pubkey": signer,
-        "created_at": created_at,
-        "kind": dry["kind"],
-        "tags": dry["tags"],
-        "content": dry["content"],
-    });
-    let publication = buzz_sdk::bw::Publication::prepare(consumer, candidate).map_err(refusal)?;
-    Ok((publication, dry))
+struct CliOperationPort<'a> {
+    client: &'a BuzzClient,
+    last_events: BTreeMap<String, Value>,
+    last_genesis: Option<String>,
 }
 
-struct ImplementedDraft<'a> {
-    repo: &'a str,
-    issue: &'a str,
-    signer: &'a str,
-    commit: &'a str,
-    tests: &'a str,
-    remote_readback: &'a Value,
-    created_at: u64,
-    auth_tag: Option<&'a Tag>,
+impl<'a> CliOperationPort<'a> {
+    fn new(client: &'a BuzzClient) -> Self {
+        Self {
+            client,
+            last_events: BTreeMap::new(),
+            last_genesis: None,
+        }
+    }
 }
 
-fn prepared_mark_implemented(
-    consumer: &Consumer,
-    input: ImplementedDraft<'_>,
-) -> Result<(buzz_sdk::bw::Publication, Value), CliError> {
-    let projection = consumer.projection();
-    let previous = projection["issue_state_id"][input.issue]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("issue has no current BW state".into()))?;
-    let state = &projection["issue_state"][input.issue];
-    if state["state"] != "in-development" {
-        return Err(CliError::Usage("BW issue is not in development".into()));
-    }
-    let stream = state["stream"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("in-development issue has no stream".into()))?;
-    let assignment = state["assignment"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("in-development issue has no selected writer".into()))?;
-    let activation = consumer.activation().map_err(|error| {
-        CliError::Usage(format!(
-            "bw:{}:{}:{}",
-            error.outcome, error.stage, error.code
-        ))
-    })?;
-    let mut tags = vec![
-        vec!["a".to_owned(), input.repo.to_owned()],
-        vec!["policy".to_owned(), activation.policy],
-        vec!["issue".to_owned(), input.issue.to_owned()],
-        vec!["previous".to_owned(), previous.to_owned()],
-    ];
-    if let Some(auth_tag) = input.auth_tag {
-        tags.push(auth_tag.as_slice().to_vec());
-    }
-    let draft = buzz_sdk::bw::record(
-        buzz_sdk::bw::RecordType::IssueState,
-        tags,
-        json!({
-            "state": "implemented",
-            "stream": stream,
-            "assignment": assignment,
-            "commit": input.commit,
-            "tests": input.tests,
-            "remote_readback": input.remote_readback,
-        }),
-    )
-    .map_err(refusal)?;
-    let dry = draft.dry_run().map_err(refusal)?;
-    let candidate = json!({
-        "pubkey": input.signer,
-        "created_at": input.created_at,
-        "kind": dry["kind"],
-        "tags": dry["tags"],
-        "content": dry["content"],
-    });
-    let publication = buzz_sdk::bw::Publication::prepare(consumer, candidate).map_err(refusal)?;
-    Ok((publication, dry))
-}
+impl buzz_sdk::bw::operations::OperationPort for CliOperationPort<'_> {
+    type Error = CliError;
 
-fn parsed_tags(dry: &Value) -> Result<Vec<Tag>, CliError> {
-    dry["tags"]
-        .as_array()
-        .ok_or_else(|| CliError::Other("bw:shape:tags".into()))?
-        .iter()
-        .map(|tag| {
-            let parts = tag
+    fn now(&mut self) -> Result<u64, Self::Error> {
+        now()
+    }
+
+    fn load_history<'a>(
+        &'a mut self,
+        repo: &'a str,
+    ) -> buzz_sdk::bw::operations::PortFuture<'a, buzz_sdk::bw::operations::RawHistory, Self::Error>
+    {
+        Box::pin(async move {
+            let history = live_history(self.client, repo).await?;
+            self.last_genesis = history
+                .consumer
+                .activation()
+                .ok()
+                .map(|activation| activation.genesis);
+            self.last_events = history.events.clone();
+            let owner = repo
+                .split(':')
+                .nth(1)
+                .ok_or_else(|| CliError::Usage("invalid BW repository coordinate".into()))?;
+            Ok(buzz_sdk::bw::operations::RawHistory {
+                trust: Trust {
+                    community: self.client.relay_url().to_owned(),
+                    repo: repo.to_owned(),
+                    owner: owner.to_owned(),
+                },
+                evidence: history.evidence,
+                now: now()?,
+                events: history
+                    .events
+                    .values()
+                    .map(|event| {
+                        serde_json::to_vec(event).map_err(|error| {
+                            CliError::Other(format!("serialize BW history: {error}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        })
+    }
+
+    fn signing_identity<'a>(
+        &'a mut self,
+        required_pubkey: Option<&'a str>,
+    ) -> buzz_sdk::bw::operations::PortFuture<
+        'a,
+        buzz_sdk::bw::operations::SigningIdentity,
+        Self::Error,
+    > {
+        Box::pin(async move {
+            let pubkey = self.client.keys().public_key().to_hex();
+            if required_pubkey.is_some_and(|required| !required.eq_ignore_ascii_case(&pubkey)) {
+                return Err(CliError::Usage("bw:reject:role:unauthorized".into()));
+            }
+            let event_tags = self
+                .client
+                .bw_auth_tag()
+                .map(|tag| vec![tag.as_slice().to_vec()])
+                .unwrap_or_default();
+            Ok(buzz_sdk::bw::operations::SigningIdentity { pubkey, event_tags })
+        })
+    }
+
+    fn sign<'a>(
+        &'a mut self,
+        candidate: &'a Value,
+        required_pubkey: Option<&'a str>,
+    ) -> buzz_sdk::bw::operations::PortFuture<'a, nostr::Event, Self::Error> {
+        Box::pin(async move {
+            let pubkey = self.client.keys().public_key().to_hex();
+            if required_pubkey.is_some_and(|required| !required.eq_ignore_ascii_case(&pubkey)) {
+                return Err(CliError::Usage("bw:reject:role:unauthorized".into()));
+            }
+            let tags = candidate["tags"]
                 .as_array()
                 .ok_or_else(|| CliError::Other("bw:shape:tags".into()))?
                 .iter()
-                .map(|part| {
-                    part.as_str()
-                        .ok_or_else(|| CliError::Other("bw:shape:tags".into()))
+                .map(|tag| {
+                    let parts = tag
+                        .as_array()
+                        .ok_or_else(|| CliError::Other("bw:shape:tags".into()))?
+                        .iter()
+                        .map(|part| {
+                            part.as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| CliError::Other("bw:shape:tags".into()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Tag::parse(parts)
+                        .map_err(|error| CliError::Other(format!("invalid BW tag: {error}")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Tag::parse(parts).map_err(|error| CliError::Other(format!("invalid BW tag: {error}")))
+            let kind = match candidate["kind"]
+                .as_u64()
+                .ok_or_else(|| CliError::Other("bw:shape:kind".into()))?
+            {
+                1 => Kind::TextNote,
+                value => Kind::Custom(value as u16),
+            };
+            EventBuilder::new(
+                kind,
+                candidate["content"]
+                    .as_str()
+                    .ok_or_else(|| CliError::Other("bw:shape:content".into()))?,
+            )
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(
+                candidate["created_at"]
+                    .as_u64()
+                    .ok_or_else(|| CliError::Other("bw:shape:created-at".into()))?,
+            ))
+            .sign_with_keys(self.client.keys())
+            .map_err(|error| CliError::Other(format!("sign BW operation: {error}")))
         })
-        .collect()
+    }
+
+    fn submit<'a>(
+        &'a mut self,
+        event: &'a nostr::Event,
+    ) -> buzz_sdk::bw::operations::PortFuture<'a, (), Self::Error> {
+        Box::pin(async move {
+            self.client.submit_event(event.clone()).await?;
+            Ok(())
+        })
+    }
+
+    fn readback<'a>(
+        &'a mut self,
+        id: &'a str,
+    ) -> buzz_sdk::bw::operations::PortFuture<'a, Option<nostr::Event>, Self::Error> {
+        Box::pin(async move {
+            self.client
+                .query_paginated(json!({"ids":[id],"kinds":[1,46100]}), 2)
+                .await?
+                .into_iter()
+                .find(|event| event["id"].as_str() == Some(id))
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| CliError::Other(format!("invalid BW readback: {error}")))
+        })
+    }
+
+    fn remote_head<'a>(
+        &'a mut self,
+        repo: &'a str,
+        stream: &'a str,
+    ) -> buzz_sdk::bw::operations::PortFuture<'a, String, Self::Error> {
+        Box::pin(async move {
+            let genesis = self
+                .last_genesis
+                .as_deref()
+                .ok_or_else(|| CliError::Other("BW genesis unavailable".into()))?;
+            let mut parts = repo.split(':');
+            let (_, owner, repo_id) = (parts.next(), parts.next(), parts.next());
+            let owner =
+                owner.ok_or_else(|| CliError::Usage("invalid BW repository coordinate".into()))?;
+            let repo_id = repo_id
+                .ok_or_else(|| CliError::Usage("invalid BW repository coordinate".into()))?;
+            let clone_url = genesis_clone_url(
+                &self.last_events,
+                genesis,
+                self.client.relay_url(),
+                owner,
+                repo_id,
+            )?;
+            resolve_stream_head_blocking(&clone_url, stream, self.client)
+        })
+    }
 }
 
-async fn publish_live_issue_state(
-    client: &BuzzClient,
-    consumer: &mut Consumer,
-    publication: buzz_sdk::bw::Publication,
-    dry: &Value,
-    created_at: u64,
+fn operation_error(error: buzz_sdk::bw::operations::OperationError<CliError>) -> CliError {
+    match error {
+        buzz_sdk::bw::operations::OperationError::Refused(message) => CliError::Usage(message),
+        buzz_sdk::bw::operations::OperationError::Port(error) => error,
+    }
+}
+
+fn issue_request(
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<buzz_sdk::bw::operations::IssueRequest, CliError> {
+    Ok(buzz_sdk::bw::operations::IssueRequest::new(
+        repo_coordinate(repo_owner, repo_id)?,
+        issue.to_owned(),
+    ))
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> Result<(), CliError> {
+    println!(
+        "{}",
+        serde_json::to_string(value)
+            .map_err(|error| CliError::Other(format!("serialize BW output: {error}")))?
+    );
+    Ok(())
+}
+
+fn print_legacy_state(
+    outcome: &buzz_sdk::bw::operations::OperationOutcome,
     state: &str,
 ) -> Result<(), CliError> {
-    let content = dry["content"]
-        .as_str()
-        .ok_or_else(|| CliError::Other("bw:shape:content".into()))?;
-    let event = EventBuilder::new(Kind::Custom(46100), content)
-        .tags(parsed_tags(dry)?)
-        .custom_created_at(Timestamp::from_secs(created_at))
-        .sign_with_keys(client.keys())
-        .map_err(|error| CliError::Other(format!("sign BW record: {error}")))?;
-    publication.seal(&event).map_err(refusal)?;
-
-    let submit_error = client.submit_event(event.clone()).await.err();
-    let readback = client
-        .query_paginated(
-            json!({"ids": [publication.event_id()], "kinds": [46100]}),
-            2,
-        )
-        .await?
-        .into_iter()
-        .find(|candidate| candidate["id"].as_str() == Some(publication.event_id()))
-        .map(serde_json::from_value::<nostr::Event>)
-        .transpose()
-        .map_err(|error| CliError::Other(format!("invalid BW readback: {error}")))?;
-    if readback.is_none() {
-        if let Some(error) = submit_error {
-            return Err(error);
-        }
-    }
-    publication
-        .confirm(consumer, &event, readback.as_ref())
-        .map_err(refusal)?;
+    let event_id = outcome
+        .steps
+        .iter()
+        .rev()
+        .find_map(|step| step.event_id.as_deref())
+        .ok_or_else(|| CliError::Other("BW operation returned no event id".into()))?;
     println!(
         "{}",
         json!({
-            "event_id": publication.event_id(),
-            "accepted": true,
-            "message": format!("issue moved to {state}"),
-            "state": state,
+            "event_id":event_id,
+            "accepted":true,
+            "message":format!("issue moved to {state}"),
+            "state":state,
         })
     );
     Ok(())
 }
 
-/// Let the selected writer identity perform the live `ready` →
-/// `in-development` transition itself. This is the agent-facing counterpart
-/// to Desktop's asynchronous request button; no owner impersonation or local
-/// managed-agent key lookup is involved.
+pub(crate) async fn get_issue_projection(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<(), CliError> {
+    let mut port = CliOperationPort::new(client);
+    let outcome = buzz_sdk::bw::operations::get_issue_projection(
+        &mut port,
+        issue_request(issue, repo_owner, repo_id)?,
+    )
+    .await
+    .map_err(operation_error)?;
+    print_json(&outcome)
+}
+
+pub(crate) async fn enroll_issue(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<(), CliError> {
+    let mut port = CliOperationPort::new(client);
+    let outcome = buzz_sdk::bw::operations::enroll_issue(
+        &mut port,
+        issue_request(issue, repo_owner, repo_id)?,
+    )
+    .await
+    .map_err(operation_error)?;
+    print_json(&outcome)
+}
+
+pub(crate) async fn accept_issue(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    delegated: bool,
+) -> Result<(), CliError> {
+    let mut port = CliOperationPort::new(client);
+    let outcome = buzz_sdk::bw::operations::accept_to_backlog(
+        &mut port,
+        buzz_sdk::bw::operations::AcceptToBacklogRequest {
+            repo: repo_coordinate(repo_owner, repo_id)?,
+            issue: issue.to_owned(),
+            delegated,
+        },
+    )
+    .await
+    .map_err(operation_error)?;
+    print_json(&outcome)
+}
+
+pub(crate) async fn assign_writer(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    writer: &str,
+) -> Result<(), CliError> {
+    let mut port = CliOperationPort::new(client);
+    let outcome = buzz_sdk::bw::operations::assign_writer(
+        &mut port,
+        buzz_sdk::bw::operations::AssignWriterRequest {
+            repo: repo_coordinate(repo_owner, repo_id)?,
+            issue: issue.to_owned(),
+            writer: writer.to_owned(),
+        },
+    )
+    .await
+    .map_err(operation_error)?;
+    print_json(&outcome)
+}
+
+pub(crate) async fn move_to_ready(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    stream: &str,
+    rework: Option<String>,
+    terminal_set: Option<String>,
+) -> Result<(), CliError> {
+    let mut port = CliOperationPort::new(client);
+    let outcome = buzz_sdk::bw::operations::move_to_ready(
+        &mut port,
+        buzz_sdk::bw::operations::MoveToReadyRequest {
+            repo: repo_coordinate(repo_owner, repo_id)?,
+            issue: issue.to_owned(),
+            stream: stream.to_owned(),
+            rework,
+            terminal_set,
+        },
+    )
+    .await
+    .map_err(operation_error)?;
+    print_json(&outcome)
+}
+
+async fn run_start_development(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<buzz_sdk::bw::operations::OperationOutcome, CliError> {
+    let mut port = CliOperationPort::new(client);
+    buzz_sdk::bw::operations::start_development(
+        &mut port,
+        issue_request(issue, repo_owner, repo_id)?,
+    )
+    .await
+    .map_err(operation_error)
+}
+
 pub(crate) async fn start_development(
     client: &BuzzClient,
     issue: &str,
     repo_owner: &str,
     repo_id: &str,
 ) -> Result<(), CliError> {
-    crate::validate::validate_hex64(issue)?;
-    let issue = issue.to_ascii_lowercase();
-    let repo = repo_coordinate(repo_owner, repo_id)?;
-    let LiveHistory {
-        mut consumer,
-        evidence,
-        ..
-    } = live_history(client, &repo).await?;
-    let created_at = now()?;
-    consumer.observe(evidence, created_at);
-    let signer = client.keys().public_key().to_hex();
-    let (publication, dry) = prepared_start_development(
-        &consumer,
-        &repo,
-        &issue,
-        &signer,
-        created_at,
-        client.bw_auth_tag(),
-    )?;
-    publish_live_issue_state(
-        client,
-        &mut consumer,
-        publication,
-        &dry,
-        created_at,
-        "in-development",
-    )
-    .await
+    let outcome = run_start_development(client, issue, repo_owner, repo_id).await?;
+    print_legacy_state(&outcome, "in-development")
 }
 
-/// Let the selected writer finish its own BW handoff. The claimed commit must
-/// already be the canonical remote head of the issue's bound stream; only
-/// then is the same observation embedded as NIP-BW external evidence.
+pub(crate) async fn issue_bw_start_development(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<(), CliError> {
+    let outcome = run_start_development(client, issue, repo_owner, repo_id).await?;
+    print_json(&outcome)
+}
+
+async fn run_mark_implemented(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    commit: &str,
+    tests: &str,
+) -> Result<buzz_sdk::bw::operations::OperationOutcome, CliError> {
+    let mut port = CliOperationPort::new(client);
+    buzz_sdk::bw::operations::mark_implemented(
+        &mut port,
+        buzz_sdk::bw::operations::MarkImplementedRequest {
+            repo: repo_coordinate(repo_owner, repo_id)?,
+            issue: issue.to_owned(),
+            commit: Some(commit.to_owned()),
+            tests: tests.to_owned(),
+        },
+    )
+    .await
+    .map_err(operation_error)
+}
+
 pub(crate) async fn mark_implemented(
     client: &BuzzClient,
     issue: &str,
@@ -585,91 +737,20 @@ pub(crate) async fn mark_implemented(
     commit: &str,
     tests: &str,
 ) -> Result<(), CliError> {
-    crate::validate::validate_hex64(issue)?;
-    let issue = issue.to_ascii_lowercase();
-    let commit = validate_git_commit(commit)?;
-    let tests = tests.trim();
-    if tests.is_empty() {
-        return Err(CliError::Usage(
-            "an honest tests and limitations summary is required".into(),
-        ));
-    }
-    let repo = repo_coordinate(repo_owner, repo_id)?;
-    let LiveHistory {
-        mut consumer,
-        mut evidence,
-        events,
-    } = live_history(client, &repo).await?;
-    let projection = consumer.projection();
-    let state = &projection["issue_state"][&issue];
-    if state["state"] != "in-development" {
-        return Err(CliError::Usage("BW issue is not in development".into()));
-    }
-    let stream = state["stream"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("in-development issue has no stream".into()))?
-        .to_owned();
-    let assignment = state["assignment"]
-        .as_str()
-        .ok_or_else(|| CliError::Usage("in-development issue has no selected writer".into()))?;
-    let signer = client.keys().public_key().to_hex();
-    let selected_writer = events
-        .get(assignment)
-        .and_then(|event| tag(event, "p"))
-        .ok_or_else(|| CliError::Other("selected BW assignment is missing its writer".into()))?;
-    if !selected_writer.eq_ignore_ascii_case(&signer) {
-        return Err(CliError::Usage("bw:reject:role:unauthorized".into()));
-    }
-    let activation = consumer.activation().map_err(|error| {
-        CliError::Usage(format!(
-            "bw:{}:{}:{}",
-            error.outcome, error.stage, error.code
-        ))
-    })?;
-    let clone_url = genesis_clone_url(
-        &events,
-        &activation.genesis,
-        client.relay_url(),
-        repo_owner,
-        repo_id,
-    )?;
-    let remote_head = resolve_stream_head_blocking(&clone_url, &stream, client)?;
-    if remote_head != commit {
-        return Err(CliError::Usage(format!(
-            "pushed commit mismatch: remote {stream} is {remote_head}, not {commit}"
-        )));
-    }
-    let created_at = now()?;
-    let remote_readback = json!({
-        "repo": repo,
-        "stream": stream,
-        "head": remote_head,
-        "observed_at": created_at,
-    });
-    evidence.git_readbacks.push(remote_readback.clone());
-    consumer.observe(evidence, created_at);
-    let (publication, dry) = prepared_mark_implemented(
-        &consumer,
-        ImplementedDraft {
-            repo: &repo,
-            issue: &issue,
-            signer: &signer,
-            commit: &commit,
-            tests,
-            remote_readback: &remote_readback,
-            created_at,
-            auth_tag: client.bw_auth_tag(),
-        },
-    )?;
-    publish_live_issue_state(
-        client,
-        &mut consumer,
-        publication,
-        &dry,
-        created_at,
-        "implemented",
-    )
-    .await
+    let outcome = run_mark_implemented(client, issue, repo_owner, repo_id, commit, tests).await?;
+    print_legacy_state(&outcome, "implemented")
+}
+
+pub(crate) async fn issue_bw_mark_implemented(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    commit: &str,
+    tests: &str,
+) -> Result<(), CliError> {
+    let outcome = run_mark_implemented(client, issue, repo_owner, repo_id, commit, tests).await?;
+    print_json(&outcome)
 }
 /// The readback-bound publish boundary: prepare, seal, confirm. No I/O, no
 /// signing and no local success latch — the relay readback is the only proof.
@@ -802,125 +883,6 @@ mod tests {
         p.to_str().expect("path").to_owned()
     }
 
-    fn fixture_consumer_through(f: &Value, last_label: &str) -> Consumer {
-        let case = f["cases"]
-            .as_array()
-            .expect("cases")
-            .iter()
-            .find(|case| case["name"] == "issue-state-positive")
-            .expect("issue-state-positive");
-        let mut consumer = Consumer::new(
-            serde_json::from_value(case["trust"].clone()).expect("trust"),
-            serde_json::from_value(case["external"].clone()).expect("evidence"),
-            case["now"].as_u64().expect("now"),
-        );
-        for label in case["input"].as_array().expect("input") {
-            let label = label.as_str().expect("label");
-            consumer
-                .ingest(&serde_json::to_vec(&f["events"][label]["event"]).expect("signed event"));
-            if label == last_label {
-                break;
-            }
-        }
-        consumer
-    }
-
-    #[test]
-    fn live_start_development_prepares_the_normative_writer_event() {
-        let f = fixtures();
-        let consumer = fixture_consumer_through(&f, "ready_a");
-        let expected = &f["events"]["dev_a"]["event"];
-        let (publication, dry) = prepared_start_development(
-            &consumer,
-            expected["tags"][1][1].as_str().expect("repo"),
-            expected["tags"][3][1].as_str().expect("issue"),
-            expected["pubkey"].as_str().expect("writer"),
-            expected["created_at"].as_u64().expect("time"),
-            None,
-        )
-        .expect("selected writer may start development");
-        assert_eq!(publication.activation().policy, expected["tags"][2][1]);
-        assert_eq!(dry["tags"], expected["tags"]);
-        assert_eq!(
-            parse_json(dry["content"].as_str().expect("content").as_bytes()).expect("body"),
-            parse_json(expected["content"].as_str().expect("content").as_bytes()).expect("body"),
-        );
-    }
-
-    #[test]
-    fn live_start_development_refuses_a_non_writer_identity() {
-        let f = fixtures();
-        let consumer = fixture_consumer_through(&f, "ready_a");
-        let expected = &f["events"]["dev_a"]["event"];
-        let error = prepared_start_development(
-            &consumer,
-            expected["tags"][1][1].as_str().expect("repo"),
-            expected["tags"][3][1].as_str().expect("issue"),
-            f["events"]["repo"]["event"]["pubkey"]
-                .as_str()
-                .expect("owner"),
-            expected["created_at"].as_u64().expect("time"),
-            None,
-        )
-        .expect_err("owner cannot impersonate the writer");
-        assert!(error.to_string().contains("bw:reject:role:unauthorized"));
-    }
-
-    #[test]
-    fn live_mark_implemented_prepares_the_normative_writer_event() {
-        let f = fixtures();
-        let consumer = fixture_consumer_through(&f, "dev_a");
-        let expected = &f["events"]["implemented_a"]["event"];
-        let body = parse_json(expected["content"].as_str().expect("content").as_bytes())
-            .expect("implemented body");
-        let (publication, dry) = prepared_mark_implemented(
-            &consumer,
-            ImplementedDraft {
-                repo: expected["tags"][1][1].as_str().expect("repo"),
-                issue: expected["tags"][3][1].as_str().expect("issue"),
-                signer: expected["pubkey"].as_str().expect("writer"),
-                commit: body["commit"].as_str().expect("commit"),
-                tests: body["tests"].as_str().expect("tests"),
-                remote_readback: &body["remote_readback"],
-                created_at: expected["created_at"].as_u64().expect("time"),
-                auth_tag: None,
-            },
-        )
-        .expect("selected writer may finish development");
-        assert_eq!(publication.activation().policy, expected["tags"][2][1]);
-        assert_eq!(dry["tags"], expected["tags"]);
-        assert_eq!(
-            parse_json(dry["content"].as_str().expect("content").as_bytes())
-                .expect("prepared body"),
-            body,
-        );
-    }
-
-    #[test]
-    fn live_mark_implemented_refuses_a_non_writer_identity() {
-        let f = fixtures();
-        let consumer = fixture_consumer_through(&f, "dev_a");
-        let expected = &f["events"]["implemented_a"]["event"];
-        let body = parse_json(expected["content"].as_str().expect("content").as_bytes())
-            .expect("implemented body");
-        let error = prepared_mark_implemented(
-            &consumer,
-            ImplementedDraft {
-                repo: expected["tags"][1][1].as_str().expect("repo"),
-                issue: expected["tags"][3][1].as_str().expect("issue"),
-                signer: f["events"]["repo"]["event"]["pubkey"]
-                    .as_str()
-                    .expect("owner"),
-                commit: body["commit"].as_str().expect("commit"),
-                tests: body["tests"].as_str().expect("tests"),
-                remote_readback: &body["remote_readback"],
-                created_at: expected["created_at"].as_u64().expect("time"),
-                auth_tag: None,
-            },
-        )
-        .expect_err("owner cannot impersonate the writer");
-        assert!(error.to_string().contains("bw:reject:role:unauthorized"));
-    }
     #[tokio::test]
     async fn publish_needs_an_explicit_bundle() {
         // No bundle is no activation evidence; the historical gate stays closed.
