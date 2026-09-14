@@ -224,7 +224,11 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
     let presenter = BuzzCommunicationNotificationPresenter(
       donate: { _, completion in
         order.append("donate")
-        XCTAssertNoThrow(try fenceStore.performFencedCleanup {})
+        do {
+          try fenceStore.performFencedCleanup {}
+        } catch {
+          XCTFail("Unable to prepare the donation cleanup: \(error)")
+        }
         completion(nil)
       },
       deleteAllInteractions: { completion in
@@ -243,7 +247,11 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
       },
       onDeletionFailure: { error in
         XCTAssertEqual(error as NSError, deletionFailure)
-        XCTAssertNoThrow(try fenceStore.begin())
+        do {
+          try fenceStore.begin()
+        } catch {
+          XCTFail("Unable to reactivate the restriction: \(error)")
+        }
         order.append("fence")
       }
     ) { content in
@@ -307,9 +315,24 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    try AppDelegate.beginLaunchAgeRestrictionFence(containerURL: directory)
+    try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: directory) {
+      XCTFail("A successful fence must not remove credentials")
+    }
 
     XCTAssertTrue(BuzzAgeRestrictionFenceStore(containerURL: directory).current().isFencing)
+  }
+
+  func testAgeSignalRequestRejectsFailedLaunchProtectionBeforeCheckingAge() {
+    let delegate = MissingAppGroupDelegate()
+    var completed = false
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: nil
+    ) { value in
+      XCTAssertEqual((value as? FlutterError)?.code, "age_signal_notification_protection_failed")
+      completed = true
+    }
+    XCTAssertTrue(completed)
   }
 
   func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
@@ -444,4 +467,8 @@ final class BuzzPushNotificationResponseTests: XCTestCase {
     XCTAssertTrue(routedTargets.isEmpty)
     XCTAssertEqual(completions, 1)
   }
+}
+
+private final class MissingAppGroupDelegate: AppDelegate {
+  override var appGroupIdentifier: String? { nil }
 }

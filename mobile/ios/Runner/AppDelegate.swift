@@ -17,7 +17,7 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
-  private var appGroupIdentifier: String? {
+  var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
   private var pushKeychainAccessGroup: String? {
@@ -46,32 +46,25 @@ import os.log
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     do {
-      let container = appGroupIdentifier.flatMap {
-        FileManager.default.containerURL(
-          forSecurityApplicationGroupIdentifier: $0
-        )
-      }
-      try Self.beginLaunchAgeRestrictionFence(containerURL: container)
+      try prepareLaunchAgeRestrictionFence()
     } catch {
-      fatalError(
-        "Unable to begin the launch age-restriction fence: \(error.localizedDescription)"
-      )
+      // Flutter must start so the existing age-check retry screen is reachable.
+      // requestAgeSignal retries this protection before returning any age result.
+      os_log(
+        "Launch notification protection failed: %{public}@", type: .error,
+        error.localizedDescription)
     }
     UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
-  static func beginLaunchAgeRestrictionFence(containerURL: URL?) throws {
-    guard let containerURL else {
-      throw NSError(
-        domain: "BuzzAppDelegate",
-        code: 1,
-        userInfo: [
-          NSLocalizedDescriptionKey: "The push app-group container is unavailable."
-        ]
-      )
+  private func prepareLaunchAgeRestrictionFence() throws {
+    let container = appGroupIdentifier.flatMap {
+      FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
     }
-    try BuzzAgeRestrictionFenceStore(containerURL: containerURL).begin()
+    try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: container) {
+      try BuzzPushKeychain.replace(signingKeys: [:], accessGroup: self.pushKeychainAccessGroup)
+    }
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -269,7 +262,7 @@ import os.log
     }
   }
 
-  private func handleAgeSignalMethodCall(
+  func handleAgeSignalMethodCall(
     _ call: FlutterMethodCall,
     viewController: UIViewController?,
     result: @escaping FlutterResult
@@ -283,6 +276,18 @@ import os.log
     }
     guard call.method == "requestAgeSignal" else {
       result(FlutterMethodNotImplemented)
+      return
+    }
+    do {
+      try prepareLaunchAgeRestrictionFence()
+    } catch {
+      result(
+        FlutterError(
+          code: "age_signal_notification_protection_failed",
+          message: "Unable to protect notifications before checking age. Please retry.",
+          details: error.localizedDescription
+        )
+      )
       return
     }
     guard #available(iOS 26.0, *) else {

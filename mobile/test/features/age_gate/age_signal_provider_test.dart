@@ -27,6 +27,41 @@ void main() {
     return container.read(ageSignalProvider);
   }
 
+  test(
+    'notification protection failure stays gated until a successful retry',
+    () async {
+      var protected = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, (call) async {
+            expect(call.method, 'requestAgeSignal');
+            if (!protected) {
+              throw PlatformException(
+                code: 'age_signal_notification_protection_failed',
+              );
+            }
+            return {'status': 'noSignal', 'ageUpper': null};
+          });
+      final container = ProviderContainer(
+        overrides: [
+          ageSignalProvider.overrideWith(
+            () => AgeSignalNotifier(delay: (_) async {}),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(ageSignalProvider.notifier);
+
+      await notifier.request();
+      expect(
+        container.read(ageSignalProvider),
+        AgeSignalState.retryableFailure,
+      );
+      protected = true;
+      await notifier.request();
+      expect(container.read(ageSignalProvider), AgeSignalState.allowed);
+    },
+  );
+
   for (final failure in ['missing', 'malformed', 'timeout']) {
     test('failed native recovery stays retryable: $failure', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
