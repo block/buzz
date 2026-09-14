@@ -428,6 +428,11 @@ type MockBridgeOptions = {
   /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
   pairingStartDelayMs?: number;
   /**
+   * Relay embedded in mock `nostrpair://` codes. Defaults to a public relay;
+   * `ws://localhost:3000` reproduces the unconfigured-desktop default.
+   */
+  pairingRelayUrl?: string;
+  /**
    * Sequenced results for `confirm_team_snapshot_import`. String = throw
    * with that message; null = succeed. Call N uses results[N]; last entry
    * repeats when exhausted. Follows the `nsecErrors` precedent.

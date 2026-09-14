@@ -25,7 +25,10 @@ import {
   useEncryptedBackupSession,
 } from "./EncryptedBackupCreator";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
-import { IdentityRecoveryPairing } from "./IdentityRecoveryPairing";
+import {
+  IdentityRecoveryPairing,
+  type IdentityRecoveryPairingStep,
+} from "./IdentityRecoveryPairing";
 import { LandingBees } from "./LandingBees";
 import {
   NostrKeyImportForm,
@@ -98,7 +101,8 @@ export function MachineOnboardingFlow({
   const [keyImportDialog, setKeyImportDialog] = React.useState<
     "backup" | "phone" | null
   >(null);
-  const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
+  const [phoneRecoveryStep, setPhoneRecoveryStep] =
+    React.useState<IdentityRecoveryPairingStep>("loading");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -486,7 +490,9 @@ export function MachineOnboardingFlow({
                       {phoneRecoveryStep === "loading" ||
                       phoneRecoveryStep === "qr"
                         ? "Scan this code with a signed-in Buzz phone."
-                        : "Confirm the code before sharing your identity."}
+                        : phoneRecoveryStep === "local-relay"
+                          ? "This desktop isn't connected to a community yet."
+                          : "Confirm the code before sharing your identity."}
                     </DialogDescription>
                     <div className="mt-5">
                       <IdentityRecoveryPairing

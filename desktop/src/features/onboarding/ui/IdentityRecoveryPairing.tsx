@@ -15,26 +15,27 @@ import { startIdentityRecoveryPairing } from "@/shared/api/tauriPairing";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { StyledQrCode } from "@/shared/ui/styled-qr-code";
+import { recoveryErrorMessage } from "../lib/identityRecoveryErrors";
+import {
+  classifyPairingQrUri,
+  localOnlyPairingRelayMessage,
+  pairingRelayFromQrUri,
+} from "../lib/pairingRelayReachability";
 
-type Step = "loading" | "qr" | "sas" | "receiving" | "done" | "error";
+export type IdentityRecoveryPairingStep =
+  | "loading"
+  | "qr"
+  | "local-relay"
+  | "sas"
+  | "receiving"
+  | "done"
+  | "error";
+
+type Step = IdentityRecoveryPairingStep;
 
 // Refresh before the pairing relay's two-minute connection cap so Desktop never
 // leaves a code on screen after its publishing channel has closed.
 const QR_REFRESH_MS = 90_000;
-
-function recoveryErrorMessage(message: string): string {
-  const normalized = message.toLowerCase();
-  if (
-    normalized.includes("sas-confirm") ||
-    normalized.includes("relay connection closed") ||
-    normalized.includes("websocket") ||
-    normalized.includes("expired") ||
-    normalized.includes("timed out")
-  ) {
-    return "This pairing code expired or lost its connection. Create a new code and try again.";
-  }
-  return message;
-}
 
 export function IdentityRecoveryPairing({
   onRecovered,
@@ -50,28 +51,49 @@ export function IdentityRecoveryPairing({
   const [copied, setCopied] = React.useState(false);
   const active = React.useRef(true);
   const copyTimer = React.useRef<number | null>(null);
+  // The relay the current code asks the phone to join, for error copy.
+  const pairingRelayRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     onStepChange?.(step);
   }, [onStepChange, step]);
 
-  const start = React.useCallback(async () => {
-    active.current = true;
-    setStep("loading");
-    setError(null);
-    setSas(null);
-    setQrUri(null);
-    setCopied(false);
-    try {
-      setQrUri(await startIdentityRecoveryPairing());
-      setStep("qr");
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Could not start recovery.",
-      );
-      setStep("error");
-    }
-  }, []);
+  const start = React.useCallback(
+    async ({ allowLocalRelay = false }: { allowLocalRelay?: boolean } = {}) => {
+      active.current = true;
+      setStep("loading");
+      setError(null);
+      setSas(null);
+      setQrUri(null);
+      setCopied(false);
+      pairingRelayRef.current = null;
+      try {
+        const uri = await startIdentityRecoveryPairing();
+        pairingRelayRef.current = pairingRelayFromQrUri(uri);
+        const reachability = classifyPairingQrUri(uri);
+        if (reachability.kind === "local-only" && !allowLocalRelay) {
+          // The backend has already opened its side of the session against a
+          // relay no phone can reach. Tear it down so its inevitable failure
+          // cannot race in as a misleading "expired" error, and explain the
+          // real cause instead of rendering an unusable code.
+          active.current = false;
+          await cancelPairing().catch(() => {});
+          setQrUri(uri);
+          setError(localOnlyPairingRelayMessage(reachability));
+          setStep("local-relay");
+          return;
+        }
+        setQrUri(uri);
+        setStep("qr");
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Could not start recovery.",
+        );
+        setStep("error");
+      }
+    },
+    [],
+  );
 
   React.useEffect(() => {
     void start();
@@ -93,7 +115,9 @@ export function IdentityRecoveryPairing({
     listen<{ message: string }>("pairing-error", ({ payload }) => {
       if (!disposed && active.current) {
         active.current = false;
-        setError(recoveryErrorMessage(payload.message));
+        setError(
+          recoveryErrorMessage(payload.message, pairingRelayRef.current),
+        );
         setStep("error");
       }
     }).then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
@@ -149,6 +173,7 @@ export function IdentityRecoveryPairing({
           cause instanceof Error
             ? cause.message
             : "Could not confirm recovery.",
+          pairingRelayRef.current,
         ),
       );
       setStep("error");
@@ -217,6 +242,40 @@ export function IdentityRecoveryPairing({
               <Check className="h-6 w-6 text-green-600 dark:text-green-400" />
             </div>
             <p className="text-sm font-medium">Identity received securely</p>
+          </div>
+        ) : step === "local-relay" ? (
+          <div
+            className="flex max-w-56 flex-col items-center gap-3 text-center text-foreground"
+            data-testid="identity-recovery-local-relay"
+          >
+            <TriangleAlert className="h-6 w-6 text-destructive" />
+            <p className="text-sm text-destructive">{error}</p>
+            <div className="flex w-full flex-col gap-2">
+              <Button
+                data-testid="identity-recovery-local-relay-retry"
+                onClick={() => void start()}
+                size="sm"
+                variant="outline"
+              >
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+                Try again
+              </Button>
+              {/*
+                Developers pairing a simulator against a local relay are the one
+                audience this code does work for; never leave them without a way
+                through (a guard that hides the only recovery affordance is a
+                functional failure).
+              */}
+              <Button
+                className="text-xs text-muted-foreground"
+                data-testid="identity-recovery-local-relay-show-anyway"
+                onClick={() => void start({ allowLocalRelay: true })}
+                size="sm"
+                variant="ghost"
+              >
+                Show the code anyway
+              </Button>
+            </div>
           </div>
         ) : step === "error" ? (
           <div className="flex max-w-52 flex-col items-center gap-3 text-center text-foreground">
