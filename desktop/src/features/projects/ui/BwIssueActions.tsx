@@ -64,7 +64,10 @@ function EnrollIntoBw({
     setPending(true);
     try {
       await invokeTauri("enroll_project_bw_issue", {
-        input: { issueId: issue.id, repo: project.repoAddress },
+        input: {
+          issueId: issue.id,
+          repo: issue.repoAddress ?? project.repoAddress,
+        },
       });
       toast.success("Issue enrolled into BW.");
       await invalidate();
@@ -154,7 +157,7 @@ function BwTextEditor({
             .filter(Boolean),
           title: title.trim(),
         },
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
         snapshot: issue.bw.snapshot,
       });
       toast.success("Issue text updated.");
@@ -274,7 +277,7 @@ function BwTriageActions({
         delegate,
         fields,
         issueId: issue.id,
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
         snapshot: issue.bw.snapshot,
       });
       toast.success("Triage action recorded.");
@@ -477,7 +480,7 @@ function BwReadyAction({
     try {
       await submitBwReadyTransition({
         issueId: issue.id,
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
         reworkVerdictId: reworkVerdictId.trim() || null,
         stream,
         terminalSetId: terminalSetId.trim() || null,
@@ -689,7 +692,7 @@ function BwWriterRecoveryAction({
     try {
       await submitBwReadyTransition({
         issueId: issue.id,
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
         stream,
       });
       toast.success("Issue returned to ready.");
@@ -802,7 +805,7 @@ function BwRelations({
         issueId: issue.id,
         operation: op,
         relation: rel as (typeof RELATION_TYPES)[number],
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
         snapshot: issue.bw.snapshot,
         target: tgt,
       });

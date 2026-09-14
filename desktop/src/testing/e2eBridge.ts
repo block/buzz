@@ -1253,6 +1253,7 @@ declare global {
     __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
       content: string;
       createdAt?: number;
+      id?: string;
       kind: number;
       tags: string[][];
     }>;
@@ -13249,33 +13250,25 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetEvent>[0],
           activeConfig,
         );
-      case "sign_event":
-        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
-          content: (payload as { content: string }).content,
-          createdAt: (payload as { createdAt?: number }).createdAt,
-          kind: (payload as { kind: number }).kind,
-          tags: (payload as { tags: string[][] }).tags,
-        });
-        if (identity) {
-          return JSON.stringify(
-            await signWithIdentity(identity, {
-              kind: (payload as { kind: number }).kind,
-              content: (payload as { content: string }).content,
-              createdAt: (payload as { createdAt?: number }).createdAt,
-              tags: (payload as { tags: string[][] }).tags,
-            }),
-          );
-        }
-
-        return JSON.stringify(
-          createMockEvent(
-            (payload as { kind: number }).kind,
-            (payload as { content: string }).content,
-            (payload as { tags: string[][] }).tags,
-            DEFAULT_MOCK_IDENTITY.pubkey,
-            (payload as { createdAt?: number }).createdAt,
-          ),
-        );
+      case "sign_event": {
+        const input = payload as {
+          content: string;
+          createdAt?: number;
+          kind: number;
+          tags: string[][];
+        };
+        const signedEvent = identity
+          ? await signWithIdentity(identity, input)
+          : createMockEvent(
+              input.kind,
+              input.content,
+              input.tags,
+              DEFAULT_MOCK_IDENTITY.pubkey,
+              input.createdAt,
+            );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push(signedEvent);
+        return JSON.stringify(signedEvent);
+      }
       case "nip44_encrypt_to_self":
         return (payload as { plaintext: string }).plaintext;
       case "nip44_decrypt_from_self":

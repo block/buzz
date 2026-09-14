@@ -80,7 +80,7 @@ export function BwAssignmentSection({
       await submitBwWriterSelection({
         delegate,
         issueId: issue.id,
-        repo: project.repoAddress,
+        repo: issue.repoAddress ?? project.repoAddress,
       });
       toast.success(head.writer ? "Writer changed." : "Writer assigned.");
       await invalidate();
