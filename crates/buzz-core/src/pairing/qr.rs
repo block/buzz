@@ -145,7 +145,12 @@ pub fn decode_qr(uri: &str) -> Result<QrPayload, PairingError> {
             match key {
                 "secret" => secret_hex = Some(value),
                 "relay" => relays.push(url_decode(value)),
-                "v" => version = value.parse::<u32>().ok(),
+                "v" => {
+                    let parsed = value.parse::<u32>().map_err(|_| {
+                        PairingError::InvalidQr(format!("invalid protocol version {value:?}"))
+                    })?;
+                    version = Some(parsed);
+                }
                 _ => {} // ignore unknown params
             }
         }
@@ -522,6 +527,28 @@ mod tests {
         assert!(
             matches!(err, PairingError::InvalidQr(ref msg) if msg.contains("unsupported protocol version 2")),
             "expected unsupported version error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_out_of_range_version() {
+        let payload = make_payload(vec!["wss://relay.example.com".to_string()]);
+        let uri = encode_qr(&payload).replace("&v=1", "&v=99999999999");
+        let err = decode_qr(&uri).unwrap_err();
+        assert!(
+            matches!(err, PairingError::InvalidQr(ref msg) if msg.contains("invalid protocol version")),
+            "expected invalid version error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_malformed_version() {
+        let payload = make_payload(vec!["wss://relay.example.com".to_string()]);
+        let uri = encode_qr(&payload).replace("&v=1", "&v=2x");
+        let err = decode_qr(&uri).unwrap_err();
+        assert!(
+            matches!(err, PairingError::InvalidQr(ref msg) if msg.contains("invalid protocol version")),
+            "expected invalid version error, got {err:?}"
         );
     }
 
