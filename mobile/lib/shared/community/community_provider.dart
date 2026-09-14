@@ -232,37 +232,23 @@ class _CommunitySnapshotSync {
 
   final CommunitySnapshotWriter _writer;
   final AgeGateCommunitySnapshotWriter _ageGateWriter;
-  final Set<Future<void>> _writesInFlight = {};
   ({String content, bool strict, bool settleFence})? _lastSuccessfulSnapshot;
   bool _ageRestricted = false;
   bool _ageCheckSuspended = false;
-  Future<void> _ageGateMutationTail = Future.value();
+  Future<void> _mutationTail = Future.value();
 
-  Future<void> _waitForWrites() async {
-    while (_writesInFlight.isNotEmpty) {
-      final writes = [..._writesInFlight];
-      await Future.wait(
-        writes.map(
-          (write) =>
-              write.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
-        ),
-      );
-    }
-  }
-
-  Future<void> _serializeAgeGateMutation(Future<void> Function() operation) {
-    final result = _ageGateMutationTail.then((_) => operation());
-    _ageGateMutationTail = result.then<void>(
+  Future<void> _serializeMutation(Future<void> Function() operation) {
+    final result = _mutationTail.then((_) => operation());
+    _mutationTail = result.then<void>(
       (_) {},
       onError: (Object _, StackTrace _) {},
     );
     return result;
   }
 
-  Future<void> suspendForAgeCheck() => _serializeAgeGateMutation(() async {
+  Future<void> suspendForAgeCheck() => _serializeMutation(() async {
     if (!_ageRestricted) _ageCheckSuspended = true;
-    await _waitForWrites();
-    await write(
+    await _write(
       const <Community>[],
       useAgeGateWriter: true,
       settleAgeGateFence: false,
@@ -271,12 +257,11 @@ class _CommunitySnapshotSync {
 
   Future<void> resumeAfterAgeCheck(
     Future<List<Community>> Function() loadCommunities,
-  ) => _serializeAgeGateMutation(() async {
+  ) => _serializeMutation(() async {
     if (_ageRestricted) return;
-    await _waitForWrites();
     final communities = await loadCommunities();
     _ageCheckSuspended = false;
-    await write(communities, useAgeGateWriter: true, settleAgeGateFence: true);
+    await _write(communities, useAgeGateWriter: true, settleAgeGateFence: true);
   });
 
   Future<void> write(
@@ -284,18 +269,25 @@ class _CommunitySnapshotSync {
     bool enforceAgeRestriction = false,
     bool useAgeGateWriter = false,
     bool settleAgeGateFence = false,
-  }) async {
-    if (enforceAgeRestriction) {
-      _ageRestricted = true;
-      final olderWrites = [..._writesInFlight];
-      await Future.wait(
-        olderWrites.map(
-          (write) =>
-              write.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
-        ),
-      );
-    }
+  }) {
+    if (enforceAgeRestriction) _ageRestricted = true;
+    // Ordinary exports must queue behind the entire restore, including its
+    // storage read. Otherwise an export can finish during that read and then
+    // be overwritten by the older list it returned.
+    return _serializeMutation(
+      () => _write(
+        communities,
+        useAgeGateWriter: useAgeGateWriter,
+        settleAgeGateFence: settleAgeGateFence,
+      ),
+    );
+  }
 
+  Future<void> _write(
+    List<Community> communities, {
+    bool useAgeGateWriter = false,
+    bool settleAgeGateFence = false,
+  }) async {
     final effectiveCommunities = _ageRestricted || _ageCheckSuspended
         ? const <Community>[]
         : communities;
@@ -323,22 +315,15 @@ class _CommunitySnapshotSync {
     );
     if (fingerprint == _lastSuccessfulSnapshot) return;
 
-    late final Future<void> writeFuture;
-    writeFuture =
-        (useAgeGateWriter
-                ? _ageGateWriter(
-                    effectiveCommunities,
-                    settleFence: settleAgeGateFence,
-                  )
-                : _writer(effectiveCommunities))
-            .whenComplete(() => _writesInFlight.remove(writeFuture));
-    _writesInFlight.add(writeFuture);
-    await writeFuture;
-    if (_ageRestricted && effectiveCommunities.isNotEmpty) {
-      await write(const <Community>[], enforceAgeRestriction: true);
+    if (useAgeGateWriter) {
+      await _ageGateWriter(
+        effectiveCommunities,
+        settleFence: settleAgeGateFence,
+      );
     } else {
-      _lastSuccessfulSnapshot = fingerprint;
+      await _writer(effectiveCommunities);
     }
+    _lastSuccessfulSnapshot = fingerprint;
   }
 }
 

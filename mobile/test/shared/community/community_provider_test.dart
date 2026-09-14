@@ -748,6 +748,39 @@ void main() {
       expect(strictSnapshots.last.single.pushNotificationsEnabled, isFalse);
     });
 
+    test('removal during resume cannot leave restored credentials', () async {
+      final controlledStorage = _PausedCommunityStorage();
+      communityStorage = controlledStorage;
+      final community = Community.create(
+        name: 'Removing',
+        relayUrl: 'https://removing.example.com',
+        nsec: nostr.Keys.generate().nsec,
+      ).copyWith(pushNotificationsEnabled: true);
+      await communityStorage.save(community);
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      await container.read(suspendCommunitySnapshotForAgeCheckProvider)();
+
+      final removal = container
+          .read(communityListProvider.notifier)
+          .removeCommunity(community.id);
+      await controlledStorage.removeStarted.future;
+      controlledStorage.pauseNextLoad = true;
+      final resume = container.read(
+        resumeCommunitySnapshotAfterAgeCheckProvider,
+      )();
+      await controlledStorage.loadStarted.future;
+      controlledStorage.releaseRemoval.complete();
+      await controlledStorage.removalPersisted.future;
+      // Let the removal submit its native update while resume holds the old list.
+      await Future<void>(() {});
+      controlledStorage.releaseLoad.complete();
+      await Future.wait([removal, resume]);
+
+      expect(await communityStorage.loadAll(), isEmpty);
+      expect(snapshots.last, isEmpty);
+    });
+
     test('removeCommunity removes from list', () async {
       container = createContainer();
       await container.read(communityListProvider.future);
@@ -1047,4 +1080,35 @@ void main() {
       expect(active!.id, ws.id);
     });
   });
+}
+
+class _PausedCommunityStorage extends CommunityStorage {
+  _PausedCommunityStorage() : super(secure: FakeSecureStorage());
+
+  final removeStarted = Completer<void>();
+  final releaseRemoval = Completer<void>();
+  final removalPersisted = Completer<void>();
+  final loadStarted = Completer<void>();
+  final releaseLoad = Completer<void>();
+  bool pauseNextLoad = false;
+
+  @override
+  Future<void> remove(String id) async {
+    removeStarted.complete();
+    await releaseRemoval.future;
+    await super.remove(id);
+    removalPersisted.complete();
+  }
+
+  @override
+  Future<List<Community>> loadAll() async {
+    final pause = pauseNextLoad;
+    pauseNextLoad = false;
+    final communities = await super.loadAll();
+    if (pause) {
+      loadStarted.complete();
+      await releaseLoad.future;
+    }
+    return communities;
+  }
 }
