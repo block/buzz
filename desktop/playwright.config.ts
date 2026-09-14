@@ -76,6 +76,7 @@ export default defineConfig({
         "**/entity-link-recipient-cards.spec.ts",
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
+        "**/composer-shift-enter-hard-break.spec.ts",
         "**/mentions.spec.ts",
         "**/mention-spacing.spec.ts",
         "**/mention-clipboard.spec.ts",
