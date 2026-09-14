@@ -18,7 +18,9 @@
 //!
 //! * an NVIDIA GPU, the driver family behind most upstream reports; and
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
-//!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
+//!   and the dmabuf renderer buys nothing on that XWayland path (#2338); and
+//! * an x86_64 CPU without AVX, where affected WebKitGTK 2.52 JavaScriptCore
+//!   builds can execute an AVX instruction and kill WebKitWebProcess (#3747).
 //!
 //! `--safe-rendering` is the manual escape hatch for a machine neither signal
 //! recognises; it also disables accelerated compositing, for that launch only.
@@ -38,6 +40,8 @@ const NVIDIA_PCI_VENDOR: &str = "0x10de";
 
 /// Where DRM devices advertise their PCI vendor.
 const DRM_ROOT: &str = "/sys/class/drm";
+/// Linux's processor feature inventory.
+const CPU_INFO: &str = "/proc/cpuinfo";
 
 /// Prefer shared-memory dmabuf transport. The #3654 replacement for
 /// `WEBKIT_DISABLE_DMABUF_RENDERER` on current WebKitGTK.
@@ -48,6 +52,9 @@ const FORCE_SHM: &str = "WEBKIT_DMABUF_RENDERER_FORCE_SHM";
 const DISABLE_DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 /// Drops accelerated compositing as well. `--safe-rendering` only.
 const DISABLE_COMPOSITING: &str = "WEBKIT_DISABLE_COMPOSITING_MODE";
+/// Disables JavaScriptCore's JIT on AVX-less x86_64 CPUs. The workaround for
+/// #3747.
+const DISABLE_JSC_JIT: &str = "JSC_useJIT";
 
 /// What the heuristic applies: force shared-memory transport without emptying
 /// the buffer mode set (#3654).
@@ -57,11 +64,9 @@ const HEURISTIC: [&str; 1] = [FORCE_SHM];
 /// omits DISABLE_DMABUF — that variable is the #3654 crash on current WebKit.
 const SAFE_VARS: [&str; 2] = [FORCE_SHM, DISABLE_COMPOSITING];
 
-/// Every variable this module may set, and therefore every variable a user
-/// assignment takes away from it. Being the same list is the invariant: nothing
-/// outside it is ever written, so a user value for any other WebKit variable is
-/// not a conflict. DISABLE_DMABUF stays owned so `=0` still stands the heuristic
-/// down for operators who need the old path or an explicit override.
+/// Every dmabuf/compositing variable this module may set, and therefore every
+/// variable a user assignment takes away from the dmabuf heuristic.
+/// `DISABLE_JSC_JIT` is an independent decision with its own user override.
 const OWNED: [&str; 3] = [FORCE_SHM, DISABLE_DMABUF, DISABLE_COMPOSITING];
 
 /// Reads one environment variable. Injected so the decision is testable without
@@ -72,9 +77,9 @@ type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 /// What this launch should do about its rendering environment.
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
-    /// Set each of these to `1`, then report `why`.
+    /// Apply each `(variable, value)` assignment, then report `why`.
     Apply {
-        vars: &'static [&'static str],
+        assignments: Vec<(&'static str, &'static str)>,
         why: String,
     },
     /// Change nothing, and report `why`.
@@ -96,13 +101,18 @@ pub fn apply() -> Result<(), String> {
         std::env::args_os(),
         &|key| std::env::var_os(key),
         Path::new(DRM_ROOT),
+        std::env::consts::ARCH,
+        Path::new(CPU_INFO),
     ) {
-        Plan::Apply { vars, why } => {
-            for var in vars {
+        Plan::Apply { assignments, why } => {
+            for (var, value) in &assignments {
                 // Safe here and only here — see the doc comment above.
-                std::env::set_var(var, "1");
+                std::env::set_var(var, value);
             }
-            let applied: Vec<String> = vars.iter().map(|var| format!("{var}=1")).collect();
+            let applied: Vec<String> = assignments
+                .iter()
+                .map(|(var, value)| format!("{var}={value}"))
+                .collect();
             eprintln!("buzz-desktop: {} — {why}", applied.join(" "));
             Ok(())
         }
@@ -114,75 +124,111 @@ pub fn apply() -> Result<(), String> {
     }
 }
 
-/// The whole decision, as a pure function of argv, the environment, and the DRM
-/// device tree.
+/// The whole decision, as a function of injected argv, environment, platform,
+/// and Linux hardware inventory paths.
 fn plan(
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     env: EnvLookup<'_>,
     drm_root: &Path,
+    arch: &str,
+    cpu_info: &Path,
 ) -> Plan {
     let safe_rendering = args
         .into_iter()
         .any(|arg| arg.as_ref() == OsStr::new(SAFE_RENDERING));
     let user_set = user_set(env);
 
-    if !user_set.is_empty() {
-        // A user who has assigned one of these has taken over the decision, so
-        // the heuristic stands down wholesale — writing the *other* variable
-        // behind their back would be exactly the surprise they opted out of.
-        return match safe_rendering {
-            // Two incompatible answers to one question, and no basis for
-            // picking: honouring the flag would overwrite configuration the
-            // user typed, honouring the environment would silently ignore a
-            // rescue flag from a user whose app does not start.
-            true => Plan::Fatal {
-                diagnostic: conflict(&user_set),
-            },
-            false => {
-                let mut why = format!("{} set in the environment", describe(&user_set));
-                // Older docs told people to export DISABLE_DMABUF=1; on current
-                // WebKitGTK that empties the transport and SIGSEGVs (#3654).
-                // Leave the takeover alone, but point survivors at FORCE_SHM.
-                if user_set
-                    .iter()
-                    .any(|(key, value)| *key == DISABLE_DMABUF && value.as_os_str() != "0")
-                {
-                    why.push_str(&format!(
-                        "; warning: {DISABLE_DMABUF} (other than =0) empties the \
-                         transport on current WebKitGTK and SIGSEGVs — prefer \
-                         {FORCE_SHM}=1 (see #3654)"
-                    ));
-                }
-                Plan::Leave { why }
-            }
+    if !user_set.is_empty() && safe_rendering {
+        // Two incompatible answers to one question, and no basis for picking:
+        // honouring the flag would overwrite configuration the user typed,
+        // honouring the environment would silently ignore a rescue flag from a
+        // user whose app does not start.
+        return Plan::Fatal {
+            diagnostic: conflict(&user_set),
         };
     }
+
+    let mut assignments = Vec::new();
+    let mut reasons = Vec::new();
 
     if safe_rendering {
-        return Plan::Apply {
-            vars: &SAFE_VARS,
-            why: format!("{SAFE_RENDERING} requested, this launch only"),
-        };
+        push_vars(&mut assignments, &SAFE_VARS);
+        reasons.push(format!("{SAFE_RENDERING} requested, this launch only"));
+    } else if user_set.is_empty() {
+        let signals = [
+            (nvidia_gpu(drm_root), "NVIDIA GPU"),
+            (env("APPIMAGE").is_some(), "AppImage"),
+        ];
+        let hits: Vec<&str> = signals
+            .iter()
+            .filter_map(|(hit, label)| hit.then_some(*label))
+            .collect();
+        if !hits.is_empty() {
+            push_vars(&mut assignments, &HEURISTIC);
+            reasons.push(hits.join(", "));
+        }
+    } else {
+        let mut why = format!("{} set in the environment", describe(&user_set));
+        // Older docs told people to export DISABLE_DMABUF=1; on current
+        // WebKitGTK that empties the transport and SIGSEGVs (#3654).
+        // Leave the takeover alone, but point survivors at FORCE_SHM.
+        if user_set
+            .iter()
+            .any(|(key, value)| *key == DISABLE_DMABUF && value.as_os_str() != "0")
+        {
+            why.push_str(&format!(
+                "; warning: {DISABLE_DMABUF} (other than =0) empties the \
+                 transport on current WebKitGTK and SIGSEGVs — prefer \
+                 {FORCE_SHM}=1 (see #3654)"
+            ));
+        }
+        reasons.push(why);
     }
 
-    let signals = [
-        (nvidia_gpu(drm_root), "NVIDIA GPU"),
-        (env("APPIMAGE").is_some(), "AppImage"),
-    ];
-    let hits: Vec<&str> = signals
-        .iter()
-        .filter_map(|(hit, label)| hit.then_some(*label))
-        .collect();
+    if env(DISABLE_JSC_JIT).is_some() {
+        reasons.push(format!("{DISABLE_JSC_JIT} set in the environment"));
+    } else if avx_available(arch, cpu_info) == Some(false) {
+        assignments.push((DISABLE_JSC_JIT, "0"));
+        reasons.push("x86_64 CPU does not advertise AVX".to_string());
+    }
 
-    match hits.is_empty() {
+    match assignments.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: match reasons.is_empty() {
+                true => "no NVIDIA GPU, not an AppImage, and no AVX-less x86_64 CPU detected"
+                    .to_string(),
+                false => reasons.join("; "),
+            },
         },
         false => Plan::Apply {
-            vars: &HEURISTIC,
-            why: hits.join(", "),
+            assignments,
+            why: reasons.join("; "),
         },
     }
+}
+
+fn push_vars(assignments: &mut Vec<(&'static str, &'static str)>, vars: &[&'static str]) {
+    for var in vars {
+        assignments.push((var, "1"));
+    }
+}
+
+/// Whether an x86_64 CPU advertises AVX. Unknown architecture or unreadable /
+/// malformed CPU data produces no decision rather than disabling the JIT.
+fn avx_available(arch: &str, cpu_info: &Path) -> Option<bool> {
+    if arch != "x86_64" {
+        return None;
+    }
+
+    let cpu_info = std::fs::read_to_string(cpu_info).ok()?;
+    cpu_info.lines().find_map(|line| {
+        let (key, features) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case("flags").then(|| {
+            features
+                .split_ascii_whitespace()
+                .any(|feature| feature.eq_ignore_ascii_case("avx"))
+        })
+    })
 }
 
 /// Owned variables the environment already carries, keyed by name.
