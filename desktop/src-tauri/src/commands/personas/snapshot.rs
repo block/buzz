@@ -498,6 +498,7 @@ mod png_body_tests {
             format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
             version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
             definition: crate::managed_agents::agent_snapshot::AgentSnapshotDefinition {
+                session_policy: Default::default(),
                 name: "Agent".to_string(),
                 source_is_builtin: false,
                 system_prompt: None,

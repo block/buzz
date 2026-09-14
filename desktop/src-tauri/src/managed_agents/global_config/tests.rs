@@ -299,6 +299,7 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
@@ -361,6 +362,7 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
@@ -624,6 +626,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),

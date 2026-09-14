@@ -4084,6 +4084,53 @@ test("collapses contiguous mixed join arrivals into one actor-neutral cohort", a
   await expect(rows.first()).toContainText(JOIN_COLLAPSE_GROUPED_TEXT);
 });
 
+test("system agent avatar keeps keyboard focus decoration outside artwork", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "mira",
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ actorPubkey, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          type: "channel_created",
+          actor: actorPubkey,
+        }),
+        kind,
+      });
+    },
+    {
+      actorPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+      kind: SYSTEM_MESSAGE_KIND,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const row = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "created this channel" });
+  const control = row.locator('button[data-testid="system-message-avatar"]');
+  const artwork = control.getByTestId("system-message-avatar");
+  await control.focus();
+
+  await expect(control).toBeFocused();
+  await expect(control).toHaveCSS("clip-path", "none");
+  await expect(artwork).toHaveCSS("clip-path", /rounded-squircle-clip/);
+});
+
 test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-random").click();
