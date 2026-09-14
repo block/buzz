@@ -591,6 +591,12 @@ pub fn build_profile(
 }
 
 /// Build a NIP-29 add-member event (kind 9000).
+///
+/// `.allow_self_tagging()` is required: a self-add (target_pubkey equals the
+/// signer's pubkey) is a legitimate operation — NIP-29's PUT_USER lets a user
+/// join a channel by adding themselves. Without it, nostr 0.44's
+/// `EventBuilder::sign_with_keys` silently strips the `p` tag matching the
+/// signer, and the relay rejects the event as "missing p tag".
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -604,10 +610,14 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
+///
+/// `.allow_self_tagging()` is required for the same reason as
+/// [`build_add_member`]: a self-removal (leave via remove-member) is a valid
+/// operation, and without it the `p` tag is stripped during signing.
 pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -617,7 +627,7 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -1692,6 +1702,15 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
+///
+/// `.allow_self_tagging()` is used for the same reason as
+/// [`build_add_member`]: if the caller's own pubkey appears in the
+/// `pubkeys` list, nostr 0.44's `EventBuilder::sign_with_keys` would
+/// strip the self-referencing `p` tag. The relay derives the participant
+/// set by combining these `p` tags with the signer's pubkey, so stripping
+/// the self tag is not fatal when other pubkeys remain — but without
+/// `.allow_self_tagging()` the signed event silently differs from the
+/// caller's intent.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(SdkError::InvalidInput(
@@ -1703,14 +1722,21 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
         let validated = check_pubkey_hex(pk, "pubkey")?;
         tags.push(tag(&["p", &validated])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a DM add-member event (kind 41011).
+///
+/// `.allow_self_tagging()` is required for the same reason as
+/// [`build_add_member`]: a self-add (adding your own pubkey to an existing
+/// DM) is a valid operation, and without it the `p` tag is stripped during
+/// signing. The relay's `handle_dm_add_member` rejects events with no `p`
+/// tags, so the stripped event would fail with "must specify at least 1
+/// new participant in p tags".
 pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(pubkey, "pubkey")?;
     let tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
-    Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a presence update event (kind 20001).
@@ -3064,6 +3090,48 @@ mod tests {
     }
 
     #[test]
+    fn add_member_self_target_preserves_p_tag() {
+        // nostr 0.44 strips p tags matching the signer unless
+        // `.allow_self_tagging()` is set. Self-add is a valid NIP-29
+        // operation (joining a channel by adding yourself).
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_add_member(cid, &self_pubkey, None::<MemberRole>).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn add_member_self_target_with_role_preserves_p_tag() {
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_add_member(cid, &self_pubkey, Some(MemberRole::Admin)).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert!(has_tag(&ev, "p", &self_pubkey));
+        assert!(has_tag(&ev, "role", "admin"));
+    }
+
+    #[test]
+    fn remove_member_self_target_preserves_p_tag() {
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_remove_member(cid, &self_pubkey).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9001);
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
+    }
+
+    #[test]
     fn leave_happy_path() {
         let cid = uuid();
         let ev = sign(build_leave(cid).unwrap());
@@ -4176,6 +4244,23 @@ mod tests {
     }
 
     #[test]
+    fn dm_open_self_target_preserves_p_tag() {
+        // nostr 0.44 strips p tags matching the signer unless
+        // `.allow_self_tagging()` is set. A user opening a DM with
+        // themselves is an edge case, but the signed event should
+        // still carry the self-referencing p tag.
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_dm_open(&[&self_pubkey]).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 41010);
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
+    }
+
+    #[test]
     fn dm_add_member_happy_path() {
         let cid = uuid();
         let pk = "b".repeat(64);
@@ -4189,6 +4274,25 @@ mod tests {
     fn dm_add_member_rejects_bad_pubkey() {
         let err = build_dm_add_member(uuid(), "short").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn dm_add_member_self_target_preserves_p_tag() {
+        // nostr 0.44 strips p tags matching the signer unless
+        // `.allow_self_tagging()` is set. Adding yourself to an existing
+        // DM is a valid operation, and the relay rejects events with no
+        // p tags, so the self p tag must survive signing.
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_dm_add_member(cid, &self_pubkey).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 41011);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
     }
 
     #[test]
