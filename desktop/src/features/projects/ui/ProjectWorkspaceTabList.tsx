@@ -46,6 +46,9 @@ export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="issues">
         <ProjectTabLabel>Issues</ProjectTabLabel>
       </TabsTrigger>
+      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="releases">
+        <ProjectTabLabel>Releases</ProjectTabLabel>
+      </TabsTrigger>
       <TabsTrigger
         aria-current={prsActive ? "page" : undefined}
         className={cn(

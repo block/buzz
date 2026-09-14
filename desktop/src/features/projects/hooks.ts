@@ -837,6 +837,24 @@ export function useProjectIssuesQuery(project: Repository | null | undefined) {
   });
 }
 
+/** The same transient Core projection the issues list uses, fetched directly
+ * for repository-scoped surfaces (P5_6A read-only releases view). Production
+ * source is exclusively `get_project_bw`; missing external evidence stays
+ * visibly pending in the snapshot instead of being fetched elsewhere. */
+export function useProjectBwSnapshotQuery(
+  project: Repository | null | undefined,
+) {
+  return useQuery({
+    enabled: Boolean(project),
+    queryKey: ["project", project?.id ?? "none", "bw-snapshot"],
+    queryFn: () => {
+      if (!project) throw new Error("No project selected.");
+      return fetchBwSnapshot(project.repoAddress);
+    },
+    staleTime: 30_000,
+  });
+}
+
 export function useProjectPullRequestsQuery(
   project: Repository | null | undefined,
 ) {

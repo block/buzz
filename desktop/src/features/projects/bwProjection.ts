@@ -62,7 +62,25 @@ export type BwSnapshot = {
     conflicts: string[];
     children: Record<string, string[]>;
     relations: BwRelation[];
-    artifact_verdicts: Record<string, unknown>;
+    /** Per-artifact member verdicts, keyed artifact id → issue id →
+     * accepted | rejected | unreviewed | conflict — decided by Core
+     * (`projection.rs`), never re-derived client-side. A new artifact
+     * starts `unreviewed` even when its issue is historically resolved. */
+    artifact_verdicts: Record<string, Record<string, string>>;
+    /** Release-set status keyed by freeze event id — Core's `set_status`
+     * (`active | completed | failed | aborted`), the sole authority for
+     * set completion. Never upgraded client-side from a provider success. */
+    sets: Record<string, string>;
+    /** Current test-ready handoff event id per set, head-selected by Core. */
+    handoffs: Record<string, string>;
+    /** Issues inside a currently `active` frozen set. */
+    active_members: string[];
+    /** True while an operational build-request has no terminal run yet. */
+    building: boolean;
+    /** Host-authorized build-request count; 0 without host authorization. */
+    dispatch_count: number;
+    /** Whether the delivered evidence authorizes host dispatch at all. */
+    host_authorized: boolean;
   };
   records: Record<string, RelayEvent>;
   decisions: Record<string, { outcome: string; stage: string; code: string }>;

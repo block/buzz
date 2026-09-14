@@ -180,7 +180,7 @@ type MockHuddleSeed = {
  * are unaffected. `activation` defaults to `null` (no BW policy in force) —
  * set it to seed a genesis/policy so the desktop UI takes the BW issue path
  * instead of the legacy one. */
-type MockBwSnapshotOverride = {
+export type MockBwSnapshotOverride = {
   activation?: { policy: string; genesis: string } | null;
   records?: Record<string, RelayEvent>;
   decisions?: Record<string, { outcome: string; stage: string; code: string }>;
@@ -202,7 +202,13 @@ type MockBwSnapshotOverride = {
     conflicts?: string[];
     children?: Record<string, string[]>;
     relations?: unknown[];
-    artifact_verdicts?: Record<string, unknown>;
+    artifact_verdicts?: Record<string, Record<string, string>>;
+    sets?: Record<string, string>;
+    handoffs?: Record<string, string>;
+    active_members?: string[];
+    building?: boolean;
+    dispatch_count?: number;
+    host_authorized?: boolean;
   };
 };
 
@@ -11586,16 +11592,27 @@ export function maybeInstallE2eTauriMocks() {
           records: override?.records ?? {},
           decisions: override?.decisions ?? {},
           notices: override?.notices ?? {},
+          // Baseline matches the real snapshot shape (`bw_projection::snapshot`
+          // always serializes every projection key); an override projection
+          // spreads over it so full Core-generated snapshots pass through
+          // verbatim while partial overrides keep their defaults.
           projection: {
-            issues: override?.projection?.issues ?? {},
-            issue_fields: override?.projection?.issue_fields ?? {},
-            issue_state: override?.projection?.issue_state ?? {},
-            issue_state_id: override?.projection?.issue_state_id ?? {},
-            leaf: override?.projection?.leaf ?? {},
-            conflicts: override?.projection?.conflicts ?? [],
-            children: override?.projection?.children ?? {},
-            relations: override?.projection?.relations ?? [],
-            artifact_verdicts: override?.projection?.artifact_verdicts ?? {},
+            issues: {},
+            issue_fields: {},
+            issue_state: {},
+            issue_state_id: {},
+            leaf: {},
+            conflicts: [],
+            children: {},
+            relations: [],
+            artifact_verdicts: {},
+            sets: {},
+            handoffs: {},
+            active_members: [],
+            building: false,
+            dispatch_count: 0,
+            host_authorized: false,
+            ...(override?.projection ?? {}),
           },
         };
       }

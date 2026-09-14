@@ -5,6 +5,7 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
+  Package,
   RefreshCw,
   SquareTerminal,
   Users,
@@ -48,6 +49,7 @@ import { DiscussionChannelsPanel } from "./DiscussionChannels";
 import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
 import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
 import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
+import { ProjectReleasesPanel } from "./ProjectReleasesPanel";
 import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
 import {
   type GitDataState,
@@ -337,6 +339,8 @@ export function WorkspaceTabs({
         icon={CircleDot}
         title="Issues"
       />
+    ) : selectedTab === "releases" ? (
+      <ProjectSectionHeader icon={Package} title="Releases" />
     ) : selectedTab === "prs" ? (
       <ProjectSectionHeader
         action={{
@@ -589,6 +593,10 @@ export function WorkspaceTabs({
             project={project}
             selectedIssueId={selectedIssueId}
           />
+        </TabsContent>
+
+        <TabsContent className="m-0" value="releases">
+          <ProjectReleasesPanel project={project} />
         </TabsContent>
 
         <TabsContent className="m-0" value="files">
