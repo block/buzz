@@ -62,7 +62,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d` tag + `p` tags for all members |
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
-| **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
+| **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out). Non-empty `content` is an optional short activity label (publishers SHOULD stay under 80 chars); clients render it for a single typer and ignore it otherwise |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |

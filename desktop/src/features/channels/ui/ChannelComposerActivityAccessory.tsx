@@ -17,7 +17,7 @@ type ChannelComposerActivityAccessoryProps = {
     typeof BotActivityComposerAction
   >["openAgentSessionPubkey"];
   profiles: ComponentProps<typeof BotActivityComposerAction>["profiles"];
-  typingPubkeys: string[];
+  typingEntries: ComponentProps<typeof TypingIndicatorRow>["typingEntries"];
   visible: boolean;
   workingBotPubkeys: string[];
 };
@@ -29,7 +29,7 @@ export function ChannelComposerActivityAccessory({
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
-  typingPubkeys,
+  typingEntries,
   visible,
   workingBotPubkeys,
 }: ChannelComposerActivityAccessoryProps) {
@@ -55,13 +55,13 @@ export function ChannelComposerActivityAccessory({
             />
           </div>
         ) : null}
-        {typingPubkeys.length > 0 ? (
+        {typingEntries.length > 0 ? (
           <TypingIndicatorRow
             channel={channel}
             className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
             currentPubkey={currentPubkey}
             profiles={profiles}
-            typingPubkeys={typingPubkeys}
+            typingEntries={typingEntries}
           />
         ) : null}
       </div>
