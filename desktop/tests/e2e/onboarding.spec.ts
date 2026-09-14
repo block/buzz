@@ -733,7 +733,7 @@ test("fresh existing-identity path leads with private-key recovery", async ({
   ).toBeVisible();
   await expect(page.getByTestId("nostr-import-card")).toBeVisible();
   await expect(page.getByTestId("nostr-import-file-button")).toHaveText(
-    "backup file",
+    "import from a file",
   );
   await expect(page.getByTestId("nostr-import-phone-link")).toHaveText(
     "recover from your phone",
@@ -744,7 +744,7 @@ test("fresh existing-identity path leads with private-key recovery", async ({
   const backupDialog = page.getByTestId("backup-recovery-dialog");
   await expect(backupDialog).toBeVisible();
   await expect(
-    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+    backupDialog.getByRole("heading", { name: "Import from a file" }),
   ).toBeVisible();
   await expect(
     backupDialog.getByTestId("nostr-import-backup-picker"),
@@ -778,7 +778,7 @@ test("fresh existing-identity path leads with private-key recovery", async ({
     });
   const backupDrop = backupDialog.getByTestId("nostr-import-backup-drop");
   await expect(backupDrop).toHaveAttribute("data-dragging", "true");
-  await expect(backupDrop).toContainText("Drop your backup file here");
+  await expect(backupDrop).toContainText("Drop file here");
   const [backupDropBox, backupFileSectionBox] = await Promise.all([
     backupDrop.boundingBox(),
     unlockPreview.boundingBox(),
@@ -1026,7 +1026,7 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   // Back first returns to backup-file selection instead of closing the dialog.
   await backupDialog.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
-    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+    backupDialog.getByRole("heading", { name: "Import from a file" }),
   ).toBeVisible();
   await expect(
     backupDialog.getByTestId("nostr-import-backup-picker"),
