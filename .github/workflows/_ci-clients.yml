@@ -131,8 +131,12 @@ jobs:
         run: swift build -c release --package-path mobile/ios/BuzzPushKit
       - name: Test
         run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Build complete iOS simulator app
+        run: cd mobile && flutter build ios --simulator --debug --no-pub
       - name: Build complete unsigned iOS release
         run: cd mobile && flutter build ios --release --no-codesign --no-pub
+      - name: Launch simulator and exercise native image segmentation
+        run: ./scripts/test-mobile-ios-simulator.sh
 
   results:
     name: Results

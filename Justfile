@@ -854,6 +854,10 @@ mobile-dev:
     unset GIT_DIR GIT_WORK_TREE
     flutter run
 
+# Launch the real app and exercise native image segmentation on a fresh iOS simulator
+mobile-test-ios-simulator:
+    ./scripts/test-mobile-ios-simulator.sh
+
 # Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
 mobile-clean:
     ./scripts/mobile-worktree-clean.sh

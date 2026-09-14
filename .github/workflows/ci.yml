@@ -80,6 +80,7 @@ jobs:
               - 'scripts/test-mobile-release-contract.sh'
               - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
+              - 'scripts/test-mobile-ios-simulator.sh'
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
