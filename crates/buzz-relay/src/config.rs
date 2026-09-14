@@ -183,7 +183,12 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).
-    /// Example: "tauri://localhost,http://localhost:3000"
+    /// Example: "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:3000"
+    ///
+    /// First-party Desktop origins (`tauri://localhost`, `http://tauri.localhost`,
+    /// `https://tauri.localhost`) are always merged in when this list is
+    /// non-empty — Windows WebView2 uses `http://tauri.localhost`, and omitting
+    /// it produces a silent "Failed to fetch" on Join community.
     pub cors_origins: Vec<String>,
     /// Optional hex-encoded private key for the relay's signing keypair.
     /// If absent, a fresh keypair is generated at startup.
@@ -367,6 +372,25 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+}
+
+/// Lockdown mode (non-empty CORS list) must still admit the fixed Desktop
+/// WebView origins. Windows WebView2 speaks `http://tauri.localhost`;
+/// macOS/Linux use `tauri://localhost`. An empty list stays empty so
+/// permissive CORS (dev mode) is unchanged.
+fn merge_desktop_cors_origins(cors_origins: &mut Vec<String>) {
+    if cors_origins.is_empty() {
+        return;
+    }
+    for origin in [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ] {
+        if !cors_origins.iter().any(|existing| existing == origin) {
+            cors_origins.push(origin.to_string());
+        }
+    }
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -801,12 +825,13 @@ impl Config {
             );
         }
 
-        let cors_origins = std::env::var("BUZZ_CORS_ORIGINS")
+        let mut cors_origins: Vec<String> = std::env::var("BUZZ_CORS_ORIGINS")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        merge_desktop_cors_origins(&mut cors_origins);
 
         let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
 
@@ -2295,6 +2320,23 @@ mod tests {
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
         );
+    }
+
+    #[test]
+    fn merge_desktop_cors_origins_fills_windows_webview_origin() {
+        let mut origins = vec!["https://buzz.example.com".to_string()];
+        merge_desktop_cors_origins(&mut origins);
+        assert!(origins.contains(&"https://buzz.example.com".to_string()));
+        assert!(origins.contains(&"tauri://localhost".to_string()));
+        assert!(origins.contains(&"http://tauri.localhost".to_string()));
+        assert!(origins.contains(&"https://tauri.localhost".to_string()));
+    }
+
+    #[test]
+    fn merge_desktop_cors_origins_leaves_empty_list_for_permissive_mode() {
+        let mut origins = Vec::new();
+        merge_desktop_cors_origins(&mut origins);
+        assert!(origins.is_empty());
     }
 
     #[test]
