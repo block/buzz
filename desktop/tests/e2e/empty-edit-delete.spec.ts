@@ -41,16 +41,17 @@ async function submitEmptyEdit(
   await page.keyboard.press("Enter");
 }
 
-test.beforeEach(async ({ page }) => {
+async function openGeneralChannel(page: import("@playwright/test").Page) {
   await installMockBridge(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-});
+}
 
 test("clearing an edit to empty prompts to delete, then deletes on confirm", async ({
   page,
 }) => {
+  await openGeneralChannel(page);
   const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
   await expect(row).toBeVisible({ timeout: 10_000 });
 
@@ -72,6 +73,7 @@ test("clearing an edit to empty prompts to delete, then deletes on confirm", asy
 });
 
 test("cancelling the empty-edit delete keeps the message", async ({ page }) => {
+  await openGeneralChannel(page);
   const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
   await expect(row).toBeVisible({ timeout: 10_000 });
 
@@ -93,6 +95,8 @@ test("cancelling the empty-edit delete keeps the message", async ({ page }) => {
 });
 
 test("a non-empty edit still edits and never deletes", async ({ page }) => {
+  await page.clock.install();
+  await openGeneralChannel(page);
   const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
   await expect(row).toBeVisible({ timeout: 10_000 });
 
@@ -104,9 +108,21 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
   const editedContent = `Edited, not deleted ${Date.now()}`;
 
   await input.click();
+  await expect(input).toBeFocused();
+  // Let edit hydration's #general suggestion open, then hold the debounce
+  // clock while replacing the entire body and immediately submitting.
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "#general stream", exact: true }),
+  ).toBeVisible();
   await page.keyboard.press("ControlOrMeta+A");
+  await page.clock.pauseAt(
+    new Date(await page.evaluate(() => Date.now() + 1_000)),
+  );
   await page.keyboard.type(editedContent);
   await page.keyboard.press("Enter");
+  await page.clock.resume();
 
   // No delete confirmation, edit mode exits, the row survives with new text.
   await expect(page.getByRole("alertdialog")).toHaveCount(0);

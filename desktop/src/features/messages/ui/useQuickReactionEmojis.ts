@@ -1,5 +1,3 @@
-import * as React from "react";
-
 import {
   loadActiveCommunityId,
   loadCommunities,
@@ -9,7 +7,6 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 const QUICK_REACTION_STORAGE_KEY = "buzz.quick-reaction-emojis.v1";
 const DEFAULT_QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉"] as const;
 const MAX_STORED_REACTIONS = 24;
-const sessionQuickReactionEmojis = new Map<string, string[]>();
 
 type QuickReactionEntry = {
   count: number;
@@ -37,18 +34,11 @@ function getActiveCommunityScope() {
   }
 }
 
-function quickReactionStorageKey(communityScope: string | null) {
+/** Persisted recents retain the existing per-community storage format. */
+export function quickReactionStorageKey(communityScope: string | null) {
   return communityScope
     ? `${QUICK_REACTION_STORAGE_KEY}:${communityScope}`
     : QUICK_REACTION_STORAGE_KEY;
-}
-
-function quickReactionSessionKey(
-  limit: number,
-  communityScope: string | null,
-  customEmojiSignature: string,
-) {
-  return `${communityScope ?? "global"}:${customEmojiSignature}:${limit}`;
 }
 
 function normalizeEntry(entry: unknown): QuickReactionEntry | null {
@@ -77,7 +67,8 @@ function sortEntries(entries: QuickReactionEntry[]) {
   });
 }
 
-function readQuickReactionEntries(storageKey: string) {
+/** Read the ranked recents once for a tray session or a storage refresh. */
+export function readQuickReactionEntries(storageKey: string) {
   if (!canUseLocalStorage()) return [];
 
   try {
@@ -108,17 +99,6 @@ function writeQuickReactionEntries(
   } catch {
     // Ignore storage failures; the reaction itself should still work.
   }
-}
-
-function customEmojiSignature(customEmoji: ReadonlyArray<CustomEmoji>) {
-  return customEmoji
-    .map((emoji) => emoji.shortcode.toLowerCase())
-    .sort()
-    .join(",");
-}
-
-function customEmojiShortcodesFromSignature(signature: string) {
-  return new Set(signature ? signature.split(",") : []);
 }
 
 function isCustomEmojiShortcode(emoji: string) {
@@ -161,6 +141,7 @@ function resolveQuickReactionEmojisWithShortcodes(
   return next;
 }
 
+/** Resolve available recents and default backfill without mutating the palette. */
 export function resolveQuickReactionEmojis(
   entries: ReadonlyArray<Pick<QuickReactionEntry, "emoji">>,
   limit: number,
@@ -169,44 +150,11 @@ export function resolveQuickReactionEmojis(
   return resolveQuickReactionEmojisWithShortcodes(
     entries,
     limit,
-    customEmojiShortcodesFromSignature(customEmojiSignature(customEmoji)),
+    new Set(customEmoji.map((emoji) => emoji.shortcode.toLowerCase())),
   );
 }
 
-function getQuickReactionEmojis(
-  limit: number,
-  communityScope: string | null,
-  customEmojiSignature: string,
-) {
-  return resolveQuickReactionEmojisWithShortcodes(
-    readQuickReactionEntries(quickReactionStorageKey(communityScope)),
-    limit,
-    customEmojiShortcodesFromSignature(customEmojiSignature),
-  );
-}
-
-function getSessionQuickReactionEmojis(
-  limit: number,
-  communityScope: string | null,
-  customEmojiSignature: string,
-) {
-  const sessionKey = quickReactionSessionKey(
-    limit,
-    communityScope,
-    customEmojiSignature,
-  );
-  const cached = sessionQuickReactionEmojis.get(sessionKey);
-  if (cached) return cached;
-
-  const emojis = getQuickReactionEmojis(
-    limit,
-    communityScope,
-    customEmojiSignature,
-  );
-  sessionQuickReactionEmojis.set(sessionKey, emojis);
-  return emojis;
-}
-
+/** Record a reaction without reshuffling the current session’s quick tray. */
 export function recordQuickReactionEmoji(emoji: string) {
   const trimmed = emoji.trim();
   if (!trimmed) return;
@@ -229,49 +177,4 @@ export function recordQuickReactionEmoji(emoji: string) {
   // Keep the current hover tray stable; the stored recents apply on reload or
   // when another tab updates this community's quick reactions.
   writeQuickReactionEntries(entries, storageKey);
-}
-
-export function useQuickReactionEmojis(
-  limit = 4,
-  customEmoji: ReadonlyArray<CustomEmoji> = [],
-) {
-  const communityScope = getActiveCommunityScope();
-  const customEmojiCacheKey = customEmojiSignature(customEmoji);
-  const [emojis, setEmojis] = React.useState(() =>
-    getSessionQuickReactionEmojis(limit, communityScope, customEmojiCacheKey),
-  );
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const storageKey = quickReactionStorageKey(communityScope);
-    const sessionKey = quickReactionSessionKey(
-      limit,
-      communityScope,
-      customEmojiCacheKey,
-    );
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === storageKey) {
-        sessionQuickReactionEmojis.delete(sessionKey);
-        setEmojis(
-          getSessionQuickReactionEmojis(
-            limit,
-            communityScope,
-            customEmojiCacheKey,
-          ),
-        );
-      }
-    };
-
-    window.addEventListener("storage", handleStorage);
-    setEmojis(
-      getSessionQuickReactionEmojis(limit, communityScope, customEmojiCacheKey),
-    );
-
-    return () => {
-      window.removeEventListener("storage", handleStorage);
-    };
-  }, [customEmojiCacheKey, limit, communityScope]);
-
-  return emojis;
 }

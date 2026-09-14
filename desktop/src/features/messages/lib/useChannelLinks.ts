@@ -116,12 +116,27 @@ export function useChannelLinks() {
 
   const updateChannelQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
-      // Store latest values so the debounced callback always uses fresh data
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Debounce suggestions, not invalidation: after replacing a #channel
+      // with ordinary text, Enter must submit rather than accept its stale
+      // suggestion and overwrite the replacement using the old offset.
+      if (
+        !detectPrefixQuery(
+          "#",
+          value,
+          cursorPosition,
+          knownNamesLowerRef.current,
+        )
+      ) {
+        setChannelQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {
