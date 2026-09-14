@@ -93,32 +93,6 @@ connected Android emulators, run `just mobile-clean` (add `--dry-run` via
 `./scripts/mobile-worktree-clean.sh --dry-run` to preview). Production
 installs are never touched.
 
-### Apple Silicon iOS simulators
-
-The Podfile enables the Flutter ML Kit package's
-[Apple Silicon simulator helper](https://pub.dev/packages/google_mlkit_commons/versions/0.12.0).
-Google's MLImage and MLKit archives still label their ARM64 code as device-only.
-The upstream helper adjusts those platform labels before each build and removes
-the pods' ARM64 simulator exclusions. Device builds restore the device labels
-automatically. Run device and simulator builds sequentially in one checkout,
-since they share the same vendored binaries.
-
-Use `just mobile-dev` normally; no Rosetta or manual architecture overrides are
-needed. After upgrading from the older Objective-C ML Kit plugins, run
-`flutter clean` and `flutter pub get` in `mobile/` once to discard stale headers.
-
-From the repository root, `just mobile-test-ios-simulator` creates a temporary
-iPhone simulator, launches the real app's pairing screen, and runs native image
-segmentation. It requires an Apple Silicon Mac with an installed iOS simulator
-runtime and removes the temporary simulator afterward. CI also builds for the
-simulator, builds an unsigned device release, then runs this test to verify that
-switching targets works.
-
-This is separate from the Notification Service Extension linker fix. The
-extension's empty `OTHER_LDFLAGS` prevents it from inheriting the app's Flutter
-and ML Kit dependencies. The app itself needs ML Kit for avatar background
-removal, so isolating the extension does not solve its simulator linking error.
-
 ### iOS push capability
 
 Every iOS artifact builds and embeds the Notification Service Extension and
