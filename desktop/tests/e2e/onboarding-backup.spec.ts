@@ -73,13 +73,11 @@ test("backup step appears on fresh-key path after profile submit", async ({
 });
 
 // ---------------------------------------------------------------------------
-// Key-created view: masked key with reveal toggle. Backup options open the
-// dark security view; the raw key is fetched only on explicit reveal/copy.
+// Key-created view: masked key with reveal and copy controls. Backup options
+// open the dark security view; the raw key is fetched only on explicit action.
 // ---------------------------------------------------------------------------
 
-test("key view reveals explicitly; options copy explicitly", async ({
-  page,
-}) => {
+test("key view reveals and copies explicitly", async ({ page }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterMachineBackup(page);
 
@@ -91,6 +89,17 @@ test("key view reveals explicitly; options copy explicitly", async ({
   await expect(key).toHaveClass(/blur/);
   await expect(key).not.toContainText("nsec1");
   expect(await invokedCommands(page)).not.toContain("get_nsec");
+
+  // Copy is available directly on the key card and provides confirmation.
+  const copyButton = page.getByTestId("backup-key-copy");
+  await expect(copyButton).toHaveAccessibleName("Copy private key");
+  await expect(copyButton).toHaveText("");
+  await copyButton.click();
+  await expect(copyButton).toHaveAccessibleName("Private key copied");
+  await expect
+    .poll(async () => invokedCommands(page))
+    .toContain("copy_text_to_clipboard");
+  expect(await invokedCommands(page)).toContain("get_nsec");
 
   // Reveal fetches the key; box must not reflow (same-length monospace mask).
   await page.getByTestId("backup-key-reveal-toggle").click();
@@ -104,7 +113,7 @@ test("key view reveals explicitly; options copy explicitly", async ({
   await page.getByTestId("backup-key-reveal-toggle").click();
   await expect(key).not.toContainText("nsec1");
 
-  // Copy is available only after opening the dark backup-options view.
+  // The deeper backup-options view retains its existing copy action.
   await page.getByTestId("backup-options-link").click();
   await expect(
     page.getByTestId("onboarding-page-backup-options"),
