@@ -138,7 +138,7 @@ void main() {
       expect(state.status, PairingStatus.error);
     });
 
-    test('rejects private IP relay URLs (SSRF)', () async {
+    test('rejects private IP relay URLs on legacy buzz:// (SSRF)', () async {
       container = createContainer();
 
       for (final ip in [
@@ -146,6 +146,7 @@ void main() {
         '172.16.0.1',
         '192.168.1.1',
         '169.254.169.254',
+        '100.64.0.1',
       ]) {
         final code = _encodePairingCode(relayUrl: 'http://$ip:3000');
         await container.read(pairingProvider.notifier).pair(code);
@@ -156,7 +157,7 @@ void main() {
       }
     });
 
-    test('rejects non-http/https schemes', () async {
+    test('rejects non-http/https/ws/wss schemes', () async {
       container = createContainer();
 
       final code = _encodePairingCode(relayUrl: 'file:///etc/passwd');
@@ -165,6 +166,61 @@ void main() {
       final state = container.read(pairingProvider);
       expect(state.status, PairingStatus.error);
       expect(state.errorMessage, contains('Invalid pairing code'));
+    });
+
+    group('validatePairingRelayUrl', () {
+      test('trusted payload accepts private ws and normalizes to http', () {
+        expect(
+          validatePairingRelayUrl(
+            'ws://10.88.0.1:3000',
+            trustVerifiedPairingPayload: true,
+          ),
+          'http://10.88.0.1:3000',
+        );
+        expect(
+          validatePairingRelayUrl(
+            'ws://xandor.tail5b3197.ts.net:3000',
+            trustVerifiedPairingPayload: true,
+          ),
+          'http://xandor.tail5b3197.ts.net:3000',
+        );
+      });
+
+      test('trusted payload accepts public wss and normalizes to https', () {
+        expect(
+          validatePairingRelayUrl(
+            'wss://relay.example.com',
+            trustVerifiedPairingPayload: true,
+          ),
+          'https://relay.example.com',
+        );
+      });
+
+      test('untrusted legacy still rejects private IP literals', () {
+        expect(
+          () => validatePairingRelayUrl(
+            'https://192.168.1.1',
+            trustVerifiedPairingPayload: false,
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('private network'),
+            ),
+          ),
+        );
+      });
+
+      test('untrusted legacy accepts public wss without false HTTPS error', () {
+        expect(
+          validatePairingRelayUrl(
+            'wss://relay.example.com',
+            trustVerifiedPairingPayload: false,
+          ),
+          'https://relay.example.com',
+        );
+      });
     });
 
     test('rejects JSON array payload', () async {
@@ -240,7 +296,10 @@ void main() {
         notifier = container.read(pairingProvider.notifier);
       });
 
-      Future<void> beginImport({required bool protected}) async {
+      Future<void> beginImport({
+        required bool protected,
+        String relayUrl = 'https://relay.test',
+      }) async {
         await notifier.pair(pairingCode);
         notifier.setProtectSensitiveActions(protected);
         notifier.confirmSas();
@@ -259,7 +318,7 @@ void main() {
             'type': 'payload',
             'payload_type': 'credentials',
             'payload': jsonEncode({
-              'relayUrl': 'https://relay.test',
+              'relayUrl': relayUrl,
               'pubkey': nostr.Keys(sourceSecret).public,
               'nsec': nostr.Keys(sourceSecret).nsec,
             }),
@@ -281,6 +340,41 @@ void main() {
         );
         expect(container.read(pairingProvider).status, PairingStatus.success);
       });
+
+      test(
+        'SAS-verified private ws:// relay imports and normalizes to http',
+        () async {
+          await beginImport(
+            protected: false,
+            relayUrl: 'ws://10.88.0.1:3000',
+          );
+
+          validation.complete();
+          await Future<void>.delayed(Duration.zero);
+
+          expect(importAuth.lastCommunity?.relayUrl, 'http://10.88.0.1:3000');
+          expect(container.read(pairingProvider).status, PairingStatus.success);
+        },
+      );
+
+      test(
+        'SAS-verified public wss:// relay imports and normalizes to https',
+        () async {
+          await beginImport(
+            protected: false,
+            relayUrl: 'wss://relay.example.com',
+          );
+
+          validation.complete();
+          await Future<void>.delayed(Duration.zero);
+
+          expect(
+            importAuth.lastCommunity?.relayUrl,
+            'https://relay.example.com',
+          );
+          expect(container.read(pairingProvider).status, PairingStatus.success);
+        },
+      );
 
       test('checked protection persists on a successful import', () async {
         await beginImport(protected: true);

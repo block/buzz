@@ -708,12 +708,18 @@ class PairingNotifier extends Notifier<PairingState> {
         throw const FormatException('Missing relayUrl in payload');
       }
 
-      // Validate relay URL to prevent SSRF via private network addresses.
-      _validateRelayUrl(relayUrl);
+      // NIP-AB already completed SAS verification against the desktop that
+      // produced this payload, so the relay URL is user-confirmed rather than
+      // an untrusted invite/SSRF vector. Allow private/VPN origins and the
+      // ws(s)/http(s) schemes Desktop actually emits (see #4198).
+      final normalizedRelayUrl = validatePairingRelayUrl(
+        relayUrl,
+        trustVerifiedPairingPayload: true,
+      );
 
       // Validate credentials against the relay via NIP-42 WS handshake.
       final credentialValidator = _credentialValidator ?? _validateCredentials;
-      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
+      await credentialValidator(relayUrl: normalizedRelayUrl, nsec: nsec);
       if (pairingGeneration != _pairingGeneration ||
           state.status != PairingStatus.storing ||
           _sendIdentityToSource) {
@@ -725,8 +731,8 @@ class PairingNotifier extends Notifier<PairingState> {
 
       // Store as community and switch to it.
       final community = Community.create(
-        name: Community.nameFromUrl(relayUrl),
-        relayUrl: relayUrl,
+        name: Community.nameFromUrl(normalizedRelayUrl),
+        relayUrl: normalizedRelayUrl,
         pubkey: pubkey,
         nsec: nsec,
         sensitiveActionPolicy: protectSensitiveActions
@@ -874,8 +880,12 @@ class PairingNotifier extends Notifier<PairingState> {
       throw const FormatException('Pairing payload missing nsec');
     }
     final uri = Uri.parse(relayUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
-    final wsUrl = uri.replace(scheme: scheme).toString();
+    final wsScheme = switch (uri.scheme) {
+      'https' || 'wss' => 'wss',
+      'http' || 'ws' => 'ws',
+      _ => throw FormatException('Invalid URL scheme: ${uri.scheme}'),
+    };
+    final wsUrl = uri.replace(scheme: wsScheme).toString();
 
     final socket = RelaySocket(
       wsUrl: wsUrl,
@@ -910,58 +920,99 @@ class PairingNotifier extends Notifier<PairingState> {
       throw const FormatException('Missing relayUrl in payload');
     }
 
-    _validateRelayUrl(relayUrl);
+    // Legacy buzz:// codes are not SAS-verified — keep strict host policy.
+    final normalizedRelayUrl = validatePairingRelayUrl(
+      relayUrl,
+      trustVerifiedPairingPayload: false,
+    );
 
     return Community.create(
-      name: Community.nameFromUrl(relayUrl),
-      relayUrl: relayUrl,
+      name: Community.nameFromUrl(normalizedRelayUrl),
+      relayUrl: normalizedRelayUrl,
       pubkey: decoded['pubkey'] as String?,
       nsec: decoded['nsec'] as String?,
       sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
     );
   }
+}
 
-  void _validateRelayUrl(String url) {
-    final uri = Uri.parse(url);
-
-    if (!kDebugMode && uri.scheme != 'https') {
-      throw const FormatException('Relay URL must use HTTPS');
-    }
-    if (uri.scheme != 'http' && uri.scheme != 'https') {
-      throw FormatException('Invalid URL scheme: ${uri.scheme}');
-    }
-
-    final host = uri.host.toLowerCase();
-    if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
-      if (!kDebugMode) {
-        throw const FormatException('Relay URL cannot target localhost');
-      }
-      return;
-    }
-
-    final ip = Uri.tryParse('http://$host')?.host ?? host;
-    if (_isPrivateHost(ip)) {
-      throw const FormatException(
-        'Relay URL cannot target private network addresses',
-      );
-    }
+/// Validates and normalizes a relay origin from a pairing credential payload.
+///
+/// Returns an HTTP(S) origin suitable for [Community.relayUrl] / [RelayConfig]:
+/// `wss`→`https`, `ws`→`http`.
+///
+/// When [trustVerifiedPairingPayload] is true (NIP-AB after SAS match), private
+/// VPN/Tailscale origins and plaintext `http`/`ws` are allowed — the URL came
+/// from a cryptographically verified desktop, not an untrusted invite.
+///
+/// When false (legacy `buzz://` paste), production still requires TLS and
+/// rejects localhost / RFC1918 literals. `wss`/`ws` are accepted and folded to
+/// `https`/`http` before those checks so public `wss://` payloads are not
+/// misreported as "must use HTTPS".
+String validatePairingRelayUrl(
+  String url, {
+  required bool trustVerifiedPairingPayload,
+}) {
+  final parsed = Uri.tryParse(url);
+  if (parsed == null || parsed.host.isEmpty) {
+    throw FormatException('Invalid relay URL: $url');
+  }
+  if (parsed.userInfo.isNotEmpty) {
+    throw const FormatException('Relay URL must not contain credentials');
   }
 
-  static bool _isPrivateHost(String host) {
-    final parts = host.split('.');
-    if (parts.length != 4) return false;
-    final octets = parts.map(int.tryParse).toList();
-    if (octets.any((o) => o == null)) return false;
+  final normalizedScheme = switch (parsed.scheme) {
+    'https' || 'wss' => 'https',
+    'http' || 'ws' => 'http',
+    _ => throw FormatException(
+      'Invalid URL scheme: ${parsed.scheme} (got: $url)',
+    ),
+  };
+  final uri = parsed.replace(scheme: normalizedScheme);
+  final normalized = uri.toString();
 
-    final a = octets[0]!;
-    final b = octets[1]!;
-
-    if (a == 10) return true;
-    if (a == 172 && b >= 16 && b <= 31) return true;
-    if (a == 192 && b == 168) return true;
-    if (a == 169 && b == 254) return true;
-    return false;
+  if (!trustVerifiedPairingPayload && !kDebugMode && uri.scheme != 'https') {
+    throw FormatException('Relay URL must use HTTPS (got: $url)');
   }
+
+  final host = uri.host.toLowerCase();
+  final isLocalhost =
+      host == 'localhost' ||
+      host == '127.0.0.1' ||
+      host == '::1' ||
+      host.endsWith('.localhost');
+  if (isLocalhost) {
+    if (!trustVerifiedPairingPayload && !kDebugMode) {
+      throw const FormatException('Relay URL cannot target localhost');
+    }
+    return normalized;
+  }
+
+  if (!trustVerifiedPairingPayload && _isPrivateHostLiteral(host)) {
+    throw const FormatException(
+      'Relay URL cannot target private network addresses',
+    );
+  }
+
+  return normalized;
+}
+
+bool _isPrivateHostLiteral(String host) {
+  final parts = host.split('.');
+  if (parts.length != 4) return false;
+  final octets = parts.map(int.tryParse).toList();
+  if (octets.any((o) => o == null)) return false;
+
+  final a = octets[0]!;
+  final b = octets[1]!;
+
+  if (a == 10) return true;
+  if (a == 172 && b >= 16 && b <= 31) return true;
+  if (a == 192 && b == 168) return true;
+  if (a == 169 && b == 254) return true;
+  // Tailscale CGNAT / carrier-grade NAT used by many VPN overlays.
+  if (a == 100 && b >= 64 && b <= 127) return true;
+  return false;
 }
 
 final pairingProvider = NotifierProvider<PairingNotifier, PairingState>(
