@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
-use reqwest::Method;
+use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -409,6 +409,37 @@ pub async fn query_relay_at_with_keys(
     .await
 }
 
+/// Build an authenticated relay HTTP request using already-signed NIP-98 auth.
+///
+/// The caller owns request ordering around this helper: rate-limit admission,
+/// egress checks, URL/body construction, send, error classification, and response
+/// parsing remain outside. `body` is accepted as final bytes so this helper never
+/// reserializes, normalizes, or changes the payload that was signed.
+fn build_authenticated_relay_request(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    auth: &str,
+    body: Option<Vec<u8>>,
+    auth_tag: Option<&str>,
+    timeout: Option<std::time::Duration>,
+) -> RequestBuilder {
+    let mut request = client.request(method, url).header("Authorization", auth);
+    if body.is_some() {
+        request = request.header("Content-Type", "application/json");
+    }
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    request
+}
+
 /// Issue an authenticated `POST /query` and parse the response, applying the
 /// per-request `timeout` that bounds a stalled or half-open relay connection.
 ///
@@ -425,19 +456,18 @@ async fn send_query_request(
     body_bytes: Vec<u8>,
     timeout: std::time::Duration,
 ) -> Result<Vec<nostr::Event>, String> {
-    let mut request = http_client
-        .post(url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .timeout(timeout);
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = build_authenticated_relay_request(
+        http_client,
+        Method::POST,
+        url,
+        auth,
+        Some(body_bytes),
+        auth_tag,
+        Some(timeout),
+    )
+    .send()
+    .await
+    .map_err(|e| classify_request_error(&e))?;
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
