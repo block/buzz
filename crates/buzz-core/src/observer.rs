@@ -96,18 +96,23 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
         &event.pubkey,
         event.content.as_str(),
     )?;
+    let result = parse_observer_plaintext(&plaintext);
+    plaintext.zeroize();
+    result
+}
+
+/// Validate the size and JSON of an already decrypted observer body.
+/// Crypto backends share this validator; it does not authenticate ciphertext.
+pub fn parse_observer_plaintext<T: DeserializeOwned>(
+    plaintext: &str,
+) -> Result<T, ObserverPayloadError> {
     if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
-        let got = plaintext.len();
-        plaintext.zeroize();
         return Err(ObserverPayloadError::PlaintextTooLarge {
             max: OBSERVER_MAX_PLAINTEXT_LEN,
-            got,
+            got: plaintext.len(),
         });
     }
-
-    let result = serde_json::from_str(&plaintext);
-    plaintext.zeroize();
-    Ok(result?)
+    Ok(serde_json::from_str(plaintext)?)
 }
 
 #[cfg(test)]

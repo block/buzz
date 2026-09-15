@@ -59,10 +59,11 @@ mod description_normalization_tests {
 }
 
 mod pending;
-pub(in crate::commands) use pending::retain_persona_pending;
 pub(in crate::commands) use pending::retain_persona_pending_at;
 pub(crate) use pending::tombstone_persona_at;
-pub(super) use pending::tombstone_persona_pending;
+pub(in crate::commands) use pending::{
+    finish_persona_pending, retain_persona_pending, PersonaRetentionWork,
+};
 mod create;
 pub use create::create_persona;
 mod sharing;
@@ -76,7 +77,10 @@ pub use inbound::reconcile_inbound_persona_event;
 pub(crate) use inbound::retain_inbound_catalog_witness;
 
 #[tauri::command]
-pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub async fn list_personas<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    operation: crate::user_operation::UserOperationScope,
+) -> Result<Vec<AgentDefinition>, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -84,6 +88,7 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        let _admission = operation.admit(&state)?;
         let mut personas = load_personas(&app)?;
         pending::project_active_persona_sharing(&app, &state, &mut personas);
         Ok(personas)
@@ -145,9 +150,86 @@ fn commit_cascade_agents(
     save(agents)
 }
 
+/// Exact target, cascade records and team references; unrelated records are
+/// excluded. This is a disk-input fence, not a global revision counter.
+fn deletion_inputs(
+    id: &str,
+    personas: &[AgentDefinition],
+    agents: &[ManagedAgentRecord],
+    teams: &[crate::managed_agents::TeamRecord],
+) -> Result<serde_json::Value, String> {
+    let persona = personas.iter().find(|persona| persona.id == id);
+    let cascade: Vec<_> = agents
+        .iter()
+        .filter(|agent| agent.persona_id.as_deref() == Some(id))
+        .collect();
+    let references: Vec<_> = teams
+        .iter()
+        .filter(|team| team.persona_ids.iter().any(|member| member == id))
+        .collect();
+    serde_json::to_value((persona, cascade, references)).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
+    delete_persona_with(id, app).await
+}
+
+pub(crate) async fn delete_persona_with<R: tauri::Runtime>(
+    id: String,
+    app: AppHandle<R>,
+) -> Result<(), String> {
     use tauri::Manager;
+    crate::owner_authorization::require_owned_workspace(&app.state::<AppState>())?;
+    // Capture every disk decision (including cascade membership and team
+    // references) before attempting any witness signature.
+    let (inputs, work, persona_work) = {
+        let state = app.state::<AppState>();
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let personas = load_personas(&app)?;
+        let agents = load_managed_agents(&app)?;
+        let teams = load_teams(&app)?;
+        let persona = personas
+            .iter()
+            .find(|persona| persona.id == id)
+            .ok_or_else(|| format!("persona {id} not found"))?;
+        let referenced = teams.iter().any(|team| team.persona_ids.contains(&id));
+        validate_persona_deletion(persona, referenced)?;
+        let cascade: std::collections::HashSet<_> =
+            collect_cascade_pubkeys(&agents, &id).into_iter().collect();
+        let remote = collect_remote_deployed(&agents, &cascade);
+        if !remote.is_empty() {
+            return Err(format!("persona {id} has provider-deployed agent instances ({}); delete those agent instances first", remote.join(", ")));
+        }
+        let inputs = deletion_inputs(&id, &personas, &agents, &teams)?;
+        let work = cascade
+            .iter()
+            .map(|pk| super::agents::deletion_witness::prepare_agent_deletion(&app, &state, pk))
+            .collect::<Vec<_>>();
+        (
+            inputs,
+            work,
+            crate::managed_agents::retention::active_retention_scope(&app, &state).and_then(
+                |scope| {
+                    let signer = scope.owner_signer();
+                    pending::tombstone_persona_at(
+                        &scope.db_path,
+                        &signer,
+                        &crate::managed_agents::persona_events::persona_d_tag(persona),
+                    )
+                    .map(|plan| (plan, signer))
+                },
+            ),
+        )
+    };
+    let mut witnesses = Vec::new();
+    for work in work {
+        witnesses.push(super::agents::deletion_witness::sign_agent_deletion(work).await);
+    }
+    witnesses.push(super::agents::deletion_witness::sign_agent_deletion(persona_work).await);
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
@@ -159,6 +241,10 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 .lock()
                 .map_err(|error| error.to_string())?;
 
+            if deletion_inputs(&id, &load_personas(&app)?, &load_managed_agents(&app)?, &load_teams(&app)?)? != inputs {
+                return Err("persona deletion conflict: disk inputs changed; retry deletion".into());
+            }
+            super::agents::deletion_witness::commit_agent_deletions(witnesses, || {
             // Load and validate the persona before any destructive work.
             let mut personas = load_personas(&app)?;
             let persona = personas
@@ -274,10 +360,10 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 delete_agent_key(pk);
                 // Tombstone + NIP-IA kind:9035 archive enqueue atomically; the
                 // archive's `persona_id` is derived from the retained 30177 head.
-                super::agents::tombstone_managed_agent_pending(&app, &state, pk);
-            }
-            tombstone_persona_pending(&app, &state, &d_tag);
 
+            }
+            Ok(d_tag)
+            })?;
             // _store_guard drops here, before try_regenerate_nest.
         }
 
@@ -343,8 +429,8 @@ pub async fn set_persona_active(
 }
 
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
-mod card;
-mod snapshot;
+pub(crate) mod card;
+pub(crate) mod snapshot;
 pub use card::*;
 #[cfg(test)]
 pub(crate) use snapshot::import::decode_snapshot_from_bytes;
@@ -354,3 +440,6 @@ pub(crate) use snapshot::import::{
 };
 pub use snapshot::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
 pub use snapshot::{encode_agent_snapshot_for_send, export_agent_snapshot};
+
+#[cfg(test)]
+mod definition_signer_tests;

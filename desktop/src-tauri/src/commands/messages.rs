@@ -11,7 +11,7 @@ pub use forum::{get_forum_posts, get_forum_thread};
 use crate::{
     app_state::AppState,
     events,
-    managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
+    managed_agents::{find_managed_agent_mut, load_managed_agents},
     models::{
         FeedItemCategory, FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SearchResponse,
         SendChannelMessageResponse, ThreadRepliesResponse,
@@ -19,7 +19,7 @@ use crate::{
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
-        submit_event_at_created_at, submit_event_with_keys_created_at,
+        submit_event_at_created_at, submit_event_with_signer_created_at,
     },
 };
 
@@ -66,10 +66,7 @@ pub async fn get_feed(
         .map(|t| t.split(',').any(|s| s.trim() == "needs_action"))
         .unwrap_or(true);
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.identity_public_key()?.to_hex();
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
@@ -420,6 +417,7 @@ pub async fn send_channel_message(
     kind: Option<u32>,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -442,7 +440,7 @@ pub async fn send_channel_message(
     // exact snapshot signs the event and its NIP-98 auth below.
     let relay_base = crate::relay::relay_api_base_url_with_override(&state);
     assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
-    let signing_keys = state.signing_keys()?;
+    let signing_keys = state.renderer_signer(expected_generation)?;
     assert_expected_signer(
         expected_signer_pubkey.as_deref(),
         &signing_keys.public_key().to_hex(),
@@ -554,6 +552,7 @@ async fn find_managed_agent_channel_message_by_marker(
     agent_pubkey: Option<&str>,
     channel_id: &str,
     marker: &str,
+    owner: Option<&crate::owner_authorization::OwnerAuthorizationScope>,
 ) -> Result<Option<Event>, String> {
     let author = agent_pubkey
         .map(str::trim)
@@ -575,7 +574,19 @@ async fn find_managed_agent_channel_message_by_marker(
             filter["until"] = serde_json::json!(until);
         }
 
-        let events = query_relay(state, &[filter]).await?;
+        let events = match owner {
+            Some(owner) => {
+                crate::relay::query_relay_at_with_signer(
+                    state,
+                    &owner.relay_base,
+                    &[filter],
+                    &owner.signer,
+                    None,
+                )
+                .await?
+            }
+            None => query_relay(state, &[filter]).await?,
+        };
         if let Some(existing) = events
             .iter()
             .find(|event| event_has_client_marker(event, marker))
@@ -632,7 +643,7 @@ pub async fn has_managed_agent_channel_message_marker(
         .filter(|value| !value.is_empty());
 
     let marker_author = marker_author_for_scope(marker_scope.as_deref(), agent_pubkey)?;
-    find_managed_agent_channel_message_by_marker(&state, marker_author, &channel_id, marker)
+    find_managed_agent_channel_message_by_marker(&state, marker_author, &channel_id, marker, None)
         .await
         .map(|event| event.is_some())
 }
@@ -644,30 +655,19 @@ fn stored_managed_agent_auth_tag(auth_tag: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn legacy_managed_agent_auth_tag(
-    owner_keys: &Keys,
+pub(crate) async fn legacy_managed_agent_auth_tag(
+    owner: &crate::active_user_signer::ActiveUserSigner,
     agent_pubkey: &PublicKey,
 ) -> Result<Option<String>, String> {
-    if owner_keys.public_key() == *agent_pubkey {
+    if owner.public_key() == *agent_pubkey {
         return Ok(None);
     }
 
-    buzz_sdk_pkg::nip_oa::compute_auth_tag(owner_keys, agent_pubkey, "")
+    owner
+        .authorize_agent(agent_pubkey, "")
+        .await
         .map(Some)
         .map_err(|error| format!("failed to compute managed agent auth tag: {error}"))
-}
-
-fn managed_agent_submission_auth_tag(
-    record: &ManagedAgentRecord,
-    state: &AppState,
-    agent_pubkey: &PublicKey,
-) -> Result<Option<String>, String> {
-    if let Some(auth_tag) = stored_managed_agent_auth_tag(record.auth_tag.as_deref()) {
-        return Ok(Some(auth_tag));
-    }
-
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
-    legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
 }
 
 fn build_managed_agent_channel_message(
@@ -695,7 +695,7 @@ fn build_managed_agent_channel_message(
 
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub async fn send_managed_agent_channel_message(
+pub async fn send_managed_agent_channel_message<R: tauri::Runtime>(
     agent_pubkey: String,
     channel_id: String,
     content: String,
@@ -704,7 +704,7 @@ pub async fn send_managed_agent_channel_message(
     mention_pubkeys: Option<Vec<String>>,
     parent_event_id: Option<String>,
     additional_markers: Option<Vec<String>>,
-    app: AppHandle,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -738,78 +738,109 @@ pub async fn send_managed_agent_channel_message(
             record.pubkey
         ));
     }
-    let submission_auth_tag =
-        managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
-    let thread_ref = match parent_event_id.as_deref() {
-        Some(parent_id) => Some(
-            // Same active-relay resolution as before — this path has no
-            // caller-captured tenant scope (yet), so resolve the override
-            // here and read through it with the active identity.
-            resolve_thread_ref(
-                parent_id,
-                &state,
-                &crate::relay::relay_api_base_url_with_override(&state),
-                None,
-            )
-            .await?,
-        ),
-        None => None,
+    // Stored proofs belong to the independent agent and require no human crypto.
+    let stored_tag = stored_managed_agent_auth_tag(record.auth_tag.as_deref());
+    let owner = if stored_tag.is_none() {
+        Some(crate::owner_authorization::OwnerAuthorizationScope::capture_legacy_repair(&state)?)
+    } else {
+        None
     };
+    let relay_base = owner
+        .as_ref()
+        .map(|s| s.relay_base.clone())
+        .unwrap_or_else(|| crate::relay::relay_api_base_url_with_override(&state));
+    let work = async {
+        let submission_auth_tag = match &owner {
+            Some(owner) => legacy_managed_agent_auth_tag(&owner.signer, &keys.public_key()).await?,
+            None => stored_tag,
+        };
+        let thread_ref = match parent_event_id.as_deref() {
+            Some(parent_id) => Some(
+                // Missing-proof repair retains its owner/relay across this query.
+                resolve_thread_ref(
+                    parent_id,
+                    &state,
+                    &relay_base,
+                    owner.as_ref().map(|s| &s.signer),
+                )
+                .await?,
+            ),
+            None => None,
+        };
 
-    if let Some(marker) = marker.as_deref() {
-        if let Some(existing) = find_managed_agent_channel_message_by_marker(
+        if let Some(marker) = marker.as_deref() {
+            if let Some(existing) = find_managed_agent_channel_message_by_marker(
+                &state,
+                marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
+                &channel_id,
+                marker,
+                owner.as_ref(),
+            )
+            .await?
+            {
+                if let Some(owner) = &owner {
+                    owner.check_current(&state)?;
+                }
+                return Ok(SendChannelMessageResponse {
+                    event_id: existing.id.to_hex(),
+                    parent_event_id: thread_ref
+                        .as_ref()
+                        .map(|reference| reference.parent_event_id.to_hex()),
+                    root_event_id: thread_ref
+                        .as_ref()
+                        .map(|reference| reference.root_event_id.to_hex()),
+                    depth: if thread_ref.is_some() { 1 } else { 0 },
+                    created_at: existing.created_at.as_secs() as i64,
+                });
+            }
+        }
+
+        let mut client_tags = marker
+            .as_deref()
+            .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
+            .unwrap_or_default();
+        for marker in additional_markers.unwrap_or_default() {
+            let marker = marker.trim();
+            if !marker.is_empty() {
+                client_tags.push(vec!["client".to_string(), marker.to_string()]);
+            }
+        }
+        let mentions = mention_pubkeys.unwrap_or_default();
+        let builder = build_managed_agent_channel_message(
+            channel_uuid,
+            trimmed,
+            thread_ref.as_ref(),
+            &mentions,
+            &client_tags,
+        )?;
+        // Same contract as `send_channel_message`: `created_at` is the signed
+        // event's, not a post-publication clock read.
+        if let Some(owner) = &owner {
+            owner.check_current(&state)?;
+        }
+        // This is the independent agent's key boundary, not an active-user fallback.
+        let signer = crate::active_user_signer::ActiveUserSigner::local(keys);
+        let (result, created_at) = submit_event_with_signer_created_at(
+            builder,
             &state,
-            marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
-            &channel_id,
-            marker,
+            &relay_base,
+            &signer,
+            submission_auth_tag.as_deref(),
         )
-        .await?
-        {
-            return Ok(SendChannelMessageResponse {
-                event_id: existing.id.to_hex(),
-                parent_event_id: thread_ref
-                    .as_ref()
-                    .map(|reference| reference.parent_event_id.to_hex()),
-                root_event_id: thread_ref
-                    .as_ref()
-                    .map(|reference| reference.root_event_id.to_hex()),
-                depth: if thread_ref.is_some() { 1 } else { 0 },
-                created_at: existing.created_at.as_secs() as i64,
-            });
-        }
-    }
+        .await?;
 
-    let mut client_tags = marker
-        .as_deref()
-        .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
-        .unwrap_or_default();
-    for marker in additional_markers.unwrap_or_default() {
-        let marker = marker.trim();
-        if !marker.is_empty() {
-            client_tags.push(vec!["client".to_string(), marker.to_string()]);
-        }
+        Ok(SendChannelMessageResponse {
+            event_id: result.event_id,
+            parent_event_id: parent_event_id.clone(),
+            root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
+            depth: if parent_event_id.is_some() { 1 } else { 0 },
+            created_at,
+        })
+    };
+    match &owner {
+        Some(owner) => owner.signer.run(work).await,
+        None => work.await,
     }
-    let mentions = mention_pubkeys.unwrap_or_default();
-    let builder = build_managed_agent_channel_message(
-        channel_uuid,
-        trimmed,
-        thread_ref.as_ref(),
-        &mentions,
-        &client_tags,
-    )?;
-    // Same contract as `send_channel_message`: `created_at` is the signed
-    // event's, not a post-publication clock read.
-    let (result, created_at) =
-        submit_event_with_keys_created_at(builder, &state, &keys, submission_auth_tag.as_deref())
-            .await?;
-
-    Ok(SendChannelMessageResponse {
-        event_id: result.event_id,
-        parent_event_id: parent_event_id.clone(),
-        root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
-        depth: if parent_event_id.is_some() { 1 } else { 0 },
-        created_at,
-    })
 }
 
 #[tauri::command]
@@ -839,10 +870,7 @@ pub async fn remove_reaction(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Find our own kind:7 reaction event referencing the target.
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.identity_public_key()?.to_hex();
     let target = event_id.trim();
     let trimmed_emoji = emoji.trim();
 

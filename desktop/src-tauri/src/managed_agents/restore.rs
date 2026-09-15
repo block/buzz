@@ -101,6 +101,9 @@ pub async fn restore_managed_agents_on_launch(
     }
 
     let state = app.state::<AppState>();
+    if state.is_remote_identity() {
+        return Err("remote managed restore is not enabled".into());
+    }
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
@@ -239,12 +242,7 @@ pub async fn restore_managed_agents_on_launch(
     // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
     // Read outside the per-agent spawn loop so all parallel spawns see the same
     // value and we don't lock `state.keys` repeatedly.
-    let owner_hex: Option<String> = state
-        .keys
-        .lock()
-        .map_err(|e| e.to_string())
-        .ok()
-        .map(|k| k.public_key().to_hex());
+    let owner_hex: Option<String> = state.identity_public_key().ok().map(|key| key.to_hex());
 
     #[cfg(feature = "mesh-llm")]
     let agents_to_start = {

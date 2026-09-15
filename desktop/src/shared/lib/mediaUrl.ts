@@ -16,6 +16,10 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isRemoteIdentity,
+  nativeGeneration,
+} from "../api/nativeIdentitySession";
 
 // Matches: https://anything.com/media/{64-hex}.{ext}
 // Also matches thumbnails: /media/{64-hex}.thumb.jpg
@@ -191,7 +195,9 @@ async function fetchProxyPort(): Promise<number | null> {
       const publishRelayOrigin = beginRelayOriginFetch();
       try {
         const url = await withDeadline(
-          invoke<string>("get_relay_http_url"),
+          invoke<string>("get_relay_http_url", {
+            expectedGeneration: nativeGeneration(),
+          }),
           deadline,
         );
         if (url !== null) publishRelayOrigin(canonicalOrigin(url));
@@ -203,7 +209,9 @@ async function fetchProxyPort(): Promise<number | null> {
     if (!cachedPort) {
       try {
         const port = await withDeadline(
-          invoke<number>("get_media_proxy_port"),
+          invoke<number>("get_media_proxy_port", {
+            expectedGeneration: nativeGeneration(),
+          }),
           deadline,
         );
         if (port !== null && port > 0 && generation === cacheGeneration) {
@@ -299,7 +307,21 @@ export function getCachedMediaProxyPort(): number | null {
  * first. Matching the bind address avoids machine-dependent image failures.
  */
 export function mediaProxyUrl(port: number, mediaPath: string): string {
-  return `http://127.0.0.1:${port}/media/${mediaPath}`;
+  return bindMediaUrl(`http://127.0.0.1:${port}/media/${mediaPath}`);
+}
+
+/** Element loads cannot carry IPC headers. Keep their URL bound to this realm,
+ * never to whichever native session happens to exist when the load runs. */
+function bindMediaUrl(url: string): string {
+  if (!isRemoteIdentity()) return url;
+  try {
+    const bound = new URL(url);
+    bound.searchParams.set("__buzz_generation", String(nativeGeneration()));
+    return bound.toString();
+  } catch {
+    // A signed-out/revoked realm must not fall back to an unbound media URL.
+    return "about:blank";
+  }
 }
 
 /**
@@ -335,5 +357,5 @@ export function rewriteRelayUrl(url: string): string {
     ensureRelayOriginFetch();
   }
 
-  return `buzz-media://localhost/media/${m[1]}`;
+  return bindMediaUrl(`buzz-media://localhost/media/${m[1]}`);
 }

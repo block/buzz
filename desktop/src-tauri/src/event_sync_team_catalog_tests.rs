@@ -108,20 +108,21 @@ fn head(base_dir: &Path, keys: &nostr::Keys) -> Option<RetainedEvent> {
     .unwrap()
 }
 
-fn reconcile(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+async fn reconcile(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
     crate::event_sync::reconcile_team_catalog_heads_at_for_test(
         base_dir,
         keys,
         &base_dir.join("retention.db"),
     )
+    .await
 }
 
 fn head_is_shared(row: &RetainedEvent) -> bool {
     event_is_shared(&nostr::Event::from_json(&row.raw_event).unwrap())
 }
 
-#[test]
-fn test_member_edit_republishes_a_newer_shared_head() {
+#[tokio::test]
+async fn test_member_edit_republishes_a_newer_shared_head() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
@@ -130,7 +131,7 @@ fn test_member_edit_republishes_a_newer_shared_head() {
     // publish path never observes.
     write_stores(base.path(), &[team()], &[member("m1", "Rewritten.")]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 1);
 
     let after = head(base.path(), &keys).unwrap();
     assert!(after.content.contains("Rewritten."));
@@ -142,14 +143,14 @@ fn test_member_edit_republishes_a_newer_shared_head() {
     assert!(after.created_at > before.created_at);
 }
 
-#[test]
-fn test_unchanged_team_is_left_alone() {
+#[tokio::test]
+async fn test_unchanged_team_is_left_alone() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
     write_stores(base.path(), &[team()], &[member("m1", "Original.")]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 0);
 
     assert!(
         !head(base.path(), &keys).unwrap().pending_sync,
@@ -157,8 +158,8 @@ fn test_unchanged_team_is_left_alone() {
     );
 }
 
-#[test]
-fn test_deleted_member_tombstones_the_coordinate() {
+#[tokio::test]
+async fn test_deleted_member_tombstones_the_coordinate() {
     // I4: a member disappears making the team unrebuildable. The reconcile
     // must purge+tombstone the coordinate (not retain a stale-body unshared
     // head), and the tombstone must be queued for the flush loop.
@@ -168,7 +169,7 @@ fn test_deleted_member_tombstones_the_coordinate() {
     // The member is gone, so the team can no longer be projected at all.
     write_stores(base.path(), &[team()], &[]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 1);
 
     // The 30178 row must be purged (not merely unshared).
     assert!(
@@ -185,25 +186,25 @@ fn test_deleted_member_tombstones_the_coordinate() {
     );
 }
 
-#[test]
-fn test_tombstone_is_not_repeated_on_next_boot() {
+#[tokio::test]
+async fn test_tombstone_is_not_repeated_on_next_boot() {
     // After the first boot tombstones the unrebuildable head (purging the 30178
     // row), the next boot must see no 30178 head and do nothing.
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
     write_stores(base.path(), &[team()], &[]);
-    reconcile(base.path(), &keys).unwrap();
+    reconcile(base.path(), &keys).await.unwrap();
 
     assert_eq!(
-        reconcile(base.path(), &keys).unwrap(),
+        reconcile(base.path(), &keys).await.unwrap(),
         0,
         "no 30178 head remains after tombstone, so nothing to do"
     );
 }
 
-#[test]
-fn test_unshared_head_is_never_touched() {
+#[tokio::test]
+async fn test_unshared_head_is_never_touched() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     // An unshared head with a member that no longer exists — the retraction
@@ -228,27 +229,27 @@ fn test_unshared_head_is_never_touched() {
     .unwrap();
     write_stores(base.path(), &[team()], &[]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 0);
 
     assert!(!head(base.path(), &keys).unwrap().pending_sync);
 }
 
-#[test]
-fn test_team_with_no_head_is_skipped() {
+#[tokio::test]
+async fn test_team_with_no_head_is_skipped() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     write_stores(base.path(), &[team()], &[member("m1", "Original.")]);
 
     assert_eq!(
-        reconcile(base.path(), &keys).unwrap(),
+        reconcile(base.path(), &keys).await.unwrap(),
         0,
         "a team the owner never shared must not be published by a boot reconcile"
     );
     assert!(head(base.path(), &keys).is_none());
 }
 
-#[test]
-fn test_members_are_read_from_the_unified_agent_store_after_the_fold() {
+#[tokio::test]
+async fn test_members_are_read_from_the_unified_agent_store_after_the_fold() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
@@ -268,15 +269,15 @@ fn test_members_are_read_from_the_unified_agent_store_after_the_fold() {
     )
     .unwrap();
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 0);
 
     let after = head(base.path(), &keys).unwrap();
     assert!(head_is_shared(&after), "the team must not be retracted");
     assert!(!after.pending_sync);
 }
 
-#[test]
-fn test_builtin_teams_are_skipped() {
+#[tokio::test]
+async fn test_builtin_teams_are_skipped() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
@@ -284,11 +285,11 @@ fn test_builtin_teams_are_skipped() {
     builtin.is_builtin = true;
     write_stores(base.path(), &[builtin], &[]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 0);
 }
 
-#[test]
-fn test_deleted_team_with_shared_head_is_tombstoned_at_reconcile() {
+#[tokio::test]
+async fn test_deleted_team_with_shared_head_is_tombstoned_at_reconcile() {
     // F1: a team is deleted after it was shared. `delete_team` is best-effort
     // for the tombstone; a crash there (or any failure) leaves the shared head
     // visible indefinitely until the next boot reconcile. The reconcile must
@@ -303,7 +304,7 @@ fn test_deleted_team_with_shared_head_is_tombstoned_at_reconcile() {
     // team record was removed before the tombstone helper ran.
     write_stores(base.path(), &[], &[]);
 
-    assert_eq!(reconcile(base.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile(base.path(), &keys).await.unwrap(), 1);
 
     // The 30178 coordinate is gone from the retention store (tombstone_team_catalog_at
     // purges it and enqueues a kind:5 in its place). Verify the head is absent.
@@ -313,18 +314,18 @@ fn test_deleted_team_with_shared_head_is_tombstoned_at_reconcile() {
     );
 }
 
-#[test]
-fn test_deleted_team_tombstone_is_not_repeated_on_next_boot() {
+#[tokio::test]
+async fn test_deleted_team_tombstone_is_not_repeated_on_next_boot() {
     // After the first boot tombstones the orphaned head (purging the 30178
     // row), the next boot must see no 30178 heads and do nothing.
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
     retain_head(base.path(), &keys, &team(), &[member("m1", "Original.")]);
     write_stores(base.path(), &[], &[]);
-    reconcile(base.path(), &keys).unwrap();
+    reconcile(base.path(), &keys).await.unwrap();
 
     assert_eq!(
-        reconcile(base.path(), &keys).unwrap(),
+        reconcile(base.path(), &keys).await.unwrap(),
         0,
         "no 30178 head remains, so nothing to tombstone"
     );
@@ -362,8 +363,8 @@ fn head_for(base_dir: &Path, keys: &nostr::Keys, team_id: &str) -> Option<Retain
     .unwrap()
 }
 
-#[test]
-fn test_two_unrebuildable_teams_are_both_tombstoned_in_one_reconcile() {
+#[tokio::test]
+async fn test_two_unrebuildable_teams_are_both_tombstoned_in_one_reconcile() {
     // I2: when two shared teams cannot be reprojected, BOTH must be tombstoned
     // in a single boot reconcile — not just the first one, with the second
     // waiting for the next boot (the original `drop(conn); return` bug).
@@ -378,7 +379,7 @@ fn test_two_unrebuildable_teams_are_both_tombstoned_in_one_reconcile() {
     write_stores(base.path(), &[team(), team_b()], &[]);
 
     // One reconcile must tombstone both.
-    let count = reconcile(base.path(), &keys).unwrap();
+    let count = reconcile(base.path(), &keys).await.unwrap();
     assert_eq!(count, 2, "both tombstones must be applied in one pass");
 
     // Both 30178 heads must be gone.
@@ -402,8 +403,8 @@ fn test_two_unrebuildable_teams_are_both_tombstoned_in_one_reconcile() {
     );
 }
 
-#[test]
-fn test_one_valid_one_unrebuildable_team_both_processed() {
+#[tokio::test]
+async fn test_one_valid_one_unrebuildable_team_both_processed() {
     // Continuation must also work when only one of two teams fails rebuild:
     // the failed team gets tombstoned, the valid team gets refreshed.
     let base = tempfile::tempdir().unwrap();
@@ -419,7 +420,7 @@ fn test_one_valid_one_unrebuildable_team_both_processed() {
         &[member("m2", "Beta revised.")],
     );
 
-    let count = reconcile(base.path(), &keys).unwrap();
+    let count = reconcile(base.path(), &keys).await.unwrap();
     assert_eq!(count, 2, "one tombstone + one refresh = 2 reconciled");
 
     // team-alpha must be tombstoned.

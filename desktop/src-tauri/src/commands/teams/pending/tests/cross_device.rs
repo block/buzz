@@ -32,8 +32,8 @@ fn device_b_receives_head(db_path: &Path, owner: &str, head: &RetainedEvent) {
     );
 }
 
-#[test]
-fn test_inbound_catalog_witness_retains_through_the_production_dispatcher() {
+#[tokio::test]
+async fn test_inbound_catalog_witness_retains_through_the_production_dispatcher() {
     // Carl r10 P1, load-bearing production seam. A 30178 head driven through
     // `retain_inbound_catalog_witness` — the SINGLE routing decision the inbound
     // reconcile makes for a catalog arrival — must land an arrival-scoped
@@ -46,7 +46,9 @@ fn test_inbound_catalog_witness_retains_through_the_production_dispatcher() {
     let owner = keys.public_key().to_hex();
 
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     let device_b = scoped_db(dir.path(), "wss://b.example", &owner);
@@ -74,8 +76,8 @@ fn test_inbound_catalog_witness_retains_through_the_production_dispatcher() {
     );
 }
 
-#[test]
-fn test_device_b_supersedes_a_shared_head_after_inbound_retention_then_edit() {
+#[tokio::test]
+async fn test_device_b_supersedes_a_shared_head_after_inbound_retention_then_edit() {
     // Carl's scenario, load-bearing leg. A shares; B retains A's head via the
     // inbound path; B edits a member. B must supersede A's discoverable head —
     // possible ONLY because B retained the head (the refresh guard-returns Noop
@@ -86,7 +88,9 @@ fn test_device_b_supersedes_a_shared_head_after_inbound_retention_then_edit() {
 
     // Device A publishes the shared head.
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     // Device B (a distinct scope) receives it inbound, then edits a member.
@@ -94,7 +98,9 @@ fn test_device_b_supersedes_a_shared_head_after_inbound_retention_then_edit() {
     device_b_receives_head(&device_b, &owner, &a_head);
 
     let edited = vec![member("m1", "Renamed On B"), member("m2", "Two")];
-    let outcome = refresh_or_retract_shared_head_at(&device_b, &keys, &team(), &edited).unwrap();
+    let outcome = refresh_or_retract_shared_head_at(&device_b, &keys, &team(), &edited)
+        .await
+        .unwrap();
 
     assert_eq!(
         outcome,
@@ -118,8 +124,8 @@ fn test_device_b_supersedes_a_shared_head_after_inbound_retention_then_edit() {
     );
 }
 
-#[test]
-fn test_device_b_tombstones_the_coordinate_after_inbound_retention_then_delete() {
+#[tokio::test]
+async fn test_device_b_tombstones_the_coordinate_after_inbound_retention_then_delete() {
     // B retains A's head, then the owner deletes the team on B. B must tombstone
     // the 30178 coordinate — again reachable only because B retained the head.
     let dir = tempfile::tempdir().unwrap();
@@ -127,13 +133,17 @@ fn test_device_b_tombstones_the_coordinate_after_inbound_retention_then_delete()
     let owner = keys.public_key().to_hex();
 
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     let device_b = scoped_db(dir.path(), "wss://b.example", &owner);
     device_b_receives_head(&device_b, &owner, &a_head);
 
-    tombstone_team_catalog_at(&device_b, &keys, "team-abc").unwrap();
+    tombstone_team_catalog_at(&device_b, &keys, "team-abc")
+        .await
+        .unwrap();
 
     assert!(
         retained_head(&device_b, &owner).is_none(),
@@ -151,8 +161,8 @@ fn test_device_b_tombstones_the_coordinate_after_inbound_retention_then_delete()
     );
 }
 
-#[test]
-fn test_inbound_catalog_retention_alone_enqueues_no_publish() {
+#[tokio::test]
+async fn test_inbound_catalog_retention_alone_enqueues_no_publish() {
     // No-ping-pong guard: retaining an inbound 30178 head (the arrival witness)
     // must NOT queue an outbound publish. If it did, two devices would republish
     // identical heads at each other on every arrival.
@@ -161,7 +171,9 @@ fn test_inbound_catalog_retention_alone_enqueues_no_publish() {
     let owner = keys.public_key().to_hex();
 
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     let device_b = scoped_db(dir.path(), "wss://b.example", &owner);
@@ -189,7 +201,7 @@ fn test_inbound_catalog_retention_alone_enqueues_no_publish() {
 /// `resolve_and_refresh_or_retract_at` (the refresh the inbound spine runs after
 /// a 30176/30175 apply). The only variable is the order — which is exactly what
 /// `orderCatalogHeadsLast` controls on the TS backfill.
-fn replay_fresh_sync_in_order(
+async fn replay_fresh_sync_in_order(
     db_path: &Path,
     keys: &nostr::Keys,
     a_head: &RetainedEvent,
@@ -211,22 +223,23 @@ fn replay_fresh_sync_in_order(
     // CURRENTLY hydrated personas. On a fresh device the personas arrive as
     // their own 30175 events; before they land, the team resolves against an
     // empty roster.
-    let apply_team_refresh = |db: &Path, personas: &[AgentDefinition]| {
-        resolve_and_refresh_or_retract_at(db, keys, &team(), personas).unwrap()
-    };
 
     if catalog_before_constituents {
         // BROKEN order (relay newest-first, no reorder): witness lands, then the
         // team refresh runs while B has no personas → resolution fails → the
         // valid head is purged and falsely tombstoned.
         receive_head(db_path);
-        apply_team_refresh(db_path, &[]);
+        resolve_and_refresh_or_retract_at(db_path, keys, &team(), &[])
+            .await
+            .unwrap();
     } else {
         // FIXED order (orderCatalogHeadsLast): constituents first. The team
         // refresh with no witness yet is a Noop (nothing to retract); personas
         // hydrate; THEN the witness lands last, with no further upsert to purge
         // it.
-        apply_team_refresh(db_path, &[]);
+        resolve_and_refresh_or_retract_at(db_path, keys, &team(), &[])
+            .await
+            .unwrap();
         receive_head(db_path);
     }
 
@@ -239,8 +252,8 @@ fn replay_fresh_sync_in_order(
     (head_present, tombstoned)
 }
 
-#[test]
-fn test_fresh_sync_retains_the_witness_when_catalog_heads_are_ordered_last() {
+#[tokio::test]
+async fn test_fresh_sync_retains_the_witness_when_catalog_heads_are_ordered_last() {
     // Carl r10 P1, finding 2. A shared a team; B first-syncs. In the FIXED order
     // (constituents before catalog heads) B must keep A's valid shared head and
     // queue NO false tombstone. The BROKEN relay-newest-first order is the
@@ -251,12 +264,15 @@ fn test_fresh_sync_retains_the_witness_when_catalog_heads_are_ordered_last() {
     let owner = keys.public_key().to_hex();
 
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     // FIXED order: witness survives, no tombstone.
     let device_b = scoped_db(dir.path(), "wss://b-fixed.example", &owner);
-    let (head_present, tombstoned) = replay_fresh_sync_in_order(&device_b, &keys, &a_head, false);
+    let (head_present, tombstoned) =
+        replay_fresh_sync_in_order(&device_b, &keys, &a_head, false).await;
     assert!(
         head_present,
         "ordering catalog heads last must retain A's valid shared witness"
@@ -270,7 +286,7 @@ fn test_fresh_sync_retains_the_witness_when_catalog_heads_are_ordered_last() {
     // falsely tombstoned. This is what `orderCatalogHeadsLast` prevents.
     let device_b_broken = scoped_db(dir.path(), "wss://b-broken.example", &owner);
     let (head_present_broken, tombstoned_broken) =
-        replay_fresh_sync_in_order(&device_b_broken, &keys, &a_head, true);
+        replay_fresh_sync_in_order(&device_b_broken, &keys, &a_head, true).await;
     assert!(
         !head_present_broken,
         "reversal proof: catalog-first order purges the valid witness"
@@ -281,8 +297,8 @@ fn test_fresh_sync_retains_the_witness_when_catalog_heads_are_ordered_last() {
     );
 }
 
-#[test]
-fn test_fresh_sync_ordered_last_still_supersedes_on_a_later_edit() {
+#[tokio::test]
+async fn test_fresh_sync_ordered_last_still_supersedes_on_a_later_edit() {
     // Convergence half: after the fixed-order first sync retains the witness,
     // B editing a member must still supersede A's head — the ordering fix must
     // not break the downstream edit/delete convergence.
@@ -291,14 +307,18 @@ fn test_fresh_sync_ordered_last_still_supersedes_on_a_later_edit() {
     let owner = keys.public_key().to_hex();
 
     let device_a = scoped_db(dir.path(), "wss://a.example", &owner);
-    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true)).unwrap();
+    prepare_team_publication_at(&device_a, &keys, &team(), &members(), Some(true))
+        .await
+        .unwrap();
     let a_head = retained_head(&device_a, &owner).unwrap();
 
     let device_b = scoped_db(dir.path(), "wss://b.example", &owner);
-    replay_fresh_sync_in_order(&device_b, &keys, &a_head, false);
+    replay_fresh_sync_in_order(&device_b, &keys, &a_head, false).await;
 
     let edited = vec![member("m1", "Renamed On B"), member("m2", "Two")];
-    let outcome = refresh_or_retract_shared_head_at(&device_b, &keys, &team(), &edited).unwrap();
+    let outcome = refresh_or_retract_shared_head_at(&device_b, &keys, &team(), &edited)
+        .await
+        .unwrap();
     assert_eq!(
         outcome,
         RefreshOrRetractOutcome::Refreshed,

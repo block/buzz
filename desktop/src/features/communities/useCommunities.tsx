@@ -165,6 +165,42 @@ export function CommunitiesProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/** The remote preview exposes exactly its activated community. It cannot mutate
+ * the persisted local-custody community list or switch the mounted relay scope.
+ */
+export function FixedCommunityProvider({
+  community,
+  children,
+}: {
+  community: Community;
+  children: ReactNode;
+}) {
+  const value = useMemo<UseCommunitiesReturn>(() => {
+    const blocked = (): never => {
+      throw new Error(
+        "Sign out before changing workspace in the remote preview",
+      );
+    };
+    return {
+      communities: [community],
+      activeCommunity: community,
+      reinitKey: 0,
+      addCommunity: blocked,
+      clearCommunities: blocked,
+      removeCommunity: blocked,
+      switchCommunity: blocked,
+      reconnectCommunity: blocked,
+      updateCommunity: blocked,
+      reorderCommunities: blocked,
+    };
+  }, [community]);
+  return (
+    <CommunitiesContext.Provider value={value}>
+      {children}
+    </CommunitiesContext.Provider>
+  );
+}
+
 export function useCommunities(): UseCommunitiesReturn {
   const ctx = useContext(CommunitiesContext);
   if (!ctx) {

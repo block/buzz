@@ -18,151 +18,100 @@
 //!   `managed-agents.json.invalid` (see [`super::storage::backup_invalid_store`])
 //!   and an error is returned, never silently skipped.
 
+use super::ManagedAgentRecord;
+use crate::active_user_signer::ActiveUserSigner;
 use std::path::Path;
+use tauri::Manager;
 
-use super::{
-    agent_events::build_agent_event,
-    persona_events::monotonic_created_at,
-    retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-    ManagedAgentRecord,
-};
-use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-use nostr::JsonUtil;
+mod publication;
+pub(crate) use publication::{finish_agent_record, prepare_agent_record, AgentRetentionWork};
 
-/// Reconcile `managed-agents.json` into kind:30177 events in the retention
-/// store. Boot-time entry point, called from `event_sync::run_event_sync`
-/// after the persona and team legs.
-pub(crate) fn reconcile_agents_to_events(
-    app: &tauri::AppHandle,
-    keys: &nostr::Keys,
+/// Reconcile agent definitions after the persona/team/catalog boot legs.
+/// Every signing await is outside both the store lock and SQLite connection.
+pub(crate) async fn reconcile_agents_to_events<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    signer: &ActiveUserSigner,
     db_path: &Path,
 ) {
     let Ok(base_dir) = super::managed_agents_base_dir(app) else {
         return;
     };
-
-    match reconcile_agents_in_dir_at(&base_dir, keys, db_path) {
+    let state = app.state::<crate::app_state::AppState>();
+    match reconcile_agents_in_dir_at(&base_dir, signer, db_path, &state.managed_agents_store_lock)
+        .await
+    {
         Ok(0) => {}
-        Ok(reconciled) => {
-            eprintln!(
-                "buzz-desktop: agent-event-reconcile: {reconciled} agents reconciled to retention"
-            );
+        Ok(count) => {
+            eprintln!("buzz-desktop: agent-event-reconcile: {count} agents reconciled to retention")
         }
-        Err(e) => {
-            eprintln!("buzz-desktop: agent-event-reconcile: {e}");
-        }
+        Err(e) => eprintln!("buzz-desktop: agent-event-reconcile: {e}"),
     }
 }
 
-/// Core reconcile logic, decoupled from the Tauri `AppHandle` for testing.
-///
-/// Reads `managed-agents.json` raw — no keyring hydration: the published
-/// projection ([`super::agent_events::agent_event_content`]) is the opt-IN
-/// no-secrets allowlist, so keys are never needed here. For each record it
-/// compares the freshly built event's content against the retained row at
-/// `(30177, owner, agent_pubkey)` and re-retains (marking `pending_sync = 1`)
-/// only when the row is absent or its content differs — an unchanged agent
-/// never churns `pending_sync`.
-///
-/// Returns the number of agents (re)written to the retention store.
-#[cfg(test)]
-pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
-    reconcile_agents_in_dir_at(base_dir, keys, &base_dir.join("retention.db"))
-}
-
-fn reconcile_agents_in_dir_at(
-    base_dir: &Path,
-    keys: &nostr::Keys,
-    db_path: &Path,
-) -> Result<u32, String> {
-    let store_path = base_dir.join("managed-agents.json");
-    if !store_path.exists() {
-        return Ok(0);
+fn read_agent_records(base_dir: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
+    let path = base_dir.join("managed-agents.json");
+    if !path.exists() {
+        return Ok(Vec::new());
     }
-
-    let content = std::fs::read_to_string(&store_path)
+    let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-
-    let records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|e| {
-        super::storage::backup_invalid_store(&store_path);
+    serde_json::from_str(&content).map_err(|e| {
+        super::storage::backup_invalid_store(&path);
         format!("failed to parse managed-agents.json (preserved as .invalid): {e}")
-    })?;
-
-    if records.is_empty() {
-        return Ok(0);
-    }
-
-    let conn =
-        open_retention_db(db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
-
-    let mut reconciled = 0u32;
-
-    for record in &records {
-        // A record without a pubkey has no event coordinate yet (key-less
-        // agents mint keys on first start) — nothing to reconcile.
-        if record.pubkey.is_empty() {
-            continue;
-        }
-
-        if retain_agent_record(&conn, keys, record)? {
-            reconciled += 1;
-        }
-    }
-
-    Ok(reconciled)
+    })
 }
 
-/// Retain `record`'s kind:30177 identity record, marking it `pending_sync`
-/// for the flush loop, when its projection differs from the retained head.
-/// Returns `Ok(true)` when a row was (re)written and `Ok(false)` when the
-/// retained content already matches (a true no-op — no `pending_sync` churn).
-///
-/// This is the single content-diff + monotonic-bump engine shared by the
-/// boot-time reconcile above and the interactive edit paths
-/// (`retain_managed_agent_pending`, persona-rename propagation). Every
-/// mutation of an agent's published identity must go through it so the
-/// retained record can never silently drift from `managed-agents.json`.
-pub(crate) fn retain_agent_record(
-    conn: &rusqlite::Connection,
+async fn reconcile_agents_in_dir_at(
+    base_dir: &Path,
+    signer: &ActiveUserSigner,
+    db_path: &Path,
+    store_lock: &std::sync::Mutex<()>,
+) -> Result<u32, String> {
+    let records = {
+        let _guard = store_lock.lock().map_err(|e| e.to_string())?;
+        read_agent_records(base_dir)?
+    };
+    let mut count = 0;
+    for record in records.iter().filter(|record| !record.pubkey.is_empty()) {
+        let work = {
+            let _guard = store_lock.lock().map_err(|e| e.to_string())?;
+            let current = read_agent_records(base_dir)?;
+            let Some(record) = current
+                .iter()
+                .find(|current| current.pubkey == record.pubkey)
+            else {
+                continue;
+            };
+            prepare_agent_record(db_path, signer, record)
+        };
+        if finish_agent_record(work, base_dir, store_lock).await? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+#[cfg(test)]
+async fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+    reconcile_agents_in_dir_at(
+        base_dir,
+        &ActiveUserSigner::local(keys.clone()),
+        &base_dir.join("retention.db"),
+        &std::sync::Mutex::new(()),
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn retain_agent_record(
+    db_path: &Path,
     keys: &nostr::Keys,
     record: &ManagedAgentRecord,
 ) -> Result<bool, String> {
-    let owner_pubkey = keys.public_key().to_hex();
-    let existing = get_retained_event(conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-
-    // Build the event first and compare ITS content, so the comparison and
-    // the retained row share one serialization of the projection (mirrors
-    // `migrate_personas_in_dir`). Serializing the projection independently
-    // here would silently diverge if `build_agent_event` ever changed how
-    // it serializes — republishing every agent every boot. Content is
-    // timestamp-independent, so the monotonic bump below never forces a
-    // spurious republish; an unchanged agent is still a true no-op.
-    let event = build_agent_event(record)?
-        .custom_created_at(monotonic_created_at(
-            existing.as_ref().map(|row| row.created_at),
-        ))
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event for '{}': {e}", record.name))?;
-
-    let content = event.content.clone();
-    if existing.as_ref().is_some_and(|row| row.content == content) {
-        return Ok(false);
+    match prepare_agent_record(db_path, &ActiveUserSigner::local(keys.clone()), record)? {
+        Some(work) => work.sign().await?.commit(std::slice::from_ref(record)),
+        None => Ok(false),
     }
-
-    retain_event(
-        conn,
-        &RetainedEvent {
-            kind: KIND_MANAGED_AGENT,
-            pubkey: owner_pubkey,
-            d_tag: record.pubkey.clone(),
-            content,
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        },
-    )
-    .map_err(|e| format!("failed to retain '{}': {e}", record.name))?;
-    Ok(true)
 }
 
 #[cfg(test)]

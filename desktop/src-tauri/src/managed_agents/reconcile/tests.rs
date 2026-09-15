@@ -1,5 +1,7 @@
 use super::*;
 use crate::managed_agents::retention::{get_pending_sync, get_retained_event, mark_synced};
+use crate::managed_agents::retention::{open_retention_db, retain_event, RetainedEvent};
+use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 
@@ -34,20 +36,20 @@ fn write_store(dir: &TempDir, records: &[ManagedAgentRecord]) {
     .unwrap();
 }
 
-#[test]
-fn missing_store_is_noop() {
+#[tokio::test]
+async fn missing_store_is_noop() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 0);
 }
 
-#[test]
-fn fresh_record_is_retained_pending() {
+#[tokio::test]
+async fn fresh_record_is_retained_pending() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     write_store(&dir, &[sample_record("a".repeat(64).as_str(), "agent-one")]);
 
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
 
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let pending = get_pending_sync(&conn).unwrap();
@@ -58,13 +60,13 @@ fn fresh_record_is_retained_pending() {
     assert!(!pending[0].raw_event.contains("nsec"));
 }
 
-#[test]
-fn unchanged_record_does_not_churn_pending_sync() {
+#[tokio::test]
+async fn unchanged_record_does_not_churn_pending_sync() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     write_store(&dir, &[sample_record("b".repeat(64).as_str(), "agent-two")]);
 
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
 
     // Simulate the flush loop confirming the publish.
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
@@ -88,24 +90,24 @@ fn unchanged_record_does_not_churn_pending_sync() {
     drop(conn);
 
     // Second boot with identical disk state: no re-retain, no pending churn.
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 0);
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     assert!(get_pending_sync(&conn).unwrap().is_empty());
 }
 
-#[test]
-fn edited_record_is_republished() {
+#[tokio::test]
+async fn edited_record_is_republished() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let mut record = sample_record("c".repeat(64).as_str(), "agent-three");
     write_store(&dir, &[record.clone()]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
 
     // Hand-edit a published field between launches.
     record.system_prompt = Some("You are an edited agent.".to_string());
     write_store(&dir, &[record]);
 
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let row = get_retained_event(
         &conn,
@@ -119,34 +121,34 @@ fn edited_record_is_republished() {
     assert!(row.pending_sync);
 }
 
-#[test]
-fn excluded_field_edit_is_noop() {
+#[tokio::test]
+async fn excluded_field_edit_is_noop() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let mut record = sample_record("d".repeat(64).as_str(), "agent-four");
     write_store(&dir, &[record.clone()]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
 
     // env_vars is excluded from the projection — editing it must not republish.
     record.env_vars = BTreeMap::from([("SOME_KEY".to_string(), "value".to_string())]);
     write_store(&dir, &[record]);
 
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 0);
 }
 
-#[test]
-fn missing_record_is_never_tombstoned() {
+#[tokio::test]
+async fn missing_record_is_never_tombstoned() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let one = sample_record("e".repeat(64).as_str(), "agent-five");
     let two = sample_record("f".repeat(64).as_str(), "agent-six");
     write_store(&dir, &[one.clone(), two]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 2);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 2);
 
     // A truncated store (one of two records) must leave the missing record's
     // retained row untouched — absence never tombstones.
     write_store(&dir, &[one]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 0);
 
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let survivor = get_retained_event(
@@ -159,22 +161,24 @@ fn missing_record_is_never_tombstoned() {
     assert!(survivor.is_some(), "missing record must stay retained");
 }
 
-#[test]
-fn keyless_record_is_skipped() {
+#[tokio::test]
+async fn keyless_record_is_skipped() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     write_store(&dir, &[sample_record("", "keyless-agent")]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 0);
 }
 
-#[test]
-fn malformed_store_errors_and_preserves_invalid_backup() {
+#[tokio::test]
+async fn malformed_store_errors_and_preserves_invalid_backup() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let store_path = dir.path().join("managed-agents.json");
     std::fs::write(&store_path, b"[{ this is not json").unwrap();
 
-    let err = reconcile_agents_in_dir(dir.path(), &keys).unwrap_err();
+    let err = reconcile_agents_in_dir(dir.path(), &keys)
+        .await
+        .unwrap_err();
     assert!(err.contains("failed to parse"), "unexpected error: {err}");
 
     let backup = dir.path().join("managed-agents.json.invalid");
@@ -187,13 +191,13 @@ fn malformed_store_errors_and_preserves_invalid_backup() {
     assert!(store_path.exists());
 }
 
-#[test]
-fn monotonic_bump_supersedes_future_dated_head() {
+#[tokio::test]
+async fn monotonic_bump_supersedes_future_dated_head() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let mut record = sample_record("1".repeat(64).as_str(), "agent-seven");
     write_store(&dir, &[record.clone()]);
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
 
     // Future-date the retained head (clock skew / interactive same-second bump).
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
@@ -212,7 +216,7 @@ fn monotonic_bump_supersedes_future_dated_head() {
     write_store(&dir, &[record]);
 
     // The changed body must land despite the future-dated head.
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let row = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &"1".repeat(64))
         .unwrap()
@@ -223,8 +227,8 @@ fn monotonic_bump_supersedes_future_dated_head() {
 /// The slimming transition: a definition-linked record whose retained row
 /// holds the legacy fat projection republishes ONCE (the slimmed shape), and
 /// the second boot is a true no-op — the republish wave is one-time.
-#[test]
-fn slimming_republish_wave_is_one_time() {
+#[tokio::test]
+async fn slimming_republish_wave_is_one_time() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let mut record = sample_record("e".repeat(64).as_str(), "agent-five");
@@ -263,7 +267,7 @@ fn slimming_republish_wave_is_one_time() {
 
     // First boot after upgrade: projection content changed (fat -> slim) so
     // the agent republishes.
-    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(), 1);
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let row = get_retained_event(
         &conn,
@@ -295,7 +299,7 @@ fn slimming_republish_wave_is_one_time() {
 
     // Second boot: identical projection — a true no-op, no republish loop.
     assert_eq!(
-        reconcile_agents_in_dir(dir.path(), &keys).unwrap(),
+        reconcile_agents_in_dir(dir.path(), &keys).await.unwrap(),
         0,
         "second boot must be a no-op (idempotence)"
     );
@@ -313,8 +317,8 @@ fn slimming_republish_wave_is_one_time() {
 /// strictly past the retained head so the relay's replaceable-event rule
 /// accepts it. Without this, the relay keeps the old name→pubkey binding
 /// until the next restart — the identity desync in #2423.
-#[test]
-fn rename_re_retains_identity_record_with_new_name() {
+#[tokio::test]
+async fn rename_re_retains_identity_record_with_new_name() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
@@ -322,7 +326,11 @@ fn rename_re_retains_identity_record_with_new_name() {
     let pubkey = "9".repeat(64);
     let mut record = sample_record(&pubkey, "Fizz");
 
-    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    assert!(
+        retain_agent_record(&dir.path().join("retention.db"), &keys, &record)
+            .await
+            .unwrap()
+    );
     let first = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
         .unwrap()
         .unwrap();
@@ -339,7 +347,9 @@ fn rename_re_retains_identity_record_with_new_name() {
 
     record.name = "Spark".to_string();
     assert!(
-        retain_agent_record(&conn, &keys, &record).unwrap(),
+        retain_agent_record(&dir.path().join("retention.db"), &keys, &record)
+            .await
+            .unwrap(),
         "a renamed record must re-retain its identity record"
     );
 
@@ -364,15 +374,19 @@ fn rename_re_retains_identity_record_with_new_name() {
 
 /// An unchanged record is a true no-op: no rewrite, no `pending_sync` churn.
 /// This is what lets every edit path call the engine unconditionally.
-#[test]
-fn retain_agent_record_is_noop_when_unchanged() {
+#[tokio::test]
+async fn retain_agent_record_is_noop_when_unchanged() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
     let pubkey = "8".repeat(64);
     let record = sample_record(&pubkey, "steady-agent");
 
-    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    assert!(
+        retain_agent_record(&dir.path().join("retention.db"), &keys, &record)
+            .await
+            .unwrap()
+    );
     let row = get_retained_event(
         &conn,
         KIND_MANAGED_AGENT,
@@ -392,7 +406,9 @@ fn retain_agent_record_is_noop_when_unchanged() {
     .unwrap();
 
     assert!(
-        !retain_agent_record(&conn, &keys, &record).unwrap(),
+        !retain_agent_record(&dir.path().join("retention.db"), &keys, &record)
+            .await
+            .unwrap(),
         "an unchanged projection must not re-retain"
     );
     assert!(

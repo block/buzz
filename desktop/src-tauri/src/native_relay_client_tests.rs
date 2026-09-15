@@ -796,10 +796,16 @@ async fn a_stale_finite_request_cannot_displace_the_new_scopes_session() {
     let scope_b = (scope_url(10), Keys::generate());
 
     let archive_a = client
-        .ensure_session(scope_a.0.clone(), scope_a.1.clone())
+        .ensure_session(
+            scope_a.0.clone(),
+            ActiveUserSigner::local(scope_a.1.clone()),
+        )
         .await;
     let archive_b = client
-        .ensure_session(scope_b.0.clone(), scope_b.1.clone())
+        .ensure_session(
+            scope_b.0.clone(),
+            ActiveUserSigner::local(scope_b.1.clone()),
+        )
         .await;
     assert!(
         archive_a.cancel.is_cancelled(),
@@ -846,7 +852,9 @@ async fn a_same_scope_lease_shares_the_installed_session_and_never_ends_it() {
     let client = NativeRelayClient::default();
     let (relay_url, keys) = (scope_url(11), Keys::generate());
 
-    let archive = client.ensure_session(relay_url.clone(), keys.clone()).await;
+    let archive = client
+        .ensure_session(relay_url.clone(), ActiveUserSigner::local(keys.clone()))
+        .await;
     let lease = client.session(relay_url.clone(), keys.clone()).await;
     assert!(
         Arc::ptr_eq(&lease.session, &archive),
@@ -884,7 +892,9 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
          session the archive is about to reuse"
     );
 
-    let archive = client.ensure_session(relay_url, keys).await;
+    let archive = client
+        .ensure_session(relay_url, ActiveUserSigner::local(keys))
+        .await;
     assert!(
         Arc::ptr_eq(&archive, &leased),
         "the archive start must reuse the installed session rather than \

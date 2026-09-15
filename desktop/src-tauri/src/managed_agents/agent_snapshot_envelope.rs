@@ -18,11 +18,14 @@
 //!   limit on the serialized manifest BEFORE encryption; envelope JSON and
 //!   ciphertext are capped before serde/base64/decrypt work; decrypted bytes
 //!   are capped before snapshot parsing.
-//! - Decrypt/auth failures return only the locked-card refusal — never
-//!   partial plaintext or crypto details.
+//! - Local decrypt/auth failures return only the locked-card refusal — never
+//!   partial plaintext or crypto details. Remote session/transport/response
+//!   failures propagate so an unavailable backend cannot become a record skip.
 
 use buzz_core_pkg::engram::NIP44_PLAINTEXT_MAX;
-use nostr::nips::nip44::{self, Version};
+use nostr::nips::nip44;
+#[cfg(test)]
+use nostr::nips::nip44::Version;
 use nostr::{Keys, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +34,9 @@ use super::agent_snapshot::{
     MemoryLevel, FORMAT_DISCRIMINATOR,
 };
 use super::types::ManagedAgentRecord;
+
+mod signer;
+pub(crate) use signer::{decrypt_envelope_with_signer, encode_locked_snapshot_png_with_signer};
 
 /// Discriminator for the locked envelope. Distinct from the plain manifest's
 /// `buzz-agent-snapshot` so detection never guesses.
@@ -202,6 +208,7 @@ pub fn parse_chunk_payload(json_bytes: &[u8]) -> Result<ChunkPayload, String> {
 ///
 /// Fails clearly (never silently truncates) when the serialized manifest
 /// exceeds the NIP-44 plaintext limit.
+#[cfg(test)]
 pub fn encrypt_snapshot_envelope(
     snapshot: &AgentSnapshot,
     owner_keys: &Keys,
@@ -241,6 +248,7 @@ pub fn encrypt_snapshot_envelope(
 /// Encode a snapshot into a LOCKED `.agent.png`: encrypt the manifest into
 /// the envelope, then compose the PNG through the same chunk encoder plain
 /// cards use. Mirrors `encode_snapshot_png`'s structural memory guard.
+#[cfg(test)]
 pub fn encode_locked_snapshot_png(
     snapshot: &AgentSnapshot,
     owner_keys: &Keys,

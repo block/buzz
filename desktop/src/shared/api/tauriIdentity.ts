@@ -1,3 +1,8 @@
+import {
+  nativeIdentity,
+  nativeGeneration,
+  isRemoteIdentity,
+} from "@/shared/api/nativeIdentitySession";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { Identity, IdentityStorage } from "@/shared/api/types";
 
@@ -22,6 +27,18 @@ function fromRawIdentity(raw: RawIdentity): Identity {
 }
 
 export async function getIdentity(): Promise<Identity> {
+  if (isRemoteIdentity()) {
+    nativeGeneration();
+    const pubkey = nativeIdentity()?.publicIdentity;
+    if (!pubkey) throw new Error("Sign in to Buzz first");
+    return {
+      pubkey,
+      displayName: `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`,
+      lost: false,
+      locked: false,
+      resetFailed: false,
+    };
+  }
   return fromRawIdentity(await invokeTauri<RawIdentity>("get_identity"));
 }
 
@@ -52,6 +69,11 @@ export async function persistCurrentIdentity(): Promise<Identity> {
  * state until the process exits and only handle errors (e.g. display a toast).
  */
 export async function signOut(): Promise<void> {
+  if (isRemoteIdentity()) {
+    await invokeTauri("clear_builderlab_auth");
+    window.location.reload();
+    return;
+  }
   await invokeTauri("sign_out");
 }
 

@@ -145,19 +145,143 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    let SavedAgentUpdate {
+        mut summary,
+        sync_params,
+        rollback,
+        access_policy_changed,
+        access_restart_relays,
+    } = save_managed_agent_update(input, &app, &state).await?;
+
+    // Phase 2: relay sync (async, outside lock). The owner-signed managed
+    // policy is security-sensitive: an access reduction must replace the old
+    // relay head before this command returns rather than waiting for the
+    // 30-second retention sweep. The flush remains durable/best-effort; rows a
+    // relay does not accept stay pending for the background retry.
+    let mut profile_sync_error =
+        crate::managed_agents::persona_events::flush_active_pending_events(&app, &state)
+            .await
+            .err()
+            .map(|error| format!("managed policy sync failed: {error}"));
+    if profile_sync_error.is_none()
+        && crate::managed_agents::persona_events::active_pending_event(
+            &app,
+            &state,
+            buzz_core_pkg::kind::KIND_MANAGED_AGENT,
+            &summary.pubkey,
+        )?
+    {
+        profile_sync_error = Some(
+            "managed policy sync failed: relay did not accept the updated policy; retry queued"
+                .to_string(),
+        );
+    }
+
+    // A rename is committed only when profile sync succeeds; otherwise restore
+    // the complete pre-edit record so Desktop and the relay keep one
+    // authoritative name.
+    if let Some((agent_keys, relay_url, display_name, avatar_url, about, auth_tag)) = sync_params {
+        if let Err(sync_error) = sync_managed_agent_profile(
+            &state,
+            &relay_url,
+            &agent_keys,
+            &display_name,
+            avatar_url.as_deref(),
+            about.as_deref(),
+            auth_tag.as_deref(),
+        )
+        .await
+        {
+            let rollback = rollback.ok_or_else(|| {
+                "missing local rollback state after relay profile sync failure".to_string()
+            })?;
+            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback).await?;
+            let restart_suffix = if access_restart_relays.is_empty() {
+                String::new()
+            } else {
+                match super::super::agents::start_local_agent_pairs_with_preflight(
+                    &app,
+                    &state,
+                    &summary.pubkey,
+                    &access_restart_relays,
+                )
+                .await
+                {
+                    Ok(_) => String::new(),
+                    Err(error) => format!(
+                        " The runtime also failed to restart with the kept access policy: {error}"
+                    ),
+                }
+            };
+            let rollback_message = if access_policy_changed {
+                "The access policy change was kept, but other edits were rolled back"
+            } else {
+                "No changes were saved"
+            };
+            return Err(format!(
+                "Agent rename failed because its relay profile could not be updated. {rollback_message}: {sync_error}.{restart_suffix}"
+            ));
+        }
+    }
+
+    if !access_restart_relays.is_empty() {
+        summary = super::super::agents::start_local_agent_pairs_with_preflight(
+            &app,
+            &state,
+            &summary.pubkey,
+            &access_restart_relays,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Agent access was saved and published, but its runtime failed to restart with the new policy: {error}"
+            )
+        })?;
+    }
+
+    Ok(UpdateManagedAgentResponse {
+        agent: summary,
+        profile_sync_error: profile_sync_error.take(),
+    })
+}
+
+type ProfileSync = (
+    Keys,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+pub(crate) struct SavedAgentUpdate {
+    summary: crate::managed_agents::ManagedAgentSummary,
+    sync_params: Option<ProfileSync>,
+    rollback: Option<AgentUpdateRollback>,
+    access_policy_changed: bool,
+    access_restart_relays: Vec<String>,
+}
+
+/// The command's complete local mutation and retention phase. Network profile
+/// synchronization and optional runtime restart follow in the command wrapper.
+pub(crate) async fn save_managed_agent_update<R: tauri::Runtime>(
+    input: UpdateManagedAgentRequest,
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<SavedAgentUpdate, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
+    let (summary, sync_params, rollback, access_policy_changed, access_restart_relays, retention) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
-        let mut records = load_managed_agents(&app)?;
+        let mut records = load_managed_agents(app)?;
         let mut runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
         let (_, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(app));
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
@@ -206,7 +330,7 @@ pub async fn update_managed_agent(
         // rules.
         let mut inherit_transition = false;
         if let Some(agent_command) = input.agent_command {
-            let personas = load_personas(&app).unwrap_or_default();
+            let personas = load_personas(app).unwrap_or_default();
             inherit_transition = crate::managed_agents::apply_agent_command_update(
                 record,
                 &personas,
@@ -287,11 +411,11 @@ pub async fn update_managed_agent(
             if access_restart_relays.is_empty() && record.runtime_pid.is_some() {
                 access_restart_relays.push(crate::relay::effective_agent_relay_url(
                     &record.relay_url,
-                    &relay_ws_url_with_override(&state),
+                    &relay_ws_url_with_override(state),
                 ));
             }
             if !access_restart_relays.is_empty() {
-                crate::managed_agents::stop_managed_agent_process(&app, record, &mut runtimes)?;
+                crate::managed_agents::stop_managed_agent_process(app, record, &mut runtimes)?;
             }
         }
 
@@ -320,7 +444,7 @@ pub async fn update_managed_agent(
 
         stamp_record_updated_at(record, applied);
 
-        save_managed_agents(&app, &records)?;
+        save_managed_agents(app, &records)?;
 
         let record = records
             .iter()
@@ -330,7 +454,7 @@ pub async fn update_managed_agent(
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an
         // update that touched only runtime/local fields is a no-op publish.
-        super::super::agents::retain_managed_agent_pending(&app, &state, record);
+        let retention = super::super::agents::prepare_managed_agent_pending(app, state, record);
 
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
@@ -339,13 +463,13 @@ pub async fn update_managed_agent(
             // an explicit per-agent relay wins; empty falls back to workspace.
             let relay_url = crate::relay::effective_agent_relay_url(
                 &record.relay_url,
-                &relay_ws_url_with_override(&state),
+                &relay_ws_url_with_override(state),
             );
             let display_name = record.name.clone();
             // Avatar fallback derives from the EFFECTIVE harness (persona-wins),
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.
-            let personas = load_personas(&app).unwrap_or_default();
+            let personas = load_personas(app).unwrap_or_default();
             let effective_command = crate::managed_agents::record_agent_command(record, &personas);
             let avatar_url = record
                 .avatar_url
@@ -365,7 +489,7 @@ pub async fn update_managed_agent(
             None
         };
 
-        let summary = { super::super::agents::summarize_from_disk(&app, record, &runtimes)? };
+        let summary = { super::super::agents::summarize_from_disk(app, record, &runtimes)? };
         let rollback = name_changed
             .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
         (
@@ -374,100 +498,19 @@ pub async fn update_managed_agent(
             rollback,
             access_policy_changed,
             access_restart_relays,
+            retention,
         )
     }; // lock dropped here
+    super::super::agents::finish_managed_agent_pending(app, state, retention).await;
 
-    try_regenerate_nest(&app);
+    try_regenerate_nest(app);
 
-    // Phase 2: relay sync (async, outside lock). The owner-signed managed
-    // policy is security-sensitive: an access reduction must replace the old
-    // relay head before this command returns rather than waiting for the
-    // 30-second retention sweep. The flush remains durable/best-effort; rows a
-    // relay does not accept stay pending for the background retry.
-    let mut profile_sync_error =
-        crate::managed_agents::persona_events::flush_active_pending_events(&app, &state)
-            .await
-            .err()
-            .map(|error| format!("managed policy sync failed: {error}"));
-    if profile_sync_error.is_none()
-        && crate::managed_agents::persona_events::active_pending_event(
-            &app,
-            &state,
-            buzz_core_pkg::kind::KIND_MANAGED_AGENT,
-            &summary.pubkey,
-        )?
-    {
-        profile_sync_error = Some(
-            "managed policy sync failed: relay did not accept the updated policy; retry queued"
-                .to_string(),
-        );
-    }
-
-    // A rename is committed only when profile sync succeeds; otherwise restore
-    // the complete pre-edit record so Desktop and the relay keep one
-    // authoritative name.
-    if let Some((agent_keys, relay_url, display_name, avatar_url, about, auth_tag)) = sync_params {
-        if let Err(sync_error) = sync_managed_agent_profile(
-            &state,
-            &relay_url,
-            &agent_keys,
-            &display_name,
-            avatar_url.as_deref(),
-            about.as_deref(),
-            auth_tag.as_deref(),
-        )
-        .await
-        {
-            let rollback = rollback.ok_or_else(|| {
-                "missing local rollback state after relay profile sync failure".to_string()
-            })?;
-            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
-            let restart_suffix = if access_restart_relays.is_empty() {
-                String::new()
-            } else {
-                match super::super::agents::start_local_agent_pairs_with_preflight(
-                    &app,
-                    &state,
-                    &summary.pubkey,
-                    &access_restart_relays,
-                )
-                .await
-                {
-                    Ok(_) => String::new(),
-                    Err(error) => format!(
-                        " The runtime also failed to restart with the kept access policy: {error}"
-                    ),
-                }
-            };
-            let rollback_message = if access_policy_changed {
-                "The access policy change was kept, but other edits were rolled back"
-            } else {
-                "No changes were saved"
-            };
-            return Err(format!(
-                "Agent rename failed because its relay profile could not be updated. {rollback_message}: {sync_error}.{restart_suffix}"
-            ));
-        }
-    }
-
-    if !access_restart_relays.is_empty() {
-        summary = super::super::agents::start_local_agent_pairs_with_preflight(
-            &app,
-            &state,
-            &summary.pubkey,
-            &access_restart_relays,
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Agent access was saved and published, but its runtime failed to restart with the new policy: {error}"
-            )
-        })?;
-    }
-
-    Ok(UpdateManagedAgentResponse {
-        agent: summary,
-        profile_sync_error: profile_sync_error.take(),
+    Ok(SavedAgentUpdate {
+        summary,
+        sync_params,
+        rollback,
+        access_policy_changed,
+        access_restart_relays,
     })
 }
 

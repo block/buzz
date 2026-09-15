@@ -1,3 +1,4 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -472,7 +473,7 @@ export function usePersonaSync(
   relayUrl: string | undefined,
 ): void {
   React.useEffect(() => {
-    if (!pubkey || !relayUrl) return;
+    if (isRemoteIdentity() || !pubkey || !relayUrl) return;
     let cancelled = false;
     const dispose = startPersonaSync(pubkey, relayUrl, () => cancelled);
     return () => {

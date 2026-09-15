@@ -23,10 +23,19 @@ pub use legacy_migration::migrate_legacy_retention_db;
 /// their relay heads and pending publications are not. Keeping a separate
 /// database per `(relay_url, owner_pubkey)` prevents a pending write created in
 /// community A from being drained into community B after a workspace switch.
+#[derive(Clone)]
 pub struct RetentionScope {
     pub db_path: PathBuf,
     pub relay_url: String,
-    pub owner_keys: nostr::Keys,
+    pub(crate) signer: crate::active_user_signer::ActiveUserSigner,
+}
+
+impl RetentionScope {
+    /// Return the originally captured async capability, never reconstruct it
+    /// from local secret material.
+    pub(crate) fn owner_signer(&self) -> crate::active_user_signer::ActiveUserSigner {
+        self.signer.clone()
+    }
 }
 
 /// Decide whether `scope` — the workspace's active retention scope — is the one
@@ -68,17 +77,16 @@ pub fn scoped_retention_db_path(base_dir: &Path, relay_url: &str, owner_pubkey: 
 
 /// Snapshot the active relay + owner and resolve their durable event store.
 ///
-/// Callers keep the returned relay and keys alongside the path whenever work
+/// Callers keep the returned relay and signer alongside the path whenever work
 /// crosses an `.await`; a later workspace switch cannot retarget that work.
 pub fn active_retention_scope<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
 ) -> Result<RetentionScope, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let owner_keys = state.signing_keys()?;
+    let signer = state.active_signer()?;
     let base_dir = super::managed_agents_base_dir(app)?;
-    let db_path =
-        scoped_retention_db_path(&base_dir, &relay_url, &owner_keys.public_key().to_hex());
+    let db_path = scoped_retention_db_path(&base_dir, &relay_url, &signer.public_key().to_hex());
     let parent = db_path
         .parent()
         .ok_or_else(|| "retention scope path has no parent".to_string())?;
@@ -87,7 +95,7 @@ pub fn active_retention_scope<R: tauri::Runtime>(
     Ok(RetentionScope {
         db_path,
         relay_url,
-        owner_keys,
+        signer,
     })
 }
 
@@ -528,6 +536,25 @@ pub fn mark_synced(
     )
     .map_err(|e| format!("failed to mark event synced: {e}"))?;
 
+    Ok(())
+}
+
+/// Clear only the exact signed row observed by an async publisher.
+///
+/// Unlike timestamp/content comparison, this preserves an equal-second,
+/// tag-only replacement that arrived while event or HTTP-auth signing awaited.
+/// The original retained event (not its freshly re-dated wire form) is the
+/// retry witness; raw equality includes its event ID and complete template.
+pub(crate) fn mark_signed_event_synced(
+    conn: &Connection,
+    event: &RetainedEvent,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE persona_events SET pending_sync = 0
+         WHERE kind = ?1 AND pubkey = ?2 AND d_tag = ?3 AND raw_event = ?4",
+        params![event.kind, event.pubkey, event.d_tag, event.raw_event],
+    )
+    .map_err(|e| format!("failed to mark signed event synced: {e}"))?;
     Ok(())
 }
 

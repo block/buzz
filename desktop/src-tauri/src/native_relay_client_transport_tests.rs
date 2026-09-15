@@ -95,7 +95,9 @@ async fn closed_then_http_submit(message: &str, shared_unavailable: bool) {
     let (http_url, mut submitted, server) = http_relay().await;
     let state = crate::app_state::build_app_state();
     let event = reply(&keys);
-    let submit = crate::relay::submit_signed_event_at_with_keys(&event, &state, &http_url, &keys);
+    let signer = crate::active_user_signer::ActiveUserSigner::local(keys.clone());
+    let submit =
+        crate::relay::submit_signed_event_at_with_signer(&event, &state, &http_url, &signer);
     let outcome = tokio::time::timeout(Duration::from_secs(1), submit).await;
     session.shutdown();
     server.abort();
@@ -151,9 +153,10 @@ async fn http_429_still_withholds_http_reply_then_accepts_it() {
         .unwrap_err();
     assert_eq!(error, "relay rate-limited: retry in 1s");
     let before = std::time::Instant::now();
+    let signer = crate::active_user_signer::ActiveUserSigner::local(keys.clone());
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
-        crate::relay::submit_signed_event_at_with_keys(&event, &state, &http_url, &keys),
+        crate::relay::submit_signed_event_at_with_signer(&event, &state, &http_url, &signer),
     )
     .await;
     server.abort();

@@ -63,7 +63,10 @@ pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, Stri
 pub async fn set_global_agent_config(
     config: GlobalAgentConfig,
     app: AppHandle,
+    operation: crate::user_operation::UserOperationScope,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
+    use tauri::Manager;
+    let write_operation = operation.clone();
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter
@@ -72,22 +75,8 @@ pub async fn set_global_agent_config(
     // lock in Phase 2 after sync_managed_agent_processes.
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
-        validate_global_config(&config)?;
-
-        let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
-
-        save_global_agent_config(&app_for_write, &config)?;
-
-        // Re-read from disk so the returned value reflects the strip-on-write pass.
-        let new_global = load_global_agent_config(&app_for_write)?;
-
-        // Pre-filter: identify agents that look eligible before taking any locks.
-        // This is a hint only; definitive eligibility check happens under lock
-        // in Phase 2.
-        let (candidates, personas_snapshot) =
-            collect_restart_candidates(&app_for_write, &old_global, &new_global);
-
-        Ok::<_, String>((new_global, old_global, candidates, personas_snapshot))
+        let state = app_for_write.state::<AppState>();
+        save_defaults_in_scope(&app_for_write, &state, &config, &write_operation)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
@@ -107,12 +96,18 @@ pub async fn set_global_agent_config(
     let mut failed_restart_count: u32 = 0;
     if !candidates.is_empty() {
         for pubkey in &candidates {
+            drop(operation.admit(&app.state::<AppState>()).map_err(|error| {
+                format!(
+                    "Agent defaults were saved, but automatic restarts were interrupted: {error}"
+                )
+            })?);
             let outcome = restart_local_agent_on_config_change(
                 &app,
                 pubkey,
                 &old_global,
                 &new_global,
                 &personas_snapshot,
+                &operation,
             )
             .await;
             match outcome {
@@ -123,11 +118,50 @@ pub async fn set_global_agent_config(
         }
     }
 
+    drop(operation.admit(&app.state::<AppState>()).map_err(|error| {
+        format!("Agent defaults were saved, but automatic restarts were interrupted: {error}")
+    })?);
     Ok(GlobalAgentConfigSaveResult {
         config: new_global,
         restarted_count,
         failed_restart_count,
     })
+}
+
+type SavedDefaults = (
+    GlobalAgentConfig,
+    GlobalAgentConfig,
+    Vec<String>,
+    Vec<crate::managed_agents::AgentDefinition>,
+);
+
+/// The blocking save/candidate phase, before any automatic restart awaits.
+pub(crate) fn save_defaults_in_scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    config: &GlobalAgentConfig,
+    operation: &crate::user_operation::UserOperationScope,
+) -> Result<SavedDefaults, String> {
+    validate_global_config(config)?;
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _admission = operation.admit(state)?;
+
+    let old_global = load_global_agent_config(app).unwrap_or_default();
+
+    save_global_agent_config(app, config)?;
+
+    // Re-read from disk so the returned value reflects the strip-on-write pass.
+    let new_global = load_global_agent_config(app)?;
+
+    // Candidate collection can merge/save personas, so it remains under
+    // the same admission as the config write. This is still a hint only;
+    // definitive eligibility is checked again in Phase 2.
+    let (candidates, personas_snapshot) = collect_restart_candidates(app, &old_global, &new_global);
+
+    Ok((new_global, old_global, candidates, personas_snapshot))
 }
 
 /// Outcome of a single per-agent restart attempt in Phase 2.
@@ -155,8 +189,8 @@ enum RestartOutcome {
 /// - it was already `Ready`, its process is currently alive, and its effective
 ///   env changed (provider, model, or env var update that needs a restart to
 ///   take effect, since env is baked at spawn time).
-fn collect_restart_candidates(
-    app: &AppHandle,
+fn collect_restart_candidates<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     old_global: &GlobalAgentConfig,
     new_global: &GlobalAgentConfig,
 ) -> (Vec<String>, Vec<crate::managed_agents::AgentDefinition>) {
@@ -250,6 +284,7 @@ async fn restart_local_agent_on_config_change(
     old_global: &GlobalAgentConfig,
     new_global: &GlobalAgentConfig,
     personas_snapshot: &[crate::managed_agents::AgentDefinition],
+    operation: &crate::user_operation::UserOperationScope,
 ) -> RestartOutcome {
     // ── Step 1: stop under lock, re-verifying eligibility ─────────────────
     let app_for_stop = app.clone();
@@ -257,6 +292,7 @@ async fn restart_local_agent_on_config_change(
     let old_global_clone = old_global.clone();
     let new_global_clone = new_global.clone();
     let personas_owned = personas_snapshot.to_vec();
+    let stop_operation = operation.clone();
 
     let stop_result = tokio::task::spawn_blocking(move || {
         use tauri::Manager;
@@ -267,6 +303,7 @@ async fn restart_local_agent_on_config_change(
             .lock()
             .map_err(|e| format!("failed to acquire store lock: {e}"))?;
 
+        let _admission = stop_operation.admit(&state)?;
         let mut records = load_managed_agents(&app_for_stop)?;
         let mut runtimes = state
             .managed_agent_processes
@@ -325,14 +362,15 @@ async fn restart_local_agent_on_config_change(
         // Stop the process.
         let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
+        let stopped_record = mark_restart_pending(record_mut, &runtime_keys)?;
         save_managed_agents(&app_for_stop, &records)?;
 
-        Ok(runtime_keys)
+        Ok((runtime_keys, stopped_record))
     })
     .await;
 
-    let runtime_keys = match stop_result {
-        Ok(Ok(runtime_keys)) => runtime_keys,
+    let (runtime_keys, stopped_record) = match stop_result {
+        Ok(Ok(stopped)) => stopped,
         Ok(Err(e)) => {
             eprintln!("buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
             return RestartOutcome::Skipped;
@@ -348,8 +386,14 @@ async fn restart_local_agent_on_config_change(
     let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
     use tauri::Manager;
     let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
-        .await
+    match super::agents::start_local_agent_pairs_in_scope(
+        app,
+        &state,
+        pubkey,
+        &relay_urls,
+        operation,
+    )
+    .await
     {
         Ok(_) => {
             eprintln!(
@@ -361,7 +405,7 @@ async fn restart_local_agent_on_config_change(
             eprintln!(
                 "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
             );
-            if let Err(save_err) = persist_last_error(app, pubkey, &e) {
+            if let Err(save_err) = persist_last_error(app, pubkey, &e, &stopped_record, operation) {
                 eprintln!(
                     "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
                 );
@@ -371,11 +415,35 @@ async fn restart_local_agent_on_config_change(
     }
 }
 
+/// Save a recovery affordance in the same write as the stopped process state.
+/// It survives cancellation or scope retirement before preflight can finish;
+/// successful runtime startup clears it through the normal runtime path.
+fn mark_restart_pending(
+    record: &mut crate::managed_agents::ManagedAgentRecord,
+    runtime_keys: &[crate::managed_agents::ManagedAgentRuntimeKey],
+) -> Result<serde_json::Value, String> {
+    let destinations: Vec<_> = runtime_keys
+        .iter()
+        .map(|key| key.relay_url.as_str())
+        .collect();
+    record.last_error = Some(format!(
+        "Automatic restart pending for {}. If interrupted, retry starting the agent.",
+        destinations.join(", ")
+    ));
+    serde_json::to_value(record).map_err(|e| e.to_string())
+}
+
 /// Persist a `last_error` on the agent record under the store lock.
 ///
 /// Best-effort: called only after a failed restart to leave the record
 /// in a diagnosable state rather than a silent "stopped with no error" state.
-fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), String> {
+fn persist_last_error<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pubkey: &str,
+    error: &str,
+    stopped_record: &serde_json::Value,
+    operation: &crate::user_operation::UserOperationScope,
+) -> Result<(), String> {
     use tauri::Manager;
     let state = app.state::<AppState>();
     let _store_guard = state
@@ -384,7 +452,21 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
         .map_err(|e| format!("failed to acquire store lock: {e}"))?;
     let mut records = load_managed_agents(app)?;
     let record = find_managed_agent_mut(&mut records, pubkey)?;
-    record.last_error = Some(error.to_string());
+    // While the initiating scope remains active, retain the baseline diagnostic
+    // write: preflight and successful pair starts legitimately change this same
+    // record before another pair fails. After retirement, permit only completion
+    // against the unchanged stopped record, never a newly selected identity.
+    let admission = operation.admit(&state);
+    if admission.is_err()
+        && serde_json::to_value(&*record).map_err(|e| e.to_string())? != *stopped_record
+    {
+        return Ok(());
+    }
+    let pending = stopped_record
+        .get("last_error")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    record.last_error = Some(format!("{pending} Automatic restart failed: {error}"));
     record.updated_at = crate::util::now_iso();
     save_managed_agents(app, &records)
 }
@@ -495,3 +577,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "global_agent_config_recovery_tests.rs"]
+mod recovery_tests;

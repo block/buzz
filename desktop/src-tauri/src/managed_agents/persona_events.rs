@@ -3,6 +3,9 @@
 //! Persona events are NIP-33 parameterized replaceable events keyed by
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
 
+pub(crate) mod definition;
+
+use crate::active_user_signer::ActiveUserSigner;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,7 +46,7 @@ fn flush_publisher_lock(db_path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>
 }
 
 /// Bounds how long one retained row may hold the per-scope publisher lock while
-/// awaiting the relay. `submit_signed_event_at_with_keys` first waits on the
+/// awaiting the relay. `submit_signed_event_at_with_signer` first waits on the
 /// process-wide admission gate (up to 300s on a 429) and then POSTs on the
 /// app-wide `http_client`, whose builder configures only pool options —
 /// reqwest leaves connect/read/total timeouts unset, so a relay that accepts
@@ -273,11 +276,11 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 /// `get_retained_event` re-check — the connection holds no `Mutex` across the
 /// await, so a concurrent edit or delete is observed here:
 /// - gone (deleted): skip, nothing to publish.
-/// - newer `created_at` or different `content`: skip; the newer row is itself
+/// - different raw event (including same-second replacement): skip; the new row is itself
 ///   `pending_sync` and publishes on its own pass.
 ///
 /// Only a row that still matches what we read is published, then cleared via
-/// `mark_synced` on the exact `created_at`+`content` the relay accepted — so an
+/// `mark_signed_event_synced` on the exact retained raw event — so an
 /// edit landing between publish and clear is never falsely marked synced.
 ///
 /// Returns the number of events the relay accepted. Best-effort: a relay
@@ -289,8 +292,8 @@ pub async fn flush_pending_events(
     state: &AppState,
 ) -> Result<u32, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let owner_keys = state.signing_keys()?;
-    flush_pending_events_at(db_path, state, &relay_url, &owner_keys).await
+    let signer = state.active_signer()?;
+    flush_pending_events_at(db_path, state, &relay_url, &signer).await
 }
 
 /// Resolve and flush only the currently active `(relay, owner)` scope.
@@ -303,7 +306,13 @@ pub async fn flush_active_pending_events(
     state: &AppState,
 ) -> Result<u32, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-    flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+    flush_pending_events_at(
+        &scope.db_path,
+        state,
+        &scope.relay_url,
+        &scope.owner_signer(),
+    )
+    .await
 }
 
 pub fn active_pending_event(
@@ -313,7 +322,7 @@ pub fn active_pending_event(
     d_tag: &str,
 ) -> Result<bool, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let owner_pubkey = scope.owner_signer().public_key().to_hex();
     let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
     Ok(
         crate::managed_agents::retention::get_retained_event(&conn, kind, &owner_pubkey, d_tag)?
@@ -325,11 +334,11 @@ pub(crate) async fn flush_pending_events_at(
     db_path: &std::path::Path,
     state: &AppState,
     relay_url: &str,
-    owner_keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
-        deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
-        open_retention_db,
+        deferred_behind_failed_tombstone, get_pending_sync, get_retained_event,
+        mark_signed_event_synced, open_retention_db,
     };
     use nostr::JsonUtil;
 
@@ -346,7 +355,7 @@ pub(crate) async fn flush_pending_events_at(
     let publisher_lock = flush_publisher_lock(db_path);
     let _publisher_guard = publisher_lock.lock().await;
 
-    let owner_pubkey = owner_keys.public_key().to_hex();
+    let owner_pubkey = signer.public_key().to_hex();
     let relay_api_base = crate::relay::relay_http_base_url(relay_url);
     let pending = {
         let conn = open_retention_db(db_path)?;
@@ -372,7 +381,7 @@ pub(crate) async fn flush_pending_events_at(
         let Some(current) = current else {
             continue; // deleted out from under us
         };
-        if current.created_at != row.created_at || current.content != row.content {
+        if current.raw_event != row.raw_event {
             continue; // superseded by a newer edit; that row publishes itself
         }
 
@@ -404,18 +413,39 @@ pub(crate) async fn flush_pending_events_at(
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
                 continue;
             }
-            redate_tombstone(&event, now.max(current.created_at), owner_keys)?
+            tokio::time::timeout(
+                PUBLISH_TIMEOUT,
+                redate_tombstone(&event, now.max(current.created_at), signer),
+            )
+            .await
+            .map_err(|_| "timed out re-signing retained tombstone".to_string())??
         } else if buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind) {
             // NIP-IA requests are freshness-checked by the relay (±120s on
             // `created_at`), so a request retained while the relay was
             // unreachable would be permanently stale. Re-sign with a fresh
             // timestamp at publish time; kind, tags, and content are preserved,
-            // and `mark_synced` below still compares against the retained row's
+            // and `mark_signed_event_synced` below still compares against the retained row's
             // original `created_at`/`content`, which are untouched.
-            resign_with_fresh_timestamp(&event, state)?
+            tokio::time::timeout(PUBLISH_TIMEOUT, resign_with_fresh_timestamp(&event, signer))
+                .await
+                .map_err(|_| "timed out re-signing retained archive request".to_string())??
         } else {
             event
         };
+
+        // Re-signing can now suspend. Re-read the exact retained event after
+        // that await, including equal-second/tag-only replacements. No SQLite
+        // connection or store mutex crosses signing. The per-scope publisher
+        // lock still prevents another flush from landing a tombstone in the
+        // remaining POST gap (see commands::teams::sharing).
+        let still_current = {
+            let conn = open_retention_db(db_path)?;
+            get_retained_event(&conn, current.kind, &current.pubkey, &current.d_tag)?
+                .is_some_and(|latest| latest.raw_event == current.raw_event)
+        };
+        if !still_current {
+            continue; // replacement remains pending for the next sweep
+        }
 
         // Bound the relay await: the admission gate can wait up to 300s and the
         // shared http_client sets no request timeout, so a non-responding relay
@@ -425,11 +455,11 @@ pub(crate) async fn flush_pending_events_at(
         // replacement deferred this pass.
         let submit = tokio::time::timeout(
             PUBLISH_TIMEOUT,
-            crate::relay::submit_signed_event_at_with_keys(
+            crate::relay::submit_signed_event_at_with_signer(
                 &event,
                 state,
                 &relay_api_base,
-                owner_keys,
+                signer,
             ),
         )
         .await;
@@ -441,21 +471,14 @@ pub(crate) async fn flush_pending_events_at(
         }
 
         let conn = open_retention_db(db_path)?;
-        mark_synced(
-            &conn,
-            current.kind,
-            &current.pubkey,
-            &current.d_tag,
-            current.created_at,
-            &current.content,
-        )?;
+        mark_signed_event_synced(&conn, &current)?;
         flushed += 1;
     }
 
     Ok(flushed)
 }
 
-/// Re-sign a retained event with the current owner keys and a fresh
+/// Re-sign a retained event with the captured owner signer and a fresh
 /// `created_at`, preserving kind, tags, and content.
 ///
 /// Used for relay-freshness-checked kinds (NIP-IA 9035/9036) that would
@@ -464,17 +487,18 @@ pub(crate) async fn flush_pending_events_at(
 /// `events::build_archive_identity_request` — nostr strips `p` tags matching
 /// the signer by default, which would corrupt a self-targeted request.
 ///
-/// Synchronous; the `state.keys` guard is dropped on return, so callers may
-/// `.await` afterwards.
-fn resign_with_fresh_timestamp(
+/// No store mutex or SQLite connection is held while the signer is awaited.
+async fn resign_with_fresh_timestamp(
     event: &nostr::Event,
-    state: &AppState,
+    signer: &ActiveUserSigner,
 ) -> Result<nostr::Event, String> {
-    let keys = state.signing_keys()?;
-    nostr::EventBuilder::new(event.kind, event.content.clone())
-        .tags(event.tags.iter().cloned())
-        .allow_self_tagging()
-        .sign_with_keys(&keys)
+    signer
+        .sign_event(
+            nostr::EventBuilder::new(event.kind, event.content.clone())
+                .tags(event.tags.iter().cloned())
+                .allow_self_tagging(),
+        )
+        .await
         .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 
@@ -485,17 +509,20 @@ fn resign_with_fresh_timestamp(
 /// both dominates the head it retracts (NIP-09 `created_at <=` soft-delete) and
 /// clears the relay's ±900s ingest window. Signing at the original owner keys
 /// keeps the event authored by the same identity that owns the coordinate; the
-/// `mark_synced` compare-and-clear below still keys on the retained row's
-/// untouched `created_at`/`content`, so a concurrent edit is never masked.
-fn redate_tombstone(
+/// exact-event compare-and-clear below still keys on the retained row's
+/// untouched raw event, so a concurrent edit is never masked.
+async fn redate_tombstone(
     event: &nostr::Event,
     created_at: i64,
-    owner_keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<nostr::Event, String> {
-    nostr::EventBuilder::new(event.kind, event.content.clone())
-        .tags(event.tags.iter().cloned())
-        .custom_created_at(nostr::Timestamp::from(created_at as u64))
-        .sign_with_keys(owner_keys)
+    signer
+        .sign_event(
+            nostr::EventBuilder::new(event.kind, event.content.clone())
+                .tags(event.tags.iter().cloned())
+                .custom_created_at(nostr::Timestamp::from(created_at as u64)),
+        )
+        .await
         .map_err(|e| format!("failed to re-sign tombstone: {e}"))
 }
 
@@ -693,6 +720,8 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+#[cfg(test)]
+mod signer_flush_tests;
 #[cfg(test)]
 mod stale_pin_tests;
 #[cfg(test)]

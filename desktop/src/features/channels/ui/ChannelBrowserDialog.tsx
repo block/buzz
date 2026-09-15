@@ -116,6 +116,7 @@ export function ChannelBrowserDialog({
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
   );
+  const [joinError, setJoinError] = React.useState<string | null>(null);
   const [mode, setMode] = React.useState<"browse" | "create">("browse");
   const [createInitialName, setCreateInitialName] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -340,6 +341,7 @@ export function ChannelBrowserDialog({
       setSort("alpha");
       setSelectedIndex(null);
       setJoiningChannelId(null);
+      setJoinError(null);
       setMode("browse");
       setCreateInitialName("");
       return;
@@ -358,12 +360,14 @@ export function ChannelBrowserDialog({
 
   async function handleJoin(channelId: string) {
     setJoiningChannelId(channelId);
+    setJoinError(null);
 
     try {
       await onJoinChannel(channelId);
       onOpenChange(false);
       onSelectChannel(channelId);
-    } catch {
+    } catch (cause) {
+      setJoinError(cause instanceof Error ? cause.message : String(cause));
       setJoiningChannelId(null);
     }
   }
@@ -436,6 +440,14 @@ export function ChannelBrowserDialog({
           />
         ) : (
           <>
+            {joinError && (
+              <p
+                role="alert"
+                className="mb-4 rounded-lg bg-destructive/10 p-3 text-sm text-destructive"
+              >
+                Couldn’t join channel: {joinError}
+              </p>
+            )}
             <DialogHeader className="space-y-0 pb-5">
               <div className="flex items-center justify-between gap-4">
                 <DialogTitle>{browseTitle}</DialogTitle>

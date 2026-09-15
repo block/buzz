@@ -37,7 +37,8 @@ use crate::{
             extract_chunk_payload_png, MemoryLevel,
         },
         agent_snapshot_envelope::{
-            decrypt_envelope, encode_locked_snapshot_png, parse_chunk_payload, ChunkPayload,
+            decrypt_envelope_with_signer, encode_locked_snapshot_png_with_signer,
+            parse_chunk_payload, ChunkPayload,
         },
         load_agent_definitions, load_global_agent_config, load_managed_agents, load_personas,
         save_global_agent_config, validate_global_config,
@@ -539,6 +540,7 @@ pub async fn mint_agent_card(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<MintedCard, String> {
+    crate::owner_authorization::require_owned_workspace(&state)?;
     let lock = lock.unwrap_or(false);
     let memory_level = parse_memory_level(memory_level.as_deref().unwrap_or(""))?;
     // ── Resolve the record + API key under lock ──────────────────────────────
@@ -597,7 +599,7 @@ pub async fn mint_agent_card(
                     .to_string(),
             );
         }
-        let owner_keys = state.signing_keys()?;
+        let owner = crate::owner_authorization::OwnerAuthorizationScope::capture(&state)?;
         // Same canonical check the envelope decoder enforces (incl. curve
         // validation) — a non-point record pubkey must fail BEFORE the API
         // spend, not at post-mint encryption.
@@ -608,13 +610,18 @@ pub async fn mint_agent_card(
         .map_err(|_| {
             "Agent record has an invalid pubkey (not a canonical x-only key).".to_string()
         })?;
-        if owner_keys.public_key() == agent_pubkey {
+        if owner.signer.public_key() == agent_pubkey {
             return Err("Cannot lock a card to itself: owner and agent keys match.".to_string());
         }
-        Some((owner_keys, agent_pubkey))
+        Some((owner, agent_pubkey))
     } else {
         None
     };
+
+    let relay_base = lock_keys.as_ref().map_or_else(
+        || crate::relay::relay_api_base_url_with_override(&state),
+        |(owner, _)| owner.relay_base.clone(),
+    );
 
     // ── Memory needs a keyed instance, resolved up front BEFORE the API
     //    spend — the memory source is always the resolved instance itself
@@ -634,6 +641,9 @@ pub async fn mint_agent_card(
         memory_entries_from_listing(listing, memory_level)
     };
 
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
+    }
     let display_name = record
         .display_name
         .clone()
@@ -649,13 +659,13 @@ pub async fn mint_agent_card(
     // spend (same fail-early rule as the key/memory guards above) — minting
     // with the wrong face wastes the spend it was supposed to protect.
     if !is_definition {
-        let relay_url = crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &crate::relay::relay_ws_url_with_override(&state),
-        );
+        let relay_url = crate::relay::effective_agent_relay_url(&record.relay_url, &relay_base);
         let profile = crate::relay::query_agent_profile(&state, &relay_url, &record.pubkey)
             .await
             .map_err(|e| format!("Could not read the agent's profile for its avatar: {e}"))?;
+        if let Some((owner, _)) = &lock_keys {
+            owner.check_current(&state)?;
+        }
         record.avatar_url = preferred_avatar_url(
             profile.and_then(|info| info.picture),
             record.avatar_url.take(),
@@ -671,10 +681,14 @@ pub async fn mint_agent_card(
             // require Blossom get-auth. Mint the header ONLY for same-origin URLs
             // so the token never leaves the relay (same contract as
             // `media_download.rs`).
-            let relay_base = crate::relay::relay_api_base_url_with_override(&state);
-            let auth = is_same_origin(url, &relay_base)
-                .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))
-                .flatten();
+            let auth = if is_same_origin(url, &relay_base) {
+                crate::commands::media::mint_media_get_auth(&state, &relay_base).await
+            } else {
+                None
+            };
+            if let Some((owner, _)) = &lock_keys {
+                owner.check_current(&state)?;
+            }
             fetch_avatar(url, auth.as_deref()).await?
         }
         _ => {
@@ -684,6 +698,9 @@ pub async fn mint_agent_card(
         }
     };
 
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
+    }
     // ── Build the manifest now (with any requested memory) so a broken agent
     //    fails before we spend minutes on the API call. ───────────────────────
     let manifest_avatar = manifest_avatar_bytes(
@@ -717,6 +734,9 @@ pub async fn mint_agent_card(
                 buzz_core_pkg::engram::NIP44_PLAINTEXT_MAX
             ));
         }
+    }
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
     }
     let instructions = build_card_instructions(
         &display_name,
@@ -757,6 +777,9 @@ pub async fn mint_agent_card(
         .await
         .map_err(|e| format!("Card mint request failed: {e}"))?;
 
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
+    }
     let status = resp.status();
     let payload: serde_json::Value = resp
         .json()
@@ -773,6 +796,9 @@ pub async fn mint_agent_card(
         return Err(format!("Card mint failed (HTTP {status}): {detail}"));
     }
 
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
+    }
     let (image_b64, designer_notes) = extract_card_output(&payload)?;
     let raw_card = STANDARD
         .decode(image_b64.as_bytes())
@@ -795,31 +821,85 @@ pub async fn mint_agent_card(
         )
         .map_err(|e| format!("Failed to encode card PNG: {e}"))?;
 
-    let final_bytes = match &lock_keys {
-        None => encode_snapshot_png(&snapshot, Some(&card_png))
-            .map_err(|e| format!("Failed to embed agent snapshot in card: {e}"))?,
-        Some((owner_keys, agent_pubkey)) => {
-            encode_locked_snapshot_png(&snapshot, owner_keys, agent_pubkey, Some(&card_png))
-                .map_err(|e| format!("Failed to embed locked agent snapshot in card: {e}"))?
-        }
+    let final_bytes = prepare_card_bytes(
+        &state,
+        &snapshot,
+        lock_keys.as_ref().map(|(owner, agent)| (owner, agent)),
+        &card_png,
+    )
+    .await?;
+
+    let slug = crate::util::slugify(&display_name, "agent", 50);
+    let minted = MintedCard {
+        card_png_base64: STANDARD.encode(&final_bytes),
+        file_name: format!("{slug}.agent.png"),
+        designer_notes,
+        locked: lock_keys.is_some(),
+        memory_level,
     };
+
+    if let Some((owner, _)) = &lock_keys {
+        owner.check_current(&state)?;
+    }
+    // Archive best-effort: the mint is already paid for and verified, so a
+    // failed archive write logs and continues — it never fails the mint.
+    if let Err(e) = archive_minted_card(&app, &id, &display_name, &minted, &final_bytes) {
+        eprintln!("buzz-desktop: card-archive: failed to archive minted card: {e}");
+    }
+
+    Ok(minted)
+}
+
+/// Production artifact preparation after image generation. A memory-free or
+/// supplied validated manifest exercises this phase without the NIP-AE reader.
+/// No archive/write occurs here; every locked result is verified by decrypting
+/// the envelope extracted from the actual final PNG, under the same scope.
+pub(crate) async fn prepare_card_bytes(
+    state: &AppState,
+    snapshot: &crate::managed_agents::agent_snapshot::AgentSnapshot,
+    lock_keys: Option<(
+        &crate::owner_authorization::OwnerAuthorizationScope,
+        &nostr::PublicKey,
+    )>,
+    card_png: &[u8],
+) -> Result<Vec<u8>, String> {
+    if let Some((owner, _)) = lock_keys {
+        owner.check_current(state)?;
+    }
+    let final_bytes = match lock_keys {
+        None => encode_snapshot_png(snapshot, Some(card_png))
+            .map_err(|e| format!("Failed to embed agent snapshot in card: {e}"))?,
+        Some((owner, agent_pubkey)) => encode_locked_snapshot_png_with_signer(
+            snapshot,
+            &owner.signer,
+            agent_pubkey,
+            Some(card_png),
+        )
+        .await
+        .map_err(|e| format!("Failed to embed locked agent snapshot in card: {e}"))?,
+    };
+
+    if let Some((owner, _)) = lock_keys {
+        owner.check_current(state)?;
+    }
 
     // ── Verify: size ceiling + round-trip on the FINAL bytes ────────────────
     // Locked cards: extract the actual chunk, parse the envelope, decrypt
     // with the owner key, then compare the logical manifest (ciphertext is
     // nondeterministic — never compare bytes).
     validate_snapshot_encode_size(final_bytes.len(), true)?;
-    let decoded = match &lock_keys {
+    let decoded = match lock_keys {
         None => decode_snapshot_png(&final_bytes)
             .map_err(|e| format!("Card failed round-trip verification: {e}"))?,
-        Some((owner_keys, _)) => {
+        Some((owner, _)) => {
             let payload = extract_chunk_payload_png(&final_bytes)
                 .map_err(|e| format!("Card failed round-trip verification: {e}"))?;
             match parse_chunk_payload(&payload)
                 .map_err(|e| format!("Card failed round-trip verification: {e}"))?
             {
                 ChunkPayload::Locked(envelope) => {
-                    decrypt_envelope(&envelope, owner_keys.secret_key())
+                    decrypt_envelope_with_signer(&envelope, &owner.signer)
+                        .await
                         .map_err(|e| format!("Card failed round-trip verification: {e}"))?
                 }
                 ChunkPayload::Plain(_) => {
@@ -831,26 +911,14 @@ pub async fn mint_agent_card(
             }
         }
     };
-    if decoded != snapshot {
+    if &decoded != snapshot {
         return Err("Card round-trip verification failed: manifest mismatch.".to_string());
     }
 
-    let slug = crate::util::slugify(&display_name, "agent", 50);
-    let minted = MintedCard {
-        card_png_base64: STANDARD.encode(&final_bytes),
-        file_name: format!("{slug}.agent.png"),
-        designer_notes,
-        locked: lock_keys.is_some(),
-        memory_level,
-    };
-
-    // Archive best-effort: the mint is already paid for and verified, so a
-    // failed archive write logs and continues — it never fails the mint.
-    if let Err(e) = archive_minted_card(&app, &id, &display_name, &minted, &final_bytes) {
-        eprintln!("buzz-desktop: card-archive: failed to archive minted card: {e}");
+    if let Some((owner, _)) = lock_keys {
+        owner.check_current(state)?;
     }
-
-    Ok(minted)
+    Ok(final_bytes)
 }
 
 /// The avatar the mint should use: the agent's kind:0 `picture` when one is

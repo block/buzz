@@ -1,3 +1,4 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -56,7 +57,7 @@ export function useAutoRestartPolicy() {
   // No dependency array by design: the tick pattern re-runs this effect
   // every render so it reads live store state; all mutation is ref-local.
   React.useEffect(() => {
-    if (!agents) return;
+    if (isRemoteIdentity() || !agents) return;
     const now = Date.now();
     const edges = edgesRef.current;
 

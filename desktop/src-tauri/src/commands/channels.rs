@@ -7,8 +7,8 @@ use crate::{
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, query_relay,
-        relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
-        submit_event_with_keys,
+        query_relay_at_with_signer, relay_api_base_url_with_override, submit_event,
+        submit_event_at,
     },
 };
 
@@ -247,7 +247,8 @@ fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
 
 async fn ensure_starter_channel_memberships(
     state: &AppState,
-    keys: &nostr::Keys,
+    keys: &crate::active_user_signer::ActiveUserSigner,
+    relay_base: &str,
     channels: &mut [ChannelInfo],
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
@@ -264,7 +265,7 @@ async fn ensure_starter_channel_memberships(
 
         let channel_uuid = parse_channel_uuid(&channel.id)?;
         let builder = events::build_join(channel_uuid)?;
-        submit_event_with_keys(builder, state, keys, None).await?;
+        submit_event_at(builder, state, relay_base, keys).await?;
         channel.is_member = true;
     }
 
@@ -274,18 +275,23 @@ async fn ensure_starter_channel_memberships(
 async fn fetch_starter_channel_metadata(
     state: &AppState,
     channel_ids: &[String],
+    relay_base: &str,
+    signer: &crate::active_user_signer::ActiveUserSigner,
 ) -> Result<Vec<ChannelInfo>, String> {
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
+    let events = query_relay_at_with_signer(
         state,
+        relay_base,
         &[serde_json::json!({
             "kinds": [39000],
             "#d": channel_ids,
             "limit": channel_ids.len(),
         })],
+        signer,
+        None,
     )
     .await?;
 
@@ -329,9 +335,10 @@ pub async fn create_channel(
     // whoever `state.keys` holds once the network round-trip completes. An
     // in-process identity swap while the request is in flight must not be
     // able to retarget the mark onto the new identity.
-    let creator_keys = state.signing_keys()?;
+    let creator_keys = state.active_signer()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
-    submit_event_with_keys(builder, &state, &creator_keys, None).await?;
+    let relay_scope = relay_api_base_url_with_override(&state);
+    submit_event_at(builder, &state, &relay_scope, &creator_keys).await?;
 
     // Mark this channel pending-owner: we just created it, so we know we're
     // the owner, but the relay's kind:39002 membership entry (#1761) is
@@ -343,13 +350,16 @@ pub async fn create_channel(
     state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let events = query_relay(
+    let events = query_relay_at_with_signer(
         &state,
+        &relay_scope,
         &[serde_json::json!({
             "kinds": [39000],
             "#d": [channel_uuid_string],
             "limit": 1
         })],
+        &creator_keys,
+        None,
     )
     .await?;
 
@@ -364,11 +374,18 @@ pub async fn create_channel(
 pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
 ) -> Result<Vec<ChannelInfo>, String> {
-    let mut existing_channels =
-        fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
+    // Discovery determines the IDs we later create or join. Capture its scope
+    // too, so a workspace switch cannot carry old-directory IDs to a new relay.
     let relay_scope = relay_api_base_url_with_override(&state);
-    let creator_keys = state.signing_keys()?;
+    let creator_keys = state.active_signer()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
+    let mut existing_channels = fetch::fetch_channels_in_scope(
+        &state,
+        DirectoryScope::IncludeOpenDirectory,
+        &relay_scope,
+        &creator_keys,
+    )
+    .await?;
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
     let mut created_ids = std::collections::HashSet::new();
 
@@ -392,7 +409,7 @@ pub async fn ensure_starter_channels(
             None,
         )?;
 
-        match submit_event_with_keys(builder, &state, &creator_keys, None).await {
+        match submit_event_at(builder, &state, &relay_scope, &creator_keys).await {
             Ok(_) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
                 created_ids.insert(channel_uuid_string.clone());
@@ -405,7 +422,9 @@ pub async fn ensure_starter_channels(
     }
 
     for _ in 0..3 {
-        let metadata = fetch_starter_channel_metadata(&state, &starter_ids).await?;
+        let metadata =
+            fetch_starter_channel_metadata(&state, &starter_ids, &relay_scope, &creator_keys)
+                .await?;
         for mut channel in metadata {
             if created_ids.contains(&channel.id) {
                 channel.is_member = true;
@@ -424,14 +443,21 @@ pub async fn ensure_starter_channels(
     }
 
     if !has_all_starter_channels(&existing_channels) {
-        existing_channels = fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
+        existing_channels = fetch::fetch_channels_in_scope(
+            &state,
+            DirectoryScope::IncludeOpenDirectory,
+            &relay_scope,
+            &creator_keys,
+        )
+        .await?;
     }
 
     if !has_all_starter_channels(&existing_channels) {
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
-    ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
+    ensure_starter_channel_memberships(&state, &creator_keys, &relay_scope, &mut existing_channels)
+        .await?;
     Ok(existing_channels)
 }
 
@@ -545,7 +571,7 @@ pub async fn add_channel_members(
     let uuid = parse_channel_uuid(&channel_id)?;
     let relay_base = relay_api_base_url_with_override(&state);
     assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
-    let signing_keys = state.signing_keys()?;
+    let signing_keys = state.active_signer()?;
     assert_expected_signer(
         expected_signer_pubkey.as_deref(),
         &signing_keys.public_key().to_hex(),
@@ -569,7 +595,7 @@ pub async fn add_channel_members(
                 continue;
             }
         };
-        match submit_event_at_with_keys(builder, &state, &relay_base, &signing_keys).await {
+        match submit_event_at(builder, &state, &relay_base, &signing_keys).await {
             Ok(_) => added.push(pubkey.clone()),
             Err(e) => errors.push(serde_json::json!({"pubkey": pubkey, "error": e})),
         }
@@ -611,10 +637,16 @@ pub async fn change_channel_member_role(
 }
 
 #[tauri::command]
-pub async fn join_channel(channel_id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn join_channel(
+    channel_id: String,
+    expected_generation: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let signer = state.renderer_signer(expected_generation)?;
+    let relay_base = relay_api_base_url_with_override(&state);
     let uuid = parse_channel_uuid(&channel_id)?;
     let builder = events::build_join(uuid)?;
-    submit_event(builder, &state).await?;
+    submit_event_at(builder, &state, &relay_base, &signer).await?;
     Ok(())
 }
 

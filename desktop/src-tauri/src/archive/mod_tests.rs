@@ -4,6 +4,7 @@
 //! `#[path]`-included from there.
 
 use super::pipeline::BucketWithResult;
+use super::prepare::{commit_ready, prepare_archive};
 use super::*;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use rusqlite::Connection;
@@ -55,7 +56,7 @@ fn add_sub(
 
 /// Run the full archive pipeline synchronously with a fake relay response.
 ///
-/// Calls `plan_archive` → injects fake relay events → `commit_archive`.
+/// Calls `plan_archive` → injects fake relay events → `prepare_archive` → `commit_ready`.
 /// This mirrors `archive_events` without the async relay calls.
 fn run_batch_sync(
     candidates: Vec<ArchiveCandidate>,
@@ -102,17 +103,14 @@ fn run_batch_sync_with_keys(
         })
         .collect();
 
-    commit_archive(
+    let signer = crate::active_user_signer::ActiveUserSigner::local(owner_keys.clone());
+    let prepared = tauri::async_runtime::block_on(prepare_archive(
         bucket_results,
         plan.ephemeral,
         plan.pre_dropped,
-        identity_pk,
-        relay_url,
-        owner_keys,
-        0,
-        conn,
-    )
-    .unwrap()
+        &signer,
+    ));
+    commit_ready(&prepared, identity_pk, relay_url, 0, conn, || Ok(())).unwrap()
 }
 
 fn candidate(event: &Event, scope_type: ScopeType, scope_value: &str) -> ArchiveCandidate {
@@ -668,7 +666,7 @@ mod real_relay {
     /// is exercised, including NIP-98 signing inside `query_relay`.
     fn make_test_app_state(keys: Keys, relay_url: &str) -> AppState {
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        state.replace_local_identity_keys(keys).unwrap();
         *state.relay_url_override.lock().unwrap() = Some(relay_url.to_string());
         state
     }
@@ -741,7 +739,7 @@ mod real_relay {
     /// Mirrors the open/drop/query/reopen pattern of production `archive_events`:
     ///   1. Open DB, run `plan_archive`, drop connection (no conn across `.await`).
     ///   2. Call `query_buckets(plan.buckets, &state).await` — NIP-98 signed.
-    ///   3. Reopen DB for `commit_archive`.
+    ///   3. Reopen DB for `prepare_archive` → `commit_ready`.
     ///
     /// Returns `ArchiveBatchResult`; caller reopens the file for row assertions.
     async fn run_batch_real_relay(
@@ -749,7 +747,7 @@ mod real_relay {
         state: &AppState,
         db_path: &Path,
     ) -> ArchiveBatchResult {
-        let identity_pk = state.keys.lock().unwrap().public_key().to_hex();
+        let identity_pk = state.local_identity_keys().unwrap().public_key().to_hex();
         let relay_url = crate::relay::relay_ws_url_with_override(state);
 
         // Phase 1: plan (sync). Connection dropped before any .await.
@@ -761,22 +759,15 @@ mod real_relay {
 
         // Phase 2: relay queries (async) — no Connection in scope.
         // Uses the real `query_buckets` path: query_relay → NIP-98 signed /query.
-        let bucket_results = query_buckets(plan.buckets, state).await;
+        let signer = state.legacy_local_signer().unwrap();
+        let relay_base = crate::relay::relay_api_base_url_with_override(state);
+        let bucket_results = query_buckets(plan.buckets, state, &relay_base, &signer).await;
+        let prepared =
+            prepare_archive(bucket_results, plan.ephemeral, plan.pre_dropped, &signer).await;
 
         // Phase 3: persist (sync). Fresh connection, same file.
         let conn = store::open_archive_db(db_path).expect("open archive db for commit");
-        let owner_keys = state.keys.lock().unwrap().clone();
-        commit_archive(
-            bucket_results,
-            plan.ephemeral,
-            plan.pre_dropped,
-            &identity_pk,
-            &relay_url,
-            &owner_keys,
-            0,
-            &conn,
-        )
-        .unwrap()
+        commit_ready(&prepared, &identity_pk, &relay_url, 0, &conn, || Ok(())).unwrap()
     }
 
     /// Happy path: publish a kind:9 message to a channel, then run the archive
@@ -1024,5 +1015,88 @@ mod real_relay {
         );
         println!("  archived_events:       {event_count} row(s)");
         println!("  archived_event_scopes: {scope_count} row(s)");
+    }
+}
+
+#[test]
+fn local_invalid_ciphertext_keeps_observer_raw_null_and_drops_metric() {
+    let conn = in_memory();
+    let owner = Keys::generate();
+    let other = Keys::generate();
+    let agent = Keys::generate();
+    let owner_pk = owner.public_key().to_hex();
+    let relay = "wss://relay.example";
+    add_sub(
+        &conn,
+        &owner_pk,
+        relay,
+        "owner_p",
+        &owner_pk,
+        "[24200,44200]",
+    );
+    // A valid envelope encrypted to another key reaches local decryption and
+    // fails authentication, rather than merely failing the envelope precheck.
+    let content = buzz_core_pkg::observer::encrypt_observer_payload(
+        &agent,
+        &other.public_key(),
+        &serde_json::json!({"channelId": "private-channel"}),
+    )
+    .unwrap();
+    let events: Vec<Event> = [24200, 44200]
+        .into_iter()
+        .map(|kind| {
+            EventBuilder::new(Kind::Custom(kind), content.clone())
+                .tags([
+                    Tag::public_key(owner.public_key()),
+                    Tag::parse(["agent", &agent.public_key().to_hex()]).unwrap(),
+                    Tag::parse(["frame", "telemetry"]).unwrap(),
+                ])
+                .sign_with_keys(&agent)
+                .unwrap()
+        })
+        .collect();
+    let result = run_batch_sync_with_keys(
+        events
+            .iter()
+            .map(|e| candidate(e, ScopeType::OwnerP, &owner_pk))
+            .collect(),
+        &owner_pk,
+        relay,
+        &conn,
+        events.clone(),
+        &owner,
+    );
+    assert_eq!(result.persisted, 1);
+    assert_eq!(result.persisted_agent_metrics, 0);
+    assert_eq!(result.dropped, 1);
+    let raw: String = conn
+        .query_row(
+            "SELECT raw_json FROM archived_events WHERE id = ?1",
+            [events[0].id.to_hex()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, events[0].as_json());
+    let channel: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM observer_channel_index WHERE id = ?1",
+            [events[0].id.to_hex()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(channel, None);
+    for table in [
+        "archived_events",
+        "archived_event_scopes",
+        "agent_metric_index",
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE id = ?1"),
+                [events[1].id.to_hex()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "invalid metric must not enter {table}");
     }
 }

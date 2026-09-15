@@ -1,3 +1,5 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
+import { remoteSettingsSectionAvailable } from "../lib/remoteSettings";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
@@ -132,6 +134,8 @@ export function SettingsView({
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     return settingsSections.filter((s) => {
+      if (isRemoteIdentity() && !remoteSettingsSectionAvailable(s.value))
+        return false;
       // Feature gate check. Manifest is preview-only — if the gate id is in
       // the manifest, it's preview and needs an opt-in; if it's not, it's
       // stable and renders unconditionally (fail-open).

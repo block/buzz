@@ -80,7 +80,7 @@ fn team() -> TeamRecord {
 /// and overrides both so this handle's retention scope lands inside the tempdir.
 fn mock_app(keys: &nostr::Keys) -> tauri::App<tauri::test::MockRuntime> {
     let state = build_app_state();
-    *state.keys.lock().unwrap() = keys.clone();
+    state.replace_local_identity_keys(keys.clone()).unwrap();
     *state.relay_url_override.lock().unwrap() = Some(RELAY.to_string());
 
     tauri::test::mock_builder()
@@ -126,6 +126,7 @@ fn inbound_catalog_head_retains_arrival_witness_through_the_production_reconcile
         event.as_json(),
         RELAY.to_string(),
         app.handle().clone(),
+        &mut Vec::new(),
     )
     .expect("reconcile of a signed 30178 head must succeed");
 

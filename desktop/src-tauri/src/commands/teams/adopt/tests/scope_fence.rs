@@ -26,7 +26,7 @@ fn scope(dir: &std::path::Path, relay: &str) -> RetentionScope {
     RetentionScope {
         db_path,
         relay_url: relay.to_string(),
-        owner_keys: keys,
+        signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     }
 }
 
@@ -78,7 +78,7 @@ fn a_relay_switch_before_commit_is_rejected_and_writes_nothing() {
     // Captured in community A; the workspace is now on community B's relay,
     // still the same owner identity (the community changed, not the login).
     let captured = scope(dir.path(), RELAY_A);
-    let live_signer = captured.owner_keys.public_key().to_hex();
+    let live_signer = captured.owner_signer().public_key().to_hex();
     let (result, committed) = run_adoption_with_live_workspace(
         captured,
         &crate::relay::relay_http_base_url(RELAY_B),
@@ -147,7 +147,7 @@ fn an_unchanged_workspace_passes_the_fence_and_commits() {
     std::fs::write(&teams_path, b"[]").unwrap();
 
     let captured = scope(dir.path(), RELAY_A);
-    let live_signer = captured.owner_keys.public_key().to_hex();
+    let live_signer = captured.owner_signer().public_key().to_hex();
     let (result, committed) = run_adoption_with_live_workspace(
         captured,
         &crate::relay::relay_http_base_url(RELAY_A),

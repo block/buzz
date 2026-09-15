@@ -31,7 +31,7 @@ fn assert_expected_scope(
         }
     }
     if let Some(expected) = expected_signer_pubkey {
-        if expected.trim().to_ascii_lowercase() != scope.owner_keys.public_key().to_hex() {
+        if expected.trim().to_ascii_lowercase() != scope.owner_signer().public_key().to_hex() {
             return Err("active identity changed while resolving Bestie".to_string());
         }
     }
@@ -172,7 +172,7 @@ pub async fn resolve_bestie_conversation(
         assignment
     };
 
-    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let owner_pubkey = scope.owner_signer().public_key().to_hex();
     let channel = super::dms::open_dm_with_scope(
         vec![assignment.agent_pubkey.clone()],
         Some(&scope.relay_url),

@@ -1,3 +1,4 @@
+import { nativeGeneration } from "@/shared/api/nativeIdentitySession";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   createAuthEvent,
@@ -537,6 +538,7 @@ export class RelayClient {
         this.relayUrl = await getRelayWsUrl();
       }
       const wsId = await invoke<number>("plugin:websocket|connect", {
+        expectedGeneration: nativeGeneration(),
         url: this.relayUrl,
         onMessage: this.onMessageChannel,
         config: {},

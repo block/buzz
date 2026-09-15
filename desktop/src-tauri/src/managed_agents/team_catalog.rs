@@ -771,87 +771,33 @@ pub fn build_team_catalog_delete(
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }
 
-/// Purge the retained 30178 head at `d_tag` and enqueue a kind:5 tombstone.
-///
-/// Called from the direct delete path, the boot reconcile (orphaned shared
-/// heads), and immediate retraction when a team can no longer be projected —
-/// all hold the db path and keys but cannot share a single
-/// `tombstone_team_catalog_at`.
-///
-/// Timestamp-domination invariant: the head this tombstone retracts may itself
-/// be future-dated (`monotonic_created_at` bumps a same-second re-publish past
-/// the prior head), and the relay only soft-deletes coordinate versions with
-/// `created_at <=` the tombstone's (NIP-09 replay protection). So the kind:5 is
-/// signed with `monotonic_created_at(Some(head.created_at))` — strictly past
-/// the retained head — read inside the transaction. Signing at wall-clock `now`
-/// would let a future-dated head survive its own tombstone, and because we then
-/// purge the local row (the only retry witness), the team would stay publicly
-/// discoverable forever. With no head, fall back to `monotonic_created_at(None)`.
-///
-/// The two SQLite operations (DELETE retained row + INSERT tombstone) run in a
-/// single transaction. A kill between them would otherwise leave the relay
-/// head shared indefinitely — the A3/I3 failure mode. Reading the head's
-/// `created_at` inside the same `BEGIN IMMEDIATE` closes the read-then-sign
-/// race: no concurrent writer can bump the head between the read and the purge.
-/// Splitting the shared logic here also avoids a cross-module layering violation.
-pub fn tombstone_team_catalog_coordinate(
+// The transactional async writer is separate from the projection builder.
+pub(crate) mod publication;
+mod retraction;
+mod tombstone;
+pub(crate) use retraction::{
+    finish_catalog_retractions, tombstone_team_catalog_coordinate, CatalogRetraction,
+};
+pub(crate) use tombstone::{
+    prepare_team_catalog_tombstone, prepare_team_catalog_tombstone_from_head, CatalogInputs,
+    CatalogTombstone,
+};
+
+#[cfg(test)]
+mod tests;
+
+/// Test adapter: exercise the same PREPARE / SIGN / COMMIT writer without a
+/// Tauri store. Production disk guards live in `tombstone_team_catalog_coordinate`.
+#[cfg(test)]
+pub(crate) async fn tombstone_team_catalog_for_test(
     db_path: &std::path::Path,
     keys: &nostr::Keys,
     d_tag: &str,
 ) -> Result<(), String> {
-    use crate::managed_agents::persona_events::monotonic_created_at;
-    use crate::managed_agents::retention::{
-        get_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
-        RetainedEvent,
-    };
-    use nostr::JsonUtil;
-
-    const KIND_DELETE: u32 = 5;
-
-    let pubkey = keys.public_key().to_hex();
-
-    let conn = open_retention_db(db_path)?;
-    // Single transaction (see the crash and domination invariants above).
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("failed to begin tombstone transaction: {e}"))?;
-    let result = (|| -> Result<(), String> {
-        // Read the head's created_at inside the transaction, then sign the
-        // kind:5 strictly past it so the relay cannot reject the deletion.
-        let prior_head =
-            get_retained_event(&conn, KIND_TEAM_CATALOG, &pubkey, d_tag)?.map(|row| row.created_at);
-        let event = build_team_catalog_delete(d_tag, &pubkey)?
-            .custom_created_at(monotonic_created_at(prior_head))
-            .sign_with_keys(keys)
-            .map_err(|e| format!("failed to sign team catalog tombstone: {e}"))?;
-        let tombstone = RetainedEvent {
-            kind: KIND_DELETE,
-            pubkey: pubkey.clone(),
-            // Key by the target coordinate so the 30176 and 30178 tombstones for
-            // one team occupy distinct rows.
-            d_tag: tombstone_retention_d_tag(KIND_TEAM_CATALOG, d_tag),
-            content: event.content.to_string(),
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        };
-        conn.execute(
-            "DELETE FROM persona_events
-             WHERE kind = ?1 AND pubkey = ?2 AND d_tag = ?3",
-            rusqlite::params![KIND_TEAM_CATALOG, &pubkey, d_tag],
-        )
-        .map_err(|e| format!("failed to purge retained 30178 head: {e}"))?;
-        retain_event(&conn, &tombstone)
-    })();
-    match result {
-        Ok(()) => conn
-            .execute_batch("COMMIT")
-            .map_err(|e| format!("failed to commit tombstone transaction: {e}")),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    prepare_team_catalog_tombstone(db_path, &keys.public_key().to_hex(), d_tag)?
+        .sign(&crate::active_user_signer::ActiveUserSigner::local(
+            keys.clone(),
+        ))
+        .await?
+        .commit()
 }
-
-#[cfg(test)]
-mod tests;

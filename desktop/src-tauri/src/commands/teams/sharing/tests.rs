@@ -1,4 +1,5 @@
 use super::*;
+use crate::active_user_signer::ActiveUserSigner;
 use crate::{
     app_state::build_app_state,
     commands::teams::pending::prepare_team_publication_at,
@@ -82,7 +83,7 @@ async fn spawn_relay(accepted: bool) -> String {
     format!("http://{addr}")
 }
 
-fn prepared(
+async fn prepared(
     db_path: &std::path::Path,
     relay_url: String,
     keys: nostr::Keys,
@@ -90,12 +91,13 @@ fn prepared(
 ) -> PreparedTeamPublication {
     let (_event, retained, team) =
         prepare_team_publication_at(db_path, &keys, &team(), &[member("m1")], Some(shared))
+            .await
             .unwrap();
     PreparedTeamPublication {
         scope: RetentionScope {
             db_path: db_path.to_path_buf(),
             relay_url,
-            owner_keys: keys,
+            signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
         },
         retained,
         team,
@@ -122,7 +124,7 @@ async fn test_accepted_share_reports_published_and_clears_the_pending_flag() {
     let db_path = dir.path().join("retention.db");
     let keys = nostr::Keys::generate();
     let owner = keys.public_key().to_hex();
-    let prepared = prepared(&db_path, spawn_relay(true).await, keys, true);
+    let prepared = prepared(&db_path, spawn_relay(true).await, keys, true).await;
     let state = build_app_state();
 
     let result = publish_prepared_team(&state, prepared).await.unwrap();
@@ -144,7 +146,7 @@ async fn test_relay_rejection_stays_durably_queued() {
     let db_path = dir.path().join("retention.db");
     let keys = nostr::Keys::generate();
     let owner = keys.public_key().to_hex();
-    let prepared = prepared(&db_path, spawn_relay(false).await, keys, true);
+    let prepared = prepared(&db_path, spawn_relay(false).await, keys, true).await;
     let state = build_app_state();
 
     let result = publish_prepared_team(&state, prepared).await.unwrap();
@@ -172,7 +174,7 @@ async fn test_unavailable_relay_stays_durably_queued() {
     let db_path = dir.path().join("retention.db");
     let keys = nostr::Keys::generate();
     let owner = keys.public_key().to_hex();
-    let prepared = prepared(&db_path, relay_url, keys, true);
+    let prepared = prepared(&db_path, relay_url, keys, true).await;
     let state = build_app_state();
 
     let result = publish_prepared_team(&state, prepared).await.unwrap();
@@ -197,12 +199,12 @@ async fn test_unshare_leaves_an_untagged_head_retained_after_publication() {
     let state = build_app_state();
     publish_prepared_team(
         &state,
-        prepared(&db_path, relay_url.clone(), keys.clone(), true),
+        prepared(&db_path, relay_url.clone(), keys.clone(), true).await,
     )
     .await
     .unwrap();
 
-    let result = publish_prepared_team(&state, prepared(&db_path, relay_url, keys, false))
+    let result = publish_prepared_team(&state, prepared(&db_path, relay_url, keys, false).await)
         .await
         .unwrap();
 
@@ -277,7 +279,7 @@ async fn delayed_share_after_delete_never_republishes_the_catalog_head() {
     let (relay_url, relayed_kinds) = spawn_recording_relay().await;
 
     // 1. Prepare the share: a pending 30178 head is retained but not yet sent.
-    let prepared = prepared(&db_path, relay_url.clone(), keys.clone(), true);
+    let prepared = prepared(&db_path, relay_url.clone(), keys.clone(), true).await;
     assert!(
         retained_head(&db_path, &owner).pending_sync,
         "the share is retained pending before any publish"
@@ -285,7 +287,9 @@ async fn delayed_share_after_delete_never_republishes_the_catalog_head() {
 
     // 2. Concurrent delete: purge the retained head and enqueue a newer
     //    30178 tombstone, atomically — exactly what `delete_team` does.
-    tombstone_team_catalog_at(&db_path, &keys, "team-abc").unwrap();
+    tombstone_team_catalog_at(&db_path, &keys, "team-abc")
+        .await
+        .unwrap();
     assert!(
         get_retained_event(
             &open_retention_db(&db_path).unwrap(),
@@ -301,13 +305,13 @@ async fn delayed_share_after_delete_never_republishes_the_catalog_head() {
     // 3. Flush the tombstone to the relay (Carl's contract: the tombstone
     //    lands BEFORE the delayed publish is released).
     let state = build_app_state();
-    *state.keys.lock().unwrap() = keys.clone();
+    state.replace_local_identity_keys(keys.clone()).unwrap();
     *state.relay_url_override.lock().unwrap() = Some(relay_url);
     flush_pending_events_at(
         &db_path,
         &state,
         &prepared.scope.relay_url,
-        &prepared.scope.owner_keys,
+        &prepared.scope.owner_signer(),
     )
     .await
     .unwrap();
@@ -446,10 +450,10 @@ async fn concurrent_flushes_never_land_the_head_after_its_tombstone() {
     let (relay_url, relayed_kinds, gate) = spawn_gated_recording_relay().await;
 
     // A pending 30178 head is retained but not yet published.
-    let _prepared = prepared(&db_path, relay_url.clone(), keys.clone(), true);
+    let _prepared = prepared(&db_path, relay_url.clone(), keys.clone(), true).await;
 
     let state = Arc::new(build_app_state());
-    *state.keys.lock().unwrap() = keys.clone();
+    state.replace_local_identity_keys(keys.clone()).unwrap();
     *state.relay_url_override.lock().unwrap() = Some(relay_url.clone());
 
     // Flush H: publishes the pending head. Its POST blocks in the gated relay,
@@ -461,16 +465,24 @@ async fn concurrent_flushes_never_land_the_head_after_its_tombstone() {
             relay_url.clone(),
             keys.clone(),
         );
-        tokio::spawn(
-            async move { flush_pending_events_at(&db_path, &state, &relay_url, &keys).await },
-        )
+        tokio::spawn(async move {
+            flush_pending_events_at(
+                &db_path,
+                &state,
+                &relay_url,
+                &ActiveUserSigner::local(keys.clone()),
+            )
+            .await
+        })
     };
 
     // Wait until H is inside its head POST — past the re-read, lock held.
     gate.reached_head_post.await.unwrap();
 
     // Concurrent delete commits: purge the head, enqueue the kind-5 tombstone.
-    tombstone_team_catalog_at(&db_path, &keys, "team-abc").unwrap();
+    tombstone_team_catalog_at(&db_path, &keys, "team-abc")
+        .await
+        .unwrap();
 
     // Flush D: would publish the tombstone. Under the lock it blocks on H.
     let d = {
@@ -480,9 +492,15 @@ async fn concurrent_flushes_never_land_the_head_after_its_tombstone() {
             relay_url.clone(),
             keys.clone(),
         );
-        tokio::spawn(
-            async move { flush_pending_events_at(&db_path, &state, &relay_url, &keys).await },
-        )
+        tokio::spawn(async move {
+            flush_pending_events_at(
+                &db_path,
+                &state,
+                &relay_url,
+                &ActiveUserSigner::local(keys.clone()),
+            )
+            .await
+        })
     };
 
     // Give D time to reach its tombstone POST. Serialized, it is parked on the
@@ -593,8 +611,8 @@ async fn a_stalled_scope_does_not_block_publication_in_another_scope() {
     let (relay_b, kinds_b) = spawn_recording_relay().await;
 
     // A pending 30178 head in each scope, retained but not yet published.
-    let _prep_a = prepared(&db_path_a, relay_a.clone(), keys_a.clone(), true);
-    let _prep_b = prepared(&db_path_b, relay_b.clone(), keys_b.clone(), true);
+    let _prep_a = prepared(&db_path_a, relay_a.clone(), keys_a.clone(), true).await;
+    let _prep_b = prepared(&db_path_b, relay_b.clone(), keys_b.clone(), true).await;
 
     let state = Arc::new(build_app_state());
 
@@ -607,7 +625,13 @@ async fn a_stalled_scope_does_not_block_publication_in_another_scope() {
             keys_a.clone(),
         );
         tokio::spawn(async move {
-            let _ = flush_pending_events_at(&db_path_a, &state, &relay_a, &keys_a).await;
+            let _ = flush_pending_events_at(
+                &db_path_a,
+                &state,
+                &relay_a,
+                &ActiveUserSigner::local(keys_a.clone()),
+            )
+            .await;
         })
     };
     reached_a.await.unwrap();
@@ -616,7 +640,12 @@ async fn a_stalled_scope_does_not_block_publication_in_another_scope() {
     // regression (global lock) fails RED instead of hanging the suite.
     let flushed_b = tokio::time::timeout(
         Duration::from_secs(10),
-        flush_pending_events_at(&db_path_b, &state, &relay_b, &keys_b),
+        flush_pending_events_at(
+            &db_path_b,
+            &state,
+            &relay_b,
+            &ActiveUserSigner::local(keys_b.clone()),
+        ),
     )
     .await
     .expect("scope B must not be blocked by scope A's stalled relay")
@@ -659,7 +688,7 @@ async fn a_stalled_relay_releases_the_publisher_lock_within_the_bound() {
     let owner = keys.public_key().to_hex();
 
     let (stall_relay, _kinds, _reached) = spawn_stalling_head_relay().await;
-    let _prep = prepared(&db_path, stall_relay.clone(), keys.clone(), true);
+    let _prep = prepared(&db_path, stall_relay.clone(), keys.clone(), true).await;
     let state = Arc::new(build_app_state());
 
     // First flush hits the stalled relay. It must return within its own bound
@@ -667,7 +696,12 @@ async fn a_stalled_relay_releases_the_publisher_lock_within_the_bound() {
     // production timeout is gone.
     let first = tokio::time::timeout(
         Duration::from_secs(600),
-        flush_pending_events_at(&db_path, &state, &stall_relay, &keys),
+        flush_pending_events_at(
+            &db_path,
+            &state,
+            &stall_relay,
+            &ActiveUserSigner::local(keys.clone()),
+        ),
     )
     .await;
     assert!(
@@ -686,7 +720,12 @@ async fn a_stalled_relay_releases_the_publisher_lock_within_the_bound() {
     // fire it instead of completing.
     let second = tokio::time::timeout(
         Duration::from_secs(600),
-        flush_pending_events_at(&db_path, &state, &stall_relay, &keys),
+        flush_pending_events_at(
+            &db_path,
+            &state,
+            &stall_relay,
+            &ActiveUserSigner::local(keys.clone()),
+        ),
     )
     .await;
     assert!(

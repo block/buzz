@@ -6,9 +6,10 @@
 use super::project_git_workflow::{
     normalize_event_id, project_owner_identity, validate_repo_address,
 };
+use crate::active_user_signer::ActiveUserSigner;
 use crate::app_state::AppState;
-use crate::relay::submit_signed_event_with_keys;
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
+use crate::relay::submit_signed_event_at_with_auth;
+use nostr::{Event, EventBuilder, JsonUtil, Kind, Tag, Timestamp};
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
@@ -72,8 +73,8 @@ struct LabeledRecipientNote<'a> {
 /// Shared builder for labeled kind:1 notes tagging recipients (`p`) on a
 /// root event — the convention used by both PR review requests
 /// (`t: review-request`) and issue assignments (`t: assignment`).
-fn build_labeled_recipient_note_event(
-    keys: &Keys,
+async fn build_labeled_recipient_note_event(
+    keys: &ActiveUserSigner,
     note: LabeledRecipientNote<'_>,
 ) -> Result<String, String> {
     let LabeledRecipientNote {
@@ -120,14 +121,14 @@ fn build_labeled_recipient_note_event(
     if let Some(created_at) = created_at {
         builder = builder.custom_created_at(Timestamp::from_secs(created_at));
     }
-    builder
-        .sign_with_keys(keys)
+    keys.sign_event(builder)
+        .await
         .map(|event| event.as_json())
         .map_err(|error| format!("sign {label} note: {error}"))
 }
 
-fn build_review_request_event(
-    keys: &Keys,
+async fn build_review_request_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     pull_request_id: &str,
     reviewers: &[String],
@@ -150,11 +151,12 @@ fn build_review_request_event(
             created_at: None,
         },
     )
+    .await
 }
 
 #[cfg(test)]
-fn build_issue_assignment_event(
-    keys: &Keys,
+async fn build_issue_assignment_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     issue_id: &str,
     assignees: &[String],
@@ -170,11 +172,12 @@ fn build_issue_assignment_event(
         created_at,
         IssueAssigneeOperation::Assign,
     )
+    .await
 }
 
 #[cfg(test)]
-fn build_issue_unassignment_event(
-    keys: &Keys,
+async fn build_issue_unassignment_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     issue_id: &str,
     assignees: &[String],
@@ -190,11 +193,12 @@ fn build_issue_unassignment_event(
         created_at,
         IssueAssigneeOperation::Unassign,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_issue_assignee_operation_event(
-    keys: &Keys,
+async fn build_issue_assignee_operation_event(
+    keys: &ActiveUserSigner,
     repo_address: &str,
     issue_id: &str,
     assignees: &[String],
@@ -219,6 +223,7 @@ fn build_issue_assignee_operation_event(
             created_at,
         },
     )
+    .await
 }
 
 #[tauri::command]
@@ -232,16 +237,25 @@ pub async fn sign_project_pull_request_review_request(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
-    let event = Event::from_json(build_review_request_event(
-        &identity.keys,
-        &input.repo_address,
-        &input.pull_request_id,
-        &input.reviewers,
-        &input.reviewer_label,
-    )?)
+    let event = Event::from_json(
+        build_review_request_event(
+            &identity.signer,
+            &input.repo_address,
+            &input.pull_request_id,
+            &input.reviewers,
+            &input.reviewer_label,
+        )
+        .await?,
+    )
     .map_err(|error| format!("parse signed review request: {error}"))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_at_with_auth(
+        &event,
+        &state,
+        &identity.relay_base,
+        &identity.signer,
+        identity.auth_tag.as_deref(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -274,18 +288,27 @@ async fn sign_project_issue_assignee_operation(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
-    let event = Event::from_json(build_issue_assignee_operation_event(
-        &identity.keys,
-        &input.repo_address,
-        &input.issue_id,
-        &input.assignees,
-        &input.assignee_label,
-        Some(input.created_at),
-        operation,
-    )?)
+    let event = Event::from_json(
+        build_issue_assignee_operation_event(
+            &identity.signer,
+            &input.repo_address,
+            &input.issue_id,
+            &input.assignees,
+            &input.assignee_label,
+            Some(input.created_at),
+            operation,
+        )
+        .await?,
+    )
     .map_err(|error| format!("parse signed issue {}: {error}", operation.label()))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_at_with_auth(
+        &event,
+        &state,
+        &identity.relay_base,
+        &identity.signer,
+        identity.auth_tag.as_deref(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -296,21 +319,22 @@ mod tests {
     };
     use nostr::{Event, JsonUtil, Keys};
 
-    #[test]
-    fn issue_assignment_is_signed_by_repository_owner() {
+    #[tokio::test]
+    async fn issue_assignment_is_signed_by_repository_owner() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let assignee = "b".repeat(64);
         let repo_address = format!("30617:{owner}:buzz");
         let event = Event::from_json(
             build_issue_assignment_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &repo_address,
                 &"d".repeat(64),
                 std::slice::from_ref(&assignee),
                 "Bob",
                 None,
             )
+            .await
             .unwrap(),
         )
         .unwrap();
@@ -329,56 +353,60 @@ mod tests {
         assert!(event.verify().is_ok());
     }
 
-    #[test]
-    fn issue_assignment_rejects_invalid_metadata() {
+    #[tokio::test]
+    async fn issue_assignment_rejects_invalid_metadata() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let repo_address = format!("30617:{owner}:buzz");
 
         assert!(build_issue_assignment_event(
-            &keys,
+            &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
             &repo_address,
             &"d".repeat(64),
             &[],
             "Bob",
             None,
         )
+        .await
         .is_err());
         assert!(build_issue_assignment_event(
-            &keys,
+            &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
             &repo_address,
             &"d".repeat(64),
             &["b".repeat(64)],
             "  ",
             None,
         )
+        .await
         .is_err());
         assert!(build_issue_assignment_event(
-            &keys,
+            &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
             &repo_address,
             "not-an-event-id",
             &["b".repeat(64)],
             "Bob",
             None,
         )
+        .await
         .is_err());
     }
 
-    #[test]
-    fn issue_unassignment_is_signed_by_repository_owner() {
+    #[tokio::test]
+    async fn issue_unassignment_is_signed_by_repository_owner() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let assignee = "b".repeat(64);
         let repo_address = format!("30617:{owner}:buzz");
         let event = Event::from_json(
             build_issue_unassignment_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &repo_address,
                 &"d".repeat(64),
                 std::slice::from_ref(&assignee),
                 "Bob",
                 Some(123),
             )
+            .await
             .unwrap(),
         )
         .unwrap();
@@ -396,20 +424,21 @@ mod tests {
         assert!(event.verify().is_ok());
     }
 
-    #[test]
-    fn review_request_is_signed_by_repository_owner() {
+    #[tokio::test]
+    async fn review_request_is_signed_by_repository_owner() {
         let keys = Keys::generate();
         let owner = keys.public_key().to_hex();
         let reviewer = "b".repeat(64);
         let repo_address = format!("30617:{owner}:buzz");
         let event = Event::from_json(
             build_review_request_event(
-                &keys,
+                &crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
                 &repo_address,
                 &"d".repeat(64),
                 std::slice::from_ref(&reviewer),
                 "Bob",
             )
+            .await
             .unwrap(),
         )
         .unwrap();

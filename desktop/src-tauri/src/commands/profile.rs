@@ -10,10 +10,7 @@ use crate::{
     managed_agents::persona_events::monotonic_created_at,
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
     nostr_convert,
-    relay::{
-        query_relay, query_relay_at_with_keys, relay_http_base_url, submit_event,
-        submit_event_at_with_keys,
-    },
+    relay::{query_relay, query_relay_at_with_signer, relay_http_base_url, submit_event_at},
 };
 
 #[tauri::command]
@@ -42,17 +39,22 @@ pub async fn update_profile(
     avatar_url: Option<String>,
     about: Option<String>,
     nip05_handle: Option<String>,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<ProfileInfo, String> {
     // Read-merge-write: kind 0 is a full profile snapshot.
-    let my_pubkey = current_pubkey_hex(&state)?;
-    let prior_events = query_relay(
+    let (signer, relay_base) = capture_profile_scope(&state, expected_generation, None)?;
+    let my_pubkey = signer.public_key().to_hex();
+    let prior_events = query_relay_at_with_signer(
         &state,
+        &relay_base,
         &[serde_json::json!({
             "kinds": [0],
             "authors": [my_pubkey],
             "limit": 1
         })],
+        &signer,
+        None,
     )
     .await?;
 
@@ -78,16 +80,19 @@ pub async fn update_profile(
         .or_else(|| current.get("nip05").and_then(Value::as_str));
 
     let builder = events::build_profile(dn, name, picture, ab, nip05)?;
-    submit_event(builder, &state).await?;
+    submit_event_at(builder, &state, &relay_base, &signer).await?;
 
     // Re-fetch to return canonical profile.
-    let events = query_relay(
+    let events = query_relay_at_with_signer(
         &state,
+        &relay_base,
         &[serde_json::json!({
             "kinds": [0],
-            "authors": [current_pubkey_hex(&state)?],
+            "authors": [my_pubkey],
             "limit": 1
         })],
+        &signer,
+        None,
     )
     .await?;
 
@@ -95,7 +100,7 @@ pub async fn update_profile(
         .first()
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+        .unwrap_or_else(|| empty_profile_info(&my_pubkey)))
 }
 
 #[tauri::command]
@@ -104,17 +109,18 @@ pub async fn update_profile_at_relay(
     expected_pubkey: String,
     expected_avatar_url: Option<String>,
     avatar_url: String,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<ProfileInfo, String> {
-    let signer = capture_expected_signer(&state, &expected_pubkey)?;
-
-    let api_base_url = relay_http_base_url(&relay_url);
+    let (signer, api_base_url) =
+        capture_profile_scope(&state, expected_generation, Some(&relay_url))?;
+    assert_expected_profile_identity(&signer, &expected_pubkey)?;
     let filter = serde_json::json!({
         "kinds": [0],
         "authors": [expected_pubkey],
         "limit": 1
     });
-    let prior_events = query_relay_at_with_keys(
+    let prior_events = query_relay_at_with_signer(
         &state,
         &api_base_url,
         std::slice::from_ref(&filter),
@@ -137,9 +143,10 @@ pub async fn update_profile_at_relay(
     }
 
     let builder = build_deferred_profile_event(&current, &avatar_url, prior_event)?;
-    submit_event_at_with_keys(builder, &state, &api_base_url, &signer).await?;
+    submit_event_at(builder, &state, &api_base_url, &signer).await?;
 
-    let events = query_relay_at_with_keys(&state, &api_base_url, &[filter], &signer, None).await?;
+    let events =
+        query_relay_at_with_signer(&state, &api_base_url, &[filter], &signer, None).await?;
     Ok(events
         .first()
         .map(nostr_convert::profile_info_from_event)
@@ -165,12 +172,30 @@ fn build_deferred_profile_event(
     )
 }
 
-fn capture_expected_signer(state: &AppState, expected_pubkey: &str) -> Result<nostr::Keys, String> {
-    let signer = state.signing_keys()?;
+// Capture one destination before acquiring remote workspace authority. The caller's
+// generation is mandatory remotely, including for delayed same-pubkey callbacks.
+fn capture_profile_scope(
+    state: &AppState,
+    expected_generation: Option<u64>,
+    explicit_relay: Option<&str>,
+) -> Result<(crate::active_user_signer::ActiveUserSigner, String), String> {
+    let configured_relay = crate::relay::relay_ws_url_with_override(state);
+    let configured_base = relay_http_base_url(&configured_relay);
+    let destination = explicit_relay
+        .map(relay_http_base_url)
+        .unwrap_or(configured_base.clone());
+    let signer = state.renderer_signer_at(expected_generation, &destination)?;
+    Ok((signer, destination))
+}
+
+fn assert_expected_profile_identity(
+    signer: &crate::active_user_signer::ActiveUserSigner,
+    expected_pubkey: &str,
+) -> Result<(), String> {
     if signer.public_key().to_hex() != expected_pubkey {
         return Err("profile identity changed before avatar save".to_string());
     }
-    Ok(signer)
+    Ok(())
 }
 
 fn normalized_avatar_url(avatar_url: Option<&str>) -> Option<&str> {
@@ -393,8 +418,7 @@ pub async fn get_presence(
 }
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
+    Ok(state.identity_public_key()?.to_hex())
 }
 
 fn current_pubkey_hex_unwrap(state: &AppState) -> String {
@@ -423,17 +447,25 @@ mod tests {
         let original = state.signing_keys().expect("signable identity");
         let original_pubkey = original.public_key().to_hex();
 
-        let captured = capture_expected_signer(&state, &original_pubkey)
+        let (captured, _) = capture_profile_scope(&state, None, None)
             .expect("matching identity should be captured");
-        *state.keys.lock().expect("lock keys") = nostr::Keys::generate();
+        assert_expected_profile_identity(&captured, &original_pubkey).unwrap();
+        state
+            .replace_local_identity_keys(nostr::Keys::generate())
+            .unwrap();
 
         assert_eq!(captured.public_key().to_hex(), original_pubkey);
         assert_ne!(
-            state.keys.lock().expect("lock keys").public_key().to_hex(),
+            state
+                .local_identity_keys()
+                .expect("local keys")
+                .public_key()
+                .to_hex(),
             original_pubkey
         );
         assert_eq!(
-            capture_expected_signer(&state, &original_pubkey).unwrap_err(),
+            assert_expected_profile_identity(&state.active_signer().unwrap(), &original_pubkey)
+                .unwrap_err(),
             "profile identity changed before avatar save"
         );
     }

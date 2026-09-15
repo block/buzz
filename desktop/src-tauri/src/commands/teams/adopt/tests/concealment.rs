@@ -27,7 +27,7 @@ fn scope(dir: &std::path::Path) -> RetentionScope {
     RetentionScope {
         db_path,
         relay_url: RELAY.to_string(),
-        owner_keys: keys,
+        signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     }
 }
 
@@ -64,7 +64,7 @@ fn a_concealed_head_is_refused_and_writes_no_store_or_retention_row() {
     let resolved = RetentionScope {
         db_path: scope.db_path.clone(),
         relay_url: scope.relay_url.clone(),
-        owner_keys: scope.owner_keys.clone(),
+        signer: scope.owner_signer(),
     };
     let result = (|| {
         let content = verified_head_content(&event, &source, &event.id.to_hex())?;
@@ -82,7 +82,7 @@ fn a_concealed_head_is_refused_and_writes_no_store_or_retention_row() {
         )
     })();
 
-    let error = result.expect_err("a concealed head must be rejected");
+    let error = result.err().expect("a concealed head must be rejected");
     assert!(
         error.contains("prohibited invisible or formatting character"),
         "the rejection must name the concealment rule: {error}"

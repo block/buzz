@@ -85,11 +85,18 @@ pub async fn add_team_from_catalog(
     };
 
     let app_for_write = app.clone();
-    tokio::task::spawn_blocking(move || {
+    let (result, work) = tokio::task::spawn_blocking(move || {
         apply::add_verified_team(&app_for_write, scope, &source, &content)
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    for work in work.personas {
+        crate::commands::personas::finish_persona_pending(&app, work).await;
+    }
+    if let Some(work) = work.team {
+        super::finish_team_pending(&app, work).await;
+    }
+    Ok(result)
 }
 
 fn normalized_event_id(value: &str) -> Result<String, String> {
@@ -128,11 +135,11 @@ async fn verified_catalog_head(
     // live workspace: a switch mid-command must not retarget the verification
     // fetch to a different tenant than the one the adoption commits into.
     let api_base_url = crate::relay::relay_http_base_url(&scope.relay_url);
-    let events = crate::relay::query_relay_at_with_keys(
+    let events = crate::relay::query_relay_at_with_signer(
         state,
         &api_base_url,
         &[filter],
-        &scope.owner_keys,
+        &scope.owner_signer(),
         None,
     )
     .await

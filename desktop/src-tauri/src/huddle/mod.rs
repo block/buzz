@@ -187,13 +187,14 @@ pub fn get_voice_input_mode(state: State<'_, AppState>) -> Result<VoiceInputMode
 /// If ANY step fails (including channel creation), the orphaned ephemeral
 /// channel is archived (best-effort) and state is reset to Idle.
 #[tauri::command]
-pub async fn start_huddle(
+pub async fn start_huddle<R: tauri::Runtime>(
     parent_channel_id: String,
     member_pubkeys: Vec<String>,
     channel_name: Option<String>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<HuddleJoinInfo, String> {
+    require_owned_human_audio(&state)?;
     // Validate inputs at the Tauri boundary.
     if member_pubkeys.len() > MAX_HUDDLE_AGENTS {
         return Err(format!(
@@ -309,9 +310,8 @@ pub async fn start_huddle(
                         successful_agents.clone();
                     hs.maybe_auto_enable_transcription_for_agents();
                     let own_pubkey = state
-                        .keys
-                        .lock()
-                        .map(|k| k.public_key().to_hex())
+                        .identity_public_key()
+                        .map(|key| key.to_hex())
                         .unwrap_or_default();
                     let mut participants = successful_agents.clone();
                     if !own_pubkey.is_empty() && !participants.contains(&own_pubkey) {
@@ -410,6 +410,7 @@ pub async fn join_huddle(
     huddle_thread_event_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<HuddleJoinInfo, String> {
+    require_owned_human_audio(&state)?;
     // Transition to Connecting.
     let huddle_generation = {
         let mut hs = state.huddle()?;
@@ -429,9 +430,8 @@ pub async fn join_huddle(
 
     // Seed participant list with own pubkey as a fallback until relay responds.
     let own_pubkey = state
-        .keys
-        .lock()
-        .map(|k| k.public_key().to_hex())
+        .identity_public_key()
+        .map(|key| key.to_hex())
         .unwrap_or_default();
 
     let committed = {
@@ -929,4 +929,15 @@ pub async fn speak_agent_message(
     .inspect_err(|_| {
         eprintln!("buzz-desktop: tts stage=queue status=failed reason=closed route_id={route_id}")
     })
+}
+
+/// Temporary admission gate until human audio tasks and handshakes are owned by
+/// the captured native auth generation. Independently keyed agent audio bypasses it.
+fn require_owned_human_audio(state: &AppState) -> Result<(), String> {
+    if state.is_remote_identity() {
+        return Err(
+            "remote human huddles are unsupported until generation-owned audio lifecycle".into(),
+        );
+    }
+    Ok(())
 }

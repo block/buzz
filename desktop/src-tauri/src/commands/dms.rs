@@ -8,7 +8,7 @@ use crate::{
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, parse_command_response,
-        query_relay_at_with_keys, submit_event, submit_event_at_with_keys,
+        query_relay_at_with_signer, submit_event, submit_event_at,
     },
 };
 
@@ -51,19 +51,19 @@ pub(crate) async fn open_dm_with_scope(
     // NIP-98 auth of every request in this command.
     let api_base_url = crate::relay::relay_api_base_url_with_override(state);
     assert_expected_relay_scope(expected_relay_url, &api_base_url)?;
-    let keys = state.signing_keys()?;
+    let keys = state.active_signer()?;
     assert_expected_signer(expected_signer_pubkey, &keys.public_key().to_hex())?;
 
     // Submit a kind:41010 dm-open event; the relay replies with the channel id
     // in its OK message payload.
     let builder = events::build_dm_open(&pubkeys)?;
-    let result = submit_event_at_with_keys(builder, state, &api_base_url, &keys).await?;
+    let result = submit_event_at(builder, state, &api_base_url, &keys).await?;
     let ack: OpenDmAck = parse_command_response(&result.message)?;
 
     // Re-fetch the channel metadata so the frontend gets the same `ChannelInfo`
     // shape as `get_channel_details` — through the same scope-checked base and
     // the same pinned identity.
-    let metadata = query_relay_at_with_keys(
+    let metadata = query_relay_at_with_signer(
         state,
         &api_base_url,
         &[serde_json::json!({

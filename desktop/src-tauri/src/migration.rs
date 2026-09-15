@@ -69,9 +69,26 @@ pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_app_data(src, dst, false)
+}
+
+fn copy_legacy_app_data(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_app_data(
+        src,
+        dst,
+        crate::native_identity::SignerMode::compiled().is_remote(),
+    )
+}
+
+// Only the app-data root owns the human identity files. Agent/repository and
+// ephemeral pairing identities are separate capabilities, not user fallback.
+fn copy_app_data(src: &Path, dst: &Path, keyless: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        if keyless && entry.file_name().to_string_lossy().starts_with("identity.") {
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&src_path)?;
@@ -208,7 +225,7 @@ pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
     if !legacy_dir.exists() {
         return;
     }
-    match copy_dir_all(&legacy_dir, &current_dir) {
+    match copy_legacy_app_data(&legacy_dir, &current_dir) {
         Ok(()) => eprintln!(
             "buzz-desktop: app-data-migration: copied legacy data from {} to {}",
             legacy_dir.display(),
@@ -783,6 +800,11 @@ fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now:
 /// - The canonical dir must differ from the current dir (skip if we ARE canonical)
 /// - The canonical dir must exist
 pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
+    // Shared-human-identity development mode never applies to remote custody;
+    // do not even read BUZZ_PRIVATE_KEY on this path.
+    if crate::native_identity::SignerMode::compiled().is_remote() {
+        return;
+    }
     // Guard: only runs when sharing identity with a worktree.
     let is_shared = std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
@@ -1427,3 +1449,7 @@ mod team_dir_tests;
 #[cfg(test)]
 #[path = "migration_sync_guard_tests.rs"]
 mod sync_guard_tests;
+
+#[cfg(test)]
+#[path = "migration_keyless_tests.rs"]
+mod keyless_tests;

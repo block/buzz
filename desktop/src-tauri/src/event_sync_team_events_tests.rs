@@ -22,8 +22,8 @@ fn one_team() -> serde_json::Value {
     }])
 }
 
-#[test]
-fn migrate_teams_writes_signed_retention_rows() {
+#[tokio::test]
+async fn migrate_teams_writes_signed_retention_rows() {
     use crate::managed_agents::retention::{get_retained_event, open_retention_db};
     use buzz_core_pkg::kind::KIND_TEAM;
 
@@ -32,7 +32,7 @@ fn migrate_teams_writes_signed_retention_rows() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "team-alpha")
@@ -44,8 +44,8 @@ fn migrate_teams_writes_signed_retention_rows() {
     assert!(row.content.contains("Alpha"));
 }
 
-#[test]
-fn migrate_teams_skips_builtins() {
+#[tokio::test]
+async fn migrate_teams_skips_builtins() {
     use crate::managed_agents::retention::{get_retained_event, open_retention_db};
     use buzz_core_pkg::kind::KIND_TEAM;
 
@@ -63,7 +63,7 @@ fn migrate_teams_skips_builtins() {
     );
     let keys = nostr::Keys::generate();
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 0);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 0);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     assert!(get_retained_event(
@@ -76,18 +76,18 @@ fn migrate_teams_skips_builtins() {
     .is_none());
 }
 
-#[test]
-fn migrate_teams_unchanged_second_run_is_noop() {
+#[tokio::test]
+async fn migrate_teams_unchanged_second_run_is_noop() {
     let base = tempfile::tempdir().unwrap();
     write_base_teams(base.path(), &one_team());
     let keys = nostr::Keys::generate();
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 0);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 0);
 }
 
-#[test]
-fn migrate_teams_edited_team_re_retains_pending() {
+#[tokio::test]
+async fn migrate_teams_edited_team_re_retains_pending() {
     use crate::managed_agents::retention::{get_retained_event, mark_synced, open_retention_db};
     use buzz_core_pkg::kind::KIND_TEAM;
 
@@ -96,7 +96,7 @@ fn migrate_teams_edited_team_re_retains_pending() {
     let keys = nostr::Keys::generate();
     let pubkey = keys.public_key().to_hex();
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "team-alpha")
@@ -117,7 +117,7 @@ fn migrate_teams_edited_team_re_retains_pending() {
     edited.as_array_mut().unwrap()[0]["description"] = serde_json::json!("Renamed team");
     write_base_teams(base.path(), &edited);
 
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 1);
 
     let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
     let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "team-alpha")
@@ -127,11 +127,11 @@ fn migrate_teams_edited_team_re_retains_pending() {
     assert!(row.content.contains("Renamed team"));
 }
 
-#[test]
-fn migrate_teams_no_file_is_noop() {
+#[tokio::test]
+async fn migrate_teams_no_file_is_noop() {
     let base = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
-    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 0);
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).await.unwrap(), 0);
 }
 
 /// Error-contract for the fatal team leg. `run_event_sync` propagates a team
@@ -140,12 +140,12 @@ fn migrate_teams_no_file_is_noop() {
 /// This proves the leg genuinely surfaces failure (rather than logging and
 /// swallowing) on an unreadable store — the precondition that made the
 /// propagation load-bearing.
-#[test]
-fn migrate_teams_surfaces_error_on_unparseable_store() {
+#[tokio::test]
+async fn migrate_teams_surfaces_error_on_unparseable_store() {
     let base = tempfile::tempdir().unwrap();
     std::fs::write(base.path().join("teams.json"), "{ not valid json").unwrap();
     let keys = nostr::Keys::generate();
-    assert!(migrate_teams_in_dir(base.path(), &keys).is_err());
+    assert!(migrate_teams_in_dir(base.path(), &keys).await.is_err());
 }
 
 /// Build a signed inbound team head at an explicit `created_at`, mirroring a
@@ -203,8 +203,8 @@ fn stale_inbound_head(
 /// bare membership. Retention order is the only difference between the lanes;
 /// `apply_workspace` awaiting the reconcile (see `commands/workspace.rs`) is
 /// what forces the reconcile-first order in production.
-#[test]
-fn reconcile_first_makes_stale_inbound_team_head_lose() {
+#[tokio::test]
+async fn reconcile_first_makes_stale_inbound_team_head_lose() {
     use crate::managed_agents::retention::{
         get_retained_event, open_retention_db, retain_inbound_event, InboundOutcome,
     };
@@ -230,7 +230,14 @@ fn reconcile_first_makes_stale_inbound_team_head_lose() {
     let ordered_db = ordered.path().join("retention.db");
     write_base_teams(ordered.path(), &repaired);
     assert_eq!(
-        migrate_teams_in_dir_at(ordered.path(), &keys, &ordered_db).unwrap(),
+        migrate_teams_in_dir_at(
+            ordered.path(),
+            &ActiveUserSigner::local(keys.clone()),
+            &ordered_db,
+            &std::sync::Mutex::new(())
+        )
+        .await
+        .unwrap(),
         1
     );
     let conn = open_retention_db(&ordered_db).unwrap();

@@ -2,6 +2,7 @@
 //! projections and their NIP-09 tombstones. Extracted from the parent module to
 //! keep it under the file-size cap.
 
+use crate::managed_agents::team_catalog::{finish_catalog_retractions, CatalogRetraction};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
@@ -24,6 +25,7 @@ mod catalog_reconcile_tests;
 
 #[derive(Debug)]
 enum InboundRuntimeRefresh {
+    Deferred(crate::managed_agents::definition_mutation::DefinitionWaiter),
     Local {
         pubkey: String,
         relay_urls: Vec<String>,
@@ -77,12 +79,10 @@ pub async fn reconcile_inbound_persona_event(
     arrival_relay_url: String,
     app: AppHandle,
 ) -> Result<(), String> {
-    let blocking_app = app.clone();
-    let restart = tokio::task::spawn_blocking(move || {
-        reconcile_inbound_persona_event_blocking(event_json, arrival_relay_url, blocking_app)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    let (restart, work) =
+        reconcile_inbound_definition(&event_json, &arrival_relay_url, &app).await?;
+
+    finish_catalog_retractions(&app, work).await;
 
     match restart {
         Some(InboundRuntimeRefresh::Local { pubkey, relay_urls }) => {
@@ -141,14 +141,47 @@ pub async fn reconcile_inbound_persona_event(
             })?;
         }
         None => {}
+        Some(InboundRuntimeRefresh::Deferred(_)) => unreachable!("deferred arrivals retried above"),
     }
     Ok(())
+}
+
+// Shared async dispatcher for the command and real-store ordering regressions.
+// Never hold the store lock or a SQLite connection while waiting for a local
+// save's signature. Retry the full arrival decision, not just its old outcome.
+async fn reconcile_inbound_definition<R: tauri::Runtime>(
+    event_json: &str,
+    arrival_relay_url: &str,
+    app: &AppHandle<R>,
+) -> Result<(Option<InboundRuntimeRefresh>, Vec<CatalogRetraction>), String> {
+    loop {
+        let app = app.clone();
+        let event_json = event_json.to_owned();
+        let arrival_relay_url = arrival_relay_url.to_owned();
+        let (result, work) = tokio::task::spawn_blocking(move || {
+            let mut work = Vec::new();
+            let result = reconcile_inbound_persona_event_blocking(
+                event_json,
+                arrival_relay_url,
+                app,
+                &mut work,
+            )?;
+            Ok::<_, String>((result, work))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+        match result {
+            Some(InboundRuntimeRefresh::Deferred(waiter)) => waiter.wait().await,
+            result => return Ok((result, work)),
+        }
+    }
 }
 
 fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     event_json: String,
     arrival_relay_url: String,
     app: AppHandle<R>,
+    work: &mut Vec<CatalogRetraction>,
 ) -> Result<Option<InboundRuntimeRefresh>, String> {
     use crate::managed_agents::{
         agent_events::managed_agent_content_from_event,
@@ -179,8 +212,7 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     // in its `a` tag (`<target_kind>:<owner>:<d_tag>`). Handled before the
     // upsert dispatch because its coordinate and retention key differ.
     if kind == KIND_DELETION {
-        reconcile_inbound_tombstone(&event, &arrival_relay_url, &app, &state)?;
-        return Ok(None);
+        return reconcile_inbound_tombstone(&event, &arrival_relay_url, &app, &state, work);
     }
 
     // Non-deletion upserts (30175/76/77) and the owner's own 30178 catalog head
@@ -233,6 +265,14 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
     else {
         return Ok(None);
     };
+    if let Some(waiter) = crate::managed_agents::definition_mutation::pending(
+        &scope.db_path,
+        &event.pubkey.to_hex(),
+        kind,
+        &d_tag,
+    )? {
+        return Ok(Some(InboundRuntimeRefresh::Deferred(waiter)));
+    }
     let conn = open_retention_db(&scope.db_path)?;
     let inbound_retained_event = RetainedEvent {
         kind,
@@ -291,11 +331,14 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
                 .map(|record| record.id.clone())
             {
                 drop(personas);
-                super::super::teams::refresh_team_catalog_heads_for_persona(
+                match super::super::teams::prepare_catalog_persona_refresh_in_scope(
                     &app,
-                    &state,
+                    &scope,
                     &persona_id,
-                );
+                ) {
+                    Ok(jobs) => work.extend(jobs),
+                    Err(e) => eprintln!("buzz-desktop: inbound catalog refresh: {e}"),
+                }
             }
         }
         KIND_TEAM => {
@@ -322,7 +365,11 @@ fn reconcile_inbound_persona_event_blocking<R: tauri::Runtime>(
             let teams = load_teams(&app)?;
             let personas = load_personas(&app)?;
             if let Some(team) = teams.iter().find(|record| record.id == team_id) {
-                super::super::teams::refresh_team_catalog_head(&app, &state, team, &personas);
+                match super::super::teams::prepare_catalog_refresh_in_scope(&scope, team, &personas)
+                {
+                    Ok(job) => work.extend(job),
+                    Err(e) => eprintln!("buzz-desktop: inbound catalog refresh: {e}"),
+                }
             }
         }
         KIND_MANAGED_AGENT => {
@@ -522,7 +569,8 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
     arrival_relay_url: &str,
     app: &AppHandle<R>,
     state: &AppState,
-) -> Result<(), String> {
+    work: &mut Vec<CatalogRetraction>,
+) -> Result<Option<InboundRuntimeRefresh>, String> {
     use crate::managed_agents::{
         load_managed_agents, load_teams,
         retention::{
@@ -537,13 +585,13 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
     use nostr::JsonUtil;
 
     let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
-        return Ok(()); // no routable coordinate — nothing to delete
+        return Ok(None); // no routable coordinate — nothing to delete
     };
     if !matches!(
         target_kind,
         KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_TEAM_CATALOG
     ) {
-        return Ok(()); // deletion for a kind we don't track locally
+        return Ok(None); // deletion for a kind we don't track locally
     }
 
     let _store_guard = state
@@ -559,8 +607,16 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
     let Some(scope) =
         crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
     else {
-        return Ok(());
+        return Ok(None);
     };
+    if let Some(waiter) = crate::managed_agents::definition_mutation::pending(
+        &scope.db_path,
+        &event.pubkey.to_hex(),
+        target_kind,
+        &target_d_tag,
+    )? {
+        return Ok(Some(InboundRuntimeRefresh::Deferred(waiter)));
+    }
     let conn = open_retention_db(&scope.db_path)?;
     let owner_hex = event.pubkey.to_hex();
     let inbound_tombstone = RetainedEvent {
@@ -624,7 +680,7 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
         },
     )?;
     if outcome == InboundOutcome::Skipped {
-        return Ok(());
+        return Ok(None);
     }
 
     // Converge the catalog after a tracked removal, matching the local delete
@@ -636,11 +692,19 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
     // swallows so a retention hiccup never blocks the disk-authoritative delete.
     match target_kind {
         KIND_TEAM => {
-            super::super::teams::tombstone_team_catalog_head(app, state, &target_d_tag);
+            match super::super::teams::prepare_catalog_delete_in_scope(app, &scope, &target_d_tag) {
+                Ok(job) => work.push(job),
+                Err(e) => eprintln!("buzz-desktop: inbound catalog delete: {e}"),
+            }
         }
         KIND_PERSONA => {
             if let Some(persona_id) = &deleted_persona_id {
-                super::super::teams::refresh_team_catalog_heads_for_persona(app, state, persona_id);
+                match super::super::teams::prepare_catalog_persona_refresh_in_scope(
+                    app, &scope, persona_id,
+                ) {
+                    Ok(jobs) => work.extend(jobs),
+                    Err(e) => eprintln!("buzz-desktop: inbound catalog refresh: {e}"),
+                }
             }
         }
         _ => {}
@@ -652,7 +716,7 @@ fn reconcile_inbound_tombstone<R: tauri::Runtime>(
     // an upsert and the Agents tab must drop the tombstoned record without restart.
     let _ = app.emit("agents-data-changed", ());
 
-    Ok(())
+    Ok(None)
 }
 
 /// Extract the `d` tag value from an event, the match key for team (= team id)
@@ -851,4 +915,33 @@ fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamE
             updated_at: now_iso(),
         }),
     }
+}
+
+#[cfg(test)]
+pub(super) fn reconcile_for_test<R: tauri::Runtime>(
+    event_json: String,
+    arrival_relay_url: String,
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let result = reconcile_inbound_persona_event_blocking(
+        event_json,
+        arrival_relay_url,
+        app,
+        &mut Vec::new(),
+    )?;
+    if matches!(result, Some(InboundRuntimeRefresh::Deferred(_))) {
+        return Err("use async inbound dispatcher while a local mutation is signing".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) async fn reconcile_async_for_test<R: tauri::Runtime>(
+    event_json: String,
+    arrival_relay_url: String,
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let (_, work) = reconcile_inbound_definition(&event_json, &arrival_relay_url, &app).await?;
+    finish_catalog_retractions(&app, work).await;
+    Ok(())
 }

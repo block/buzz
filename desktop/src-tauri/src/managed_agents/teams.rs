@@ -244,7 +244,10 @@ fn agents_referencing_team<'a>(
 /// vec is empty. For catalog-adopted teams (`catalog_source` present), member
 /// copies matching this publication's provenance are deactivated (re-activatable
 /// on re-add), not deleted.
-pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<String>, String> {
+pub fn delete_team_with_cascade<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    team_id: &str,
+) -> Result<Vec<String>, String> {
     let mut teams = load_teams(app)?;
     let team = teams
         .iter()

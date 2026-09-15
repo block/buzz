@@ -79,9 +79,8 @@ fn managed_policy_filters(
 
 fn current_user_pubkey(state: &AppState) -> Result<String, String> {
     state
-        .keys
-        .lock()
-        .map(|keys| keys.public_key().to_hex())
+        .identity_public_key()
+        .map(|key| key.to_hex())
         .map_err(|error| error.to_string())
 }
 
@@ -457,15 +456,20 @@ mod real_relay_tests {
 
     fn state_for(keys: Keys) -> AppState {
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        state.replace_local_identity_keys(keys).unwrap();
         *state.relay_url_override.lock().unwrap() = Some(relay_ws_url());
         state
     }
 
     async fn publish(builder: EventBuilder, signer: &Keys, state: &AppState) {
-        relay::submit_event_with_keys(builder, state, signer, None)
-            .await
-            .expect("publish real-relay fixture");
+        relay::submit_event_at(
+            builder,
+            state,
+            &relay::relay_api_base_url_with_override(state),
+            &crate::active_user_signer::ActiveUserSigner::local(signer.clone()),
+        )
+        .await
+        .expect("publish real-relay fixture");
     }
 
     #[tokio::test]
@@ -525,7 +529,7 @@ mod real_relay_tests {
             &db_path,
             &state,
             &relay_ws_url(),
-            &owner,
+            &crate::active_user_signer::ActiveUserSigner::local(owner.clone()),
         )
         .await
         .expect("create-path immediate policy flush");

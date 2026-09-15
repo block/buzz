@@ -82,6 +82,7 @@ struct SendRequest {
 }
 
 struct ConnectionHandle {
+    authority: Option<crate::active_user_signer::ActiveUserSigner>,
     sender: mpsc::Sender<SendRequest>,
     cancel: CancellationToken,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -132,6 +133,15 @@ async fn open_connection(
     url: &str,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<Id, String> {
+    open_authorized_connection(manager, url, on_message, None).await
+}
+
+async fn open_authorized_connection(
+    manager: &WebSocketManager,
+    url: &str,
+    on_message: Channel<InvokeResponseBody>,
+    authority: Option<crate::active_user_signer::ActiveUserSigner>,
+) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
     let (socket, _) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
@@ -147,6 +157,9 @@ async fn open_connection(
         return Err("WebSocket connection cancelled".to_string());
     }
 
+    if let Some(signer) = &authority {
+        signer.check_valid()?;
+    }
     let id = loop {
         let candidate = uuid::Uuid::new_v4().as_u128() as u32;
         if !manager.connections.lock().await.contains_key(&candidate) {
@@ -156,6 +169,7 @@ async fn open_connection(
     let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
     let cancel = CancellationToken::new();
     let handle = Arc::new(ConnectionHandle {
+        authority: authority.clone(),
         sender,
         cancel: cancel.clone(),
         task: Mutex::new(None),
@@ -164,14 +178,27 @@ async fn open_connection(
     manager.connections.lock().await.insert(id, handle.clone());
 
     let task_manager = manager.clone();
-    let task = tauri::async_runtime::spawn(run_connection(
-        id,
-        socket,
-        receiver,
-        cancel,
-        on_message,
-        task_manager,
-    ));
+    let task = tauri::async_runtime::spawn(async move {
+        let work = run_connection(
+            id,
+            socket,
+            receiver,
+            cancel,
+            on_message,
+            task_manager.clone(),
+        );
+        if let Some(signer) = authority {
+            let _ = signer
+                .run(async {
+                    work.await;
+                    Ok(())
+                })
+                .await;
+            task_manager.remove(id).await;
+        } else {
+            work.await;
+        }
+    });
     *task_slot = Some(task);
     drop(task_slot);
     drop(current_connect_cancel);
@@ -180,12 +207,28 @@ async fn open_connection(
 
 #[tauri::command]
 async fn connect(
+    state: tauri::State<'_, crate::app_state::AppState>,
     manager: tauri::State<'_, WebSocketManager>,
     url: String,
     on_message: Channel<InvokeResponseBody>,
     _config: Option<serde_json::Value>,
+    expected_generation: Option<u64>,
 ) -> Result<Id, String> {
-    open_connection(manager.inner(), &url, on_message).await
+    if state.is_remote_identity() {
+        let signer = state
+            .native_auth
+            .workspace_signer(expected_generation, &url)?;
+        signer
+            .run(open_authorized_connection(
+                manager.inner(),
+                &url,
+                on_message,
+                Some(signer.clone()),
+            ))
+            .await
+    } else {
+        open_connection(manager.inner(), &url, on_message).await
+    }
 }
 
 pub(crate) async fn send_message(
@@ -212,6 +255,9 @@ pub(crate) async fn send_message(
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("WebSocket connection {id} not found"))?;
+    if let Some(signer) = &handle.authority {
+        signer.check_valid()?;
+    }
     let (result_tx, result_rx) = oneshot::channel();
     tokio::time::timeout(
         WRITE_TIMEOUT,
@@ -247,6 +293,18 @@ async fn disconnect(manager: tauri::State<'_, WebSocketManager>, id: Id) -> Resu
 
 #[tauri::command]
 async fn disconnect_all(manager: tauri::State<'_, WebSocketManager>) -> Result<(), String> {
+    disconnect_manager(&manager).await;
+    Ok(())
+}
+
+pub(crate) async fn clear_connections<R: Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    if let Some(manager) = app.try_state::<WebSocketManager>() {
+        disconnect_manager(&manager).await;
+    }
+}
+
+async fn disconnect_manager(manager: &WebSocketManager) {
     let mut connect_cancel = manager.connect_cancel.lock().await;
     connect_cancel.cancel();
     *connect_cancel = CancellationToken::new();
@@ -259,7 +317,6 @@ async fn disconnect_all(manager: tauri::State<'_, WebSocketManager>) -> Result<(
     };
     futures_util::future::join_all(handles.into_iter().map(WebSocketManager::disconnect_handle))
         .await;
-    Ok(())
 }
 
 async fn run_connection<S>(
@@ -568,6 +625,7 @@ mod tests {
         let (channel, deliveries) = recording_channel();
         let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
         let handle = Arc::new(ConnectionHandle {
+            authority: None,
             sender,
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
@@ -672,6 +730,7 @@ mod tests {
         );
         let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
         let handle = Arc::new(ConnectionHandle {
+            authority: None,
             sender,
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
@@ -712,6 +771,7 @@ mod tests {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (sender, _receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
         let handle = Arc::new(ConnectionHandle {
+            authority: None,
             sender,
             cancel: CancellationToken::new(),
             task: Mutex::new(Some(tauri::async_runtime::spawn(async move {
@@ -739,6 +799,7 @@ mod tests {
         let gate = manager.connect_cancel.lock().await;
         let (sender, _receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
         let handle = Arc::new(ConnectionHandle {
+            authority: None,
             sender,
             cancel: CancellationToken::new(),
             task: Mutex::new(Some(tauri::async_runtime::spawn(async {
@@ -776,6 +837,7 @@ mod tests {
             .await
             .unwrap();
         let blocked = Arc::new(ConnectionHandle {
+            authority: None,
             sender: blocked_sender,
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
@@ -784,6 +846,7 @@ mod tests {
 
         let (healthy_sender, mut healthy_receiver) = mpsc::channel(1);
         let healthy = Arc::new(ConnectionHandle {
+            authority: None,
             sender: healthy_sender.clone(),
             cancel: CancellationToken::new(),
             task: Mutex::new(None),

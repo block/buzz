@@ -1,3 +1,4 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
 import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
 import {
   AnimatePresence,
@@ -136,6 +137,7 @@ export function ProfileSettingsCard({
   currentPubkey,
   fallbackDisplayName,
 }: ProfileSettingsCardProps) {
+  const remoteCustody = isRemoteIdentity();
   const shouldReduceMotion = useReducedMotion();
   const profileQuery = useProfileQuery();
   const updateProfileMutation = useUpdateProfileMutation();
@@ -779,8 +781,9 @@ export function ProfileSettingsCard({
                                   className="text-sm font-normal text-muted-foreground/70"
                                   data-settings-subcopy
                                 >
-                                  Your keypair and NIP-05 handle are fixed for
-                                  this device.
+                                  {remoteCustody
+                                    ? "Your identity is managed by your organization."
+                                    : "Your keypair and NIP-05 handle are fixed for this device."}
                                 </p>
                               </div>
                               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
@@ -801,7 +804,17 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
-                              <PrivateKeyBackupRow />
+                              {remoteCustody ? (
+                                <p
+                                  className="px-4 py-3 text-sm text-muted-foreground"
+                                  data-testid="remote-key-custody"
+                                >
+                                  Your private key stays with the remote signer.
+                                  Local key backup and export are not available.
+                                </p>
+                              ) : (
+                                <PrivateKeyBackupRow />
+                              )}
                             </div>
                           </details>
                         </SettingsOptionGroup>
@@ -862,7 +875,9 @@ export function ProfileSettingsCard({
         </div>
       </div>
 
-      <SignOutSection />
+      {/* The local account action wipes/replaces a private key. Remote session
+          sign-out is separate and intentionally deferred for this staging build. */}
+      {!remoteCustody && <SignOutSection />}
     </section>
   );
 }

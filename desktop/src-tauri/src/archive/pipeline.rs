@@ -6,16 +6,17 @@
 //!
 //! `rusqlite::Connection` is `!Send`. No `&Connection` borrow crosses an
 //! `.await` point in any function here. Phase 1 (`plan_archive`) and Phase 3
-//! (`commit_archive`) are sync; Phase 2 (`query_buckets`) is async and never
+//! (`prepare::commit_ready`) are sync; query and crypto preparation are async and never
 //! holds a `Connection` reference.
 
 use nostr::{Event, JsonUtil};
 use rusqlite::Connection;
 
+use crate::active_user_signer::ActiveUserSigner;
 use crate::app_state::AppState;
-use crate::relay::query_relay;
+use crate::relay::query_relay_at_with_signer;
 
-use super::{store, validate_ephemeral_frame, ArchiveBatchResult, ArchiveCandidate, MatchedScope};
+use super::{store, validate_ephemeral_public, ArchiveCandidate, MatchedScope};
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -37,41 +38,41 @@ fn raw_kind_value(raw: &str) -> Option<u64> {
 // ── Private types ────────────────────────────────────────────────────────────
 
 /// A parsed, sig-verified candidate ready for further processing.
-pub(super) struct Parsed {
-    pub(super) event: Event,
-    pub(super) raw_json: String,
-    pub(super) matched_scope: MatchedScope,
+pub(crate) struct Parsed {
+    pub(crate) event: Event,
+    pub(crate) raw_json: String,
+    pub(crate) matched_scope: MatchedScope,
 }
 
 /// One scope bucket: a set of candidates that share a scope type+value,
 /// with the relay filter already built and the subscription kinds loaded.
-pub(super) struct Bucket {
-    pub(super) scope_type_str: String,
-    pub(super) scope_value: String,
-    pub(super) allowed_kinds: Vec<u64>,
-    pub(super) filter: serde_json::Value,
-    pub(super) group: Vec<Parsed>,
+pub(crate) struct Bucket {
+    pub(crate) scope_type_str: String,
+    pub(crate) scope_value: String,
+    pub(crate) allowed_kinds: Vec<u64>,
+    pub(crate) filter: serde_json::Value,
+    pub(crate) group: Vec<Parsed>,
 }
 
 /// Output of the sync planning phase.
-pub(super) struct ArchivePlan {
-    pub(super) buckets: Vec<Bucket>,
-    pub(super) ephemeral: Vec<Parsed>,
+pub(crate) struct ArchivePlan {
+    pub(crate) buckets: Vec<Bucket>,
+    pub(crate) ephemeral: Vec<Parsed>,
     /// Events already accounted as dropped during planning (no subscription,
     /// unknown scope type, parse failure, bad sig).
-    pub(super) pre_dropped: u32,
+    pub(crate) pre_dropped: u32,
 }
 
 /// A bucket with the relay's response attached.
-pub(super) struct BucketWithResult {
-    pub(super) scope_type_str: String,
-    pub(super) scope_value: String,
-    pub(super) allowed_kinds: Vec<u64>,
-    pub(super) group: Vec<Parsed>,
+pub(crate) struct BucketWithResult {
+    pub(crate) scope_type_str: String,
+    pub(crate) scope_value: String,
+    pub(crate) allowed_kinds: Vec<u64>,
+    pub(crate) group: Vec<Parsed>,
     /// Event ids returned by the relay for the scoped filter.
-    pub(super) returned_ids: std::collections::HashSet<String>,
-    /// True if the relay query failed (network error); entire group dropped.
-    pub(super) relay_failed: bool,
+    pub(crate) returned_ids: std::collections::HashSet<String>,
+    /// True if the relay query failed; retain the entire group for retry.
+    pub(crate) relay_failed: bool,
 }
 
 // ── Phase 1 ──────────────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ pub(super) struct BucketWithResult {
 ///
 /// Returns an [`ArchivePlan`] with no `&Connection` remaining — safe to hold
 /// across `.await`.
-pub(super) fn plan_archive(
+pub(crate) fn plan_archive(
     candidates: Vec<ArchiveCandidate>,
     identity_pk: &str,
     relay_url: &str,
@@ -133,6 +134,24 @@ pub(super) fn plan_archive(
             && raw_kind != super::KIND_AGENT_TURN_METRIC as u64;
 
         if is_ephemeral {
+            if validate_ephemeral_public(&event, identity_pk).is_err() {
+                pre_dropped += 1;
+                continue;
+            }
+            // DB errors propagate; they are not evidence of invalid input.
+            let allowed = store::get_subscription_kinds(
+                conn,
+                identity_pk,
+                relay_url,
+                "owner_p",
+                &cand.matched_scope.scope_value,
+            )?
+            .and_then(|json| serde_json::from_str::<Vec<u64>>(&json).ok())
+            .is_some_and(|kinds| kinds.contains(&raw_kind));
+            if !allowed {
+                pre_dropped += 1;
+                continue;
+            }
             ephemeral.push(Parsed {
                 event,
                 raw_json: cand.raw_event_json,
@@ -229,10 +248,23 @@ pub(super) fn plan_archive(
 ///
 /// `state` is `&AppState` — a `Copy` reference — so no `!Send` value is held
 /// across `.await`.
-pub(super) async fn query_buckets(buckets: Vec<Bucket>, state: &AppState) -> Vec<BucketWithResult> {
+pub(crate) async fn query_buckets(
+    buckets: Vec<Bucket>,
+    state: &AppState,
+    relay_api: &str,
+    signer: &ActiveUserSigner,
+) -> Vec<BucketWithResult> {
     let mut results: Vec<BucketWithResult> = Vec::with_capacity(buckets.len());
     for bucket in buckets {
-        let (returned_ids, relay_failed) = match query_relay(state, &[bucket.filter]).await {
+        let (returned_ids, relay_failed) = match query_relay_at_with_signer(
+            state,
+            relay_api,
+            &[bucket.filter],
+            signer,
+            None,
+        )
+        .await
+        {
             Ok(evs) => (evs.iter().map(|e| e.id.to_hex()).collect(), false),
             Err(_) => (std::collections::HashSet::new(), true),
         };
@@ -246,244 +278,4 @@ pub(super) async fn query_buckets(buckets: Vec<Bucket>, state: &AppState) -> Vec
         });
     }
     results
-}
-
-// ── Phase 3 ──────────────────────────────────────────────────────────────────
-
-/// Phase 3 (sync): apply relay results and write accepted events to the store.
-///
-/// All event + scope upserts run inside a single SQLite transaction: either
-/// every write in the batch commits or none do. This preserves the invariant
-/// that every `archived_events` row has at least one matching `archived_event_scopes`
-/// row — a partial failure can never leave an orphaned event with no scope proof.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn commit_archive(
-    bucket_results: Vec<BucketWithResult>,
-    ephemeral: Vec<Parsed>,
-    pre_dropped: u32,
-    identity_pk: &str,
-    relay_url: &str,
-    owner_keys: &nostr::Keys,
-    now: i64,
-    conn: &Connection,
-) -> Result<ArchiveBatchResult, String> {
-    let mut persisted: u32 = 0;
-    let mut persisted_agent_metrics: u32 = 0;
-    let mut dropped: u32 = pre_dropped;
-
-    // Collect writes; count drops first, then execute inside a single
-    // transaction so event and scope rows are always committed atomically.
-    //
-    // raw_json is owned so kind-44200 rows can store decrypted plaintext
-    // instead of the original NIP-44 ciphertext.
-    struct WriteRow {
-        eid: String,
-        kind: i64,
-        pubkey: String,
-        created_at: i64,
-        raw_json: String,
-        scope_type: String,
-        scope_value: String,
-    }
-    let mut writes: Vec<WriteRow> = Vec::new();
-
-    // ── Persistent path ──────────────────────────────────────────────────────
-    for result in &bucket_results {
-        if result.relay_failed {
-            dropped += result.group.len() as u32;
-            continue;
-        }
-
-        for p in &result.group {
-            let eid = p.event.id.to_hex();
-
-            // Relay proof: event was returned for the scoped filter.
-            if !result.returned_ids.contains(&eid) {
-                dropped += 1;
-                continue;
-            }
-
-            // Kind enforcement: event.kind must be in the subscription's list.
-            if !result
-                .allowed_kinds
-                .contains(&(p.event.kind.as_u16() as u64))
-            {
-                dropped += 1;
-                continue;
-            }
-
-            // For kind-44200 (agent turn metrics): decrypt at ingest and store
-            // the plaintext payload JSON so token-usage calculators can read
-            // the archive without needing the owner key.  Fail-closed: if
-            // decrypt fails for any reason, drop the event — never store
-            // ciphertext or partial output.
-            let stored_json =
-                if p.event.kind.as_u16() as u64 == super::KIND_AGENT_TURN_METRIC as u64 {
-                    match buzz_core_pkg::agent_turn_metric::decrypt_agent_turn_metric(
-                        owner_keys, &p.event,
-                    ) {
-                        Ok(payload) => match serde_json::to_string(&payload) {
-                            Ok(json) => json,
-                            Err(_) => {
-                                dropped += 1;
-                                continue;
-                            }
-                        },
-                        Err(_) => {
-                            dropped += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    p.raw_json.clone()
-                };
-
-            // The relay returning this event for {ids, #h/#e/#p, kinds} IS the
-            // proof of scope membership. Use scope_value directly; no local
-            // tag re-derivation (which would incorrectly drop h-less events
-            // matched via the relay's StoredEvent.channel_id fallback).
-            writes.push(WriteRow {
-                eid,
-                kind: p.event.kind.as_u16() as i64,
-                pubkey: p.event.pubkey.to_hex(),
-                created_at: p.event.created_at.as_secs() as i64,
-                raw_json: stored_json,
-                scope_type: result.scope_type_str.clone(),
-                scope_value: result.scope_value.clone(),
-            });
-        }
-    }
-
-    // ── Ephemeral path (owner_p) ─────────────────────────────────────────────
-    // Fully local validation — no relay query.
-    let mut validated_ephemeral: Vec<(String, &Parsed)> = Vec::new();
-    for p in &ephemeral {
-        match validate_ephemeral_frame(
-            &p.event,
-            identity_pk,
-            &p.matched_scope.scope_value,
-            conn,
-            identity_pk,
-            relay_url,
-        ) {
-            Ok(()) => validated_ephemeral.push((p.event.id.to_hex(), p)),
-            Err(_) => {
-                dropped += 1;
-            }
-        }
-    }
-
-    // ── Commit all writes atomically ─────────────────────────────────────────
-    if !writes.is_empty() || !validated_ephemeral.is_empty() {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("failed to begin archive transaction: {e}"))?;
-
-        for w in &writes {
-            store::upsert_archived_event(
-                &tx,
-                identity_pk,
-                relay_url,
-                &w.eid,
-                w.kind,
-                &w.pubkey,
-                w.created_at,
-                &w.raw_json,
-                now,
-            )?;
-            store::upsert_event_scope(
-                &tx,
-                identity_pk,
-                relay_url,
-                &w.eid,
-                &w.scope_type,
-                &w.scope_value,
-                now,
-            )?;
-
-            // Index kind-44200 rows in the SAME transaction as the canonical
-            // insert (Rev 2 F5): the plaintext payload was already decrypted
-            // above into `w.raw_json`, so this is parse-only, no re-decrypt.
-            // `insert_metric_index_row`'s own `ON CONFLICT DO NOTHING` makes
-            // a duplicate call for an already-indexed id (e.g. re-ingest of
-            // a row seen in an earlier batch) a safe no-op — its `bool`
-            // return tells us whether this call actually inserted a new
-            // index row, which is exactly what `persisted_agent_metrics`
-            // counts (A5: newly-indexed rows, valid or invalid, not raw
-            // write attempts).
-            if w.kind == super::KIND_AGENT_TURN_METRIC as i64 {
-                let index_row = super::metric_store::AgentMetricIndexRow::from_payload(
-                    &w.raw_json,
-                    &w.eid,
-                    &w.pubkey,
-                    w.created_at,
-                    now,
-                );
-                let index_inserted = super::metric_store::insert_metric_index_row(
-                    &tx,
-                    identity_pk,
-                    relay_url,
-                    &index_row,
-                )?;
-                if index_inserted {
-                    persisted_agent_metrics += 1;
-                }
-            }
-
-            persisted += 1;
-        }
-
-        for (eid, p) in &validated_ephemeral {
-            store::upsert_archived_event(
-                &tx,
-                identity_pk,
-                relay_url,
-                eid,
-                p.event.kind.as_u16() as i64,
-                &p.event.pubkey.to_hex(),
-                p.event.created_at.as_secs() as i64,
-                &p.raw_json,
-                now,
-            )?;
-            store::upsert_event_scope(
-                &tx,
-                identity_pk,
-                relay_url,
-                eid,
-                "owner_p",
-                &p.matched_scope.scope_value,
-                now,
-            )?;
-
-            // Index at ingest: attempt to decrypt and extract channelId.
-            // Write a status row regardless of outcome so backfill never
-            // re-processes this frame (INSERT OR IGNORE on PK is a no-op if
-            // the row is already present from a prior run).
-            let channel_id_for_index: Option<String> =
-                buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
-                    owner_keys, &p.event,
-                )
-                .ok()
-                .and_then(|v| v.get("channelId")?.as_str().map(|s| s.to_owned()));
-            store::upsert_observer_channel_index(
-                &tx,
-                identity_pk,
-                relay_url,
-                eid,
-                channel_id_for_index.as_deref(),
-                p.event.created_at.as_secs() as i64,
-            )?;
-
-            persisted += 1;
-        }
-
-        tx.commit()
-            .map_err(|e| format!("failed to commit archive transaction: {e}"))?;
-    }
-
-    Ok(ArchiveBatchResult {
-        persisted,
-        persisted_agent_metrics,
-        dropped,
-    })
 }

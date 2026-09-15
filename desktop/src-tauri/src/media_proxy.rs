@@ -11,127 +11,173 @@ use tauri::{http, Manager};
 use tokio::net::TcpListener;
 
 use crate::app_state::AppState;
-use crate::commands::media::mint_media_get_auth;
-use crate::relay;
+use crate::media_read::MediaReadScope;
 
 /// Defense-in-depth cap: refuse to buffer responses larger than this into RAM.
-/// Range requests (≤16 MiB from server) always fit. Full GETs for huge videos
-/// get a clear 413 instead of OOM — the <video> element always uses range
-/// requests for seeking, so this only catches edge cases.
+/// The buffered protocol applies this to actual bytes, including range requests.
+/// Oversized full GETs with Content-Length get 413 before reading the body;
+/// oversized chunked protocol responses fail during bounded buffering.
 const MAX_PROXY_RESPONSE: u64 = 20 * 1024 * 1024;
 
 #[derive(Clone)]
 struct ProxyState {
-    client: reqwest::Client,
     app_handle: tauri::AppHandle,
 }
 
+// This query field binds element loads (which cannot set IPC headers) to the
+// mounted renderer. It is not a credential and is never forwarded upstream.
+const GENERATION_QUERY: &str = "__buzz_generation";
+
+fn media_path(uri: &http::Uri) -> Result<(String, Option<u64>), String> {
+    if !uri.path().starts_with("/media/") {
+        return Err("not found".into());
+    }
+    let mut generation = None;
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        if key == GENERATION_QUERY {
+            if generation.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err("invalid media generation".into());
+            }
+            generation = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "invalid media generation")?,
+            );
+        } else {
+            query.append_pair(&key, &value);
+        }
+    }
+    let query = query.finish();
+    let path = if query.is_empty() {
+        uri.path().to_owned()
+    } else {
+        format!("{}?{query}", uri.path())
+    };
+    Ok((path, generation))
+}
+
 async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) -> Response {
-    // Allow requests with no Origin (e.g. <video> element fetches) or from
-    // the Tauri webview origin. Blocks cross-origin JS fetches from other
-    // tabs/apps while letting HTML media resource loads through.
-    let origin = req
-        .headers()
+    proxy_response(
+        &state.app_handle.state::<AppState>(),
+        req.uri(),
+        req.headers(),
+    )
+    .await
+}
+
+// Shared by the loopback HTTP handler and custom protocol; neither goes through
+// Tauri dispatch, so admission and the entire body lifetime belong here.
+/// Admit a renderer media read and stream only while its captured session is valid.
+pub(crate) async fn proxy_response(
+    state: &AppState,
+    uri: &http::Uri,
+    request_headers: &HeaderMap,
+) -> Response {
+    let origin = request_headers
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !origin.is_empty() && origin != "tauri://localhost" && origin != "http://tauri.localhost" {
-        return (StatusCode::FORBIDDEN, "forbidden: invalid origin").into_response();
+        return proxy_error(StatusCode::FORBIDDEN, "forbidden: invalid origin");
     }
+    let (path, generation) = match media_path(uri) {
+        Ok(value) => value,
+        Err(_) => return proxy_error(StatusCode::BAD_REQUEST, "invalid media URL"),
+    };
+    let scope = match MediaReadScope::capture_renderer(state, generation) {
+        Ok(scope) => scope,
+        Err(_) => return proxy_error(StatusCode::UNAUTHORIZED, "media session unavailable"),
+    };
+    proxy_response_captured(state, &path, request_headers, scope).await
+}
 
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
-    // Resolve relay URL dynamically so workspace switches take effect immediately.
-    let app_state = state.app_handle.state::<AppState>();
-    let base_url = relay::relay_api_base_url_with_override(&app_state);
-    let upstream_url = format!("{base_url}{path_and_query}");
-
-    let has_range = req.headers().contains_key("range");
-
-    let mut upstream = state
-        .client
-        .get(&upstream_url)
-        .timeout(std::time::Duration::from_secs(120));
-
-    // `upstream_url` is always `{relay base}{path}`, so the token can't reach
-    // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&app_state, &base_url) {
-        upstream = upstream.header("authorization", auth);
-    }
-
-    if let Some(range) = req.headers().get("range") {
-        if let Ok(v) = range.to_str() {
-            upstream = upstream.header("range", v);
-        }
-    }
-
-    let resp = match upstream.send().await {
-        Ok(r) => r,
+async fn proxy_response_captured(
+    state: &AppState,
+    path: &str,
+    request_headers: &HeaderMap,
+    scope: MediaReadScope,
+) -> Response {
+    let result = scope
+        .run(async {
+            let mut upstream = state
+                .media_fetch_client
+                .get(format!("{}{path}", scope.base))
+                .timeout(std::time::Duration::from_secs(120));
+            if let Some(auth) = scope.authorization().await? {
+                upstream = upstream.header("authorization", auth);
+            }
+            if let Some(range) = request_headers.get("range") {
+                upstream = upstream.header("range", range);
+            }
+            upstream.send().await.map_err(|e| e.to_string())
+        })
+        .await;
+    let resp = match result {
+        Ok(resp) => resp,
         Err(_) => {
-            return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
+            return proxy_error(
+                StatusCode::BAD_GATEWAY,
+                "media request failed or session ended",
+            )
         }
     };
-
-    let status =
-        StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
+    let status = resp.status();
     let mut headers = HeaderMap::new();
-    for key in &[
+    for key in [
         "content-type",
         "content-range",
         "accept-ranges",
         "content-length",
-        // Cache-related headers — let WKWebView's HTTP cache do its job so
-        // images don't re-fetch on every channel switch. Media URLs are
-        // content-addressed (sha256 in path), so the relay sends
-        // `Cache-Control: public, max-age=31536000, immutable` and we
-        // forward it verbatim. `etag`/`last-modified` are forwarded for
-        // future-proofing if upstream ever adds them.
         "cache-control",
         "etag",
         "last-modified",
     ] {
-        if let Some(val) = resp.headers().get(*key) {
-            if let Ok(v) = HeaderValue::from_bytes(val.as_bytes()) {
-                headers.insert(*key, v);
-            }
+        if let Some(value) = resp.headers().get(key) {
+            headers.insert(key, value.clone());
         }
     }
-
-    // OOM guard for non-range full GETs (same 20 MB cap as the protocol handler).
-    if !has_range {
-        if let Some(cl) = headers.get("content-length") {
-            if let Ok(len) = cl.to_str().unwrap_or("0").parse::<u64>() {
-                if len > MAX_PROXY_RESPONSE {
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "response too large — use range requests for video playback",
-                    )
-                        .into_response();
-                }
-            }
-        }
+    if scope.requires_session() {
+        // Content addressing is not authorization. Do not let a webview cache
+        // satisfy requests after native revocation without reaching this guard.
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        headers.remove("etag");
+        headers.remove("last-modified");
     }
+    if !request_headers.contains_key("range")
+        && resp
+            .content_length()
+            .is_some_and(|len| len > MAX_PROXY_RESPONSE)
+    {
+        return proxy_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "response too large — use range requests for video playback",
+        );
+    }
+    let upstream = Box::pin(resp.bytes_stream());
+    let stream =
+        futures_util::stream::try_unfold((scope, upstream), |(scope, mut upstream)| async move {
+            let chunk = scope
+                .run(async { upstream.try_next().await.map_err(|e| e.to_string()) })
+                .await
+                .map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(chunk.map(|chunk| (chunk, (scope, upstream))))
+        });
+    (status, headers, Body::from_stream(stream)).into_response()
+}
 
-    // Stream the body — no buffering.
-    let stream = resp.bytes_stream().map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
-
-    (status, headers, body).into_response()
+fn proxy_error(status: StatusCode, message: &'static str) -> Response {
+    (status, [("cache-control", "no-store")], message).into_response()
 }
 
 /// Spawn a localhost HTTP proxy that streams media via reqwest, avoiding the
 /// Tauri protocol handler's requirement to buffer the entire response into
 /// `Vec<u8>`. Returns the OS-assigned port.
-pub async fn spawn_media_proxy(http_client: reqwest::Client, app_handle: tauri::AppHandle) -> u16 {
-    let proxy_state = ProxyState {
-        client: http_client,
-        app_handle,
-    };
+pub async fn spawn_media_proxy(app_handle: tauri::AppHandle) -> u16 {
+    let proxy_state = ProxyState { app_handle };
 
     let app = Router::new()
         .route("/media/{*path}", get(proxy_handler))
@@ -155,152 +201,39 @@ pub async fn spawn_media_proxy(http_client: reqwest::Client, app_handle: tauri::
 /// WKWebView's networking stack bypasses the VPN tunnel, causing 403s from Cloudflare Access.
 /// This handler routes `buzz-media://localhost/{path}` through reqwest, which
 /// runs in the Tauri process and goes through the VPN.
-pub async fn handle_buzz_media(
-    app: &tauri::AppHandle,
+pub async fn handle_buzz_media<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     request: &http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
-    use tauri::Manager;
-
     let state = app.state::<AppState>();
-    let base = relay::relay_api_base_url_with_override(&state);
-
-    // Preserve path + query (thumbnails may have query params).
-    // Only proxy /media/ paths — reject anything else.
-    let path_and_query = request
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-
-    if !path_and_query.starts_with("/media/") {
-        return error_response(404, "not found");
-    }
-
-    let has_range = request.headers().contains_key("range");
-    let upstream_url = format!("{base}{path_and_query}");
-
-    // Forward Range header if present — enables video seeking through the proxy.
-    let mut upstream = state
-        .http_client
-        .get(&upstream_url)
-        .timeout(std::time::Duration::from_secs(60));
-
-    // `upstream_url` is always `{relay base}{path}`, so the token can't reach
-    // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&state, &base) {
-        upstream = upstream.header("authorization", auth);
-    }
-
-    if let Some(range) = request.headers().get("range") {
-        if let Ok(v) = range.to_str() {
-            upstream = upstream.header("range", v);
-        }
-    }
-
-    let result = upstream.send().await;
-
-    match result {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-
-            // Propagate range-related headers so <video> seeking works.
-            let content_range = resp
-                .headers()
-                .get("content-range")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let accept_ranges = resp
-                .headers()
-                .get("accept-ranges")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let content_length = resp
-                .headers()
-                .get("content-length")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-
-            // Propagate cache-related headers so WKWebView's HTTP cache
-            // can avoid re-fetching content-addressed media on every
-            // channel switch. The relay sends
-            // `Cache-Control: public, max-age=31536000, immutable`;
-            // `etag`/`last-modified` are forwarded if upstream supplies them.
-            let cache_control = resp
-                .headers()
-                .get("cache-control")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let etag = resp
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let last_modified = resp
-                .headers()
-                .get("last-modified")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-
-            // OOM guard: if this is a non-range GET and the upstream body is
-            // larger than our cap, bail with 413 instead of buffering into RAM.
-            // Tauri's protocol handler requires Vec<u8> so we can't truly stream.
-            if !has_range {
-                if let Some(ref cl) = content_length {
-                    if let Ok(len) = cl.parse::<u64>() {
-                        if len > MAX_PROXY_RESPONSE {
-                            return error_response(
-                                413,
-                                "response too large — use range requests for video playback",
-                            );
-                        }
-                    }
-                }
-            }
-
-            match resp.bytes().await {
-                Ok(bytes) => {
-                    let mut builder = http::Response::builder()
-                        .status(status)
-                        .header("content-type", &content_type);
-                    if let Some(ref cr) = content_range {
-                        builder = builder.header("content-range", cr);
-                    }
-                    if let Some(ref ar) = accept_ranges {
-                        builder = builder.header("accept-ranges", ar);
-                    }
-                    if let Some(ref cl) = content_length {
-                        builder = builder.header("content-length", cl);
-                    }
-                    if let Some(ref cc) = cache_control {
-                        builder = builder.header("cache-control", cc);
-                    }
-                    if let Some(ref e) = etag {
-                        builder = builder.header("etag", e);
-                    }
-                    if let Some(ref lm) = last_modified {
-                        builder = builder.header("last-modified", lm);
-                    }
-                    builder
-                        .body(bytes.to_vec())
-                        .unwrap_or_else(|_| error_response(500, "response build failed"))
-                }
-                Err(_) => error_response(502, "failed to read upstream body"),
-            }
-        }
-        Err(_) => error_response(502, "upstream request failed"),
-    }
+    let (path, generation) = match media_path(request.uri()) {
+        Ok(parsed) => parsed,
+        Err(_) => return error_response(400, "invalid media URL"),
+    };
+    let scope = match MediaReadScope::capture_renderer(&state, generation) {
+        Ok(scope) => scope,
+        Err(_) => return error_response(401, "media session unavailable"),
+    };
+    let result = scope
+        .run(async {
+            let response =
+                proxy_response_captured(&state, &path, request.headers(), scope.clone()).await;
+            let (parts, body) = response.into_parts();
+            // Enforce the buffering cap on actual bytes, including chunked responses.
+            let bytes = axum::body::to_bytes(body, MAX_PROXY_RESPONSE as usize)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(http::Response::from_parts(parts, bytes.to_vec()))
+        })
+        .await;
+    result.unwrap_or_else(|_| error_response(502, "media body unavailable or session ended"))
 }
 
 fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
     http::Response::builder()
         .status(status)
         .header("content-type", "text/plain")
+        .header("cache-control", "no-store")
         .body(msg.as_bytes().to_vec())
         .unwrap_or_else(|_| {
             http::Response::builder()

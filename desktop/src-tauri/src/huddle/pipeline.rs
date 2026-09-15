@@ -3,6 +3,8 @@
 //! Handles starting, hot-starting, and spawning transcription tasks for
 //! the voice pipelines. Extracted from mod.rs to keep the command layer thin.
 
+use crate::active_user_signer::ActiveUserSigner;
+
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -607,12 +609,13 @@ fn should_reselect_constructed_voice(constructed_voice: &str, latest_voice: &str
 /// Factored out of the transcription loop so egress boundary 5 (huddle STT)
 /// has a directly testable seam: the NIP-49 egress guard runs here, before
 /// any bytes can reach the network.
-pub(crate) fn sign_and_guard_stt_body(
+pub(crate) async fn sign_and_guard_stt_body(
     builder: nostr::EventBuilder,
-    keys: &nostr::Keys,
+    signer: &ActiveUserSigner,
 ) -> Result<Vec<u8>, String> {
-    let event = builder
-        .sign_with_keys(keys)
+    let event = signer
+        .sign_event(builder)
+        .await
         .map_err(|e| format!("sign event: {e}"))?;
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "huddle STT publish")?;
@@ -638,8 +641,8 @@ pub(crate) fn spawn_transcription_task(
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
     let http_client = state.http_client.clone();
-    let keys = match state.keys.lock() {
-        Ok(k) => k.clone(),
+    let signer = match state.legacy_local_signer() {
+        Ok(signer) => signer,
         Err(_) => return,
     };
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
@@ -688,7 +691,7 @@ pub(crate) fn spawn_transcription_task(
             // the kind event and build NIP-98 auth after the wait so both
             // timestamps are fresh — single clean order: wait → sign → auth → send.
             crate::relay_admission::wait_for_rate_limit().await;
-            let body_bytes = match sign_and_guard_stt_body(builder, &keys) {
+            let body_bytes = match sign_and_guard_stt_body(builder, &signer).await {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("buzz-desktop: STT publish: {e}");
@@ -696,18 +699,24 @@ pub(crate) fn spawn_transcription_task(
                 }
             };
             let url = format!("{relay_base_url}/events");
-            let auth_header = match crate::relay::build_nip98_auth_header_for_keys(
-                &keys,
+            let auth_header = match crate::relay::build_nip98_auth_header_for_signer(
+                &signer,
                 &reqwest::Method::POST,
                 &url,
                 &body_bytes,
-            ) {
+            )
+            .await
+            {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("buzz-desktop: STT NIP-98 auth: {e}");
                     continue;
                 }
             };
+
+            if session_generation.load(Ordering::Acquire) != spawned_gen {
+                break;
+            }
 
             let response = {
                 http_client

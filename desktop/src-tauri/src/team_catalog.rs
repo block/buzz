@@ -64,10 +64,12 @@ pub(crate) async fn fetch_team_catalog(
     state: State<'_, AppState>,
     relay_client: State<'_, NativeRelayClient>,
 ) -> Result<Vec<TeamCatalogPublication>, String> {
-    let keys = state.signing_keys()?;
-    let owner = keys.public_key().to_hex();
+    let signer = state.active_signer()?;
+    let owner = signer.public_key().to_hex();
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
-    let session = relay_client.session(relay_url.clone(), keys).await;
+    let session = relay_client
+        .session_with_signer(relay_url.clone(), signer)
+        .await;
     let by_id = collect_verified_catalog(|until| {
         let session = &session;
         async move {
@@ -90,8 +92,8 @@ pub(crate) async fn fetch_team_catalog(
     })
     .await?;
 
-    let current_keys = state.signing_keys()?;
-    if current_keys.public_key().to_hex() != owner
+    let current_signer = state.active_signer()?;
+    if current_signer.public_key().to_hex() != owner
         || crate::relay::relay_ws_url_with_override(&state) != relay_url
     {
         return Err("team catalog scope changed while fetching".to_string());

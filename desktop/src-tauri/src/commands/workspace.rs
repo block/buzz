@@ -51,7 +51,7 @@ fn migrate_legacy_retention_into(
     match crate::managed_agents::retention::migrate_legacy_retention_db(
         &base_dir,
         &scope.db_path,
-        &scope.owner_keys.public_key().to_hex(),
+        &scope.owner_signer().public_key().to_hex(),
     ) {
         Ok(0) => {}
         Ok(copied) => {
@@ -107,11 +107,11 @@ pub struct ActiveWorkspaceInfo {
 /// Returns the current active workspace info (relay URL + pubkey).
 #[tauri::command]
 pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspaceInfo, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    let pubkey = state.identity_public_key()?;
     let relay_url = relay::relay_ws_url_with_override(&state);
     Ok(ActiveWorkspaceInfo {
         relay_url,
-        pubkey: keys.public_key().to_hex(),
+        pubkey: pubkey.to_hex(),
     })
 }
 
@@ -158,6 +158,9 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
+    if state.is_remote_identity() {
+        return Err("use activate_remote_workspace for remote identity".into());
+    }
     // Take the generation only after entering the serialized transaction. An
     // apply that is already running remains authoritative until it releases
     // the lock; the next apply then advances the generation. This keeps every
@@ -167,6 +170,10 @@ pub async fn apply_workspace(
         &state.workspace_apply_generation,
     )
     .await;
+
+    if let Some(sync) = app.try_state::<crate::archive::sync::ArchiveSyncState>() {
+        sync.stop_for_workspace().await;
+    }
 
     let restore_app = app.clone();
     let apply_app = app.clone();
@@ -211,18 +218,10 @@ pub async fn apply_workspace(
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
-        {
-            let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
-            *override_guard = Some(relay_url);
-        }
+        state.install_local_workspace(relay_url, parsed_keys)?;
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
         crate::relay_admission::reset_gate_for_workspace_change();
-
-        if let Some(keys) = parsed_keys {
-            let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
-            *keys_guard = keys;
-        }
 
         // Keep the backend-side reconcile guard aligned with the frontend
         // experiment before launch-time restore can spawn any agents. Missing
@@ -289,7 +288,7 @@ pub async fn apply_workspace(
             // the moment `useCommunityInit` observes the applied workspace, and
             // an old relay team head could otherwise win that race and overwrite
             // the repaired `persona_ids`. The team leg is fatal (see
-            // `run_event_sync`): only its success durably retains the corrected
+            // `run_event_sync_blocking`): only its success durably retains the corrected
             // head with a superseding `monotonic_created_at`, so
             // `retain_inbound_event`'s equal/older guard rejects the stale head.
             // On failure we return `Err` — the command reports failure,
@@ -297,7 +296,7 @@ pub async fn apply_workspace(
             // never starts against an un-superseded disk state.
             crate::event_sync::run_event_sync_blocking(
                 restore_app.clone(),
-                scope.owner_keys,
+                scope.owner_signer(),
                 scope.db_path,
             )
             .await?;
@@ -417,4 +416,56 @@ mod tests {
         assert!(queued_ticket > running_ticket);
         assert_current_apply_generation(&generation, queued_ticket).unwrap();
     }
+}
+
+/// Messaging-first activation: never reconcile local agent custody under an SSO
+/// owner. Managed-agent/mesh mutations and inbound definition sync stay disabled.
+#[tauri::command]
+pub async fn activate_remote_workspace(
+    app: AppHandle,
+    relay_url: String,
+    expected_generation: u64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if !state.is_remote_identity() {
+        return Err("remote workspace requires remote signer mode".into());
+    }
+    let url = url::Url::parse(&relay_url).map_err(|_| "invalid relay URL")?;
+    if !matches!(url.scheme(), "ws" | "wss")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("invalid relay URL".into());
+    }
+    let signer = state.active_signer()?;
+    if signer.generation() != Some(expected_generation) {
+        return Err("native authentication generation changed".into());
+    }
+    let (_guard, _) = begin_workspace_apply(
+        state.workspace_apply_lock.clone(),
+        &state.workspace_apply_generation,
+    )
+    .await;
+    // One relay per authenticated generation. Switching requires logout so all
+    // captured transport capabilities are revoked before replacement.
+    if state.native_auth.workspace_active()? {
+        state
+            .native_auth
+            .workspace_signer(Some(expected_generation), &relay_url)?;
+        return Ok(());
+    }
+    signer.check_valid()?;
+    if let Some(sync) = app.try_state::<crate::archive::sync::ArchiveSyncState>() {
+        sync.stop_for_workspace().await;
+    }
+    crate::native_websocket::clear_connections(&app).await;
+    signer.check_valid()?;
+    *state.relay_url_override.lock().map_err(|e| e.to_string())? = Some(relay_url.clone());
+    crate::relay_admission::reset_gate_for_workspace_change();
+    // Schema warmup is awaited before exposing the workspace; no store import,
+    // agent restoration or local retention publication is admitted in this mode.
+    state.archive_db.warm_init().await?;
+    state.native_auth.activate_workspace(&signer, &relay_url)
 }

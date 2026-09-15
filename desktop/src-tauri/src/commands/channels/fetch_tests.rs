@@ -108,7 +108,7 @@ impl Relay {
 
     fn state(&self, keys: &Keys) -> AppState {
         let state = crate::app_state::build_app_state();
-        *state.keys.lock().unwrap() = keys.clone();
+        state.replace_local_identity_keys(keys.clone()).unwrap();
         *state.relay_url_override.lock().unwrap() = Some(self.url.clone());
         state
     }
@@ -327,7 +327,9 @@ async fn each_fetch_observes_roster_changes_and_the_current_identity_and_relay()
         .await
         .unwrap()
         .is_empty());
-    *state.keys.lock().unwrap() = next_keys.clone();
+    state
+        .replace_local_identity_keys(next_keys.clone())
+        .unwrap();
     assert_eq!(
         fetch(&state, DirectoryScope::MemberOnly).await.unwrap()[0].member_pubkeys,
         vec![next.clone()]

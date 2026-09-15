@@ -17,7 +17,11 @@ use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
 pub struct AppState {
-    pub keys: Mutex<Keys>,
+    local_keys: Mutex<Option<Keys>>,
+    pub(crate) native_auth: crate::builderlab::BuilderlabSession,
+    pub(crate) signer_mode: crate::native_identity::SignerMode,
+    #[cfg(test)]
+    pub(crate) test_signer: Mutex<Option<crate::active_user_signer::ActiveUserSigner>>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
@@ -34,6 +38,9 @@ pub struct AppState {
     pub relay_url_override: Mutex<Option<String>>,
     pub workspace_apply_lock: Arc<AsyncMutex<()>>,
     pub workspace_apply_generation: AtomicU64,
+    /// Serializes captured foreground-operation admission with identity/relay replacement.
+    /// Acquire after a store lock, before identity locks; never hold across an await.
+    pub(crate) operation_generation: std::sync::Arc<Mutex<u64>>,
     /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
     /// Experiment state applied to managed-agent starts and profile reconciliation.
@@ -185,21 +192,42 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
 }
 
 pub fn build_app_state() -> AppState {
-    // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
-    // in setup() will replace the ephemeral placeholder with a persisted key.
-    let (keys, identity_storage) = match identity_from_env() {
-        Some(keys) => {
-            eprintln!(
-                "buzz-desktop: configured identity pubkey {}",
-                keys.public_key().to_hex()
-            );
-            (keys, IdentityStorage::Environment)
+    #[cfg(not(test))]
+    let mode = crate::native_identity::SignerMode::compiled();
+    // The historical fixture constructs local keys. Remote tests request their
+    // mode explicitly; packaging configuration must not change fixture identity.
+    #[cfg(test)]
+    let mode = crate::native_identity::SignerMode::Local;
+    build_app_state_for_mode(mode)
+}
+
+pub(crate) fn build_app_state_for_mode(mode: crate::native_identity::SignerMode) -> AppState {
+    let identity = crate::native_identity::bootstrap_local_identity(mode, || {
+        // Preserve the local env override and recovery placeholder semantics.
+        match identity_from_env() {
+            Some(keys) => {
+                eprintln!(
+                    "buzz-desktop: configured identity pubkey {}",
+                    keys.public_key().to_hex()
+                );
+                (keys, IdentityStorage::Environment)
+            }
+            None => (Keys::generate(), IdentityStorage::Ephemeral),
         }
-        None => (Keys::generate(), IdentityStorage::Ephemeral),
+    });
+    let (keys, identity_storage) = match identity {
+        Some((keys, storage)) => (Some(keys), storage),
+        None => (None, IdentityStorage::Absent),
     };
 
+    let native_auth = crate::builderlab::BuilderlabSession::default();
     AppState {
-        keys: Mutex::new(keys),
+        local_keys: Mutex::new(keys),
+        signer_mode: mode,
+        operation_generation: native_auth.operation_generation.clone(),
+        native_auth,
+        #[cfg(test)]
+        test_signer: Mutex::new(None),
         identity_storage: AtomicU8::new(identity_storage as u8),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -263,7 +291,11 @@ mod accessors;
 /// `RecoveryState::KeyringLocked` (keyring unreachable — key still in keyring
 /// but inaccessible this boot). Both states boot with an ephemeral key; the
 /// frontend shows different recovery screens for each.
-pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(), String> {
+pub fn resolve_persisted_identity<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    state.require_local_identity()?;
     // Only skip file-based resolution if the env var was present AND parsed
     // successfully. A malformed env var should fall through to the persisted
     // key rather than leaving the app on an ephemeral identity.
@@ -281,8 +313,8 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     // Write keys and storage before setting the recovery flags (Release) so
     // any thread that reads a flag as false with Acquire sees consistent data.
     {
-        let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
-        *active_keys = resolved.keys;
+        let mut active_keys = state.local_keys.lock().map_err(|e| e.to_string())?;
+        *active_keys = Some(resolved.keys);
         state.set_identity_storage(resolved.storage);
     }
     state.identity_lost.store(

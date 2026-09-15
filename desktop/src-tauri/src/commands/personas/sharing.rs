@@ -60,6 +60,7 @@ pub async fn set_persona_shared(
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
     let state = app.state::<AppState>();
+    let prepared = super::pending::finish_persona_publication(&app, Ok(prepared)).await?;
     publish_prepared_persona(&state, prepared).await
 }
 
@@ -77,17 +78,15 @@ pub async fn update_persona_and_publish(
     input: crate::managed_agents::UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<SetPersonaSharedResult, String> {
-    let (_, prepared) =
-        super::update::update_persona_with(input, app.clone(), |app, state, persona| {
-            // Strict path: this command's contract is to report the publication
-            // outcome, so an enqueue failure must reach the UI rather than being
-            // logged and swallowed.
-            let result = prepare_persona_publication(app, state, persona, None)?;
-            // F2: refresh any shared 30178 heads that include this persona.
-            crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
-            Ok(result)
-        })
-        .await?;
+    update_persona_and_publish_with(input, app).await
+}
+
+pub(super) async fn update_persona_and_publish_with<R: tauri::Runtime>(
+    input: crate::managed_agents::UpdatePersonaRequest,
+    app: AppHandle<R>,
+) -> Result<SetPersonaSharedResult, String> {
+    let (_, prepared) = super::update::update_persona_with(input, app.clone(), true).await?;
+    let prepared = prepared.ok_or_else(|| "persona publication was not retained".to_string())?;
 
     let state = app.state::<AppState>();
     publish_prepared_persona(&state, prepared).await
@@ -98,11 +97,11 @@ async fn publish_prepared_persona(
     prepared: PreparedPersonaPublication,
 ) -> Result<SetPersonaSharedResult, String> {
     let api_base_url = crate::relay::relay_http_base_url(&prepared.scope.relay_url);
-    let publish_result = crate::relay::submit_signed_event_at_with_keys(
+    let publish_result = crate::relay::submit_signed_event_at_with_signer(
         &prepared.event,
         state,
         &api_base_url,
-        &prepared.scope.owner_keys,
+        &prepared.scope.owner_signer(),
     )
     .await;
 
@@ -195,19 +194,21 @@ mod tests {
         format!("http://{addr}")
     }
 
-    fn prepared(
+    async fn prepared(
         db_path: &std::path::Path,
         relay_url: String,
         keys: nostr::Keys,
         shared_override: Option<bool>,
     ) -> PreparedPersonaPublication {
         let (event, retained, persona) =
-            prepare_persona_publication_at(db_path, &keys, &persona(), shared_override).unwrap();
+            prepare_persona_publication_at(db_path, &keys, &persona(), shared_override)
+                .await
+                .unwrap();
         PreparedPersonaPublication {
             scope: RetentionScope {
                 db_path: db_path.to_path_buf(),
                 relay_url,
-                owner_keys: keys,
+                signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
             },
             event,
             retained,
@@ -221,7 +222,7 @@ mod tests {
         let db_path = dir.path().join("retention.db");
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
-        let prepared = prepared(&db_path, spawn_relay(false).await, keys, Some(true));
+        let prepared = prepared(&db_path, spawn_relay(false).await, keys, Some(true)).await;
         let state = build_app_state();
 
         let result = publish_prepared_persona(&state, prepared).await.unwrap();
@@ -256,7 +257,7 @@ mod tests {
         let db_path = dir.path().join("retention.db");
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
-        let prepared = prepared(&db_path, relay_url, keys, Some(true));
+        let prepared = prepared(&db_path, relay_url, keys, Some(true)).await;
         let state = build_app_state();
 
         let result = publish_prepared_persona(&state, prepared).await.unwrap();
@@ -288,7 +289,7 @@ mod tests {
         let db_path = dir.path().join("retention.db");
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
-        let prepared = prepared(&db_path, spawn_relay(true).await, keys, Some(true));
+        let prepared = prepared(&db_path, spawn_relay(true).await, keys, Some(true)).await;
         let state = build_app_state();
 
         let result = publish_prepared_persona(&state, prepared).await.unwrap();
@@ -320,8 +321,10 @@ mod tests {
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
         // The persona is already shared in this scope.
-        prepare_persona_publication_at(&db_path, &keys, &persona(), Some(true)).unwrap();
-        let prepared = prepared(&db_path, spawn_relay(true).await, keys, None);
+        prepare_persona_publication_at(&db_path, &keys, &persona(), Some(true))
+            .await
+            .unwrap();
+        let prepared = prepared(&db_path, spawn_relay(true).await, keys, None).await;
         let state = build_app_state();
 
         let result = publish_prepared_persona(&state, prepared).await.unwrap();
@@ -353,8 +356,10 @@ mod tests {
         let db_path = dir.path().join("retention.db");
         let keys = nostr::Keys::generate();
         let owner = keys.public_key().to_hex();
-        prepare_persona_publication_at(&db_path, &keys, &persona(), Some(true)).unwrap();
-        let prepared = prepared(&db_path, spawn_relay(false).await, keys, None);
+        prepare_persona_publication_at(&db_path, &keys, &persona(), Some(true))
+            .await
+            .unwrap();
+        let prepared = prepared(&db_path, spawn_relay(false).await, keys, None).await;
         let state = build_app_state();
 
         let result = publish_prepared_persona(&state, prepared).await.unwrap();
@@ -390,6 +395,7 @@ mod tests {
         let keys = nostr::Keys::generate();
 
         let error = prepare_persona_publication_at(dir.path(), &keys, &persona(), None)
+            .await
             .expect_err("a directory cannot be opened as the retention database");
 
         assert!(error.contains("failed to open retention db"));

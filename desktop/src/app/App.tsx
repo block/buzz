@@ -1,3 +1,5 @@
+import { isRemoteIdentity } from "@/shared/api/nativeIdentitySession";
+import { RemoteIdentityApp } from "@/app/RemoteIdentityApp";
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -792,6 +794,10 @@ export function App() {
   useReloadShortcut();
   useCloseWindowShortcut();
   useInitialRenderReady();
+  return isRemoteIdentity() ? <RemoteIdentityApp /> : <LocalIdentityApp />;
+}
+
+function LocalIdentityApp() {
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
   const [queryClient] = useState(createBuzzQueryClient);
 

@@ -139,8 +139,8 @@ pub(crate) async fn unread_catch_up(
     relay_client: State<'_, NativeRelayClient>,
     app: AppHandle,
 ) -> Result<UnreadCatchUpResponse, String> {
-    let keys = state.signing_keys()?;
-    let owner = keys.public_key().to_hex();
+    let signer = state.active_signer()?;
+    let owner = signer.public_key().to_hex();
     if !owner.eq_ignore_ascii_case(&request.self_pubkey) {
         return Err("unread catch-up identity does not match active scope".to_string());
     }
@@ -151,7 +151,9 @@ pub(crate) async fn unread_catch_up(
     // would then be reading a cancelled socket. The `join_next` drain ends
     // before this binding does, so that holds today — keep it that way, and in
     // particular do not move the lease into a task or narrow its scope.
-    let session = relay_client.session(relay_url.clone(), keys).await;
+    let session = relay_client
+        .session_with_signer(relay_url.clone(), signer)
+        .await;
 
     let concurrency = std::sync::Arc::new(Semaphore::new(8));
     let mut pending = JoinSet::new();
@@ -217,8 +219,8 @@ pub(crate) async fn unread_catch_up(
 
     fetched.sort_by_key(|item| item.order);
 
-    let current_keys = state.signing_keys()?;
-    if current_keys.public_key().to_hex() != owner
+    let current_signer = state.active_signer()?;
+    if current_signer.public_key().to_hex() != owner
         || crate::relay::relay_ws_url_with_override(&state) != relay_url
     {
         return Err("unread catch-up scope changed while fetching".to_string());

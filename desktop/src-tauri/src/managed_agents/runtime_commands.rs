@@ -232,6 +232,16 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     start_pair(pubkey, relay_url, true, None, app)
 }
 
+/// Start a pair on behalf of one captured foreground operation.
+pub(crate) fn start_managed_agent_runtime_pair_in_scope(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle,
+    operation: &crate::user_operation::UserOperationScope,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair_in_scope(pubkey, relay_url, true, None, app, Some(operation))
+}
+
 #[tauri::command]
 pub fn start_managed_agent_runtime(
     pubkey: String,
@@ -248,6 +258,17 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair_in_scope(pubkey, relay_url, lazy, expected_updated_at, app, None)
+}
+
+fn start_pair_in_scope(
+    pubkey: String,
+    relay_url: String,
+    lazy: bool,
+    expected_updated_at: Option<&str>,
+    app: AppHandle,
+    operation: Option<&crate::user_operation::UserOperationScope>,
+) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -260,6 +281,9 @@ fn start_pair(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
+    let _admission = operation
+        .map(|operation| operation.admit(&state))
+        .transpose()?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
     if record.backend != BackendKind::Local {
@@ -283,11 +307,10 @@ fn start_pair(
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
 
-    let owner = state
-        .keys
-        .lock()
-        .ok()
-        .map(|keys| keys.public_key().to_hex());
+    let owner = match operation {
+        Some(operation) => Some(operation.owner_pubkey.to_hex()),
+        None => state.identity_public_key().ok().map(|key| key.to_hex()),
+    };
     let mut process =
         spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
     let now = crate::util::now_iso();

@@ -2,14 +2,14 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, Keys, Tag};
+use nostr::{Event, Keys, NostrSigner, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
 use crate::error::WsClientError;
-use crate::message::{build_auth_event, parse_relay_message, OkResponse, RelayMessage};
+use crate::message::{build_auth_event_with_signer, parse_relay_message, OkResponse, RelayMessage};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -39,8 +39,17 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
+        Self::connect_authenticated_with_signer(url, keys, auth_tag).await
+    }
+
+    /// Connect and authenticate using an asynchronous rust-nostr signer.
+    pub async fn connect_authenticated_with_signer(
+        url: &str,
+        signer: &dyn NostrSigner,
+        auth_tag: Option<&Tag>,
+    ) -> Result<Self, WsClientError> {
         let mut conn = Self::connect(url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        conn.authenticate_with_signer(signer, auth_tag).await?;
         Ok(conn)
     }
 
@@ -72,11 +81,21 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
+        self.authenticate_with_signer(keys, auth_tag).await
+    }
+
+    /// Perform NIP-42 authentication through the asynchronous signing boundary.
+    pub async fn authenticate_with_signer(
+        &mut self,
+        signer: &dyn NostrSigner,
+        auth_tag: Option<&Tag>,
+    ) -> Result<(), WsClientError> {
         let challenge = self
             .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
             .await?;
 
-        let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
+        let auth_event =
+            build_auth_event_with_signer(&challenge, &self.relay_url, signer, auth_tag).await?;
         let event_id = auth_event.id.to_hex();
 
         self.send_raw(&json!(["AUTH", auth_event])).await?;

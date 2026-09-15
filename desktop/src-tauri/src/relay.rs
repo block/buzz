@@ -1,3 +1,4 @@
+use crate::active_user_signer::ActiveUserSigner;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use reqwest::Method;
@@ -117,14 +118,21 @@ pub fn relay_api_base_url() -> String {
 
 // ── NIP-98 HTTP auth ────────────────────────────────────────────────────────
 
-pub fn build_nip98_auth_header(
+/// Build NIP-98 authorization using a captured signer.
+pub(crate) async fn build_nip98_auth_header_for_signer(
+    signer: &ActiveUserSigner,
     method: &Method,
     url: &str,
     body: &[u8],
-    state: &AppState,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    build_nip98_auth_header_for_keys(&keys, method, url, body)
+    let event = signer
+        .sign_event(nip98_builder(method, url, body)?)
+        .await
+        .map_err(|error| format!("sign failed: {error}"))?;
+    Ok(format!(
+        "Nostr {}",
+        BASE64.encode(event.as_json().as_bytes())
+    ))
 }
 
 pub fn build_nip98_auth_header_for_keys(
@@ -133,6 +141,16 @@ pub fn build_nip98_auth_header_for_keys(
     url: &str,
     body: &[u8],
 ) -> Result<String, String> {
+    let event = nip98_builder(method, url, body)?
+        .sign_with_keys(keys)
+        .map_err(|error| format!("sign failed: {error}"))?;
+    Ok(format!(
+        "Nostr {}",
+        BASE64.encode(event.as_json().as_bytes())
+    ))
+}
+
+fn nip98_builder(method: &Method, url: &str, body: &[u8]) -> Result<EventBuilder, String> {
     let payload_hash = hex::encode(Sha256::digest(body));
 
     // Nonce ensures unique event IDs even for identical requests in the same second.
@@ -150,15 +168,7 @@ pub fn build_nip98_auth_header_for_keys(
             .map_err(|error| format!("nonce tag failed: {error}"))?,
     ];
 
-    let event = EventBuilder::new(Kind::HttpAuth, "")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|error| format!("sign failed: {error}"))?;
-
-    Ok(format!(
-        "Nostr {}",
-        BASE64.encode(event.as_json().as_bytes())
-    ))
+    Ok(EventBuilder::new(Kind::HttpAuth, "").tags(tags))
 }
 
 // ── Error handling ──────────────────────────────────────────────────────────
@@ -370,20 +380,8 @@ pub async fn query_relay_at(
     api_base_url: &str,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
-    crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/query", api_base_url);
-    let body_bytes =
-        serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
-    send_query_request(
-        &state.http_client,
-        &url,
-        &auth,
-        None,
-        body_bytes,
-        QUERY_REQUEST_TIMEOUT,
-    )
-    .await
+    let signer = state.legacy_local_signer()?;
+    query_relay_at_with_signer(state, api_base_url, filters, &signer, None).await
 }
 
 pub async fn query_relay_at_with_keys(
@@ -407,6 +405,35 @@ pub async fn query_relay_at_with_keys(
         QUERY_REQUEST_TIMEOUT,
     )
     .await
+}
+
+/// Query with the exact captured identity and relay.
+pub(crate) async fn query_relay_at_with_signer(
+    state: &AppState,
+    api_base_url: &str,
+    filters: &[serde_json::Value],
+    signer: &ActiveUserSigner,
+    auth_tag: Option<&str>,
+) -> Result<Vec<nostr::Event>, String> {
+    signer
+        .run(async {
+            crate::relay_admission::wait_for_rate_limit().await;
+            let url = format!("{}/query", api_base_url);
+            let body_bytes = serde_json::to_vec(filters)
+                .map_err(|e| format!("filter serialization failed: {e}"))?;
+            let auth = build_nip98_auth_header_for_signer(signer, &Method::POST, &url, &body_bytes)
+                .await?;
+            send_query_request(
+                &state.http_client,
+                &url,
+                &auth,
+                auth_tag,
+                body_bytes,
+                QUERY_REQUEST_TIMEOUT,
+            )
+            .await
+        })
+        .await
 }
 
 /// Issue an authenticated `POST /query` and parse the response, applying the
@@ -622,72 +649,69 @@ pub use get::get_relay_json;
 
 mod submit;
 pub use submit::{
-    submit_event, submit_event_at_created_at, submit_event_at_with_keys,
-    submit_event_with_keys_created_at, submit_signed_event_at_with_keys, SubmitEventResponse,
+    submit_event, submit_event_at_created_at, submit_event_with_signer_created_at,
+    SubmitEventResponse,
 };
-
-/// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
-///
-/// Managed-agent flows use this to publish as the agent itself while still
-/// including the stored NIP-OA auth tag when the relay requires owner-backed
-/// membership.
-pub async fn submit_event_with_keys(
-    builder: nostr::EventBuilder,
-    state: &AppState,
-    keys: &Keys,
-    auth_tag: Option<&str>,
-) -> Result<SubmitEventResponse, String> {
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
-    submit_signed_event_with_keys(&event, state, keys, auth_tag).await
-}
+pub(crate) use submit::{submit_event_at, submit_signed_event_at_with_signer};
 
 /// POST an already-signed event using the same explicit identity for NIP-98.
-pub async fn submit_signed_event_with_keys(
+pub(crate) async fn submit_signed_event_at_with_auth(
     event: &nostr::Event,
     state: &AppState,
-    keys: &Keys,
+    api_base_url: &str,
+    signer: &ActiveUserSigner,
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
-    if event.pubkey != keys.public_key() {
-        return Err("signed event does not match the publishing identity".to_string());
-    }
-    crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
-    let body_bytes = event.as_json().into_bytes();
-    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    signer
+        .run(async {
+            if event.pubkey != signer.public_key() {
+                return Err("signed event does not match the publishing identity".to_string());
+            }
+            crate::relay_admission::wait_for_rate_limit().await;
+            let url = format!("{}/events", api_base_url.trim_end_matches('/'));
+            let body_bytes = event.as_json().into_bytes();
+            crate::egress_guard::assert_no_key_backup_bytes(
+                &body_bytes,
+                "signed event submit (keys)",
+            )?;
+            let auth_header =
+                build_nip98_auth_header_for_signer(signer, &Method::POST, &url, &body_bytes)
+                    .await?;
 
-    let mut request = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
+            let mut request = state
+                .http_client
+                .post(&url)
+                .header("Authorization", auth_header)
+                .header("Content-Type", "application/json");
+            if let Some(tag) = auth_tag {
+                request = request.header("x-auth-tag", tag);
+            }
 
-    let response = request
-        .body(body_bytes)
-        .send()
+            let response = request
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| classify_request_error(&e))?;
+
+            if !response.status().is_success() {
+                return Err(relay_error_message(response).await);
+            }
+
+            let result: SubmitEventResponse = parse_json_response(response).await?;
+
+            if !result.accepted {
+                return Err(format!("relay rejected event: {}", result.message));
+            }
+
+            Ok(result)
+        })
         .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
-
-    if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
-    }
-
-    Ok(result)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod signer_tests;

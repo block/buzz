@@ -28,7 +28,7 @@ fn test_arrival_relay_matching_agrees_with_database_identity() {
     let scope = |relay: &str| RetentionScope {
         db_path: scoped_retention_db_path(base, relay, &owner),
         relay_url: relay.to_string(),
-        owner_keys: keys.clone(),
+        signer: crate::active_user_signer::ActiveUserSigner::local(keys.clone()),
     };
     let community_a = scoped_retention_db_path(base, "wss://a.example", &owner);
 
