@@ -16,6 +16,12 @@ Widget _trackActiveThreadScrollPosition(
   },
 );
 
+/// Whether [position] is moving under a scroll activity no finger started.
+bool _threadScrollIsProgrammaticallyMoving(
+  ScrollPosition position, {
+  required bool isDragging,
+}) => !isDragging && position.isScrollingNotifier.value;
+
 bool _jumpActiveThreadScrollToTail(
   ObjectRef<ScrollPosition?> activePosition,
   bool Function()? testOverride,
