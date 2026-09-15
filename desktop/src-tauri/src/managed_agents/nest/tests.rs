@@ -545,6 +545,33 @@ fn refresh_skips_when_version_current() {
 }
 
 #[test]
+fn refresh_skill_updates_presence_guidance_from_version_five() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+
+    let skill_dir = root.join(".agents/skills/buzz-cli");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Buzz CLI Skill\n\n**`users set-presence` is broken** — will fail until WebSocket support is added.\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join(".skill-version"), "5\n").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    let content = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+    assert_eq!(content, BUZZ_CLI_SKILL_MD);
+    assert!(!content.contains("**`users set-presence` is broken**"));
+    assert_eq!(
+        fs::read_to_string(skill_dir.join(".skill-version"))
+            .unwrap()
+            .trim(),
+        NEST_SKILL_VERSION.to_string()
+    );
+}
+
+#[test]
 fn refresh_skill_overwrites_on_version_bump() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
