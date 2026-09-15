@@ -1,3 +1,4 @@
+import { buildReplyTags as buildSingleLevelReplyTags } from "@/features/messages/lib/threading";
 import * as React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -5426,7 +5427,7 @@ async function handleGetThreadReplies(
   const cap = Math.min(args.limit ?? 200, 500);
   const filter: MockFilter & Record<string, unknown> = {
     "#e": [args.rootEventId],
-    depth_limit: args.depthLimit ?? 64,
+    depth_limit: args.depthLimit ?? 2147483647,
     kinds: [...TIMELINE_KINDS],
     limit: cap,
   };
@@ -10268,34 +10269,13 @@ async function handleSendChannelMessage(
         };
     const rootEventId =
       args.rootEventId ?? parentThread.rootEventId ?? args.parentEventId;
-    const depth = parentEvent
-      ? (() => {
-          let currentEvent: RelayEvent | undefined = parentEvent;
-          let nextDepth = 1;
-
-          while (currentEvent) {
-            const reference = getThreadReferenceFromTags(currentEvent.tags);
-            if (!reference.parentEventId) {
-              return nextDepth;
-            }
-
-            nextDepth += 1;
-            currentEvent = history.find(
-              (event) => event.id === reference.parentEventId,
-            );
-          }
-
-          return nextDepth;
-        })()
-      : 1;
-
     const event: RelayEvent = {
       id: mockEventId(),
       pubkey: mockPubkey,
       created_at: createdAt,
       kind,
       tags: [
-        ...buildReplyMessageTags(
+        ...buildSingleLevelReplyTags(
           args.channelId,
           mockPubkey,
           args.parentEventId,
@@ -10313,16 +10293,16 @@ async function handleSendChannelMessage(
 
     return {
       event_id: event.id,
-      parent_event_id: args.parentEventId,
+      parent_event_id: rootEventId,
       root_event_id: rootEventId,
-      depth,
+      depth: 1,
       created_at: createdAt,
     };
   }
 
   const relayIdentity = getRelayIdentity(config);
   const tags = args.parentEventId
-    ? buildReplyMessageTags(
+    ? buildSingleLevelReplyTags(
         args.channelId,
         relayIdentity.pubkey,
         args.parentEventId,

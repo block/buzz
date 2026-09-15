@@ -122,8 +122,8 @@ export function buildReplyTags(
     return tags;
   }
 
-  tags.push(["e", rootEventId, "", "root"]);
-  tags.push(["e", parentEventId, "", "reply"]);
+  tags.push(["e", rootEventId, "", "reply"]);
+  tags.push(["reply-context", parentEventId]);
   return tags;
 }
 
@@ -143,8 +143,8 @@ export function buildThreadReferenceTags(
     return tags;
   }
 
-  tags.push(["e", rootEventId, "", "root"]);
-  tags.push(["e", parentEventId, "", "reply"]);
+  tags.push(["e", rootEventId, "", "reply"]);
+  tags.push(["reply-context", parentEventId]);
   return tags;
 }
 
@@ -159,4 +159,12 @@ export function resolveReplyRootId(
 
   const thread = getThreadReference(parent.tags);
   return thread.rootId ?? parent.id;
+}
+
+/** Explicit response context, or the parent of a historical nested response. */
+export function getReplyContextId(tags: string[][]): string | null {
+  const context = tags.find((tag) => tag[0] === "reply-context")?.[1];
+  if (context) return context;
+  const { rootId, parentId } = getThreadReference(tags);
+  return parentId && rootId !== parentId ? parentId : null;
 }

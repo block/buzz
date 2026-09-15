@@ -325,70 +325,35 @@ export function hasNestedThreadBranches(entries: readonly MainTimelineEntry[]) {
   );
 }
 
-function appendExpandedReplies(params: {
-  entries: MainTimelineEntry[];
-  parentId: string;
-  depth: number;
-  directChildrenByParentId: Map<string, TimelineMessage[]>;
-  descendantStatsByMessageId: Map<string, ThreadDescendantStats>;
-  expandedReplyIds: ReadonlySet<string>;
-}) {
-  const {
-    entries,
-    parentId,
-    depth,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  } = params;
-  const directReplies = directChildrenByParentId.get(parentId) ?? [];
-
-  for (const reply of directReplies) {
-    const isExpanded = expandedReplyIds.has(reply.id);
-    entries.push({
-      message: normalizeInlineReplyMessage(reply, depth),
-      summary: isExpanded
-        ? null
-        : buildSummaryForDirectReplies(reply.id, descendantStatsByMessageId),
-    });
-
-    if (isExpanded) {
-      appendExpandedReplies({
-        entries,
-        parentId: reply.id,
-        depth: depth + 1,
-        directChildrenByParentId,
-        descendantStatsByMessageId,
-        expandedReplyIds,
-      });
+/** Flatten historical branches without requiring every ancestor to be loaded. */
+function buildVisibleThreadReplies(index: ThreadPanelIndex, rootId: string) {
+  const included = new Map<string, TimelineMessage>();
+  const pending = [rootId];
+  const visited = new Set<string>();
+  for (const message of index.messageById.values()) {
+    if (message.id !== rootId && message.rootId === rootId) {
+      included.set(message.id, message);
+      pending.push(message.id);
     }
   }
-}
-
-function buildVisibleThreadReplies(params: {
-  openThreadHeadId: string;
-  directChildrenByParentId: Map<string, TimelineMessage[]>;
-  descendantStatsByMessageId: Map<string, ThreadDescendantStats>;
-  expandedReplyIds: ReadonlySet<string>;
-}) {
-  const {
-    openThreadHeadId,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  } = params;
-  const entries: MainTimelineEntry[] = [];
-
-  appendExpandedReplies({
-    entries,
-    parentId: openThreadHeadId,
-    depth: 1,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  });
-
-  return entries;
+  while (pending.length > 0) {
+    const parentId = pending.pop()!;
+    if (visited.has(parentId)) continue;
+    visited.add(parentId);
+    for (const child of index.directChildrenByParentId.get(parentId) ?? []) {
+      if (child.id === rootId) continue;
+      included.set(child.id, child);
+      pending.push(child.id);
+    }
+  }
+  return [...included.values()]
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+    .map(
+      (message): MainTimelineEntry => ({
+        message: normalizeInlineReplyMessage(message, 1),
+        summary: null,
+      }),
+    );
 }
 
 function buildRelayThreadSummary(
@@ -500,7 +465,7 @@ export function buildThreadPanelDataFromIndex(
   index: ThreadPanelIndex,
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
-  expandedReplyIds: ReadonlySet<string>,
+  _expandedReplyIds: ReadonlySet<string>,
 ): ThreadPanelData {
   if (!openThreadHeadId) {
     return {
@@ -511,9 +476,11 @@ export function buildThreadPanelDataFromIndex(
     };
   }
 
-  const { directChildrenByParentId, descendantStatsByMessageId, messageById } =
-    index;
-  const threadHead = messageById.get(openThreadHeadId) ?? null;
+  const { messageById } = index;
+  const selectedHead = messageById.get(openThreadHeadId);
+  const rootId =
+    selectedHead?.rootId ?? selectedHead?.parentId ?? openThreadHeadId;
+  const threadHead = messageById.get(rootId) ?? null;
 
   if (!threadHead) {
     return {
@@ -525,22 +492,18 @@ export function buildThreadPanelDataFromIndex(
   }
 
   const normalizedThreadHead = normalizeHeadMessage(threadHead);
-  const visibleReplies = buildVisibleThreadReplies({
-    openThreadHeadId,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  });
+  const visibleReplies = buildVisibleThreadReplies(index, threadHead.id);
 
   const replyTargetInBranch =
     threadReplyTargetId === threadHead.id
       ? normalizedThreadHead
-      : (messageById.get(threadReplyTargetId ?? "") ?? null);
+      : (visibleReplies.find(
+          (entry) => entry.message.id === threadReplyTargetId,
+        )?.message ?? null);
 
   return {
     threadHead: normalizedThreadHead,
-    totalReplyCount:
-      descendantStatsByMessageId.get(openThreadHeadId)?.descendantCount ?? 0,
+    totalReplyCount: visibleReplies.length,
     visibleReplies,
     replyTargetMessage: replyTargetInBranch ?? normalizedThreadHead,
   };

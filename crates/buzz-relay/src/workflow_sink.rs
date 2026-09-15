@@ -328,28 +328,17 @@ impl ActionSink for RelayActionSink {
                 None => None,
             };
 
-            // NIP-10 e-tags for the thread. Marked `root`/`reply` so clients and
-            // the ingest resolver read the ancestry the same way. A direct reply
-            // (parent == root) emits a single `reply` tag; a nested reply emits
-            // the `root` + `reply` pair — matching `buzz_sdk::builders::thread_tags`
-            // so every writer produces one wire shape per reply kind.
+            // Reply ancestry is flattened before signing and metadata persistence.
             if let Some(ancestry) = &reply_ancestry {
                 let root_hex = ancestry.root_hex();
-                let parent_hex = ancestry.parent_hex();
-                if root_hex == parent_hex {
+                tags.push(
+                    Tag::parse(["e", &root_hex, "", "reply"])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("reply e tag: {e}")))?,
+                );
+                if let Some(context) = reply_to.as_deref().filter(|id| *id != root_hex) {
                     tags.push(
-                        Tag::parse(["e", &root_hex, "", "reply"]).map_err(|e| {
-                            ActionSinkError::EventBuild(format!("reply e tag: {e}"))
-                        })?,
-                    );
-                } else {
-                    tags.push(
-                        Tag::parse(["e", &root_hex, "", "root"])
-                            .map_err(|e| ActionSinkError::EventBuild(format!("root e tag: {e}")))?,
-                    );
-                    tags.push(
-                        Tag::parse(["e", &parent_hex, "", "reply"]).map_err(|e| {
-                            ActionSinkError::EventBuild(format!("reply e tag: {e}"))
+                        Tag::parse(["reply-context", context]).map_err(|e| {
+                            ActionSinkError::EventBuild(format!("reply context: {e}"))
                         })?,
                     );
                 }
@@ -824,6 +813,210 @@ mod postgres_tests {
         Arc::new(state)
     }
 
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres"]
+    async fn single_level_reply_policy_validates_ancestry_and_context() {
+        use crate::handlers::ingest::resolve_nip10_thread_meta;
+        let mut state = test_state().await;
+        let author = nostr::Keys::generate();
+        let host = format!("flat-test-{}.example", Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author.public_key().to_hex())
+            .await
+            .unwrap()
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            _ => panic!("fresh community required"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "flat",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+        let channel_hex = channel.id.to_string();
+        let root = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "root")
+            .tags([Tag::parse(["h", &channel_hex]).unwrap()])
+            .sign_with_keys(&author)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &root, Some(channel.id))
+            .await
+            .unwrap();
+        let root_hex = root.id.to_hex();
+        let parent = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "parent")
+            .tags([
+                Tag::parse(["h", &channel_hex]).unwrap(),
+                Tag::parse(["e", &root_hex, "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &parent, Some(channel.id))
+            .await
+            .unwrap();
+        let parent_hex = parent.id.to_hex();
+        let nested = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "old client")
+            .tags([
+                Tag::parse(["h", &channel_hex]).unwrap(),
+                Tag::parse(["e", &root_hex, "", "root"]).unwrap(),
+                Tag::parse(["e", &parent_hex, "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .unwrap();
+        // Policy off preserves older producers; unindexed parents are still resolved.
+        assert_eq!(
+            resolve_nip10_thread_meta(community, &nested, channel.id, &state)
+                .await
+                .unwrap()
+                .unwrap()
+                .depth,
+            2
+        );
+        {
+            let state = Arc::get_mut(&mut state).expect("no sink has retained the test state");
+            Arc::make_mut(&mut state.config)
+                .single_level_reply_communities
+                .push(*community.as_uuid());
+        }
+        assert!(
+            resolve_nip10_thread_meta(community, &nested, channel.id, &state)
+                .await
+                .is_err()
+        );
+        let thread = buzz_sdk::ThreadRef {
+            root_event_id: root.id,
+            parent_event_id: parent.id,
+        };
+        let flat = buzz_sdk::build_message(
+            channel.id,
+            "new client",
+            Some(&thread),
+            &[],
+            false,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&author)
+        .unwrap();
+        assert!(flat.verify().is_ok());
+        let metadata = resolve_nip10_thread_meta(community, &flat, channel.id, &state)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.depth, 1);
+        assert_eq!(metadata.parent_event_id, root.id.as_bytes());
+        assert!(
+            resolve_nip10_thread_meta(community, &flat, Uuid::new_v4(), &state)
+                .await
+                .is_err()
+        );
+        let unrelated = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "another root")
+            .tags([Tag::parse(["h", &channel_hex]).unwrap()])
+            .sign_with_keys(&author)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &unrelated, Some(channel.id))
+            .await
+            .unwrap();
+        let forged = buzz_sdk::build_message(
+            channel.id,
+            "wrong context",
+            Some(&buzz_sdk::ThreadRef {
+                root_event_id: root.id,
+                parent_event_id: unrelated.id,
+            }),
+            &[],
+            false,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&author)
+        .unwrap();
+        assert!(
+            resolve_nip10_thread_meta(community, &forged, channel.id, &state)
+                .await
+                .is_err()
+        );
+        for context_tags in [
+            vec![Tag::parse(["reply-context", &parent_hex]).unwrap()],
+            vec![Tag::parse(["reply-context"]).unwrap()],
+            vec![
+                Tag::parse(["reply-context", &parent_hex]).unwrap(),
+                Tag::parse(["reply-context", &root_hex]).unwrap(),
+            ],
+        ] {
+            let top_level_context =
+                EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "invalid context")
+                    .tags(context_tags)
+                    .sign_with_keys(&author)
+                    .unwrap();
+            assert!(
+                resolve_nip10_thread_meta(community, &top_level_context, channel.id, &state)
+                    .await
+                    .is_err()
+            );
+        }
+        // Even the maximum stored historical depth must remain answerable at depth 1.
+        let parent_at =
+            chrono::DateTime::from_timestamp(parent.created_at.as_secs() as i64, 0).unwrap();
+        let root_at =
+            chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).unwrap();
+        state
+            .db
+            .insert_thread_metadata(
+                community,
+                parent.id.as_bytes(),
+                parent_at,
+                channel.id,
+                Some(root.id.as_bytes()),
+                Some(root_at),
+                Some(root.id.as_bytes()),
+                Some(root_at),
+                i32::MAX,
+                false,
+            )
+            .await
+            .unwrap();
+        let metadata = resolve_nip10_thread_meta(community, &flat, channel.id, &state)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.depth, 1);
+        let workflow_ancestry = crate::handlers::ingest::resolve_relay_reply_thread_meta(
+            community,
+            &parent_hex,
+            channel.id,
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(workflow_ancestry.depth, 1);
+        assert_eq!(workflow_ancestry.parent_event_id, root.id.as_bytes());
+        // Enforcement does not mutate or remove historical signed events.
+        let historical = state
+            .db
+            .get_event_by_id_for_event_write(community, parent.id.as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.event.id, parent.id);
+        assert!(historical.event.verify().is_ok());
+    }
+
     async fn execute_send_message_workflow(
         state: &Arc<AppState>,
         community: CommunityId,
@@ -1264,23 +1457,19 @@ mod postgres_tests {
             .expect("reply has thread metadata");
 
         assert_eq!(
-            meta.depth, 2,
-            "reply to a marked-but-unindexed nested parent is depth 2, not top-level"
+            meta.depth, 1,
+            "reply to a historical nested parent is flattened to the original root"
         );
         let root_bytes = nostr::EventId::from_hex(&root_hex)
             .expect("root id")
             .as_bytes()
             .to_vec();
-        let parent_bytes = parent_event.id.as_bytes().to_vec();
         assert_eq!(
             meta.root_event_id.as_deref(),
             Some(root_bytes.as_slice()),
             "root recovered from the parent's own NIP-10 markers"
         );
-        assert_eq!(
-            meta.parent_event_id.as_deref(),
-            Some(parent_bytes.as_slice())
-        );
+        assert_eq!(meta.parent_event_id.as_deref(), Some(root_bytes.as_slice()));
 
         // The reply's own NIP-10 e-tags point root→the recovered root,
         // reply→the immediate parent (matching the ingest resolver).
@@ -1300,8 +1489,13 @@ mod postgres_tests {
                 }
             })
         };
-        assert_eq!(marker("root").as_deref(), Some(root_hex.as_str()));
-        assert_eq!(marker("reply").as_deref(), Some(parent_hex.as_str()));
+        assert_eq!(marker("root"), None);
+        assert_eq!(marker("reply").as_deref(), Some(root_hex.as_str()));
+        assert!(stored
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["reply-context", parent_hex.as_str()]));
 
         // A root-only parent is top-level under the shared collapse rule, even
         // without metadata. A workflow reply therefore starts a thread at P,

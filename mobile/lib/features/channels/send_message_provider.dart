@@ -207,7 +207,7 @@ class SendMessage {
 
   /// Build `e`-tags for a thread reply, matching the desktop convention:
   /// - Direct reply to thread head: `["e", id, "", "reply"]`
-  /// - Nested reply: `["e", rootId, "", "root"]` + `["e", parentId, "", "reply"]`
+  /// - Reply to a response: root reply plus a separate reply-context tag.
   static List<List<String>> _buildReplyTags(
     String parentEventId,
     String? rootEventId,
@@ -219,8 +219,8 @@ class SendMessage {
       ];
     }
     return [
-      ['e', root, '', 'root'],
-      ['e', parentEventId, '', 'reply'],
+      ['e', root, '', 'reply'],
+      ['reply-context', parentEventId],
     ];
   }
 }

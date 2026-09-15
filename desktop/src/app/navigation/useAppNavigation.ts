@@ -272,6 +272,7 @@ export function useAppNavigation() {
          * firing. Used by the Drafts panel "Send message" confirm flow.
          */
         autoSend?: string;
+        threadDraftKey?: string;
         /** Navigate even when the destination matches the current href.
          * Used by desktop-notification activation so a click is never
          * silently swallowed (block/buzz#3509). */
@@ -304,6 +305,9 @@ export function useAppNavigation() {
               : {}),
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
+            ...(options?.threadDraftKey
+              ? { threadDraft: options.threadDraftKey }
+              : {}),
           },
           state: options?.preserveSearchHighlight
             ? undefined

@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
@@ -201,6 +203,7 @@ Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
+  Map<String, Future<List<NostrEvent>>> pendingThreadRoots = const {},
   Set<String>? knownAgentPubkeys,
   Future<Set<String>> Function()? loadChannelBotPubkeys,
   bool watchChannelMembershipUpdates = false,
@@ -316,6 +319,10 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
+      for (final entry in pendingThreadRoots.entries)
+        threadRootProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) => entry.value),
       for (final entry in threadReplies.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
@@ -10628,7 +10635,192 @@ void main() {
       expect(highlightedDecoration.color!.a, lessThan(0.12));
     });
 
-    testWidgets('opens a nested reply in its direct-parent thread', (
+    testWidgets(
+      'single-level reply hydrates missing root without duplicating response',
+      (tester) async {
+        final root = _textMsg(
+          id: 'root',
+          pubkey: 'alice',
+          content: 'Hydrated original',
+          createdAt: 1000,
+        );
+        final response = _textMsg(
+          id: 'response',
+          pubkey: 'bob',
+          content: 'Selected response',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final gate = Completer<List<NostrEvent>>();
+        final snapshot = formatTimeline([response]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [response],
+            pendingThreadRoots: {'root': gate.future},
+            threadReplies: {
+              'root': [response],
+            },
+            home: ThreadDetailPage(
+              threadHead: snapshot.single,
+              allMessages: snapshot,
+              channelId: _channelId,
+              currentPubkey: null,
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('thread-message-response')),
+          findsOneWidget,
+        );
+        expect(
+          tester.widget<ComposeBar>(find.byType(ComposeBar)).threadHeadId,
+          'root',
+        );
+        gate.complete([root]);
+        await tester.pumpAndSettle();
+        expect(find.text('Hydrated original'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-message-response')),
+          findsOneWidget,
+        );
+        expect(find.text('1 reply'), findsOneWidget);
+      },
+    );
+
+    for (final legacy in [false, true]) {
+      testWidgets(
+        'single-level reply restores ${legacy ? "legacy and concurrent root drafts" : "saved response context"}',
+        (tester) async {
+          final root = _textMsg(
+            id: 'root',
+            pubkey: 'alice',
+            content: 'Original',
+            createdAt: 1000,
+          );
+          final response = _textMsg(
+            id: 'response',
+            pubkey: 'bob',
+            content: 'Response',
+            createdAt: 1100,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          );
+          final messages = formatTimeline([root, response]);
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, response],
+              threadReplies: {
+                'root': [response],
+              },
+              home: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ThreadDetailPage(
+                          threadHead: messages.firstWhere(
+                            (m) => m.id == (legacy ? 'response' : 'root'),
+                          ),
+                          allMessages: messages,
+                          channelId: _channelId,
+                          currentPubkey: null,
+                          isMember: true,
+                          isArchived: false,
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Open saved reply'),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final container = ProviderScope.containerOf(
+            tester.element(find.text('Open saved reply')),
+          );
+          final drafts = container.read(composeDraftsProvider.notifier);
+          drafts.save(
+            key: '$_channelId:root',
+            channelId: _channelId,
+            threadHeadId: 'root',
+            text: 'Root draft',
+            replyContextId: legacy ? null : 'response',
+          );
+          if (legacy) {
+            drafts.save(
+              key: '$_channelId:response',
+              channelId: _channelId,
+              threadHeadId: 'response',
+              text: 'Legacy response draft',
+            );
+          }
+          await tester.tap(find.text('Open saved reply'));
+          await tester.pumpAndSettle();
+          final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
+          expect(composer.threadHeadId, 'root');
+          expect(composer.replyContextId, 'response');
+          expect(composer.draftThreadHeadId, legacy ? 'response' : 'root');
+          await tester.tap(
+            find.text(legacy ? 'Legacy response draft' : 'Root draft'),
+          );
+          await tester.pumpAndSettle();
+          final editor = find
+              .descendant(
+                of: find.byType(ComposeBar),
+                matching: find.byType(EditableText),
+              )
+              .first;
+          expect(
+            tester.widget<EditableText>(editor).controller.text,
+            legacy ? 'Legacy response draft' : 'Root draft',
+          );
+          await tester.enterText(editor, 'Updated restored reply');
+          await tester.pump();
+          expect(
+            drafts
+                .draftFor('$_channelId:${legacy ? "response" : "root"}')!
+                .replyContextId,
+            'response',
+          );
+          if (legacy) {
+            expect(drafts.textFor('$_channelId:root'), 'Root draft');
+          }
+          Navigator.of(tester.element(find.byType(ComposeBar))).pop();
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Open saved reply'));
+          await tester.pumpAndSettle();
+          expect(
+            tester.widget<ComposeBar>(find.byType(ComposeBar)).replyContextId,
+            'response',
+          );
+          await tester.tap(find.text('Updated restored reply'));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<EditableText>(
+                  find
+                      .descendant(
+                        of: find.byType(ComposeBar),
+                        matching: find.byType(EditableText),
+                      )
+                      .first,
+                )
+                .controller
+                .text,
+            'Updated restored reply',
+          );
+        },
+      );
+    }
+
+    testWidgets('opens a historical nested reply in the original flat thread', (
       tester,
     ) async {
       final root = _textMsg(
@@ -10679,7 +10871,7 @@ void main() {
       final threadPage = tester.widget<ThreadDetailPage>(
         find.byType(ThreadDetailPage),
       );
-      expect(threadPage.threadHead.id, 'parent');
+      expect(threadPage.threadHead.id, 'root');
       expect(threadPage.initialMessageId, 'target');
 
       final highlighted = tester.widget<DecoratedBox>(

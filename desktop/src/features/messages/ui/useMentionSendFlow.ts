@@ -335,6 +335,10 @@ export function useMentionSendFlow({
           draft.savedImeta,
           [...draft.savedSpoileredAttachmentUrls],
           draft.savedMentionRefs,
+          draft.capturedThreadContext?.parentEventId !==
+            draft.capturedThreadContext?.threadHeadId
+            ? draft.capturedThreadContext?.parentEventId
+            : null,
         );
         return true;
       };

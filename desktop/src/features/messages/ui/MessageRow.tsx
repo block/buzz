@@ -56,6 +56,7 @@ import {
   MessageMetaSegments,
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { ReplyContextLine } from "./ReplyContextLine";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -685,6 +686,7 @@ export const MessageRow = React.memo(
 
     const messageBodyNode = (
       <>
+        <ReplyContextLine channelId={channelId} tags={message.tags} />
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
         {continuationMetadataNode}

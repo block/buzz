@@ -14,6 +14,7 @@ import {
 type UseDraftPersistLifecycleParams = {
   effectiveDraftKey: string | null | undefined;
   channelId: string | null | undefined;
+  replyContextId?: string | null;
   /** Load a saved draft from the store. */
   loadDraft: (draftKey: string) => DraftState | undefined;
   /** Persist the current draft to the store (called in effect cleanup). */
@@ -24,6 +25,7 @@ type UseDraftPersistLifecycleParams = {
     pendingImeta: ImetaMedia[],
     spoileredAttachmentUrls: string[],
     mentionRefs: DraftMentionRef[],
+    replyContextId?: string | null,
   ) => void;
   /** Snapshot selected mention identities still present in current content. */
   getMentionRefs: (content: string) => DraftMentionRef[];
@@ -107,6 +109,7 @@ type UseDraftPersistLifecycleResult = {
 export function useDraftPersistLifecycle({
   effectiveDraftKey,
   channelId,
+  replyContextId,
   loadDraft,
   persistDraft,
   getMentionRefs,
@@ -125,6 +128,11 @@ export function useDraftPersistLifecycle({
   syncComposerContentFromEditor,
   getImplicitAgentMentionPrefix,
 }: UseDraftPersistLifecycleParams): UseDraftPersistLifecycleResult {
+  const replyContexts = React.useRef(
+    new Map<string, string | null | undefined>(),
+  );
+  if (effectiveDraftKey)
+    replyContexts.current.set(effectiveDraftKey, replyContextId);
   const persistedContent = React.useCallback(
     (content: string) =>
       stripImplicitAgentMentionPrefix(
@@ -248,6 +256,7 @@ export function useDraftPersistLifecycle({
           [...pendingImetaForPersistRef.current],
           [...spoileredAttachmentUrlsRef.current],
           getMentionRefs(content),
+          replyContexts.current.get(effectiveDraftKey),
         );
       }
     };

@@ -14,27 +14,8 @@ function getThreadRouteTarget(
     return null;
   }
 
-  const expandedReplyIds = new Set<string>();
-  let ancestorId = targetMessage.parentId ?? null;
-  let guard = 0;
-  const maxHops = messageById.size + 1;
-
-  while (ancestorId && ancestorId !== threadHeadId && guard < maxHops) {
-    const ancestor = messageById.get(ancestorId);
-    if (!ancestor) {
-      return null;
-    }
-
-    expandedReplyIds.add(ancestor.id);
-    ancestorId = ancestor.parentId ?? null;
-    guard += 1;
-  }
-
-  if (ancestorId !== threadHeadId) {
-    return null;
-  }
-
-  return { expandedReplyIds, threadHeadId };
+  // Flat threads can reveal a root-tagged reply even if its parent is absent.
+  return { expandedReplyIds: new Set<string>(), threadHeadId };
 }
 
 function getRouteMainTimelineTargetId(

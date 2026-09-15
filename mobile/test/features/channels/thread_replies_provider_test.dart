@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
+  List<NostrFilter> lastFilters = [];
   List<NostrEvent> replies = const [];
   Completer<List<NostrEvent>>? nextQueryGate;
 
@@ -24,6 +25,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryCount++;
+    lastFilters = filters;
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
@@ -74,6 +76,22 @@ void main() {
       ['a', 'm', 'z'],
     );
   });
+
+  test(
+    'thread query keeps deep historical replies and scopes root hydration',
+    () async {
+      final (container, session, _) = makeHarness([_reply('deep-100', 1000)]);
+      addTearDown(container.dispose);
+      await container.read(threadRepliesProvider(args).future);
+      expect(
+        session.lastFilters.single.extensions['depth_limit'],
+        greaterThanOrEqualTo(100),
+      );
+      await container.read(threadRootProvider(args).future);
+      expect(session.lastFilters.single.ids, ['root']);
+      expect(session.lastFilters.single.tags['#h'], ['chan']);
+    },
+  );
 
   test('does not refetch on the disconnect edge', () async {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);

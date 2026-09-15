@@ -23,7 +23,6 @@ class _ThreadMessageList extends StatelessWidget {
   final bool isArchived;
   final FocusNode composerFocusNode;
   final VoidCallback restoreComposerFocus;
-  final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
     required this.viewport,
@@ -48,7 +47,6 @@ class _ThreadMessageList extends StatelessWidget {
     required this.isArchived,
     required this.composerFocusNode,
     required this.restoreComposerFocus,
-    required this.childrenByParent,
   });
 
   @override
@@ -177,13 +175,6 @@ class _ThreadMessageList extends StatelessWidget {
                         reply.pubkey.toLowerCase() ||
                     (reply.createdAt - previousReply.createdAt) > 300;
 
-                // Check if this reply itself has children (nested thread).
-                final nestedChildren = childrenByParent[reply.id];
-                final nestedSummary =
-                    nestedChildren != null && nestedChildren.isNotEmpty
-                    ? _buildNestedSummary(reply.id, nestedChildren)
-                    : null;
-
                 return trackActiveScrollPosition(
                   LocalMessageSendTransition(
                     key: ValueKey('thread-message-send-${reply.id}'),
@@ -222,16 +213,6 @@ class _ThreadMessageList extends StatelessWidget {
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
                           ),
-                          if (nestedSummary != null)
-                            _NestedThreadSummaryRow(
-                              summary: nestedSummary,
-                              replyMessage: reply,
-                              allMessages: allMessages,
-                              channelId: channelId,
-                              currentPubkey: currentPubkey,
-                              isMember: isMember,
-                              isArchived: isArchived,
-                            ),
                         ],
                       ),
                     ),
