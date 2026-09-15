@@ -1395,8 +1395,21 @@ fn oauth_cache_root_for(
 fn default_oauth_cache_root() -> Result<PathBuf, AgentError> {
     oauth_cache_root_for(
         std::env::var_os(BUZZ_AGENT_CONFIG_DIR_ENV).map(PathBuf::from),
-        dirs::home_dir(),
+        home_dir_preferring_env(),
     )
+}
+
+/// `$HOME` first, then the platform's own notion of the profile directory.
+///
+/// `dirs::home_dir` ignores `$HOME` on Windows in favour of `%USERPROFILE%`.
+/// Git Bash sessions export their own `HOME`, and the per-test isolation this
+/// module documents sets it deliberately — obeying it keeps both working while
+/// still resolving on a GUI-spawned process that has no `HOME` at all.
+fn home_dir_preferring_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
