@@ -2,16 +2,14 @@
  * Pure classification + submit gating for the key-import form, unit-testable
  * without a DOM.
  *
- * `ncryptsec1…` is a NIP-49 encrypted backup: no npub preview is possible
- * (the pubkey is inside the encrypted payload) and a passphrase is required.
- * Password validation happens in Rust at decrypt time; this module performs
- * the password-independent Bech32 and NIP-49 structure checks needed to decide
- * when the form can safely switch modes.
+ * Encrypted backups cannot be previewed before their recovery inputs are
+ * provided. Password and recovery-code validation happens in Rust; this module
+ * performs only the password-independent shape checks needed to switch modes.
  */
 
 import { nsecToNpub } from "@/shared/lib/nostrUtils";
 
-export type KeyImportKind = "nsec" | "ncryptsec" | "unknown";
+export type KeyImportKind = "nsec" | "ncryptsec" | "two-skd" | "unknown";
 
 const NCRYPTSEC_HRP = "ncryptsec";
 const NIP49_VERSION = 2;
@@ -67,12 +65,21 @@ function convertFiveBitWordsToBytes(words: readonly number[]): number[] | null {
 
 export function classifyKeyImportInput(input: string): KeyImportKind {
   const trimmed = input.trim();
+  if (trimmed.startsWith("buzz2skd1:")) return "two-skd";
   // Case-insensitive on the HRP to match the Rust classifier: an uppercase
   // valid backup routes to the encrypted path (and decodes there); mixed
   // case routes there too and fails in Rust with the accurate error.
   if (trimmed.slice(0, 10).toLowerCase() === "ncryptsec1") return "ncryptsec";
   if (trimmed.startsWith("nsec1")) return "nsec";
   return "unknown";
+}
+
+/** Lightweight shape check for Buzz's versioned, base64url 2SKD artifact. */
+export function isPlausibleTwoSkdBackup(input: string): boolean {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("buzz2skd1:") || trimmed.length > 4096) return false;
+  const encoded = trimmed.slice("buzz2skd1:".length);
+  return encoded.length >= 40 && /^[A-Za-z0-9_-]+$/.test(encoded);
 }
 
 /**
@@ -113,13 +120,22 @@ export function isPlausibleNcryptsec(input: string): boolean {
 
 /**
  * Whether the import form's submit should be enabled.
- * nsec: must derive an npub. ncryptsec: plausible blob + non-empty passphrase.
+ * Raw keys must derive an npub. Encrypted backups require their complete set
+ * of recovery inputs before submission.
  */
 export function keyImportSubmitEnabled(
   input: string,
   passphrase: string,
+  recoverySecret = "",
 ): boolean {
   const kind = classifyKeyImportInput(input);
+  if (kind === "two-skd") {
+    return (
+      isPlausibleTwoSkdBackup(input) &&
+      passphrase.length > 0 &&
+      recoverySecret.trim().length > 0
+    );
+  }
   if (kind === "ncryptsec") {
     return isPlausibleNcryptsec(input) && passphrase.length > 0;
   }
