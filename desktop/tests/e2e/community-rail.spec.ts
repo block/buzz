@@ -1508,8 +1508,14 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+
+    // KeyboardSensor attaches its document keydown listener on the next timer
+    // tick, after the drag has already become active.
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);
