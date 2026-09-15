@@ -11,10 +11,26 @@ const COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY =
   "buzz-community-discovery-after-leave";
 
 /**
+ * Join `rest` onto `home`, matching the separator style `home` already uses.
+ *
+ * Windows `homeDir()` returns a trailing backslash, so stripping only `/`
+ * yields a doubled separator. A backslash in `home` also means a Windows path,
+ * where `\` is not a legal filename character — rewriting `/` in `rest` is
+ * lossless there, but would corrupt a real filename on Unix.
+ */
+export function joinHomePath(home: string, rest: string): string {
+  const base = home.replace(/[/\\]+$/, "");
+  return base.includes("\\")
+    ? `${base}\\${rest.replace(/\//g, "\\")}`
+    : `${base}/${rest}`;
+}
+
+/**
  * Expand a leading `~` to the user's home directory. The backend rejects
  * `~`-prefixed paths (`std::fs` does not expand the shell tilde), so the UI
- * resolves it before save. Returns non-`~` input unchanged. Empty/whitespace
- * input returns `undefined` so callers can clear the override.
+ * resolves it before save. Accepts `~/` and the Windows-native `~\`. Returns
+ * non-`~` input unchanged. Empty/whitespace input returns `undefined` so
+ * callers can clear the override.
  */
 export async function expandTilde(input: string): Promise<string | undefined> {
   const trimmed = input.trim();
@@ -24,10 +40,8 @@ export async function expandTilde(input: string): Promise<string | undefined> {
   if (trimmed === "~") {
     return homeDir();
   }
-  if (trimmed.startsWith("~/")) {
-    const home = await homeDir();
-    const base = home.endsWith("/") ? home.slice(0, -1) : home;
-    return `${base}/${trimmed.slice(2)}`;
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return joinHomePath(await homeDir(), trimmed.slice(2));
   }
   return trimmed;
 }
