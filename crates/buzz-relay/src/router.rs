@@ -31,12 +31,17 @@ use crate::state::AppState;
 ///
 /// Pure Nostr protocol: WebSocket (NIP-01), HTTP bridge (NIP-98), media (Blossom),
 /// git (smart HTTP), NIP-05, and health probes.
+fn media_body_limit(max_image_bytes: u64, max_video_bytes: u64, max_file_bytes: u64) -> usize {
+    max_image_bytes.max(max_video_bytes).max(max_file_bytes) as usize
+}
+
+/// Build the relay's HTTP router with route-specific body limits and middleware.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let media_body_limit = state
-        .config
-        .media
-        .max_image_bytes
-        .max(state.config.media.max_video_bytes) as usize;
+    let media_body_limit = media_body_limit(
+        state.config.media.max_image_bytes,
+        state.config.media.max_video_bytes,
+        state.config.media.max_file_bytes,
+    );
     let media_router = Router::new()
         .route("/upload", put(api::media::upload_blob))
         .route("/media/upload", put(api::media::upload_blob))
@@ -530,6 +535,12 @@ mod tests {
     use axum::{routing::get, Router};
     use futures_util::SinkExt;
     use opentelemetry::trace::TracerProvider as _;
+
+    #[test]
+    fn media_body_limit_includes_configured_generic_file_limit() {
+        assert_eq!(super::media_body_limit(1, 2, 3), 3);
+        assert_eq!(super::media_body_limit(5, 2, 3), 5);
+    }
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, Notify};

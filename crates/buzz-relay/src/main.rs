@@ -26,6 +26,43 @@ use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 use tokio_util::sync::CancellationToken;
 
+const UPLOAD_RECORD_REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const UPLOAD_RECORD_REPAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct DeletionFencedUploadRecordRepairProtector {
+    db: buzz_db::Db,
+}
+
+impl buzz_media::UploadRecordRepairProtector for DeletionFencedUploadRecordRepairProtector {
+    fn protect<'a>(
+        &'a self,
+        community: buzz_core::tenant::CommunityId,
+        operation: buzz_media::UploadRecordRepairFuture<'a>,
+    ) -> buzz_media::UploadRecordRepairFuture<'a> {
+        Box::pin(async move {
+            let guard =
+                buzz_deletion::acquire_serving_write(&self.db, community, "upload_record_repair")
+                    .await
+                    .map_err(|error| {
+                        buzz_media::MediaError::StorageError(format!(
+                            "upload-record repair serving-write lease unavailable: {error}"
+                        ))
+                    })?;
+            let outcome = guard.protect(operation).await.map_err(|error| {
+                buzz_media::MediaError::StorageError(format!(
+                    "upload-record repair serving-write lease lost: {error}"
+                ))
+            })?;
+            guard.finish().await.map_err(|error| {
+                buzz_media::MediaError::StorageError(format!(
+                    "upload-record repair serving-write lease release failed: {error}"
+                ))
+            })?;
+            outcome
+        })
+    }
+}
+
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     value.map(str::trim).is_some_and(|value| {
         matches!(
@@ -525,6 +562,96 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         media_storage,
     );
     let state = Arc::new(app_state);
+
+    if config.media.upload_records_enabled {
+        let repair_protector = Arc::new(DeletionFencedUploadRecordRepairProtector {
+            db: state.db.clone(),
+        });
+        let initial_repairs = tokio::time::timeout(
+            UPLOAD_RECORD_REPAIR_TIMEOUT,
+            buzz_media::process_upload_record_repair_page(
+                &state.media_storage,
+                repair_protector.as_ref(),
+                None,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("upload-record repair startup page timed out"))?
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "upload records require list/read/write/delete access for durable repair: {error}"
+            )
+        })?;
+        if initial_repairs.repaired > 0
+            || initial_repairs.waiting_for_record > 0
+            || initial_repairs.waiting_for_sidecar > 0
+            || initial_repairs.failed > 0
+        {
+            info!(
+                repaired = initial_repairs.repaired,
+                waiting_for_record = initial_repairs.waiting_for_record,
+                waiting_for_sidecar = initial_repairs.waiting_for_sidecar,
+                failed = initial_repairs.failed,
+                "processed startup upload-record repair page"
+            );
+        }
+
+        let repair_storage = Arc::clone(&state.media_storage);
+        let repair_shutting_down = Arc::clone(&state.shutting_down);
+        let repair_protector = Arc::clone(&repair_protector);
+        tokio::spawn(async move {
+            let mut continuation_token = if initial_repairs.is_truncated {
+                initial_repairs.next_continuation_token
+            } else {
+                None
+            };
+            let mut interval = tokio::time::interval(UPLOAD_RECORD_REPAIR_INTERVAL);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if repair_shutting_down.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                match tokio::time::timeout(
+                    UPLOAD_RECORD_REPAIR_TIMEOUT,
+                    buzz_media::process_upload_record_repair_page(
+                        &repair_storage,
+                        repair_protector.as_ref(),
+                        continuation_token.clone(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(page)) => {
+                        if page.repaired > 0
+                            || page.waiting_for_record > 0
+                            || page.waiting_for_sidecar > 0
+                            || page.failed > 0
+                        {
+                            info!(
+                                repaired = page.repaired,
+                                waiting_for_record = page.waiting_for_record,
+                                waiting_for_sidecar = page.waiting_for_sidecar,
+                                failed = page.failed,
+                                "processed upload-record repair page"
+                            );
+                        }
+                        continuation_token = if page.is_truncated {
+                            page.next_continuation_token
+                        } else {
+                            None
+                        };
+                    }
+                    Ok(Err(error)) => {
+                        warn!(%error, "upload-record repair page failed; retrying the same cursor");
+                    }
+                    Err(_) => {
+                        warn!("upload-record repair page timed out; retrying the same cursor");
+                    }
+                }
+            }
+        });
+    }
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the

@@ -865,6 +865,15 @@ impl Config {
                 .unwrap_or(100 * 1024 * 1024),
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
+            // Rollout fence for the new calendar classification. This must stay
+            // false until every writer uses first-writer claims and conditional
+            // sidecar publication; otherwise an old pod can overwrite `.ics`
+            // metadata with the legacy `.bin` classification.
+            calendar_classification_enabled: std::env::var(
+                "BUZZ_MEDIA_CALENDAR_CLASSIFICATION_READY",
+            )
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
             // Per-upload-event records (`_uploads/` moderation side channel).
             // Off by default; coherence between the three knobs is enforced in
             // MediaConfig::validate at startup.
