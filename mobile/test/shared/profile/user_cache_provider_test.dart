@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -26,21 +27,22 @@ void main() {
   });
 
   test('refresh queries profiles that are already cached', () async {
+    final agent = nostr.Keys.generate();
     final session = _RecordingProfileSession();
     final container = ProviderContainer(
       overrides: [relaySessionProvider.overrideWith(() => session)],
     );
     addTearDown(container.dispose);
     final cache = container.read(userCacheProvider.notifier);
-    cache.cacheProfileEvent(
-      _profileEvent(id: 'cached-profile', createdAt: 1, name: 'Cached Human'),
+    cache.captureAdmission().add(
+      _profileEvent(keys: agent, createdAt: 1, name: 'Cached Human'),
     );
 
-    final succeeded = await cache.refresh(const ['AGENT']);
+    final succeeded = await cache.refresh([agent.public.toUpperCase()]);
 
     expect(succeeded, isTrue);
     expect(session.requestedFilter?.kinds, const [0]);
-    expect(session.requestedFilter?.authors, const ['agent']);
+    expect(session.requestedFilter?.authors, [agent.public]);
     expect(session.requestedFilter?.limit, 1);
   });
 
@@ -56,22 +58,16 @@ void main() {
     final agent = nostr.Keys.generate();
     final refresh = cache.refresh([agent.public]);
 
-    cache.cacheProfileEvent(
+    cache.captureAdmission().add(
       _profileEvent(
-        id: 'newer-agent',
-        pubkey: agent.public,
+        keys: agent,
         createdAt: 2,
         name: 'Agent',
         tags: [_authTag(owner, agent.public)],
       ),
     );
     refreshCompleter.complete([
-      _profileEvent(
-        id: 'older-human',
-        pubkey: agent.public,
-        createdAt: 1,
-        name: 'Human',
-      ),
+      _profileEvent(keys: agent, createdAt: 1, name: 'Human'),
     ]);
 
     expect(await refresh, isTrue);
@@ -84,12 +80,7 @@ void main() {
     final agent = nostr.Keys.generate();
     final session = _RecordingProfileSession(
       result: Future.value([
-        _profileEvent(
-          id: 'newer-human',
-          pubkey: agent.public,
-          createdAt: 2,
-          name: 'Human',
-        ),
+        _profileEvent(keys: agent, createdAt: 2, name: 'Human'),
       ]),
     );
     final container = ProviderContainer(
@@ -97,10 +88,9 @@ void main() {
     );
     addTearDown(container.dispose);
     final cache = container.read(userCacheProvider.notifier);
-    cache.cacheProfileEvent(
+    cache.captureAdmission().add(
       _profileEvent(
-        id: 'older-agent',
-        pubkey: agent.public,
+        keys: agent,
         createdAt: 1,
         name: 'Agent',
         tags: [_authTag(owner, agent.public)],
@@ -108,24 +98,19 @@ void main() {
     );
 
     expect(await cache.refresh([agent.public]), isTrue);
+    cache.put(UserProfile(pubkey: agent.public, ownerPubkey: owner.public));
     expect(cache.state[agent.public]?.displayName, 'Human');
     expect(cache.state[agent.public]?.ownerPubkey, isNull);
   });
 
   test('non-profile history cannot poison profile order', () async {
+    final agent = nostr.Keys.generate();
     final session = _RecordingProfileSession(
       results: [
         Future.value([
-          _profileEvent(
-            id: 'non-profile-newer',
-            createdAt: 3,
-            name: 'Ignored',
-            kind: 1,
-          ),
+          _profileEvent(keys: agent, createdAt: 3, name: 'Ignored', kind: 1),
         ]),
-        Future.value([
-          _profileEvent(id: 'valid-older', createdAt: 2, name: 'Valid'),
-        ]),
+        Future.value([_profileEvent(keys: agent, createdAt: 2, name: 'Valid')]),
       ],
     );
     final container = ProviderContainer(
@@ -134,10 +119,10 @@ void main() {
     addTearDown(container.dispose);
     final cache = container.read(userCacheProvider.notifier);
 
-    expect(await cache.refresh(const ['agent']), isTrue);
-    expect(cache.state['agent'], isNull);
-    expect(await cache.refresh(const ['agent']), isTrue);
-    expect(cache.state['agent']?.displayName, 'Valid');
+    expect(await cache.refresh([agent.public]), isTrue);
+    expect(cache.state[agent.public], isNull);
+    expect(await cache.refresh([agent.public]), isTrue);
+    expect(cache.state[agent.public]?.displayName, 'Valid');
   });
 
   test('same-second profile tie keeps the lowest event id', () {
@@ -145,35 +130,36 @@ void main() {
     addTearDown(container.dispose);
     final cache = container.read(userCacheProvider.notifier);
 
-    cache.cacheProfileEvent(
-      _profileEvent(id: 'b', createdAt: 1, name: 'Larger ID'),
-    );
-    cache.cacheProfileEvent(
-      _profileEvent(id: 'a', createdAt: 1, name: 'Lower ID'),
-    );
-    cache.cacheProfileEvent(
-      _profileEvent(id: 'c', createdAt: 1, name: 'Later Larger ID'),
-    );
+    final agent = nostr.Keys.generate();
+    final events = [
+      for (final name in ['First', 'Second', 'Third'])
+        _profileEvent(keys: agent, createdAt: 1, name: name),
+    ]..sort((a, b) => a.id.compareTo(b.id));
+    for (final event in [events[1], events[0], events[2]]) {
+      cache.captureAdmission().add(event);
+    }
 
-    expect(cache.state['agent']?.displayName, 'Lower ID');
+    expect(
+      cache.state[agent.public]?.displayName,
+      ProfileData.fromEvent(events.first).displayName,
+    );
   });
 }
 
 NostrEvent _profileEvent({
-  required String id,
+  required nostr.Keys keys,
   required int createdAt,
   required String name,
-  String pubkey = 'agent',
   List<List<String>> tags = const [],
   int kind = 0,
-}) => NostrEvent(
-  id: id,
-  pubkey: pubkey,
-  createdAt: createdAt,
-  kind: kind,
-  tags: tags,
-  content: jsonEncode({'name': name}),
-  sig: 'sig',
+}) => NostrEvent.fromJson(
+  nostr.Event.from(
+    secretKey: keys.secret,
+    createdAt: createdAt,
+    kind: kind,
+    tags: tags,
+    content: jsonEncode({'name': name}),
+  ).toMap(),
 );
 
 List<String> _authTag(nostr.Keys owner, String agentPubkey) {

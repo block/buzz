@@ -173,7 +173,7 @@ void main() {
         relayAgents: const [],
         sharedChannelIds: const {},
         userCache: const {},
-        ownerByAgentPubkey: const {},
+        ownerByAgentPubkey: {ownedAgent: userPubkey},
         searchResults: [
           UserProfile(
             pubkey: ownedAgent,

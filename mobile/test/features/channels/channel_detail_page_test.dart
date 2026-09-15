@@ -1,3 +1,4 @@
+import '../../shared/crypto/nip_oa_test.dart' show profile;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
@@ -1031,12 +1032,11 @@ void main() {
       expect(find.byTooltip('Start Huddle'), findsNothing);
 
       relaySession.emitProfile(
-        _profileEvent(
-          id: 'newer-agent',
-          pubkey: agent.public,
+        profile(
+          agent,
+          [_authTag(owner, agent.public)],
           createdAt: 2,
-          name: 'Agent',
-          tags: [_authTag(owner, agent.public)],
+          content: '{"name":"Agent"}',
         ),
       );
       profileRefresh.complete([

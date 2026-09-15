@@ -1,3 +1,4 @@
+import '../../shared/crypto/nip_oa_test.dart' as signed;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -16,6 +17,30 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 void main() {
+  test(
+    'unauthenticated profile history cannot hydrate or merge metadata',
+    () async {
+      final keys = nostr.Keys.generate();
+      final genuine = signed.profile(keys, [], content: '{"about":"Forged"}');
+      final invalid = NostrEvent.fromJson({
+        ...genuine.toJson(),
+        'id': '0' * 64,
+      });
+      final session = _ProfileRelaySession(invalid);
+      final container = _profileContainer(keys.nsec, session);
+      addTearDown(container.dispose);
+
+      expect(await container.read(profileProvider.future), isNull);
+      await container
+          .read(profileProvider.notifier)
+          .updateDisplayName('Genuine');
+      expect(jsonDecode(session.published.single.content), {
+        'display_name': 'Genuine',
+      });
+      expect(session.published.single.tags, isEmpty);
+    },
+  );
+
   test('profile updates preserve existing kind:0 metadata', () async {
     final keys = nostr.Keys.generate();
     final owner = nostr.Keys.generate();
@@ -39,7 +64,7 @@ void main() {
           'custom': 'preserve-me',
         }),
         sig: 'sig',
-      ),
+      ).signedBy(keys),
     );
     final container = ProviderContainer(
       overrides: [
@@ -93,7 +118,7 @@ void main() {
           'about': 'Building Buzz',
         }),
         sig: 'sig',
-      ),
+      ).signedBy(keys),
     );
     final container = _profileContainer(keys.nsec, relaySession);
     addTearDown(container.dispose);
@@ -123,7 +148,7 @@ void main() {
         tags: const [],
         content: 'not-json',
         sig: 'sig',
-      ),
+      ).signedBy(keys),
     );
     final container = _profileContainer(keys.nsec, relaySession);
     addTearDown(container.dispose);
@@ -200,7 +225,7 @@ void main() {
           tags: const [],
           content: '{}',
           sig: 'sig',
-        ),
+        ).signedBy(keys),
       ],
     );
     final container = _profileContainer(keys.nsec, relaySession);
@@ -233,7 +258,7 @@ void main() {
             'custom': 'initial',
           }),
           sig: 'sig',
-        ),
+        ).signedBy(keys),
       ];
       final relaySession = _ControlledProfileRelaySession(
         fetch: () async => history,
@@ -255,7 +280,7 @@ void main() {
             'custom': 'remote',
           }),
           sig: 'sig',
-        ),
+        ).signedBy(keys),
       ];
 
       await container
@@ -279,6 +304,7 @@ void main() {
     () async {
       final keys = nostr.Keys.generate();
       final relaySession = _LosingProfileRelaySession(
+        keys,
         NostrEvent(
           id: 'profile-initial',
           pubkey: keys.public,
@@ -287,7 +313,7 @@ void main() {
           tags: const [],
           content: jsonEncode({'display_name': 'Initial'}),
           sig: 'sig',
-        ),
+        ).signedBy(keys),
       );
       final container = _profileContainer(keys.nsec, relaySession);
       addTearDown(container.dispose);
@@ -323,7 +349,7 @@ void main() {
               'about': 'Initial about',
             }),
             sig: 'sig',
-          ),
+          ).signedBy(keys),
         ],
       );
       final container = _profileContainer(keys.nsec, relaySession);
@@ -358,7 +384,7 @@ void main() {
       tags: const [],
       content: jsonEncode({'display_name': 'Initial'}),
       sig: 'sig',
-    );
+    ).signedBy(keys);
     final patchFetchStarted = Completer<void>();
     final patchHistory = Completer<List<NostrEvent>>();
     var fetchCount = 0;
@@ -404,7 +430,7 @@ void main() {
         tags: const [],
         content: jsonEncode({'display_name': 'Initial'}),
         sig: 'sig',
-      );
+      ).signedBy(keys);
       final patchFetchStarted = Completer<void>();
       final patchHistory = Completer<List<NostrEvent>>();
       final rehydration = Completer<List<NostrEvent>>();
@@ -470,7 +496,7 @@ void main() {
       tags: const [],
       content: jsonEncode({'display_name': 'Active'}),
       sig: 'sig',
-    );
+    ).signedBy(otherKeys);
     var fetchCount = 0;
     final relaySession = _ControlledProfileRelaySession(
       fetch: () async {
@@ -507,7 +533,7 @@ void main() {
         tags: const [],
         content: jsonEncode({'display_name': 'Stale'}),
         sig: 'sig',
-      ),
+      ).signedBy(keys),
     ]);
     await Future<void>.delayed(Duration.zero);
 
@@ -668,7 +694,8 @@ class _ControlledProfileRelaySession extends RelaySessionNotifier {
 }
 
 class _LosingProfileRelaySession extends RelaySessionNotifier {
-  _LosingProfileRelaySession(this.initial);
+  _LosingProfileRelaySession(this.keys, this.initial);
+  final nostr.Keys keys;
 
   final NostrEvent initial;
   final List<NostrEvent> published = [];
@@ -697,7 +724,7 @@ class _LosingProfileRelaySession extends RelaySessionNotifier {
       tags: const [],
       content: jsonEncode({'display_name': 'Remote'}),
       sig: 'sig',
-    );
+    ).signedBy(keys);
     return event;
   }
 }
@@ -727,4 +754,18 @@ class _DisconnectedRelaySession extends RelaySessionNotifier {
 class _ResumedLifecycle extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
+// Explicit positive-fixture signing: retain metadata, tags, kind and timestamp.
+extension on NostrEvent {
+  NostrEvent signedBy(nostr.Keys keys) {
+    if (pubkey != keys.public) throw ArgumentError('Fixture signer mismatch');
+    return signed.profile(
+      keys,
+      tags,
+      createdAt: createdAt,
+      kind: kind,
+      content: content,
+    );
+  }
 }

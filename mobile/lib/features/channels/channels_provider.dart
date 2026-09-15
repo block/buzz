@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_provider.dart';
 import '../../shared/push/push_presentation_cache.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';

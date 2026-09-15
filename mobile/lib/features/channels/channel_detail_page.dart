@@ -140,6 +140,7 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
 }) async {
   final session = ref.read(relaySessionProvider.notifier);
   var subscriptionStatus = RelaySubscriptionStatus.retrying;
+  final admission = ref.read(userCacheProvider.notifier).captureAdmission();
   var directLookupComplete = false;
   final agentPubkeys = <String>{};
 
@@ -150,7 +151,7 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
   void handleEvent(NostrEvent event) {
     if (event.kind == 0) {
       try {
-        ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
+        admission.add(event);
       } catch (error) {
         debugPrint('[DmIdentity] invalid live profile: $error');
         onFailure();

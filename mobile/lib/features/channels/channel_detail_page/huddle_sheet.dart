@@ -54,6 +54,7 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
     final participantPubkeys = ref.watch(
       _huddleLogicalParticipantPubkeysProvider(channelId),
     );
+    final admission = ref.read(userCacheProvider.notifier).captureAdmission();
     final subscriptionVersion = ++_subscriptionVersion;
     _clearSubscription();
     ref.onDispose(() {
@@ -65,7 +66,7 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
     ref.read(userCacheProvider.notifier).preload(participantPubkeys);
     if (relayState.status == SessionStatus.connected) {
       Future.microtask(
-        () => _subscribe(participantPubkeys, subscriptionVersion),
+        () => _subscribe(participantPubkeys, subscriptionVersion, admission),
       );
     }
     return 0;
@@ -74,6 +75,7 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
   Future<void> _subscribe(
     List<String> participantPubkeys,
     int subscriptionVersion,
+    ProfileAdmission admission,
   ) async {
     try {
       final unsubscribe = await ref
@@ -86,7 +88,7 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
             ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5),
             (event) {
               if (!_isCurrent(subscriptionVersion)) return;
-              ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
+              admission.add(event);
               state++;
             },
           );
