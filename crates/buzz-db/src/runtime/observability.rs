@@ -151,8 +151,8 @@ pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
     ("writer", "maintenance"),
 ];
 
-/// Eleven valid pairs × (12 histogram series + 4 outcome counters + 1 gauge).
-pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 17;
+/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LockType {
@@ -380,6 +380,12 @@ struct PoolAcquireAttempt {
 
 impl PoolAcquireAttempt {
     fn start(pair: PoolOperation, emit_legacy: bool) -> Self {
+        metrics::counter!(
+            "buzz_db_pool_acquire_started_total",
+            "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
+        )
+        .increment(1);
         {
             let mut waiters = POOL_WAITERS[pair.index()]
                 .lock()
@@ -604,7 +610,7 @@ mod tests {
                 PoolOperation::ReaderSubscriptionHistory,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 187);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -861,6 +867,24 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let attempt = PoolAcquireAttempt::start(PoolOperation::WriterTenantResolution, false);
+        let in_flight = snapshotter.snapshot().into_vec();
+        assert!(in_flight.iter().any(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<BTreeMap<_, _>>();
+            matches!(value, DebugValue::Counter(1))
+                && key.key().name() == "buzz_db_pool_acquire_started_total"
+                && labels.get("pool_role") == Some(&"writer")
+                && labels.get("operation") == Some(&"tenant_resolution")
+        }));
+        assert!(
+            in_flight.iter().all(|(key, _, _, _)| {
+                key.key().name() != "buzz_db_pool_acquire_attempts_total"
+            }),
+            "the request-start signal must be observable before its terminal"
+        );
         drop(attempt);
         refresh_pool_waiters(true);
 
