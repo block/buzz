@@ -14,6 +14,11 @@ test("parseVideoReviewTimecode extracts supported leading timecodes", () => {
     text: "Long-form note",
     timecode: "1:02:03",
   });
+  assert.deepEqual(parseVideoReviewTimecode("[42] Jump here"), {
+    seconds: 42,
+    text: "Jump here",
+    timecode: "42",
+  });
 });
 
 test("parseVideoReviewTimecode ignores ordinary bracketed markdown", () => {
