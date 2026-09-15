@@ -15,6 +15,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use buzz_core_pkg::agent_turn_metric::AgentTurnMetricPayload;
 
+use super::agent_usage::MAX_LATEST_SNAPSHOT_AGENTS;
+
 // ── u64-safe sortable encoding ───────────────────────────────────────────────
 
 /// Fixed-width digit count for the lexicographically order-preserving decimal
@@ -616,6 +618,120 @@ pub(super) fn has_archived_evidence(
         .optional()
         .map_err(|e| format!("has_archived_evidence: {e}"))?;
     Ok(exists.is_some())
+}
+
+/// Plaintext payload candidate for the latest-snapshot query. Rows are ordered
+/// newest-first within each agent so the caller can skip a corrupt candidate
+/// and fall back to the next valid archived payload.
+pub(super) struct AgentMetricPayloadCandidate {
+    pub agent_pubkey: String,
+    pub raw_json: String,
+}
+
+/// Newest payloads retained as corruption fallback for each agent. Rows are
+/// validated when indexed; this cushion preserves defensive fallback without
+/// allowing one archive to load unbounded plaintext JSON.
+const MAX_LATEST_CANDIDATES_PER_AGENT: i64 = 8;
+
+/// Load valid indexed NIP-AM payloads in newest-first order per agent. The
+/// canonical event must still belong to this identity's `owner_p` scope;
+/// identity/relay index keys alone are not treated as authorization evidence.
+pub(super) fn load_latest_metric_payload_candidates(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    agent_pubkeys: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<AgentMetricPayloadCandidate>, String> {
+    if agent_pubkeys.is_some_and(std::collections::HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
+
+    let agents: Vec<String> = match agent_pubkeys {
+        Some(filter) => {
+            let mut agents: Vec<_> = filter.iter().cloned().collect();
+            agents.sort();
+            agents
+                .into_iter()
+                .take(MAX_LATEST_SNAPSHOT_AGENTS)
+                .collect()
+        }
+        None => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT agent_pubkey
+                     FROM agent_metric_index
+                     WHERE identity_pubkey = ?1
+                       AND relay_url = ?2
+                       AND parse_status = 'valid'
+                     ORDER BY agent_pubkey ASC
+                     LIMIT ?3",
+                )
+                .map_err(|e| format!("prepare latest metric agents: {e}"))?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        identity_pubkey,
+                        relay_url,
+                        MAX_LATEST_SNAPSHOT_AGENTS as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("query latest metric agents: {e}"))?;
+            let mut agents = Vec::new();
+            for row in rows {
+                agents.push(row.map_err(|e| format!("read latest metric agent row: {e}"))?);
+            }
+            agents
+        }
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT ae.raw_json
+             FROM agent_metric_index ami
+             INNER JOIN archived_events ae
+                ON ae.identity_pubkey = ami.identity_pubkey
+               AND ae.relay_url = ami.relay_url
+               AND ae.id = ami.id
+             WHERE ami.identity_pubkey = ?1
+               AND ami.relay_url = ?2
+               AND ami.agent_pubkey = ?3
+               AND ami.parse_status = 'valid'
+               AND ae.kind = 44200
+               AND EXISTS (
+                   SELECT 1 FROM archived_event_scopes aes
+                   WHERE aes.identity_pubkey = ami.identity_pubkey
+                     AND aes.relay_url = ami.relay_url
+                     AND aes.id = ami.id
+                     AND aes.scope_type = 'owner_p'
+                     AND aes.scope_value = ?1
+               )
+             ORDER BY ami.reported_at DESC, ami.id DESC
+             LIMIT ?4",
+        )
+        .map_err(|e| format!("prepare load_latest_metric_payload_candidates: {e}"))?;
+
+    let mut candidates = Vec::new();
+    for agent_pubkey in agents {
+        let rows = stmt
+            .query_map(
+                params![
+                    identity_pubkey,
+                    relay_url,
+                    agent_pubkey,
+                    MAX_LATEST_CANDIDATES_PER_AGENT
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("query latest metric payload candidates: {e}"))?;
+        for row in rows {
+            candidates.push(AgentMetricPayloadCandidate {
+                agent_pubkey: agent_pubkey.clone(),
+                raw_json: row.map_err(|e| format!("read latest metric payload row: {e}"))?,
+            });
+        }
+    }
+    Ok(candidates)
 }
 
 fn stmt_prepare<'a>(conn: &'a Connection, sql: &str) -> Result<rusqlite::Statement<'a>, String> {

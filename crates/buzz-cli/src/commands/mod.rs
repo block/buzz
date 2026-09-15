@@ -8,6 +8,7 @@ pub mod gifs;
 pub mod issues;
 pub mod mem;
 pub mod messages;
+pub mod metrics;
 pub mod moderation;
 pub mod notes;
 pub mod pack;

@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,6 +18,14 @@ void main() {
         desktopCiphertext,
       ),
       '{"version":1,"theme":"catppuccin-latte","accent":"#f97316","followSystem":false}',
+    );
+  });
+
+  test('rejects oversized ciphertext before base64 allocation', () {
+    final oversized = List.filled(nip44MaxContentLength + 1, 'A').join();
+    expect(
+      () => nip44Decrypt(Uint8List(32), oversized),
+      throwsA(isA<FormatException>()),
     );
   });
 }
