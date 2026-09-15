@@ -91,6 +91,7 @@ export function ProjectChannelHome({
   projects,
   targetMessageEvents = EMPTY_TARGET_MESSAGE_EVENTS,
   targetMessageId,
+  targetMessageView,
 }: {
   allowRepositoryHealing: boolean;
   autoSendDraftKey?: string | null;
@@ -98,6 +99,7 @@ export function ProjectChannelHome({
   projects: Project[];
   targetMessageEvents?: RelayEvent[];
   targetMessageId?: string | null;
+  targetMessageView?: "timeline" | null;
 }) {
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const sidebar = useOptionalSidebar();
@@ -383,6 +385,7 @@ export function ProjectChannelHome({
                     ? (search.messageId ?? null)
                     : targetMessageId
                 }
+                targetMessageView={targetMessageView}
               />
             </React.Suspense>
           ) : (

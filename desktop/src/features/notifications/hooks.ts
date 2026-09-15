@@ -205,9 +205,18 @@ export function useNotificationSettings(pubkey?: string) {
     return nextPermission;
   });
 
+  const refreshPermissionSafely = React.useEffectEvent(async () => {
+    try {
+      return await refreshPermission();
+    } catch (error) {
+      console.warn("Failed to refresh desktop notification permission", error);
+      return null;
+    }
+  });
+
   React.useEffect(() => {
     void normalizedPubkey;
-    void refreshPermission();
+    void refreshPermissionSafely();
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
@@ -221,7 +230,9 @@ export function useNotificationSettings(pubkey?: string) {
       if (cancelPendingRefresh) return;
       cancelPendingRefresh = scheduleAfterForegroundReady(() => {
         cancelPendingRefresh = null;
-        if (document.visibilityState === "visible") void refreshPermission();
+        if (document.visibilityState === "visible") {
+          void refreshPermissionSafely();
+        }
       });
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -249,7 +260,7 @@ export function useNotificationSettings(pubkey?: string) {
         ...current,
         desktopEnabled: false,
       }));
-      void refreshPermission();
+      void refreshPermissionSafely();
       return true;
     }
 

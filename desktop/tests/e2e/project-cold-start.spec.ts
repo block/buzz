@@ -73,6 +73,21 @@ async function waitForProjectEnumeration(
     .toBe(true);
 }
 
+async function waitForProjectChannelSubscription(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "buzz",
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
+}
+
 test("snapshot project home cannot publish repository healing", async ({
   page,
 }) => {
@@ -168,4 +183,35 @@ test("equal live project data enables healing after snapshot reconciliation", as
     "data-repository-healing-enabled",
     "true",
   );
+});
+
+test("project-home timeline targets do not open the thread panel", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-buzz").click();
+  await expect(page.getByTestId("project-home-context-panel")).toBeVisible();
+  await waitForProjectChannelSubscription(page);
+
+  const messageId = "project-home-timeline-target";
+  await page.evaluate((id) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "buzz",
+      content: "Project timeline target",
+      id,
+    });
+  }, messageId);
+  await expect(page.getByText("Project timeline target")).toBeVisible();
+
+  await page.evaluate(
+    ({ channelId, id }) => {
+      window.location.hash = `/channels/${channelId}?messageId=${id}&messageView=timeline`;
+    },
+    { channelId: PROJECT_HOME_CHANNEL_ID, id: messageId },
+  );
+
+  await expect(page).not.toHaveURL(/messageId=/);
+  await expect(page.getByTestId("message-thread-panel")).toHaveCount(0);
 });
