@@ -61,10 +61,19 @@ class SendMessage {
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
-    // Use explicitly passed pubkeys, or resolve @mentions against
-    // channel members to avoid matching the wrong user.
-    final explicitMentions =
-        mentionPubkeys ?? await _resolveMentions(content, channelId);
+    // Merge explicitly passed pubkeys (picker taps) with any "@Name" typed
+    // as plain text that was never tapped in the picker. The compose bar
+    // always calls this with a concrete (possibly empty) list, never null,
+    // so the old `mentionPubkeys ?? _resolveMentions(...)` fallback never
+    // ran from the interactive send path — only from callers that pass
+    // null explicitly. Union, never replace: a caller-supplied pubkey is
+    // never dropped.
+    final tapped = mentionPubkeys ?? const <String>[];
+    final textResolved = await _resolveMentions(content, channelId);
+    final explicitMentions = <String>{
+      ...tapped.map((pk) => pk.toLowerCase()),
+      ...textResolved,
+    }.toList();
     final authorPubkey = _signedEventRelay.pubkey;
     final dmRecipientPubkeys = channel?.isDm == true
         ? await _fetchDmRecipientPubkeys(channelId, channel!, authorPubkey)
@@ -158,13 +167,22 @@ class SendMessage {
   ///
   /// Fetches channel members from the relay and matches @names only
   /// against members of that channel. Falls back to the full user cache
-  /// if the member fetch fails.
+  /// if the member fetch fails. Two safety rules, both added now that
+  /// this fallback is reachable from the interactive send path (see
+  /// [call]):
+  /// - Code spans/fences and blockquoted lines are stripped before
+  ///   extraction — mirrors the SDK's "remove code regions before @name
+  ///   extraction" fix (block/buzz#2684); a quoted or sample "@name" is
+  ///   not the sender's live intent to mention anyone.
+  /// - A name matching more than one channel member resolves to nobody
+  ///   rather than an arbitrary pick — same "avoid matching the wrong
+  ///   user" contract this method already documented, made explicit.
   Future<List<String>> _resolveMentions(
     String content,
     String channelId,
   ) async {
     final mentionPattern = RegExp(r'@(\w+)');
-    final matches = mentionPattern.allMatches(content);
+    final matches = mentionPattern.allMatches(_stripCodeAndQuotes(content));
     if (matches.isEmpty) return const [];
 
     // Try to get channel member pubkeys for scoped resolution.
@@ -183,6 +201,7 @@ class SendMessage {
       final name = match.group(1)?.toLowerCase();
       if (name == null || name.isEmpty) continue;
 
+      final candidates = <String>{};
       for (final profile in cache.values) {
         final displayName = profile.displayName?.toLowerCase();
         if (displayName == null) continue;
@@ -197,12 +216,27 @@ class SendMessage {
           continue;
         }
 
-        pubkeys.add(profile.pubkey);
-        break;
+        candidates.add(profile.pubkey.toLowerCase());
       }
+
+      // Exactly one channel member answers to this name: safe to resolve.
+      // Zero or several: skip rather than guess or notify more than one.
+      if (candidates.length == 1) pubkeys.add(candidates.single);
     }
 
     return pubkeys.toList();
+  }
+
+  /// Removes fenced code blocks, inline code spans, and blockquoted lines
+  /// before mention extraction. See [_resolveMentions] doc above.
+  static String _stripCodeAndQuotes(String content) {
+    var stripped = content.replaceAll(RegExp(r'```.*?```', dotAll: true), ' ');
+    stripped = stripped.replaceAll(RegExp(r'`[^`]*`'), ' ');
+    stripped = stripped
+        .split('\n')
+        .where((line) => !line.trimLeft().startsWith('>'))
+        .join('\n');
+    return stripped;
   }
 
   /// Build `e`-tags for a thread reply, matching the desktop convention:
