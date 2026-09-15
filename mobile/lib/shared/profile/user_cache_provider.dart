@@ -3,11 +3,11 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community_provider.dart';
-import '../crypto/nip_oa.dart';
 import '../push/push_presentation_cache.dart';
 import '../push/push_presentation_export_recovery.dart';
 import '../relay/relay.dart';
 import 'user_profile.dart';
+import 'profile_event_parser.dart';
 
 /// In-memory cache of user profiles, fetched in batches from the relay.
 ///
@@ -17,14 +17,20 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   final Set<String> _pending = {};
   final _pushExport = PushPresentationExportRecovery();
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
+  int _generation = 0;
+  bool _flushInFlight = false;
+  Future<void> _verificationQueue = Future.value();
   Timer? _batchTimer;
   Completer<bool>? _batchCompleter;
 
   @override
   Map<String, UserProfile> build() {
     ref.watch(relayConfigProvider);
+    _generation++;
     _profileEventOrders.clear();
     ref.onDispose(() {
+      _generation++;
+      _pending.clear();
       _batchTimer?.cancel();
       _batchTimer = null;
       _batchCompleter?.complete(false);
@@ -59,7 +65,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (uncached.isEmpty && !alreadyPending) return Future.value(true);
     _pending.addAll(uncached);
     final completer = _batchCompleter ??= Completer<bool>();
-    _batchTimer ??= Timer(const Duration(milliseconds: 50), _flushPending);
+    _scheduleBatch();
     return completer.future;
   }
 
@@ -74,23 +80,14 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         .toSet()
         .toList();
     if (normalized.isEmpty) return true;
+    final generation = _generation;
     try {
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.profilesBatch(normalized),
       );
-      final updated = Map<String, UserProfile>.from(state);
-      final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
-        _profileEventOrders,
-      );
-      for (final event in events) {
-        _cacheProfileEvent(event, updated, updatedOrders);
-      }
-      _profileEventOrders
-        ..clear()
-        ..addAll(updatedOrders);
-      state = updated;
-      return true;
+      if (!_isCurrent(generation)) return false;
+      return await _verifyAndMerge(events, generation);
     } catch (_) {
       return false;
     }
@@ -110,7 +107,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;
     _pending.add(pubkey);
     _batchCompleter ??= Completer<bool>();
-    _batchTimer ??= Timer(const Duration(milliseconds: 50), _flushPending);
+    _scheduleBatch();
   }
 
   Future<void> _flushPending() async {
@@ -122,6 +119,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final completer = _batchCompleter;
     _batchCompleter = null;
 
+    _flushInFlight = true;
+    final generation = _generation;
     var succeeded = false;
     try {
       final communityID = ref.read(activeCommunityProvider).value?.id;
@@ -130,18 +129,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         NostrFilters.profilesBatch(pubkeys),
       );
 
-      final updated = Map<String, UserProfile>.from(state);
-      final updatedOrders = Map<String, ({int createdAt, String eventId})>.from(
-        _profileEventOrders,
-      );
-      for (final event in events) {
-        _cacheProfileEvent(event, updated, updatedOrders);
-      }
-
-      _profileEventOrders
-        ..clear()
-        ..addAll(updatedOrders);
-      state = updated;
+      if (!_isCurrent(generation)) return;
+      if (!await _verifyAndMerge(events, generation)) return;
       if (communityID != null) {
         unawaited(
           _pushExport.export(
@@ -154,43 +143,92 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       // Silently fail — non-gating callers will just show pubkeys.
     } finally {
       completer?.complete(succeeded);
+      _flushInFlight = false;
+      if (ref.mounted && _pending.isNotEmpty) _scheduleBatch();
     }
   }
 
-  bool _cacheProfileEvent(
-    NostrEvent event,
-    Map<String, UserProfile> profiles, [
-    Map<String, ({int createdAt, String eventId})>? orders,
-  ]) {
-    if (event.kind != 0) return false;
-    final eventOrders = orders ?? _profileEventOrders;
-    final pubkey = event.pubkey.toLowerCase();
-    final current = eventOrders[pubkey];
-    final isNewer =
-        current == null ||
-        event.createdAt > current.createdAt ||
-        (event.createdAt == current.createdAt &&
-            event.id.compareTo(current.eventId) < 0);
-    if (!isNewer) return false;
+  void _scheduleBatch() {
+    if (_flushInFlight) return;
+    _batchTimer ??= Timer(const Duration(milliseconds: 50), _flushPending);
+  }
 
-    profiles[pubkey] = _profileFromEvent(event);
-    eventOrders[pubkey] = (createdAt: event.createdAt, eventId: event.id);
+  Future<bool> _verifyAndMerge(List<NostrEvent> events, int generation) {
+    // Both refresh and preload share one worker slot. Keep this queue across
+    // community changes so an old worker cannot overlap a new community's job.
+    final result = _verificationQueue.then((_) async {
+      if (!_isCurrent(generation)) return false;
+      // Match live-cache admission before parsing. In particular, a malformed
+      // stale profile must not fail a refresh that previously ignored it.
+      final pending = [
+        for (final event in events)
+          if (event.kind == 0 &&
+              _isNewer(event.pubkey.toLowerCase(), event.createdAt, event.id))
+            event,
+      ];
+      if (pending.isEmpty) return true;
+      final profiles = await ref.read(profileEventBatchParserProvider)(pending);
+      if (!_isCurrent(generation)) return false;
+      _mergeParsedProfiles(profiles);
+      return true;
+    });
+    // Callers receive the original error; only the sequencing tail recovers so
+    // one rejected batch does not poison all future refreshes.
+    _verificationQueue = result.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    return result;
+  }
+
+  bool _isCurrent(int generation) => ref.mounted && generation == _generation;
+
+  void _mergeParsedProfiles(List<ParsedProfileEvent> profiles) {
+    // Read the current state after the isolate completes: live events and other
+    // batches may have installed newer profiles while this batch was parsing.
+    final updated = Map<String, UserProfile>.from(state);
+    var changed = false;
+    for (final parsed in profiles) {
+      if (!_isNewer(parsed.profile.pubkey, parsed.createdAt, parsed.eventId)) {
+        continue;
+      }
+      updated[parsed.profile.pubkey] = parsed.profile;
+      _profileEventOrders[parsed.profile.pubkey] = (
+        createdAt: parsed.createdAt,
+        eventId: parsed.eventId,
+      );
+      changed = true;
+    }
+    if (changed) state = updated;
+  }
+
+  bool _isNewer(String pubkey, int createdAt, String eventId) {
+    final current = _profileEventOrders[pubkey];
+    return current == null ||
+        createdAt > current.createdAt ||
+        (createdAt == current.createdAt &&
+            eventId.compareTo(current.eventId) < 0);
+  }
+
+  bool _cacheProfileEvent(NostrEvent event, Map<String, UserProfile> profiles) {
+    if (event.kind != 0) return false;
+    final pubkey = event.pubkey.toLowerCase();
+    if (!_isNewer(pubkey, event.createdAt, event.id)) return false;
+    profiles[pubkey] = parseProfileEvent(event).profile;
+    _profileEventOrders[pubkey] = (
+      createdAt: event.createdAt,
+      eventId: event.id,
+    );
     return true;
   }
-
-  UserProfile _profileFromEvent(NostrEvent event) {
-    final data = ProfileData.fromEvent(event);
-    final pubkey = data.pubkey.toLowerCase();
-    return UserProfile(
-      pubkey: pubkey,
-      displayName: data.displayName,
-      avatarUrl: data.avatarUrl,
-      about: data.about,
-      nip05Handle: data.nip05,
-      ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
-    );
-  }
 }
+
+/// Profile history parser, isolated from provider state so batch completion can
+/// be delayed independently of relay delivery.
+final profileEventBatchParserProvider =
+    Provider<Future<List<ParsedProfileEvent>> Function(List<NostrEvent>)>(
+      (ref) => parseProfileEventBatch,
+    );
 
 final userCacheProvider =
     NotifierProvider<UserCacheNotifier, Map<String, UserProfile>>(
