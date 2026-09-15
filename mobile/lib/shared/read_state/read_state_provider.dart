@@ -76,7 +76,14 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
-    final activeCommunity = ref.watch(activeCommunityProvider).value;
+    // Selected, not watched whole: activeCommunityProvider is a FutureProvider,
+    // so every recompute passes through AsyncLoading before AsyncData. Watching
+    // the AsyncValue rebuilds on that transition alone, however equal the
+    // resulting Community is. Selecting the value compares Community to
+    // Community, which is why it also needs Community to define ==.
+    final activeCommunity = ref.watch(
+      activeCommunityProvider.select((community) => community.value),
+    );
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {
