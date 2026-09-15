@@ -27,24 +27,21 @@ import * as React from "react";
 export const SETTLE_MOTION_WINDOW_MS = 100;
 export const SETTLE_FRAME_COUNT = 3;
 /**
- * Upper bound on how long a fetched page may be withheld. Trackpad momentum
- * decays in well under a second; a reader actively driving the scroller for
- * this long has moved on, and admitting under continuous REAL input is safe —
- * the dropped-write hazard is specific to the inertial momentum phase, which
- * cannot outlive this deadline.
+ * There is deliberately no unconditional admission deadline. A fresh gesture
+ * can start at any age of the request; elapsed fetch time is not proof that
+ * WebKit has relinquished momentum. The held page remains available and is
+ * admitted as soon as real input and geometry settle.
  */
-export const SETTLE_HOLD_DEADLINE_MS = 4_000;
 
 export type SettleGateDecision<T> =
   | { kind: "pass" }
   | { kind: "hold"; held: T[] };
 
 /**
- * Pure admission rule. Holds only a PURE history prepend: the next snapshot
- * must be the admitted rows (same ids, possibly refreshed objects — edits and
- * reactions keep rendering) with one or more new rows in front. Anything else
- * — appends, deletions, authoritative replacements, channel resets — passes
- * through immediately so the gate can never pin a stale dataset.
+ * Hold a history prefix even when deletion, live output or row regrouping
+ * accompanies it. Survivors may refresh while held, but structural metadata
+ * stays at the admitted publication until motion stops. A disjoint replacement
+ * is not history pagination and must not pin a stale channel.
  */
 export function selectSettleGatedMessages<T extends { id: string }>({
   admitted,
@@ -54,17 +51,15 @@ export function selectSettleGatedMessages<T extends { id: string }>({
   next: T[];
 }): SettleGateDecision<T> {
   if (admitted.length === 0) return { kind: "pass" };
-  const prependCount = next.findIndex(
-    (message) => message.id === admitted[0].id,
+  const admittedIds = new Set(admitted.map((message) => message.id));
+  const firstSurvivor = next.findIndex((message) =>
+    admittedIds.has(message.id),
   );
-  if (prependCount <= 0) return { kind: "pass" };
-  if (next.length - prependCount !== admitted.length) return { kind: "pass" };
-  for (let index = 0; index < admitted.length; index += 1) {
-    if (next[prependCount + index].id !== admitted[index].id) {
-      return { kind: "pass" };
-    }
-  }
-  return { kind: "hold", held: next.slice(prependCount) };
+  if (firstSurvivor <= 0) return { kind: "pass" };
+  return {
+    kind: "hold",
+    held: next.filter((message) => admittedIds.has(message.id)),
+  };
 }
 
 export function useSettleGatedPrependMessages<T extends { id: string }, M>({
@@ -72,6 +67,7 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
   messages,
   meta,
   scrollElementRef,
+  bypass = false,
 }: {
   channelId?: string | null;
   messages: T[];
@@ -84,6 +80,8 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
    */
   meta: M;
   scrollElementRef: { readonly current: HTMLElement | null };
+  /** Explicit latest/send/navigation intent may release held history. */
+  bypass?: boolean;
 }): { messages: T[]; meta: M; isHoldingPrepend: boolean } {
   const admittedRef = React.useRef<T[]>(messages);
   const admittedMetaRef = React.useRef<M>(meta);
@@ -96,10 +94,12 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
     admittedMetaRef.current = meta;
   }
 
-  const decision = selectSettleGatedMessages({
-    admitted: admittedRef.current,
-    next: messages,
-  });
+  const decision: SettleGateDecision<T> = bypass
+    ? { kind: "pass" }
+    : selectSettleGatedMessages({
+        admitted: admittedRef.current,
+        next: messages,
+      });
   const isHoldingPrepend = decision.kind === "hold";
 
   let output: T[];
@@ -137,7 +137,6 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
       return;
     }
     let frame: number | null = null;
-    const deadline = performance.now() + SETTLE_HOLD_DEADLINE_MS;
     // Assume motion at hold start: worst case this costs one quiet window
     // (~100ms) behind the fetching-older spinner when the reader was already
     // at rest; the alternative admits mid-fling if WebKit starves the first
@@ -150,16 +149,15 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
     };
     scroller.addEventListener("scroll", markMotion, { passive: true });
     scroller.addEventListener("wheel", markMotion, { passive: true });
+    scroller.addEventListener("touchmove", markMotion, { passive: true });
+    scroller.addEventListener("keydown", markMotion);
     const watch = () => {
       const scrollTop = scroller.scrollTop;
       settledFrames =
         Math.abs(scrollTop - previousScrollTop) < 0.5 ? settledFrames + 1 : 0;
       previousScrollTop = scrollTop;
       const quiet = performance.now() - lastMotionTs >= SETTLE_MOTION_WINDOW_MS;
-      if (
-        (quiet && settledFrames >= SETTLE_FRAME_COUNT) ||
-        performance.now() >= deadline
-      ) {
+      if (quiet && settledFrames >= SETTLE_FRAME_COUNT) {
         frame = null;
         admittedRef.current = latestMessagesRef.current;
         admittedMetaRef.current = latestMetaRef.current;
@@ -172,6 +170,8 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
     return () => {
       scroller.removeEventListener("scroll", markMotion);
       scroller.removeEventListener("wheel", markMotion);
+      scroller.removeEventListener("touchmove", markMotion);
+      scroller.removeEventListener("keydown", markMotion);
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [isHoldingPrepend, scrollElementRef]);

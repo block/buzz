@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import {
+  pageOlderHistory,
+  startOlderHistory,
+} from "../helpers/timelineHistory";
 
 // First-pass settle budget for a full channel-history prepend. CI Linux font
 // rasterization can leave the restored anchor a subpixel off the local value
@@ -182,13 +186,8 @@ test("preserves user scroll while older channel history loads", async ({
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Use the `deep-history` channel: its store is seeded with 600 messages,
-  // more than CHANNEL_HISTORY_LIMIT (300, hooks.ts), so the cold load windows
-  // to the newest 300 and leaves ~300 genuinely older messages behind the
-  // `until` cursor. A shallow seed (store < 300) is fully drained by the cold
-  // load, so the wheel `fetchOlder` returns only already-cached duplicates that
-  // dedup to zero net growth -- the anchor never has a real prepend to hold and
-  // the assertion would measure virtualizer re-measure, not scroll preservation.
+  // 600 seed rows, with one 50-row head on cold load: every continuation
+  // below must add real history, not merely remeasure cached duplicates.
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
   const timeline = page.getByTestId("message-timeline");
@@ -214,24 +213,12 @@ test("preserves user scroll while older channel history loads", async ({
       return Number.isFinite(min) ? min : null;
     });
 
-  // PHASE 1 -- walk into mid-history with NO history delay. Force the timeline
-  // to its top and wait for an older rendered index after each fetch. A wheel
-  // issued while prepend restoration owns the sentinel can be swallowed, which
-  // made a fixed gesture loop fail before exercising the anchor invariant.
-  // Stop in mid-history so phase 2 still has a genuine older page to fetch above
-  // the reading anchor.
-  const scrollToTop = async () =>
-    timeline.evaluate((element) => {
-      const container = element as HTMLDivElement;
-      container.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
-      container.scrollTop = 0;
-      container.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
-
+  // Walk into mid-history. Each gesture waits for visual acknowledgement,
+  // not merely a newly mounted row from scrolling within the previous page.
   let deepest = (await oldestRenderedIndex()) ?? Number.POSITIVE_INFINITY;
   for (let pageIndex = 0; pageIndex < 10 && deepest >= 400; pageIndex += 1) {
     const previousDeepest = deepest;
-    await scrollToTop();
+    await pageOlderHistory(page);
     await expect
       .poll(async () => (await oldestRenderedIndex()) ?? previousDeepest, {
         timeout: 5_000,
@@ -270,19 +257,9 @@ test("preserves user scroll while older channel history loads", async ({
   const oldestBeforeLanding = await oldestRenderedIndex();
   expect(oldestBeforeLanding).not.toBeNull();
 
-  // Move the top sentinel out of its trigger band after the phase-1 climb so
-  // returning to it is a fresh continuation gesture.
-  await page.mouse.wheel(0, 1_500);
-  await page.waitForTimeout(100);
-
-  // Re-enter the top sentinel and wait for the delayed request to start. Drive
-  // the actual scroll container because wheel input can arrive while prepend
-  // restoration still owns the sentinel and be discarded.
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    if ((await inflightCount()) > 0) break;
-    await scrollToTop();
-    await page.waitForTimeout(50);
-  }
+  // A fresh gesture starts exactly one delayed page after the prior visual
+  // transaction has settled. Keep it in flight for the anchor assertion.
+  await startOlderHistory(page);
   expect(await inflightCount()).toBeGreaterThan(0);
 
   // Capture the first-visible row id AFTER the fire wheel but WHILE the page is
@@ -1316,19 +1293,12 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
     return element && element.scrollHeight > element.clientHeight * 3;
   });
 
-  // Land a genuine prepend first. This is what turns `shift` on; subsequent
-  // ordinary list updates and measurements must happen with it cleared.
+  // Land a genuine server page first. Live events older than an open window's
+  // boundary are intentionally not admitted; injecting them would not exercise
+  // prepend compensation. The 180 seeded rows leave real history to request.
   const scrollHeightBeforePrepend = (await getTimelineMetrics(page))
     .scrollHeight;
-  await page.evaluate(() => {
-    for (let index = 0; index < 100; index += 1) {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
-        content: `prepended settle row ${index}\nolder line two ${index}\nolder line three ${index}`,
-        createdAt: 1_699_999_000 + index,
-      });
-    }
-  });
+  await pageOlderHistory(page);
   await expect
     .poll(() =>
       getTimelineMetrics(page).then((metrics) => metrics.scrollHeight),
@@ -1689,56 +1659,16 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
       );
     });
 
-  // Poll for real progress instead of a fixed sleep: a slow CI shard's fetch
-  // round-trip outlasts a hard delay and reads as a false stall.
-  const waitForOlderHistoryProgress = async (previousDeepest: number) => {
-    try {
-      await expect
-        .poll(async () => (await oldestRenderedIndex()) ?? previousDeepest, {
-          timeout: 10_000,
-        })
-        .toBeLessThan(previousDeepest);
-    } catch {
-      // No advancement within the window: treat as a stall, not a failure.
-    }
-    return oldestRenderedIndex();
-  };
-
-  // Drive scrollTop to 0 each pass instead of `mouse.wheel`: the older-history
-  // sentinel disconnects while a prepend's index-restore owns scroll and only
-  // re-arms once it settles, so a wheel issued during that window is swallowed
-  // and reads as a false stall. Forcing the top guarantees the re-armed
-  // sentinel re-fires and the next older page fetches.
-  const scrollToTop = async () =>
-    timeline.evaluate((element) => {
-      const container = element as HTMLDivElement;
-      container.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
-      container.scrollTop = 0;
-      container.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
-
   await timeline.hover();
   let deepest = Number.POSITIVE_INFINITY;
-  let stallStreak = 0;
-  for (let attempt = 0; attempt < 200 && deepest > 0; attempt += 1) {
-    await scrollToTop();
-    const current = await waitForOlderHistoryProgress(deepest);
-    if ((current ?? Number.POSITIVE_INFINITY) > 50) {
-      expect(await isIntroHeaderInViewport()).toBe(false);
-    }
-
-    if (current !== null && current < deepest) {
-      deepest = current;
-      stallStreak = 0;
-    } else {
-      // No advance within the 10s settle window. `waitForOlderHistoryProgress`
-      // already absorbs a slow fetch round-trip, so each no-advance pass is a
-      // genuine miss (sentinel still owned, or true end-of-history). Allow a
-      // generous streak before bailing so a few owned-window passes near the
-      // start can't end the loop short of index 0.
-      stallStreak += 1;
-      if (stallStreak > 15) break;
-    }
+  for (let attempt = 0; attempt < 50 && deepest >= 50; attempt += 1) {
+    await pageOlderHistory(page);
+    const previous = deepest;
+    await expect
+      .poll(async () => (await oldestRenderedIndex()) ?? previous)
+      .toBeLessThan(previous);
+    deepest = (await oldestRenderedIndex()) ?? previous;
+    if (deepest > 50) expect(await isIntroHeaderInViewport()).toBe(false);
   }
 
   // Reached deep history (near the true start) without the cap evicting the
@@ -1791,6 +1721,7 @@ test("older-history fetches never overlap (no concurrent in-flight requests)", a
   await timeline.hover();
   await timeline.evaluate((element) => {
     const timelineElement = element as HTMLDivElement;
+    timelineElement.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     timelineElement.scrollTop = 150;
     timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
@@ -1857,6 +1788,7 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
   // timeline at scrollTop 0, which is the one position this test must avoid.
   await timeline.evaluate((element) => {
     const timelineElement = element as HTMLDivElement;
+    timelineElement.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     timelineElement.scrollTop = 150;
     timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
@@ -1981,11 +1913,10 @@ test("one scroll-up gesture pages older history once, not to the channel top", a
   const pagesFetched = await fetchCount();
   const deepest = await oldestRenderedIndex();
 
-  // One gesture should yield a small, bounded number of pages — not dozens.
-  // pageOlderMessagesUntilRowFloor may fetch up to MAX_BATCHES_PER_FETCH (3)
-  // relay pages to satisfy one visible row floor, so allow that ceiling plus a
-  // little slack; a cascade blows far past it.
-  expect(pagesFetched).toBeLessThanOrEqual(4);
+  // One logical load is exactly one server page. Neither zero work nor
+  // sequential requests hidden behind a single network lock is acceptable.
+  expect(pagesFetched).toBe(1);
+  expect(deepest).not.toBeNull();
   // And it must NOT have reached the oldest seeded root on its own.
   expect(deepest ?? Number.POSITIVE_INFINITY).toBeGreaterThan(50);
 });

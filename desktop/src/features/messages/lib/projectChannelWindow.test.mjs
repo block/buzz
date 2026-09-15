@@ -417,6 +417,114 @@ test("test_concurrent_refreshes_after_seeded_snapshot_share_one_authoritative_fe
   }
 });
 
+test("projection does not rescan cached thread replies per authoritative row", () => {
+  const rows = Array.from({ length: 1000 }, (_, index) =>
+    event(`row-${String(index).padStart(4, "0")}`, 2000 - index),
+  );
+  let reads = 0;
+  const replies = Array.from({ length: 300 }, (_, index) => ({
+    ...event(`reply-${index}`, 1000 + index),
+    get id() {
+      reads++;
+      return `reply-${index}`;
+    },
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "reply"],
+    ],
+  }));
+  const window = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    newestPage(rows),
+  );
+  const result = reconcileChannelWindowMessages(window, replies);
+  assert.equal(result.length, 1300);
+  assert.ok(
+    reads < 3000,
+    `cache-only id reads ${reads} must be linear, not 300 × 1000`,
+  );
+});
+
+test("staged refresh keeps live summaries for reused tails and updates received during fetch", () => {
+  const harness = createHarness();
+  const fresh = event("fresh", 200);
+  const reused = event("reused", 100);
+  const cursor = { createdAt: fresh.created_at, eventId: fresh.id };
+  const head = { ...newestPage([fresh]), hasMore: true, nextCursor: cursor };
+  const tail = { ...newestPage([reused]), startCursor: cursor };
+  const live = (count) => ({
+    summary: {
+      replyCount: count,
+      descendantCount: count,
+      participantPubkeys: [],
+      lastReplyAt: 300,
+    },
+    createdAt: count,
+  });
+  const oldHeadSummary = live(1);
+  const oldTailSummary = live(2);
+  const retained = {
+    ...appendOlderChannelWindow(
+      replaceNewestChannelWindow(emptyChannelWindowStore(), head),
+      tail,
+    ),
+    liveSummaries: { [fresh.id]: oldHeadSummary, [reused.id]: oldTailSummary },
+  };
+  harness.client.setQueryData(harness.windowKey, retained);
+  // QueryClient structural sharing can change identity; take the exact
+  // retained pages used by production rather than assuming reference equality.
+  const current = harness.client.getQueryData(harness.windowKey);
+  const wire = wirePage([fresh]);
+  wire.at(-1).content = JSON.stringify({
+    has_more: true,
+    next_cursor: { created_at: 200, id: fresh.id },
+  });
+  reconcileFetchedChannelWindow(
+    harness.client,
+    harness.channelId,
+    wire,
+    [],
+    new AbortController().signal,
+    [head, current.pages[1]],
+    current,
+  );
+  let summaries = harness.client.getQueryData(harness.windowKey).liveSummaries;
+  assert.equal(
+    summaries[fresh.id],
+    undefined,
+    "fresh head supersedes pre-fetch summary",
+  );
+  assert.deepEqual(
+    summaries[reused.id],
+    oldTailSummary,
+    "reused tail is not a fresh recount",
+  );
+
+  harness.client.setQueryData(harness.windowKey, retained);
+  const beforeFetch = harness.client.getQueryData(harness.windowKey);
+  harness.client.setQueryData(harness.windowKey, {
+    ...beforeFetch,
+    liveSummaries: { ...beforeFetch.liveSummaries, [fresh.id]: live(3) },
+  });
+  const duringFetch = harness.client.getQueryData(harness.windowKey);
+  reconcileFetchedChannelWindow(
+    harness.client,
+    harness.channelId,
+    wire,
+    [],
+    new AbortController().signal,
+    [head, duringFetch.pages[1]],
+    beforeFetch,
+  );
+  summaries = harness.client.getQueryData(harness.windowKey).liveSummaries;
+  assert.deepEqual(
+    summaries[fresh.id],
+    live(3),
+    "in-flight push survives fresh page publication",
+  );
+  harness.client.clear();
+});
+
 test("test_subscription_refresh_preserves_cold_history_error", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
