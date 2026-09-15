@@ -147,6 +147,31 @@ test("orders same-second reconnect events by roster revision", () => {
   assert.equal(result.has(BOB), true);
 });
 
+test("orders same-second remote leave after its join by roster revision", () => {
+  const result = reconstructHuddlePresence(
+    [
+      event({ id: "1", kind: 48100, createdAt: 1 }),
+      participantEvent({
+        id: "z",
+        kind: 48101,
+        admissionId: "remote",
+        rosterRevision: 1,
+        createdAt: 2,
+      }),
+      participantEvent({
+        id: "a",
+        kind: 48102,
+        admissionId: "remote",
+        rosterRevision: 2,
+        createdAt: 2,
+      }),
+    ],
+    RELAY,
+  );
+
+  assert.equal(result.has(BOB), false);
+});
+
 test("ignores an older replay for the same admission", () => {
   const tracker = new HuddlePresenceTracker(RELAY);
   tracker.apply(event({ id: "1", kind: 48100 }));
