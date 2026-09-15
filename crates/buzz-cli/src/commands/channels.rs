@@ -249,6 +249,74 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     Ok(())
 }
 
+fn channel_member_profile_filter(members: &[serde_json::Value]) -> Option<serde_json::Value> {
+    let mut seen = HashSet::new();
+    let authors: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.get("pubkey").and_then(|value| value.as_str()))
+        .filter(|pubkey| !pubkey.is_empty() && seen.insert((*pubkey).to_owned()))
+        .map(str::to_owned)
+        .collect();
+
+    if authors.is_empty() {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "kinds": [0],
+        "authors": authors,
+    }))
+}
+
+fn enrich_channel_member_display_names(
+    mut members: Vec<serde_json::Value>,
+    profile_events: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut display_names = HashMap::new();
+    for event in profile_events {
+        let Some(pubkey) = event.get("pubkey").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(content) = event.get("content").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Ok(profile) = serde_json::from_str::<serde_json::Value>(content) else {
+            continue;
+        };
+        let Some(display_name) = profile
+            .get("display_name")
+            .or_else(|| profile.get("name"))
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        // Query pagination is newest-first; keep the first profile seen for
+        // each author if a relay still retains replaced kind:0 events.
+        display_names
+            .entry(pubkey.to_owned())
+            .or_insert_with(|| display_name.to_owned());
+    }
+
+    for member in &mut members {
+        let display_name = member
+            .get("pubkey")
+            .and_then(|value| value.as_str())
+            .and_then(|pubkey| display_names.get(pubkey))
+            .cloned();
+        if let Some(object) = member.as_object_mut() {
+            object.insert(
+                "display_name".to_owned(),
+                display_name
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+
+    members
+}
+
 pub async fn cmd_list_channel_members(
     client: &BuzzClient,
     channel_id: &str,
@@ -262,6 +330,12 @@ pub async fn cmd_list_channel_members(
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     let members = events.first().map(extract_p_tags).unwrap_or_default();
+    let profiles = if let Some(filter) = channel_member_profile_filter(&members) {
+        client.query_all(filter).await?
+    } else {
+        Vec::new()
+    };
+    let members = enrich_channel_member_display_names(members, &profiles);
     let output = serde_json::to_string(&members).unwrap_or_default();
     println!("{output}");
     Ok(())
@@ -1587,8 +1661,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
+        channel_member_profile_filter, cmd_set_add_policy, enrich_channel_member_display_names,
+        fetch_candidate_hints, finalize_roster_resolution, format_candidate, hints_from_results,
+        join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
         ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
@@ -1610,6 +1685,48 @@ mod tests {
             presence: presence.map(str::to_string),
             profile_updated_at,
         }
+    }
+
+    #[test]
+    fn channel_member_profile_filter_batches_unique_pubkeys() {
+        let members = vec![
+            json!({"pubkey": "aaaa", "role": "owner"}),
+            json!({"pubkey": "bbbb", "role": "bot"}),
+            json!({"pubkey": "aaaa", "role": "member"}),
+        ];
+
+        assert_eq!(
+            channel_member_profile_filter(&members),
+            Some(json!({
+                "kinds": [0],
+                "authors": ["aaaa", "bbbb"],
+            }))
+        );
+        assert_eq!(channel_member_profile_filter(&[]), None);
+    }
+
+    #[test]
+    fn channel_members_include_nullable_profile_display_names() {
+        let members = vec![
+            json!({"pubkey": "aaaa", "role": "owner"}),
+            json!({"pubkey": "bbbb", "role": "bot"}),
+            json!({"pubkey": "cccc", "role": "member"}),
+        ];
+        let profiles = vec![
+            json!({"pubkey": "aaaa", "content": r#"{"display_name":"Alice"}"#}),
+            json!({"pubkey": "aaaa", "content": r#"{"display_name":"Older Alice"}"#}),
+            json!({"pubkey": "bbbb", "content": r#"{"name":"Fallback Bob"}"#}),
+            json!({"pubkey": "cccc", "content": "not-json"}),
+        ];
+
+        assert_eq!(
+            enrich_channel_member_display_names(members, &profiles),
+            vec![
+                json!({"pubkey": "aaaa", "role": "owner", "display_name": "Alice"}),
+                json!({"pubkey": "bbbb", "role": "bot", "display_name": "Fallback Bob"}),
+                json!({"pubkey": "cccc", "role": "member", "display_name": null}),
+            ]
+        );
     }
 
     #[test]
