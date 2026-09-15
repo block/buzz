@@ -2515,6 +2515,76 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   ).toContainText("alice and bob are typing");
 });
 
+test("typing indicator shows the activity label when present", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", KIND_TYPING_INDICATOR);
+
+  // A typing event whose content carries an activity label renders it after the name.
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "random",
+      pubkey,
+      label: "reviewing the quarterly report",
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await expect(
+    page.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice is typing — reviewing the quarterly report");
+
+  // The label follows refreshes: the next ping can change it.
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "random",
+      pubkey,
+      label: "publishing the answer",
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await expect(
+    page.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice is typing — publishing the answer");
+
+  // A classic content-less ping renders today's label again, unchanged.
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "random",
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await expect(
+    page.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice is typing...");
+  await expect(
+    page.getByTestId("message-typing-indicator-label"),
+  ).not.toContainText("—");
+
+  // With several typers the row stays generic — per-typer labels would not fit.
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "random",
+      pubkey,
+      label: "reading the Journal",
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "random",
+      pubkey,
+    });
+  }, TEST_IDENTITIES.bob.pubkey);
+
+  await expect(
+    page.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice and bob are typing");
+});
+
 test("sidebar shows unread indicator for newly active channels", async ({
   page,
 }) => {

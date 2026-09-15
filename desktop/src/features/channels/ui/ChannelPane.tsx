@@ -179,12 +179,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   onRetryThreadReplies,
   threadPanelWidthPx,
   threadScrollTargetId,
-  threadTypingPubkeys,
+  threadTypingEntries,
   threadReplyTargetMessage,
   threadUnreadCounts,
   threadReplyUnreadCounts,
   threadFirstUnreadReplyId,
-  typingPubkeys,
+  typingEntries,
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
@@ -332,7 +332,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isMainDeferredEditPending &&
     acceptsMainAttachments &&
     !isSinglePanelView;
-  const hasTypingActivity = typingPubkeys.length > 0;
+  const hasTypingActivity = typingEntries.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
@@ -803,7 +803,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onOpenAgentSession={onOpenAgentSession}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
-                    typingPubkeys={typingPubkeys}
+                    typingEntries={typingEntries}
                     visible={hasComposerBottomActivity}
                     workingBotPubkeys={composerWorkingBotPubkeys}
                   />
@@ -892,7 +892,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   threadHeadMessage.id,
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
+                threadTypingEntries={threadTypingEntries}
                 activityAccessoryVisible={hasThreadComposerBotActivity}
                 activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
