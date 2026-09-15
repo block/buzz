@@ -67,7 +67,11 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
                           isActive: communities[index].id == activeId,
                           isEditing: isEditing.value,
                           onTap: isEditing.value
-                              ? null
+                              ? () => _promptRenameCommunity(
+                                  context,
+                                  ref,
+                                  communities[index],
+                                )
                               : () async {
                                   final community = communities[index];
                                   if (community.id != activeId) {
@@ -119,6 +123,7 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
 }
 
 const double _communitySwitcherAvatarSize = 36;
+const double _communitySwitcherRenameIconSize = 14;
 
 class _CommunitySwitcherDivider extends StatelessWidget {
   const _CommunitySwitcherDivider();
@@ -178,15 +183,35 @@ class _CommunitySwitcherTile extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    community.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyLarge?.copyWith(
-                      fontWeight: isActive
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                    ),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          community.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.bodyLarge?.copyWith(
+                            fontWeight: isActive
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                          ),
+                        ),
+                      ),
+                      if (isEditing) ...[
+                        const SizedBox(width: Grid.xxs),
+                        Semantics(
+                          label: 'Rename ${community.name}',
+                          child: Icon(
+                            LucideIcons.pencil,
+                            key: Key(
+                              'community-switcher-rename-${community.id}',
+                            ),
+                            size: _communitySwitcherRenameIconSize,
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: Grid.quarter),
                   Text(
@@ -374,6 +399,25 @@ class _AddCommunityTile extends StatelessWidget {
       ),
     );
   }
+}
+
+Future<void> _promptRenameCommunity(
+  BuildContext context,
+  WidgetRef ref,
+  Community community,
+) async {
+  final name = await showBuzzDialog<String>(
+    context: context,
+    builder: (_) => _NameInputDialog(
+      title: 'Rename Community',
+      confirmLabel: 'Rename',
+      initialValue: community.name,
+    ),
+  );
+  if (name == null || name.isEmpty || name == community.name) return;
+  await ref
+      .read(communityListProvider.notifier)
+      .renameCommunity(community.id, name);
 }
 
 Future<void> _confirmRemoveCommunity(
