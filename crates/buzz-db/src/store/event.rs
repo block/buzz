@@ -10,8 +10,8 @@ use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
-    KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
+    event_kind_i32, is_ephemeral, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AUTH,
+    KIND_EVENT_REMINDER, KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
 };
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
@@ -113,6 +113,10 @@ pub struct EventQuery {
     /// SQL pushdown is sound.  Keeping `event_visible_to_reader` as post-filter
     /// defense-in-depth catches any residual mismatch.
     pub shared_gated_reader: Option<Vec<u8>>,
+    /// Author-only visibility reader for [`query_events`]: exclude foreign
+    /// [`AUTHOR_ONLY_KINDS`] before ordering, offset and limit. This does not
+    /// affect `count_events`; callers must retain its existing fallback gate.
+    pub author_only_reader: Option<Vec<u8>>,
 }
 
 impl EventQuery {
@@ -144,6 +148,7 @@ impl EventQuery {
             channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
+            author_only_reader: None,
         }
     }
 }
@@ -679,6 +684,19 @@ pub(crate) async fn query_events_on(
         qb.push_bind(reader_bytes.clone());
         qb.push(format!(" OR {col_prefix}tags @> "));
         qb.push_bind(shared_containment);
+        qb.push(")");
+    }
+
+    // Author-only visibility belongs before pagination, just like shared-gated
+    // visibility. Keep relay result checks as defense in depth.
+    if let Some(ref reader_bytes) = q.author_only_reader {
+        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+        let mut sep = qb.separated(", ");
+        for kind in AUTHOR_ONLY_KINDS {
+            sep.push_bind(*kind as i32);
+        }
+        qb.push(format!(") OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
         qb.push(")");
     }
 
