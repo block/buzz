@@ -319,14 +319,17 @@ async fn execute_relay_admin_command(
             // Default role is "member" when no role tag is present.
             let role = extract_tag_value(event, "role").unwrap_or_else(|| "member".to_string());
 
-            // Owners can add admins or members; admins can only add members.
+            // Owners can add admins, members, or directly provisioned observers;
+            // admins can only add ordinary members.
             if role == "owner" {
                 return Err("invalid role: use kind:9032 to promote to owner".to_string());
             }
-            if role == "admin" && sender_role != "owner" {
-                return Err("actor not authorized: only owner can grant admin role".to_string());
+            if (role == "admin" || role == "observer") && sender_role != "owner" {
+                return Err(
+                    "actor not authorized: only owner can grant admin or observer role".to_string(),
+                );
             }
-            if role != "admin" && role != "member" {
+            if role != "admin" && role != "member" && role != "observer" {
                 return Err(format!("invalid role: {role}"));
             }
 
@@ -350,6 +353,15 @@ async fn execute_relay_admin_command(
             // Only publish NIP-43 announcements when the row was actually inserted —
             // skip on no-op re-adds to avoid spurious kind:8000 events.
             if was_inserted {
+                if role == "observer" {
+                    disconnect_relay_principal(
+                        tenant,
+                        state,
+                        &target_hex,
+                        &event.id.to_hex(),
+                        "restricted: relay role changed; reauthenticate",
+                    )?;
+                }
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
@@ -404,6 +416,14 @@ async fn execute_relay_admin_command(
                 }
             }
 
+            disconnect_relay_principal(
+                tenant,
+                state,
+                &target_hex,
+                &event.id.to_hex(),
+                "restricted: relay membership removed",
+            )?;
+
             info!(
                 sender = %sender_hex,
                 target = %target_hex,
@@ -439,7 +459,7 @@ async fn execute_relay_admin_command(
             if new_role == "owner" {
                 return Err("cannot set role to owner".to_string());
             }
-            if new_role != "admin" && new_role != "member" {
+            if new_role != "admin" && new_role != "member" && new_role != "observer" {
                 return Err(format!("invalid role: {new_role}"));
             }
 
@@ -463,6 +483,18 @@ async fn execute_relay_admin_command(
                 });
             }
 
+            // NIP-42 scopes are cached in the connection context. Force every
+            // role change through a fresh authorization decision so a member
+            // cannot retain write authority after becoming an observer (and an
+            // observer promoted to member does not remain artificially stale).
+            disconnect_relay_principal(
+                tenant,
+                state,
+                &target_hex,
+                &event.id.to_hex(),
+                "restricted: relay role changed; reauthenticate",
+            )?;
+
             info!(
                 sender = %sender_hex,
                 target = %target_hex,
@@ -480,6 +512,19 @@ async fn execute_relay_admin_command(
         }
     }
 
+    Ok(())
+}
+
+fn disconnect_relay_principal(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey_hex: &str,
+    event_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let pubkey = hex::decode(pubkey_hex)
+        .map_err(|e| format!("invalid relay member pubkey during disconnect: {e}"))?;
+    state.disconnect_pubkey_clusterwide(tenant, &pubkey, event_id, reason);
     Ok(())
 }
 
@@ -894,6 +939,199 @@ mod postgres_tests {
         assert_eq!(
             stored_icon(&state, &tenant).await.as_deref(),
             Some("https://example.com/closed.png")
+        );
+    }
+
+    /// Production-seam regression for both observer-specific failure modes:
+    /// an open relay must honor the direct observer row, and changing a live
+    /// member to observer must revoke the socket that cached full scopes.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn open_relay_observer_downgrade_revokes_live_session_and_resolves_read_only() {
+        let host = format!(
+            "observer-open-downgrade-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (state, tenant) = workspace_profile_test_state(&host, false).await;
+        let owner = Keys::generate();
+        let target = Keys::generate();
+        for (keys, role) in [(&owner, "owner"), (&target, "member")] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .await
+                .expect("seed relay role");
+        }
+
+        let conn_id = uuid::Uuid::new_v4();
+        let (send_tx, _send_rx) = tokio::sync::mpsc::channel(1);
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        state.conn_manager.register(
+            conn_id,
+            send_tx,
+            ctrl_tx,
+            None,
+            cancel.clone(),
+            tenant.community(),
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, target.public_key().to_bytes().to_vec());
+
+        let change = EventBuilder::new(Kind::Custom(RELAY_ADMIN_CHANGE_ROLE as u16), "")
+            .tags([
+                Tag::parse(["p", &target.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["role", "observer"]).expect("role tag"),
+            ])
+            .sign_with_keys(&owner)
+            .expect("sign role change");
+        handle_relay_admin_event(&tenant, &state, &change)
+            .await
+            .expect("owner changes member to observer");
+
+        assert!(
+            cancel.is_cancelled(),
+            "cached full-scope session is revoked"
+        );
+        let close = ctrl_rx.try_recv().expect("reauthentication reason is sent");
+        assert!(
+            format!("{close:?}").contains("relay role changed; reauthenticate"),
+            "disconnect carries the restrictive role-change reason"
+        );
+
+        let authorization = crate::api::relay_members::resolve_principal_authorization(
+            &state,
+            tenant.community(),
+            &target.public_key().to_bytes(),
+            None,
+            None,
+        )
+        .await
+        .expect("direct observer resolves on an open relay");
+        assert_eq!(authorization.scopes, buzz_auth::Scope::observer_read_only());
+        assert!(authorization.observer);
+
+        let denial = crate::api::relay_members::enforce_relay_membership(
+            &state,
+            tenant.community(),
+            &target.public_key().to_bytes(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("membership-only mutation surfaces reject observer");
+        assert_eq!(denial.0, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(denial.1 .0["error"], "observer_read_only");
+
+        // Simulate a socket on another pod that missed the Redis disconnect:
+        // it still carries the full scopes granted before the downgrade. The
+        // central EVENT seam must re-read the durable observer row and deny.
+        let stale_event = EventBuilder::new(Kind::TextNote, "must not be stored")
+            .sign_with_keys(&target)
+            .expect("sign stale-session event");
+        let stale_event_id = stale_event.id.to_hex();
+        let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let stale_conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: tenant.clone(),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: target.public_key(),
+                    scopes: buzz_auth::Scope::all_known(),
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        crate::handlers::event::handle_event(stale_event, stale_conn, Arc::clone(&state)).await;
+        let axum::extract::ws::Message::Text(text) =
+            send_rx.try_recv().expect("stale session denial sent")
+        else {
+            panic!("expected text relay message");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame JSON");
+        assert_eq!(frame[0], "OK");
+        assert_eq!(frame[1], stale_event_id);
+        assert_eq!(frame[2], false);
+        assert_eq!(
+            frame[3],
+            "restricted: insufficient scope (need messages:write)"
+        );
+
+        // The same observer role remains usable through the production WS
+        // COUNT and REQ handlers. This pins both halves of the contract at the
+        // actual transport seams rather than only testing the scope resolver.
+        let (read_tx, mut read_rx) = tokio::sync::mpsc::channel(8);
+        let (read_ctrl_tx, _read_ctrl_rx) = tokio::sync::mpsc::channel(1);
+        let read_conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: tenant.clone(),
+            remote_addr: "127.0.0.1:1235".parse().expect("socket addr"),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: target.public_key(),
+                    scopes: buzz_auth::Scope::observer_read_only(),
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx: read_tx,
+            ctrl_tx: read_ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        let read_filter = nostr::Filter::new().kind(Kind::TextNote).limit(1);
+        crate::handlers::count::handle_count(
+            "observer-count".to_string(),
+            vec![read_filter.clone()],
+            Arc::clone(&read_conn),
+            Arc::clone(&state),
+        )
+        .await;
+        let axum::extract::ws::Message::Text(count_text) =
+            read_rx.try_recv().expect("observer COUNT response")
+        else {
+            panic!("expected text COUNT response");
+        };
+        let count_frame: serde_json::Value =
+            serde_json::from_str(&count_text).expect("COUNT frame JSON");
+        assert_eq!(count_frame[0], "COUNT");
+        assert_eq!(count_frame[1], "observer-count");
+
+        crate::handlers::req::handle_req(
+            "observer-req".to_string(),
+            vec![read_filter],
+            vec![None],
+            read_conn,
+            Arc::clone(&state),
+        )
+        .await;
+        let mut saw_eose = false;
+        while let Ok(axum::extract::ws::Message::Text(text)) = read_rx.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&text).expect("REQ frame JSON");
+            if frame[0] == "EOSE" && frame[1] == "observer-req" {
+                saw_eose = true;
+            }
+        }
+        assert!(
+            saw_eose,
+            "observer REQ must complete successfully with EOSE"
         );
     }
 }

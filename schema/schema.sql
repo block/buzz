@@ -576,7 +576,7 @@ CREATE TABLE pubkey_allowlist (
 CREATE TABLE relay_members (
     community_id UUID NOT NULL REFERENCES communities(id),
     pubkey      TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'observer')),
     added_by    TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1892,4 +1892,3 @@ CREATE INDEX idx_relay_operator_audit_target
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
-

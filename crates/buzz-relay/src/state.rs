@@ -1173,12 +1173,12 @@ impl AppState {
         }
     }
 
-    /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`
-    /// now (fenced to `tenant`'s community) and fan the same disconnect out to
-    /// every other pod over the conn-control Redis channel.
+    /// Enforce a live access revocation cluster-wide: close this pod's sockets
+    /// for `pubkey` now (fenced to `tenant`'s community) and fan the same
+    /// disconnect out to every other pod over the conn-control Redis channel.
     ///
-    /// This is the single entry point for live ban enforcement (decision 4:
-    /// "a ban takes effect immediately, everywhere, including live sessions").
+    /// This is the single entry point for live ban, membership-removal, and
+    /// role-change enforcement.
     /// Callers must not invoke the pod-local `conn_manager.disconnect_pubkey`
     /// directly — doing so closes sockets only on the pod that processed the
     /// ban and silently drops the cluster-wide half. Pairing both halves here
@@ -1186,10 +1186,9 @@ impl AppState {
     ///
     /// Returns the number of sockets closed on *this* pod only — remote pods
     /// close asynchronously and do not report back, so callers must not treat
-    /// the count as cluster-wide truth. The cross-pod publish is fire-and-forget
-    /// (mirrors [`Self::spawn_cache_invalidation`]): the DB ban row is the
-    /// durable backstop, so a dropped publish still refuses the banned member's
-    /// next auth and next write.
+    /// the count as cluster-wide truth. The cross-pod publish is fire-and-forget;
+    /// the EVENT handler revalidates the durable authorization row before every
+    /// WebSocket write, so a dropped publish cannot preserve stale write access.
     pub fn disconnect_pubkey_clusterwide(
         &self,
         tenant: &TenantContext,
@@ -1211,9 +1210,9 @@ impl AppState {
             event_id: event_id.to_string(),
             reason: reason.to_string(),
         };
-        // This pre-existing ban path may remain fire-and-forget because the
-        // durable ban row rejects the member again at auth. Community archival
-        // is different: its API awaits publication and live sockets also have a
+        // This path may remain fire-and-forget because the durable authorization
+        // row is re-evaluated at the central WS write seam. Community archival is
+        // different: its API awaits publication and live sockets also have a
         // periodic durable-state revalidation backstop below.
         tokio::spawn(async move {
             if let Err(e) = pubsub.publish_conn_control(&tenant, &command).await {

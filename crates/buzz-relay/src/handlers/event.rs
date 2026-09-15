@@ -631,7 +631,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     )
     .increment(1);
 
-    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
+    let (conn_id, pubkey_bytes, auth_pubkey, mut scopes, channel_ids, verified_owner) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => (
@@ -640,6 +640,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 ctx.pubkey,
                 ctx.scopes.clone(),
                 ctx.channel_ids.clone(),
+                ctx.agent_owner_pubkey,
             ),
             _ => {
                 reject("auth");
@@ -652,6 +653,37 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             }
         }
     };
+
+    // Pub/sub disconnects are an optimization, not the authorization boundary:
+    // another pod can miss a role-change control message. Re-read the durable role
+    // before every WS write and intersect it with the scopes granted at NIP-42
+    // authentication. A downgrade therefore takes effect even on a stale remote
+    // socket, while a promotion still requires reauthentication.
+    let current_authorization =
+        match crate::api::relay_members::resolve_live_principal_authorization(
+            &state,
+            conn.tenant.community(),
+            &pubkey_bytes,
+            verified_owner.as_ref(),
+        )
+        .await
+        {
+            Ok(authorization) => authorization,
+            Err((status, _)) => {
+                let (metric_reason, message) = if status.is_server_error() {
+                    ("error", "error: internal server error")
+                } else {
+                    (
+                        "authorization_changed",
+                        "restricted: authorization changed; reauthenticate",
+                    )
+                };
+                reject(metric_reason);
+                conn.send(RelayMessage::ok(&event_id_hex, false, message));
+                return;
+            }
+        };
+    scopes.retain(|scope| current_authorization.scopes.contains(scope));
 
     // Must run before both ephemeral and persistent branches. Persistent
     // events get a second check inside ingest_event() (step 3), but

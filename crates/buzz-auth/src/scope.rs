@@ -61,6 +61,14 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// Return the complete authority granted to a directly provisioned observer.
+    ///
+    /// Observers may read channel events only. Channel and community visibility
+    /// remain independently constrained by the relay's existing membership gates.
+    pub fn observer_read_only() -> Vec<Scope> {
+        vec![Self::MessagesRead]
+    }
+
     /// Return a `Vec` containing every known scope variant.
     ///
     /// Used in dev mode (`require_auth_token=false`) where `X-Pubkey` header
@@ -245,5 +253,13 @@ mod tests {
                 "all_known() must not contain Unknown variants"
             );
         }
+    }
+
+    #[test]
+    fn observer_authority_is_explicit_nonempty_and_read_only() {
+        let scopes = Scope::observer_read_only();
+        assert_eq!(scopes, vec![Scope::MessagesRead]);
+        assert!(!scopes.is_empty());
+        assert!(scopes.iter().all(|scope| scope.as_str().ends_with(":read")));
     }
 }
