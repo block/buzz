@@ -126,6 +126,7 @@ pub use relay_members::*;
 pub use relay_reconnect::*;
 pub use social::*;
 pub use team_snapshot::*;
+pub(crate) use teams::replay_pending_team_membership;
 pub use teams::*;
 pub use updater::*;
 pub use window_chrome::*;

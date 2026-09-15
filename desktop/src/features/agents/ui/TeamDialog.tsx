@@ -21,6 +21,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import { personaCatalogCopy } from "./personaLibraryCopy";
 import { RemoveMembersConfirmDialog } from "./RemoveMembersConfirmDialog";
 import {
+  canSubmitTeamDialog,
   copySelectedPersonaIds,
   countMissingPersonaIds,
   filterAvailablePersonaIds,
@@ -326,11 +327,7 @@ export function TeamDialog({
                   Cancel
                 </Button>
                 <Button
-                  disabled={
-                    name.trim().length === 0 ||
-                    selectedPersonaIds.length === 0 ||
-                    isPending
-                  }
+                  disabled={!canSubmitTeamDialog({ name, isPending })}
                   onClick={() => void handleSubmit()}
                   size="sm"
                   type="button"
