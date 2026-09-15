@@ -2,7 +2,8 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
-    read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
+    read_file_or_stdin, read_or_stdin, repo_coord_a_value, sdk_err, validate_hex64,
+    validate_repo_id,
 };
 use buzz_sdk::{GitPrUpdateMeta, GitPullRequestMeta, GitRepoCoord, GitStatusMeta};
 
@@ -132,10 +133,7 @@ pub async fn cmd_list_prs(
     label: Option<&str>,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
-    validate_repo_id(repo_id)?;
-
-    let a_value = format!("30617:{repo_owner}:{repo_id}");
+    let a_value = repo_coord_a_value(repo_owner, repo_id)?;
     let mut filter = serde_json::json!({
         "kinds": [1618],
         "#a": [a_value]
