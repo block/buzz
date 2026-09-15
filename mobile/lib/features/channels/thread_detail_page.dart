@@ -678,12 +678,17 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry]);
     final readState = ref.watch(readStateProvider);
+    // Gate passive read-state advance on the app being foregrounded —
+    // mirrors the channel-detail gate (#7470). A backgrounded app must
+    // not mark replies read; on resume the effect re-runs and catches up.
+    final appLifecycle = ref.watch(appLifecycleProvider);
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
         .join(',');
 
     useEffect(() {
       if (!readState.isReady || replies.isEmpty) return null;
+      if (appLifecycle != AppLifecycleState.resumed) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         for (final reply in replies) {
           ref
@@ -692,7 +697,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         }
       });
       return null;
-    }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
+    }, [threadHead.id, readState.isReady, visibleReplyReadKey, appLifecycle]);
 
     // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));
