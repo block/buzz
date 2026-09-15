@@ -69,6 +69,7 @@ NostrFilter _threadRepliesFilter(
     limit: 200,
     extensions: {
       'depth_limit': 64,
+      'include_aux': true,
       if (cursor != null) 'thread_cursor': cursor.createdAt,
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },
