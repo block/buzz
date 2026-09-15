@@ -74,6 +74,8 @@ type TimelineMessageListProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+  onOpenProjectedThread?: (message: TimelineMessage) => void;
+  onReplyToProjectedThread?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -102,6 +104,7 @@ type TimelineMessageListProps = {
   stickyDayDividers?: boolean;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  threadRepliesInChannel?: boolean;
   /** Content rendered as the first virtual row before channel history. */
   leadingContent?: React.ReactNode;
   /** Hide date boundaries for a huddle's live transcript. */
@@ -148,6 +151,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onMarkRead,
   onReply,
   onOpenThread,
+  onOpenProjectedThread,
+  onReplyToProjectedThread,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
@@ -158,6 +163,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   stickyDayDividers = true,
   threadUnreadCounts,
+  threadRepliesInChannel = false,
   unfollowThreadById,
   leadingContent,
   historyExhausted = false,
@@ -174,8 +180,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   const entries = React.useMemo(
     () =>
       mainEntries ??
-      buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
-    [mainEntries, messages, profiles, threadSummaries],
+      buildMainTimelineEntries(messages, undefined, threadSummaries, profiles, {
+        threadRepliesInChannel,
+      }),
+    [mainEntries, messages, profiles, threadRepliesInChannel, threadSummaries],
   );
   // Contexts are memoized per message id so MessageRow/Markdown memo
   // comparisons hold across unrelated timeline re-renders (typing
@@ -273,6 +281,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onMarkUnread={onMarkUnread}
               onReply={onReply}
               onOpenThread={onOpenThread}
+              onOpenProjectedThread={onOpenProjectedThread}
+              onReplyToProjectedThread={onReplyToProjectedThread}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
               searchActiveMessageId={searchActiveMessageId}
@@ -305,6 +315,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onEdit,
       onMarkRead,
       onMarkUnread,
+      onOpenProjectedThread,
+      onReplyToProjectedThread,
       onReply,
       onOpenThread,
       onToggleReaction,

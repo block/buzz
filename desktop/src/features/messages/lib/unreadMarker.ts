@@ -32,12 +32,15 @@ const EMPTY_MARKER: ChannelUnreadMarker = {
  *   produced regardless of the frontier.
  * @param currentPubkey When provided, messages authored by this pubkey are
  *   never counted as unread (the user knows about their own posts).
+ * @param includeReplies When true, visible thread replies are part of the
+ *   channel feed and participate in the channel unread boundary.
  */
 export function computeChannelUnreadMarker(
   messages: TimelineMessage[],
   frontierSeconds: number | null,
   suppressed = false,
   currentPubkey?: string,
+  includeReplies = false,
 ): ChannelUnreadMarker {
   if (suppressed) {
     return EMPTY_MARKER;
@@ -51,7 +54,7 @@ export function computeChannelUnreadMarker(
   let unreadCount = 0;
 
   for (const message of messages) {
-    if (message.parentId) {
+    if (!includeReplies && message.parentId) {
       continue;
     }
     if (
