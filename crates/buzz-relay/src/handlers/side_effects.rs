@@ -1968,13 +1968,28 @@ async fn handle_join_request(
         ));
     }
 
-    // Skip if already an active member — prevents duplicate join notifications.
-    // Fail closed on DB errors rather than falling through to add_member.
+    // Skip the membership mutation if already an active member — prevents
+    // duplicate join notifications. Fail closed on DB errors rather than
+    // falling through to add_member.
+    //
+    // HOWEVER, still re-emit the kind:39002 discovery snapshot for this channel.
+    // Rationale: if the relay-side kind:39002 event was lost, replaced without
+    // the requester's p-tag, or is otherwise stale (e.g. relay restore from
+    // backup, manual DB surgery, a prior emission that raced and failed), the
+    // requesting client has no repair path — `get_channels` keeps returning
+    // `is_member=false`. The requester already proved
+    // membership-held intent by sending kind:9021; refreshing the discovery
+    // snapshot here is idempotent (`replace_addressable_event` is a no-op
+    // when the member list is unchanged) and self-heals the desktop from the
+    // "channel shows as non-member, Join does nothing" state.
     if state
         .is_member_cached(tenant.community(), channel_id, &actor_bytes)
         .await?
     {
-        info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
+        info!(channel = %channel_id, "kind:9021 join — already a member, refreshing discovery snapshot");
+        if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+            warn!(channel = %channel_id, error = %e, "already-member discovery refresh failed");
+        }
         return Ok(());
     }
 
