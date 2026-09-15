@@ -360,6 +360,12 @@ s3:
   # path: https://endpoint/bucket/key (bundled MinIO-compatible default)
   # virtual: https://bucket.endpoint/key (standard S3; required by new Railway buckets)
   addressingStyle: path
+  # static (default): read keys from the env secret (BUZZ_S3_ACCESS_KEY /
+  #   BUZZ_S3_SECRET_KEY secretKeyRefs, optional). chain: resolve credentials
+  #   from the pod's IAM role (EKS Pod Identity / IRSA) by emitting literal
+  #   empty strings so the relay takes the AWS credential-chain branch. Do
+  #   not set accessKey/secretKey with credentialSource: chain (#5211).
+  credentialSource: static
   accessKey: ""
   secretKey: ""
 

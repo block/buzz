@@ -213,6 +213,11 @@
           "enum": ["path", "virtual"],
           "description": "S3 URL style shared by media and Git/CAS clients. Defaults to path for bundled MinIO compatibility."
         },
+        "credentialSource": {
+          "type": "string",
+          "enum": ["static", "chain"],
+          "description": "static: read S3 keys from the env secret (secretKeyRefs). chain: emit literal empty strings so the relay resolves credentials from the pod IAM role (EKS Pod Identity / IRSA)."
+        },
         "accessKey": { "type": "string" },
         "secretKey": { "type": "string" }
       }
