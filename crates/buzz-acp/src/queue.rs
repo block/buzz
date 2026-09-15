@@ -421,7 +421,10 @@ impl EventQueue {
                 let cancelled_scope = self
                     .cancelled_batches
                     .keys()
-                    .find(|scope| !self.in_flight_scopes.contains(scope))
+                    .find(|scope| {
+                        !self.in_flight_scopes.contains(scope)
+                            && self.retry_after.get(scope).is_none_or(|&t| t <= now)
+                    })
                     .cloned();
                 match cancelled_scope {
                     Some(scope) => {
@@ -525,6 +528,17 @@ impl EventQueue {
         }
     }
 
+    /// Return the number of failed attempts already recorded for a scope.
+    ///
+    /// Used to annotate owner-only observer failures before `requeue` either
+    /// preserves the counter or clears it on dead-letter.
+    pub fn retry_count<K: IntoScope>(&self, scope: K) -> u32 {
+        self.retry_counts
+            .get(&scope.into_scope())
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Re-queue a batch of events that failed to process.
     ///
     /// Events are pushed back to the **front** of the channel's queue so they
@@ -589,31 +603,12 @@ impl EventQueue {
             "requeueing failed batch with backoff"
         );
 
-        let queue = self.queues.entry(scope.clone()).or_default();
-        // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                scope: scope.clone(),
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at, // preserve original timestamp (#46)
-            });
-        }
-        // Enforce per-scope cap: trim oldest (back) events if requeue pushed
-        // the partition over the limit. Without this, repeated requeue+push
-        // cycles can grow the queue unboundedly.
-        while queue.len() > MAX_PENDING_PER_SCOPE {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                scope = %scope.telemetry_label(),
-                limit = MAX_PENDING_PER_SCOPE,
-                "requeue overflow — dropped oldest event to enforce cap"
-            );
-        }
+        // A merged turn still owes its cancelled carryover: Steer continues
+        // that work, and Interrupt retains it as superseded context. Restore
+        // the complete batch and its framing on every retry, not just the
+        // newest messages, using the same bounded restoration as a held turn.
+        self.requeue_preserve_timestamps(batch);
         self.retry_after.insert(scope, Instant::now() + delay);
-        self.enforce_channel_cap(channel_id);
         None
     }
 
@@ -735,10 +730,10 @@ impl EventQueue {
             !q.is_empty()
                 && !self.in_flight_scopes.contains(scope)
                 && self.retry_after.get(scope).is_none_or(|&t| t <= now)
-        }) || self
-            .cancelled_batches
-            .keys()
-            .any(|scope| !self.in_flight_scopes.contains(scope))
+        }) || self.cancelled_batches.keys().any(|scope| {
+            !self.in_flight_scopes.contains(scope)
+                && self.retry_after.get(scope).is_none_or(|&t| t <= now)
+        })
     }
 
     /// Returns `true` if any undispatched work remains for a channel that is
@@ -813,6 +808,12 @@ impl EventQueue {
     #[cfg(test)]
     pub fn set_retry_count_for_test<K: IntoScope>(&mut self, scope: K, count: u32) {
         self.retry_counts.insert(scope.into_scope(), count);
+    }
+
+    /// Advance only a scope's retry deadline without sleeping in integration tests.
+    #[cfg(test)]
+    pub(crate) fn expire_retry_for_test(&mut self, scope: &SessionScope) {
+        self.retry_after.insert(scope.clone(), Instant::now());
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
@@ -1100,6 +1101,43 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         root_event_id,
         parent_event_id,
         mentioned_pubkeys: mentions,
+    }
+}
+
+/// The observer-facing conversation context for a flushed prompt batch.
+///
+/// Top-level events have no NIP-10 root marker, so their own event id becomes
+/// the conversation root. Thread replies preserve the root and parent resolved
+/// from their tags. Cancelled events come first in merged prompts; the newest
+/// regular event remains the reply anchor. Keeping this at the queue boundary
+/// gives `turn_started` and `turn_error` one identical correlation contract.
+#[derive(Debug, Clone, Default)]
+pub struct TriggeringEventContext {
+    pub event_ids: Vec<String>,
+    pub root_event_id: Option<String>,
+    pub parent_event_id: Option<String>,
+}
+
+pub fn triggering_event_context(batch: &FlushBatch) -> TriggeringEventContext {
+    let mut event_ids = Vec::with_capacity(batch.cancelled_events.len() + batch.events.len());
+    event_ids.extend(batch.cancelled_events.iter().map(|be| be.event.id.to_hex()));
+    event_ids.extend(batch.events.iter().map(|be| be.event.id.to_hex()));
+    let Some(last) = batch
+        .events
+        .last()
+        .or_else(|| batch.cancelled_events.last())
+    else {
+        return TriggeringEventContext {
+            event_ids,
+            ..TriggeringEventContext::default()
+        };
+    };
+    let trigger_id = last.event.id.to_hex();
+    let thread = parse_thread_tags(&last.event);
+    TriggeringEventContext {
+        event_ids,
+        root_event_id: Some(thread.root_event_id.unwrap_or_else(|| trigger_id.clone())),
+        parent_event_id: thread.parent_event_id.or(Some(trigger_id)),
     }
 }
 
@@ -2210,6 +2248,10 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
     let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
     (framing.new_tag, framing.closing_note)
 }
+
+#[cfg(test)]
+#[path = "queue_retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3920,6 +3962,44 @@ mod tests {
         let tags = parse_thread_tags(&event);
         assert!(tags.root_event_id.is_none());
         assert!(tags.parent_event_id.is_none());
+    }
+
+    #[test]
+    fn triggering_context_includes_cancelled_events_but_anchors_to_new_work() {
+        let ch = Uuid::new_v4();
+        let cancelled = make_event("cancelled");
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let latest = make_event_with_tags(
+            "latest",
+            vec![
+                vec!["e".into(), root.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent.clone(), "".into(), "reply".into()],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            scope: thread(ch, &root),
+            events: vec![BatchEvent {
+                event: latest.clone(),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: cancelled.clone(),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let context = triggering_event_context(&batch);
+        assert_eq!(
+            context.event_ids,
+            vec![cancelled.id.to_hex(), latest.id.to_hex()]
+        );
+        assert_eq!(context.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(context.parent_event_id.as_deref(), Some(parent.as_str()));
     }
 
     #[test]
