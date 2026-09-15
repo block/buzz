@@ -63,6 +63,7 @@ export default defineConfig({
         "**/voice-settings.spec.ts",
         "**/voice-note.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
+        "**/agent-capability-manifest.spec.ts",
         "**/agent-error-state-screenshots.spec.ts",
         "**/edit-agent.spec.ts",
         "**/doctor-cta-screenshots.spec.ts",
