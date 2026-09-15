@@ -60,6 +60,9 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route("/members/restrictions", get(list_member_restrictions))
+        .route("/members/{pubkey}/ban", delete(unban_member))
+        .route("/members/{pubkey}/timeout", delete(untimeout_member))
         .layer(middleware::from_fn(security_headers))
         // Mutation routes carry a JSON body (max ~4 KB); read-only routes have no body.
         .layer(RequestBodyLimitLayer::new(4096))
@@ -1108,7 +1111,263 @@ async fn delete_operator(
     Ok(Json(serde_json::json!({"deleted": canonical_hex})))
 }
 
-// ── Staffing helpers ──────────────────────────────────────────────────────────
+// ── Member restriction routes ─────────────────────────────────────────────────
+
+/// JSON response shape for one restriction record.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberRestrictionRecord {
+    /// Target member pubkey as lowercase hex.
+    pubkey: String,
+    /// Whether the member is currently banned.
+    banned: bool,
+    /// Ban expiry timestamp; `null` while `banned` ⇒ permanent.
+    ban_expires_at: Option<DateTime<Utc>>,
+    /// Moderator-supplied ban reason (private to the admin plane).
+    ban_reason: Option<String>,
+    /// Write-block until this timestamp; `null` or past ⇒ not timed out.
+    muted_until: Option<DateTime<Utc>>,
+    /// Moderator-supplied timeout reason (private to the admin plane).
+    mute_reason: Option<String>,
+    /// Last-acting moderator pubkey as lowercase hex.
+    actor_pubkey: String,
+    /// Last modification time.
+    updated_at: DateTime<Utc>,
+}
+
+impl From<buzz_db::moderation::BanRecord> for MemberRestrictionRecord {
+    fn from(r: buzz_db::moderation::BanRecord) -> Self {
+        Self {
+            pubkey: hex::encode(&r.pubkey),
+            banned: r.banned,
+            ban_expires_at: r.ban_expires_at,
+            ban_reason: r.ban_reason,
+            muted_until: r.muted_until,
+            mute_reason: r.mute_reason,
+            actor_pubkey: hex::encode(&r.actor_pubkey),
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+/// Paginated response for `GET /members/restrictions`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestrictionsPage {
+    /// Restriction records for this page, newest first.
+    items: Vec<MemberRestrictionRecord>,
+    /// Opaque cursor for the next page, or `null` when the returned page is
+    /// smaller than `limit` (i.e., all rows have been delivered). An exactly
+    /// full final page emits a non-null cursor; the subsequent request returns
+    /// an empty page with `null`.
+    ///
+    /// Encoding: `base64url(updated_at_micros_decimal + "_" + pubkey_hex)`.
+    /// Treat as opaque — the format may change across releases.
+    next_cursor: Option<String>,
+}
+
+/// Encode a keyset cursor as a base64url-safe opaque token.
+///
+/// Format: `{updated_at_micros}_{pubkey_hex}` encoded with URL_SAFE_NO_PAD.
+fn encode_cursor(updated_at: DateTime<Utc>, pubkey: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let payload = format!("{}_{}", updated_at.timestamp_micros(), hex::encode(pubkey));
+    URL_SAFE_NO_PAD.encode(payload.as_bytes())
+}
+
+/// Decode an opaque cursor token back to `(updated_at, pubkey_bytes)`.
+fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor is not valid base64url"))?;
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor is not valid UTF-8"))?;
+    let (ts_str, pk_hex) = s
+        .split_once('_')
+        .ok_or_else(|| ApiError::bad_request("invalid_cursor", "cursor format is invalid"))?;
+    let micros: i64 = ts_str
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor timestamp is invalid"))?;
+    let dt = DateTime::from_timestamp_micros(micros)
+        .ok_or_else(|| ApiError::bad_request("invalid_cursor", "cursor timestamp out of range"))?;
+    let pubkey = hex::decode(pk_hex)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor pubkey is invalid hex"))?;
+    if pubkey.len() != 32 {
+        return Err(ApiError::bad_request(
+            "invalid_cursor",
+            "cursor pubkey must be 32 bytes",
+        ));
+    }
+    Ok((dt, pubkey))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommunityQuery {
+    community_id: Uuid,
+}
+
+/// Query params for `GET /members/restrictions`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestrictionsQuery {
+    community_id: Uuid,
+    /// Maximum number of records to return (1–200, default 200).
+    limit: Option<i64>,
+    /// Opaque continuation cursor from a prior response's `nextCursor` field.
+    cursor: Option<String>,
+}
+
+/// GET /members/restrictions?communityId={uuid}[&limit={1-200}][&cursor={token}]
+///
+/// List currently active bans and timeouts for the given community, newest
+/// first, with stable keyset pagination.
+///
+/// **Response shape:** `{ "items": [...], "nextCursor": "<token>"|null }`
+///
+/// - `limit` — page size, 1–200, default 200. Enforced as a SQL `LIMIT`.
+/// - `cursor` — opaque token from a prior page's `nextCursor`. Omit for the
+///   first page. Format: base64url of `{updated_at_micros}_{pubkey_hex}`.
+///
+/// Returns 400 if `communityId` is absent / invalid, `limit` is out of range,
+/// or `cursor` is malformed. Returns 401 without a valid admin credential.
+async fn list_member_restrictions(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    Query(query): Query<RestrictionsQuery>,
+) -> Result<Json<RestrictionsPage>, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        uri.path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str()),
+        "GET",
+        None,
+    )
+    .await?;
+
+    let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
+    let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
+
+    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+    let records = state
+        .db
+        .list_community_restrictions_page(community, page_limit, cursor)
+        .await?;
+
+    let next_cursor = if records.len() as i64 == page_limit {
+        records
+            .last()
+            .map(|r| encode_cursor(r.updated_at, &r.pubkey))
+    } else {
+        None
+    };
+
+    Ok(Json(RestrictionsPage {
+        items: records.into_iter().map(Into::into).collect(),
+        next_cursor,
+    }))
+}
+
+/// DELETE /members/{pubkey}/ban?communityId={uuid}
+///
+/// Lift an active ban for the given member in the given community.
+/// Returns 204 on success, 409 if no active ban exists.
+/// Requires nip98 auth.
+async fn unban_member(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(pubkey_hex): Path<String>,
+    Query(query): Query<CommunityQuery>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let principal_opt = authorize(
+        &state,
+        &headers,
+        uri.path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str()),
+        "DELETE",
+        None,
+    )
+    .await?;
+
+    let principal = require_mutation_principal(principal_opt)?;
+
+    let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
+    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+
+    let actor_authority = match principal.role {
+        AdminRole::Operator => "relay_operator",
+        AdminRole::Moderator => "relay_moderator",
+    };
+
+    let lifted = state
+        .db
+        .unban_community_member_with_audit(
+            community,
+            &target_bytes,
+            &principal.pubkey,
+            actor_authority,
+        )
+        .await?;
+    if !lifted {
+        return Err(ApiError::conflict("no active ban for this member"));
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// DELETE /members/{pubkey}/timeout?communityId={uuid}
+///
+/// Clear an active timeout/write-block for the given member in the given
+/// community. Returns 204 on success, 409 if no active timeout exists.
+/// Requires nip98 auth.
+async fn untimeout_member(
+    State(state): State<Arc<crate::state::AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(pubkey_hex): Path<String>,
+    Query(query): Query<CommunityQuery>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let principal_opt = authorize(
+        &state,
+        &headers,
+        uri.path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str()),
+        "DELETE",
+        None,
+    )
+    .await?;
+
+    let principal = require_mutation_principal(principal_opt)?;
+
+    let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
+    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+
+    let actor_authority = match principal.role {
+        AdminRole::Operator => "relay_operator",
+        AdminRole::Moderator => "relay_moderator",
+    };
+
+    let lifted = state
+        .db
+        .untimeout_community_member_with_audit(
+            community,
+            &target_bytes,
+            &principal.pubkey,
+            actor_authority,
+        )
+        .await?;
+    if !lifted {
+        return Err(ApiError::conflict("no active timeout for this member"));
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
 
 /// Returns true if any config-backed operator is effective — a non-empty
 /// `RELAY_OPERATOR_PUBKEYS` (every entry is an operator) or, when that list is
@@ -1721,6 +1980,877 @@ mod postgres_tests {
             response.status(),
             StatusCode::FORBIDDEN,
             "mismatched origin must still be rejected in disabled mode"
+        );
+    }
+
+    // ── Member restriction tests ──────────────────────────────────────────
+
+    #[test]
+    fn restriction_record_converts_ban_record_pubkeys_to_hex() {
+        // Pure unit test: BanRecord → MemberRestrictionRecord hex encodes the
+        // Vec<u8> pubkeys. No database or state needed.
+        let record = buzz_db::moderation::BanRecord {
+            pubkey: vec![0xAB; 32],
+            banned: true,
+            ban_expires_at: None,
+            ban_reason: Some("spam".to_string()),
+            muted_until: None,
+            mute_reason: None,
+            actor_pubkey: vec![0xCD; 32],
+            updated_at: chrono::Utc::now(),
+        };
+        let response: MemberRestrictionRecord = record.into();
+        assert_eq!(response.pubkey, "ab".repeat(32));
+        assert_eq!(response.actor_pubkey, "cd".repeat(32));
+        assert!(response.banned);
+        assert_eq!(response.ban_reason.as_deref(), Some("spam"));
+    }
+
+    #[tokio::test]
+    async fn list_restrictions_rejects_missing_credential() {
+        let state = test_state().await;
+        let community_id = Uuid::nil();
+        let response = status_for(
+            state,
+            Request::builder()
+                .uri(format!("/members/restrictions?communityId={community_id}"))
+                .header(header::HOST, "admin.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /members/restrictions without credential must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn unban_member_rejects_missing_credential() {
+        let state = test_state().await;
+        let pubkey_hex = "ab".repeat(32);
+        let community_id = Uuid::nil();
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/members/{pubkey_hex}/ban?communityId={community_id}"
+                ))
+                .header(header::HOST, "admin.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "DELETE /members/{{pubkey}}/ban without credential must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn untimeout_member_rejects_missing_credential() {
+        let state = test_state().await;
+        let pubkey_hex = "ab".repeat(32);
+        let community_id = Uuid::nil();
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/members/{pubkey_hex}/timeout?communityId={community_id}"
+                ))
+                .header(header::HOST, "admin.example")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "DELETE /members/{{pubkey}}/timeout without credential must return 401"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unban_member_returns_409_when_no_active_ban() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        // Create an isolated community so the test doesn't clash with other rows.
+        let community_uuid = Uuid::new_v4();
+        let host = format!("unban-test-{}.example", community_uuid.simple());
+        db.ensure_configured_community(&host)
+            .await
+            .expect("create test community");
+
+        let state = test_state().await;
+        let operator_keys = test_operator_keys();
+        let pubkey_hex = "ab".repeat(32);
+        let community_id = community_uuid;
+
+        let path = format!("/members/{pubkey_hex}/ban?communityId={community_id}");
+        let auth = make_nostr_auth_delete(&operator_keys, &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "unban with no active ban must return 409"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn untimeout_member_returns_409_when_no_active_timeout() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("untimeout-test-{}.example", community_uuid.simple());
+        db.ensure_configured_community(&host)
+            .await
+            .expect("create test community");
+
+        let state = test_state().await;
+        let operator_keys = test_operator_keys();
+        let pubkey_hex = "ab".repeat(32);
+        let community_id = community_uuid;
+
+        let path = format!("/members/{pubkey_hex}/timeout?communityId={community_id}");
+        let auth = make_nostr_auth_delete(&operator_keys, &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "untimeout with no active timeout must return 409"
+        );
+    }
+
+    // ── Restriction management success tests (require Postgres) ──────────
+
+    /// Build an AppState that uses a real Postgres connection pool so HTTP
+    /// routes that hit the DB can commit and read back results.
+    async fn nip98_state_with_real_pool(pool: sqlx::PgPool) -> Arc<crate::state::AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.relay_operator_pubkeys = vec![test_operator_keys().public_key().to_hex()];
+        config.relay_operator_api_origin = Some("https://admin.example".to_string());
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_restrictions_returns_active_bans_and_timeouts() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("list-restrictions-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        let banned_pubkey = vec![0xAAu8; 32];
+        let timed_out_pubkey = vec![0xBBu8; 32];
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+
+        // Insert a permanent ban and a timeout in this community.
+        db.ban_community_member(community, &banned_pubkey, &actor_pubkey, None, None)
+            .await
+            .expect("insert ban fixture");
+        db.timeout_community_member(
+            community,
+            &timed_out_pubkey,
+            &actor_pubkey,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("insert timeout fixture");
+
+        let state = nip98_state_with_real_pool(pool).await;
+        let path = format!("/members/restrictions?communityId={community_uuid}");
+        let auth = make_nostr_auth(&test_operator_keys(), &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("GET")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET restrictions must return 200"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let page: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
+
+        let records = page["items"].as_array().expect("items must be an array");
+        assert_eq!(records.len(), 2, "must return both the ban and the timeout");
+
+        let banned_hex = hex::encode(&banned_pubkey);
+        let timed_out_hex = hex::encode(&timed_out_pubkey);
+        let pubkeys: std::collections::HashSet<String> = records
+            .iter()
+            .filter_map(|r| r["pubkey"].as_str().map(String::from))
+            .collect();
+        assert!(
+            pubkeys.contains(&banned_hex),
+            "banned pubkey must appear in the response"
+        );
+        assert!(
+            pubkeys.contains(&timed_out_hex),
+            "timed-out pubkey must appear in the response"
+        );
+
+        // Verify the banned record has banned=true in JSON.
+        let banned_rec = records
+            .iter()
+            .find(|r| r["pubkey"].as_str() == Some(&banned_hex))
+            .expect("banned record");
+        assert_eq!(
+            banned_rec["banned"],
+            serde_json::Value::Bool(true),
+            "banned record must have banned=true"
+        );
+
+        // Two records returned with default limit=200 → no next page.
+        assert_eq!(
+            page["nextCursor"],
+            serde_json::Value::Null,
+            "nextCursor must be null when all records fit in one page"
+        );
+    }
+
+    /// Pagination regression: bind the default=200 cap, SQL LIMIT enforcement,
+    /// keyset continuation, exactly-once coverage, and tie-breaker correctness
+    /// in a single falsifiable route test.
+    ///
+    /// Seeding strategy:
+    /// - Rows 1–199: distinct `updated_at` values, newest first (positions 1–199).
+    /// - Rows 200–201: two distinct pubkeys forced to share an identical older
+    ///   `updated_at` so they land at positions 200–201 in `ORDER BY updated_at
+    ///   DESC, pubkey DESC`, straddling the default 200-row page boundary.
+    ///   A broken tie-breaker will either duplicate or omit one of these rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_restrictions_pagination_exhaustive() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("list-restrict-pg-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+
+        // Build 201 distinct pubkeys.  Pubkey layout:
+        //   indices 0..=198 (199 rows) → [i+1, i+1, ..., i+1] where i ∈ 0..199
+        //   indices 199..=200 (2 rows) → [0xE1..] and [0xE2..] (the tied pair)
+        // The tied pair is pinned to positions 200/201 by their OLDER timestamp
+        // (now()-1000s vs. now()-1..199s), not by pubkey ordering.  Under
+        // `pubkey DESC` 0xE2 sorts above 0xE1, so 0xE2 lands at position 200
+        // and 0xE1 at position 201; the default-200 page boundary splits the tie.
+        let mut all_pubkeys: Vec<Vec<u8>> = Vec::new();
+        for i in 1u8..=199 {
+            all_pubkeys.push(vec![i; 32]);
+        }
+        all_pubkeys.push(vec![0xE1u8; 32]); // tied pair member A — position 201
+        all_pubkeys.push(vec![0xE2u8; 32]); // tied pair member B — position 200
+
+        // Batch-insert all 201 rows with explicit `updated_at` stamps:
+        //   rows 0..198 → now() - (i+1) seconds  (distinct, newer)
+        //   rows 199-200 → now() - 1000 seconds   (identical, oldest)
+        // This guarantees the tied pair occupies sort positions 200–201.
+        let actor_bytes = actor_pubkey;
+
+        // Insert in two batches to keep parameter counts manageable.
+        // Batch 1: rows 0..=198 (distinct timestamps).
+        for (i, pk) in all_pubkeys[..199].iter().enumerate() {
+            let secs_ago = (i as i64) + 1;
+            sqlx::query(
+                r#"
+                INSERT INTO community_bans
+                    (community_id, pubkey, banned, actor_pubkey, updated_at)
+                VALUES ($1, $2, true, $3,
+                        now() - make_interval(secs => $4))
+                ON CONFLICT (community_id, pubkey) DO UPDATE SET
+                    banned = true,
+                    actor_pubkey = EXCLUDED.actor_pubkey,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(pk.as_slice())
+            .bind(actor_bytes.as_slice())
+            .bind(secs_ago)
+            .execute(&pool)
+            .await
+            .expect("insert row");
+        }
+
+        // Batch 2: tied pair at an identical old timestamp.
+        let tied_ts = chrono::Utc::now() - chrono::Duration::seconds(1000);
+        for pk in &all_pubkeys[199..] {
+            sqlx::query(
+                r#"
+                INSERT INTO community_bans
+                    (community_id, pubkey, banned, actor_pubkey, updated_at)
+                VALUES ($1, $2, true, $3, $4)
+                ON CONFLICT (community_id, pubkey) DO UPDATE SET
+                    banned = true,
+                    actor_pubkey = EXCLUDED.actor_pubkey,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(pk.as_slice())
+            .bind(actor_bytes.as_slice())
+            .bind(tied_ts)
+            .execute(&pool)
+            .await
+            .expect("insert tied row");
+        }
+
+        let state = nip98_state_with_real_pool(pool).await;
+        let operator_keys = test_operator_keys();
+
+        // ── assertion 1: limit=201 → 400 ─────────────────────────────────
+        let bad_path = format!("/members/restrictions?communityId={community_uuid}&limit=201");
+        let bad_auth = make_nostr_auth(&operator_keys, &bad_path);
+        let bad_response = status_for(
+            Arc::clone(&state),
+            Request::builder()
+                .method("GET")
+                .uri(&bad_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, bad_auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            bad_response.status(),
+            StatusCode::BAD_REQUEST,
+            "limit=201 must return 400"
+        );
+
+        // ── assertion 2: default limit → exactly 200 items + non-null cursor ─
+        // (This is the falsifiable binding of default=200 and max=200.)
+        let first_path = format!("/members/restrictions?communityId={community_uuid}");
+        let first_auth = make_nostr_auth(&operator_keys, &first_path);
+        let first_response = status_for(
+            Arc::clone(&state),
+            Request::builder()
+                .method("GET")
+                .uri(&first_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, first_auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            first_response.status(),
+            StatusCode::OK,
+            "default-limit request must return 200"
+        );
+        let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let first_page: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("parse JSON");
+        let first_items = first_page["items"].as_array().expect("items array");
+        assert_eq!(
+            first_items.len(),
+            200,
+            "default limit must return exactly 200 items (binds default=200 and SQL cap)"
+        );
+        assert!(
+            first_page["nextCursor"].is_string(),
+            "200 items from 201 seeded → nextCursor must be non-null"
+        );
+
+        // Collect pubkeys from the first page.
+        let mut seen_pubkeys: std::collections::HashSet<String> = first_items
+            .iter()
+            .filter_map(|r| r["pubkey"].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            seen_pubkeys.len(),
+            200,
+            "first page must have 200 distinct pubkeys"
+        );
+
+        // ── assertion 3: walk remaining pages to exhaustion ───────────────
+        let mut cursor_token = first_page["nextCursor"].as_str().map(str::to_owned);
+        let mut page_count = 1usize; // already consumed first page above
+
+        loop {
+            let tok = match &cursor_token {
+                Some(t) => t.clone(),
+                None => break,
+            };
+            let path = format!("/members/restrictions?communityId={community_uuid}&cursor={tok}");
+            let auth = make_nostr_auth(&operator_keys, &path);
+            let response = status_for(
+                Arc::clone(&state),
+                Request::builder()
+                    .method("GET")
+                    .uri(&path)
+                    .header(header::HOST, "admin.example")
+                    .header(header::AUTHORIZATION, auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "continuation page {page_count}: must return 200"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let page: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
+            let items = page["items"].as_array().expect("items array");
+            assert!(
+                items.len() <= 200,
+                "continuation page {page_count}: must not exceed cap; got {}",
+                items.len()
+            );
+            for item in items {
+                let pk = item["pubkey"].as_str().expect("pubkey str").to_owned();
+                assert!(
+                    seen_pubkeys.insert(pk.clone()),
+                    "continuation page {page_count}: pubkey {pk} appeared more than once"
+                );
+            }
+            page_count += 1;
+            cursor_token = page["nextCursor"].as_str().map(str::to_owned);
+            assert!(
+                page_count <= 10,
+                "pagination must terminate within 10 pages for 201 rows"
+            );
+        }
+
+        // ── assertion 4: exactly-once coverage ───────────────────────────
+        let expected: std::collections::HashSet<String> =
+            all_pubkeys.iter().map(hex::encode).collect();
+        assert_eq!(
+            seen_pubkeys, expected,
+            "every seeded pubkey must appear exactly once across all pages"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unban_member_returns_204_clears_ban_and_inserts_audit() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("unban-success-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create other community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        // Insert a permanent ban as the target member.
+        let target_pubkey = vec![0xCCu8; 32];
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+        db.ban_community_member(community, &target_pubkey, &actor_pubkey, None, None)
+            .await
+            .expect("insert ban fixture");
+
+        // Also give the same target an active timeout in the same community.
+        // Restriction independence: unban must NOT clear the timeout.
+        db.timeout_community_member(
+            community,
+            &target_pubkey,
+            &actor_pubkey,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+            Some("test-timeout"),
+        )
+        .await
+        .expect("insert timeout fixture alongside ban");
+
+        // Tenant isolation: ban a different pubkey in a *different* community so
+        // we can verify the DELETE only clears the intended restriction.
+        let other_community_uuid = Uuid::new_v4();
+        let other_host = format!("unban-other-{}.example", other_community_uuid.simple());
+        let other_community = db
+            .ensure_configured_community(&other_host)
+            .await
+            .expect("create other community")
+            .id;
+        db.ban_community_member(other_community, &target_pubkey, &actor_pubkey, None, None)
+            .await
+            .expect("insert ban fixture for other community");
+
+        let state = nip98_state_with_real_pool(pool.clone()).await;
+        let target_hex = hex::encode(&target_pubkey);
+        let path = format!("/members/{target_hex}/ban?communityId={community_uuid}");
+        let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "unban of an active ban must return 204"
+        );
+
+        // Ban must be cleared in the target community.
+        let ban = db
+            .get_community_ban(community, &target_pubkey)
+            .await
+            .expect("read ban after unban");
+        assert!(
+            ban.as_ref().is_none_or(|r| !r.banned),
+            "ban must be cleared after successful unban"
+        );
+
+        // Timeout must survive: unban must not clear the co-existing timeout.
+        // A regression that widened the unban UPDATE to also clear muted_until
+        // would fail this assertion.
+        assert!(
+            ban.as_ref()
+                .and_then(|r| r.muted_until)
+                .is_some_and(|t| t > chrono::Utc::now()),
+            "unban must not clear the co-existing active timeout"
+        );
+
+        // Audit row must exist in the target community.
+        let actions = db
+            .list_moderation_actions(community, 10)
+            .await
+            .expect("list moderation actions");
+        let unban_action = actions.iter().find(|a| a.action == "unban");
+        assert!(unban_action.is_some(), "audit row for unban must exist");
+        let action = unban_action.unwrap();
+        assert_eq!(
+            action.actor_pubkey, actor_pubkey,
+            "audit actor must be the operator"
+        );
+        assert_eq!(
+            action.target_pubkey.as_deref(),
+            Some(target_pubkey.as_slice()),
+            "audit target_pubkey must match"
+        );
+        assert_eq!(
+            action.actor_authority.as_str(),
+            "relay_operator",
+            "audit actor_authority must be relay_operator"
+        );
+
+        // Other community's ban must be untouched (tenant isolation).
+        let other_ban = db
+            .get_community_ban(other_community, &target_pubkey)
+            .await
+            .expect("read other community ban");
+        assert!(
+            other_ban.is_some_and(|r| r.banned),
+            "unban must not affect the same pubkey in another community"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn untimeout_member_returns_204_clears_timeout_and_inserts_audit() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("untimeout-success-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        let target_pubkey = vec![0xDDu8; 32];
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+        db.timeout_community_member(
+            community,
+            &target_pubkey,
+            &actor_pubkey,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            Some("test reason"),
+        )
+        .await
+        .expect("insert timeout fixture");
+
+        // Also give the same target an active ban in the same community.
+        // Restriction independence: untimeout must NOT clear the ban.
+        db.ban_community_member(community, &target_pubkey, &actor_pubkey, None, None)
+            .await
+            .expect("insert ban fixture alongside timeout");
+
+        // Cross-community isolation: give the same target a timeout in a second
+        // community. The untimeout must NOT clear it (binds community_id = $1).
+        let other_community_uuid = Uuid::new_v4();
+        let other_host = format!("untimeout-other-{}.example", other_community_uuid.simple());
+        let other_community = db
+            .ensure_configured_community(&other_host)
+            .await
+            .expect("create other community")
+            .id;
+        db.timeout_community_member(
+            other_community,
+            &target_pubkey,
+            &actor_pubkey,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            Some("test reason other community"),
+        )
+        .await
+        .expect("insert timeout fixture for other community");
+
+        let state = nip98_state_with_real_pool(pool.clone()).await;
+        let target_hex = hex::encode(&target_pubkey);
+        let path = format!("/members/{target_hex}/timeout?communityId={community_uuid}");
+        let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "untimeout of an active timeout must return 204"
+        );
+
+        // Timeout must be cleared in the target community.
+        let restriction = db
+            .get_community_ban(community, &target_pubkey)
+            .await
+            .expect("read ban after untimeout");
+        assert!(
+            restriction
+                .as_ref()
+                .is_none_or(|r| r.muted_until.is_none_or(|t| t <= chrono::Utc::now())),
+            "timeout must be cleared after successful untimeout"
+        );
+
+        // Ban must survive: untimeout must not clear the co-existing ban.
+        // A regression that widened the untimeout UPDATE to also clear banned
+        // would fail this assertion.
+        assert!(
+            restriction.as_ref().is_some_and(|r| r.banned),
+            "untimeout must not clear the co-existing active ban"
+        );
+
+        // Other community's timeout must be untouched (community_id predicate).
+        // A regression that dropped the community_id = $1 WHERE clause would
+        // clear this timeout and fail this assertion.
+        let other_restriction = db
+            .get_community_ban(other_community, &target_pubkey)
+            .await
+            .expect("read other community restriction");
+        assert!(
+            other_restriction
+                .as_ref()
+                .and_then(|r| r.muted_until)
+                .is_some_and(|t| t > chrono::Utc::now()),
+            "untimeout must not affect the same pubkey's timeout in another community"
+        );
+
+        // Audit row must exist.
+        let actions = db
+            .list_moderation_actions(community, 10)
+            .await
+            .expect("list moderation actions");
+        let untimeout_action = actions.iter().find(|a| a.action == "untimeout");
+        assert!(
+            untimeout_action.is_some(),
+            "audit row for untimeout must exist"
+        );
+        let action = untimeout_action.unwrap();
+        assert_eq!(action.actor_pubkey, actor_pubkey, "audit actor must match");
+        assert_eq!(
+            action.target_pubkey.as_deref(),
+            Some(target_pubkey.as_slice()),
+            "audit target_pubkey must match"
+        );
+        assert_eq!(
+            action.actor_authority.as_str(),
+            "relay_operator",
+            "audit actor_authority must be relay_operator"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unban_member_returns_409_for_expired_ban() {
+        // An expired ban (banned=true, ban_expires_at <= now()) is treated as
+        // inactive by all read paths; the DELETE must also return 409 rather
+        // than 204 for an expired ban.
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("unban-expired-{}.example", community_uuid.simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let community_uuid = *community.as_uuid();
+
+        // Insert a ban that already expired.
+        let target_pubkey = vec![0xEEu8; 32];
+        let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
+        db.ban_community_member(
+            community,
+            &target_pubkey,
+            &actor_pubkey,
+            None,
+            // Expired 1 hour ago.
+            Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("insert expired ban fixture");
+
+        let state = nip98_state_with_real_pool(pool.clone()).await;
+        let target_hex = hex::encode(&target_pubkey);
+        let path = format!("/members/{target_hex}/ban?communityId={community_uuid}");
+        let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "unban of an expired ban must return 409"
+        );
+
+        // No audit row should have been inserted (transaction rolled back).
+        let actions = db
+            .list_moderation_actions(community, 10)
+            .await
+            .expect("list moderation actions");
+        assert!(
+            actions.is_empty(),
+            "no audit row must be inserted when unban returns 409"
         );
     }
 
