@@ -23,8 +23,8 @@ import {
   runtimeIsReadyForOnboarding,
 } from "./onboardingRuntimeSelection";
 import {
-  getRuntimesForConnectionMethod,
   type HarnessConnectionMethod,
+  orderRuntimesForConnectionMethod,
   runtimeUnavailableDescription,
 } from "./harnessConnectionOptions";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
@@ -679,20 +679,14 @@ function RuntimeProvidersSection({
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const [canScrollUp, setCanScrollUp] = React.useState(false);
   const [canScrollDown, setCanScrollDown] = React.useState(false);
-  const orderedItems = React.useMemo(() => {
-    const visible = getRuntimesForConnectionMethod(
-      getVisibleOnboardingRuntimes(items),
-      method,
-    );
-    if (method !== "api") return visible;
-
-    const group = (runtime: AcpRuntimeCatalogEntry) => {
-      if (runtime.id === "buzz-agent") return 0;
-      if (runtime.id === "goose") return 1;
-      return runtime.availability === "available" ? 2 : 3;
-    };
-    return [...visible].sort((left, right) => group(left) - group(right));
-  }, [items, method]);
+  const orderedItems = React.useMemo(
+    () =>
+      orderRuntimesForConnectionMethod(
+        getVisibleOnboardingRuntimes(items),
+        method,
+      ),
+    [items, method],
+  );
   const updateScrollEdges = React.useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -1076,19 +1070,8 @@ function SetupStepContent({
     setLocalDirection("forward");
 
     if (nextMethod === "api") {
-      const buzzRuntime = runtimeProviders.items.find(
-        (runtime) => runtime.id === "buzz-agent",
-      );
-      if (buzzRuntime) {
-        if (readinessConfirmed && runtimeIsReadyForOnboarding(buzzRuntime)) {
-          actions.next([buzzRuntime.id], "method");
-          return;
-        }
-        setDetailConfigBackTarget("method");
-        setSelectedRuntimeId(buzzRuntime.id);
-        setStage("detail");
-        return;
-      }
+      actions.next(["buzz-agent"], "method");
+      return;
     }
 
     setStage("list");
@@ -1096,6 +1079,10 @@ function SetupStepContent({
 
   function openRuntime(runtimeId: string) {
     setLocalDirection("forward");
+    if (runtimeId === "buzz-agent") {
+      actions.next([runtimeId]);
+      return;
+    }
     const runtime = runtimeProviders.items.find(
       (item) => item.id === runtimeId,
     );
@@ -1129,7 +1116,7 @@ function SetupStepContent({
           <ConnectionMethodSection onSelect={chooseMethod} />
           <OnboardingFooter>
             <Button
-              className="h-9 whitespace-nowrap rounded-full px-6 text-sm hover:bg-foreground/10"
+              className="h-9 whitespace-nowrap rounded-full px-6 text-sm text-primary hover:bg-primary/10 hover:text-primary"
               data-testid="onboarding-setup-skip"
               onClick={() => actions.next([])}
               type="button"
@@ -1150,7 +1137,7 @@ function SetupStepContent({
           />
           <OnboardingFooter>
             <Button
-              className="h-9 whitespace-nowrap rounded-full px-6 text-sm hover:bg-foreground/10"
+              className="h-9 whitespace-nowrap rounded-full px-6 text-sm text-primary hover:bg-primary/10 hover:text-primary"
               data-testid="onboarding-setup-skip"
               onClick={() => actions.next([])}
               type="button"

@@ -230,7 +230,7 @@ function AgentDefaultsSection({
   return (
     <fieldset
       aria-busy={isPending}
-      className="w-full space-y-4 text-left text-sm disabled:pointer-events-none disabled:opacity-70"
+      className="w-full space-y-4 text-left text-sm text-primary disabled:pointer-events-none disabled:opacity-70"
       disabled={isPending}
     >
       {configSurfaceLoading ? (
@@ -424,7 +424,7 @@ export function DefaultConfigStep({
 
       <OnboardingFooter>
         <Button
-          className="h-9 whitespace-nowrap rounded-full px-6 text-sm hover:bg-foreground/10"
+          className="h-9 whitespace-nowrap rounded-full px-6 text-sm text-primary hover:bg-primary/10 hover:text-primary"
           data-testid="onboarding-config-skip"
           disabled={isSaving}
           onClick={handleSkip}

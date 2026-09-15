@@ -288,7 +288,7 @@ describe("SetupStep cached-ready revalidation", () => {
     queryClient.clear();
   });
 
-  it("hands off only the API harness selected while forced discovery is pending", async () => {
+  it("hands Buzz directly to API config while forced discovery is pending", async () => {
     const queryClient = makeQueryClient();
     queryClient.setQueryData(acpRuntimesQueryKey, [
       catalogEntry("buzz-agent", "not_applicable"),
@@ -324,8 +324,8 @@ describe("SetupStep cached-ready revalidation", () => {
     });
     assert.deepEqual(
       nextCalls,
-      [],
-      "cached Buzz readiness cannot advance before forced discovery settles",
+      [[["buzz-agent"], "method"]],
+      "Buzz API configuration does not wait for runtime discovery",
     );
 
     await act(async () => {
@@ -336,7 +336,7 @@ describe("SetupStep cached-ready revalidation", () => {
     assert.deepEqual(
       nextCalls,
       [[["buzz-agent"], "method"]],
-      "successful discovery advances with only the explicitly chosen API harness",
+      "discovery completion does not navigate a second time",
     );
     assert.ok(
       readyRuntimeIdSnapshots.some(

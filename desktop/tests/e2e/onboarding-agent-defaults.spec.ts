@@ -243,7 +243,7 @@ test("setup filters the bundled harnesses by connection method", async ({
   await expect(page.getByTestId("onboarding-setup-next")).toHaveCount(0);
 });
 
-test("API selection survives a pending forced discovery with multiple ready harnesses", async ({
+test("API selection opens Buzz config immediately while discovery is pending", async ({
   page,
 }) => {
   await installMockBridge(
@@ -260,28 +260,52 @@ test("API selection survives a pending forced discovery with multiple ready harn
   await page.goto("/");
   await navigateToSetupPage(page, null);
 
-  // Prime the shared catalog, then leave and re-enter setup so the second
-  // forced discovery runs against cached multi-runtime readiness.
+  // Selecting API never waits on discovery or shows Buzz's generic auth step.
   await page.getByTestId("onboarding-harness-method-api").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connect Buzz" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("global-agent-provider")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveCount(0);
+  expect(await readSavedRuntime(page)).toBeNull();
+
+  await page.getByTestId("onboarding-use-different-harness").click();
+  await expect(
+    page.getByRole("heading", { name: "Choose a harness" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
+});
+
+test("choosing signed-out Buzz skips the generic harness auth step", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("buzz-agent", "available", { status: "logged_out" }),
+        runtime("goose", "available", { status: "not_applicable" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page, "api");
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await page.getByTestId("onboarding-use-different-harness").click();
   await expect(
     page.getByRole("heading", { name: "Choose a harness" }),
   ).toBeVisible();
   await page.getByTestId("onboarding-runtime-details-buzz-agent").click();
-  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
-  await page.getByTestId("onboarding-back").click();
-  await expect(
-    page.getByRole("heading", { name: "Choose a harness" }),
-  ).toBeVisible();
-  await page.getByTestId("onboarding-back").click();
 
-  await page.getByTestId("onboarding-harness-method-api").click();
-  await expect(page.getByTestId("onboarding-page-config")).toHaveCount(0);
-  await expect(page.getByTestId("onboarding-page-config")).toBeVisible({
-    timeout: 10_000,
-  });
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connect Buzz" })).toHaveCount(
+    0,
+  );
   await expect(page.getByTestId("global-agent-provider")).toBeVisible();
-  await expect(page.getByTestId("global-agent-default-harness")).toHaveCount(0);
-  expect(await readSavedRuntime(page)).toBeNull();
 });
 
 test("setup distinguishes a missing CLI from an installed desktop app", async ({

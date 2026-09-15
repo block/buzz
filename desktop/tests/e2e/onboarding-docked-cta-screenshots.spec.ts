@@ -285,6 +285,12 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
     "forward",
   );
   await expectUsesFullCardWidth(page.getByTestId("onboarding-key-guidance"));
+  const guidanceIcons = page.getByTestId("identity-key-guidance-icon");
+  await expect(guidanceIcons).toHaveCount(3);
+  for (const icon of await guidanceIcons.all()) {
+    await expect(icon).toHaveCSS("color", "rgb(23, 23, 23)");
+    await expect(icon).toHaveClass(/bg-\[#e2e2e2\]\/30/);
+  }
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02-key-introduction.png` });
   await page.getByRole("button", { name: "Create my private key" }).click();
@@ -356,24 +362,22 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02a-backup-option-hover.png` });
 
-  // The reusable secret stays out of the DOM until the user explicitly asks
-  // to reveal it. Copy is a separate action and leaves the rendered value
-  // masked.
+  // The generated key is readable at rest. Hovering the well blurs it and
+  // replaces the key with the copy action; the reveal eye is intentionally gone.
   const keyValue = page.getByTestId("backup-key-value");
-  const revealButton = page.getByTestId("backup-reveal-key");
+  const keyWell = page.getByTestId("backup-key-well");
   const copyButton = page.getByTestId("backup-copy-key");
   await expect(keyValue).toBeVisible();
-  await expect(keyValue).not.toContainText("nsec1mock");
-  await expect(revealButton).toHaveAccessibleName("Reveal private key");
-  await revealButton.click();
   await expect(keyValue).toContainText("nsec1mock");
-  await expect(revealButton).toHaveAccessibleName("Hide private key");
-  await revealButton.click();
-  await expect(keyValue).not.toContainText("nsec1mock");
+  await expect(page.getByTestId("backup-reveal-key")).toHaveCount(0);
+  await expect(copyButton).toHaveCSS("opacity", "0");
+  await keyWell.hover();
+  await expect(keyValue).toHaveCSS("filter", /blur\(4px\)/);
+  await expect(copyButton).toHaveCSS("opacity", "1");
   await expect(copyButton).toBeEnabled();
   await copyButton.click();
   await expect(copyButton).toContainText("Copied to clipboard");
-  await expect(keyValue).not.toContainText("nsec1mock");
+  await expect(keyValue).toContainText("nsec1mock");
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-copy.png` });
 
@@ -435,10 +439,15 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await expectHorizontalCardTransition(page, "onboarding-page-2", "forward");
   await expect(page.getByText(/More harnesses can be added in/)).toHaveCount(0);
   await expect(page.getByTestId("onboarding-setup-skip")).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-skip")).toHaveCSS(
+    "color",
+    "rgb(23, 23, 23)",
+  );
   await expect(page.getByTestId("onboarding-setup-next")).toHaveCount(0);
   await expect(
     page.getByText("CLI not detected", { exact: false }),
   ).toHaveCount(0);
+  await expect(page.getByText("Not installed", { exact: true })).toHaveCount(1);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/03b-subscriptions.png` });
 
@@ -487,6 +496,10 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   );
   await expect(page.getByTestId("global-agent-default-harness")).toHaveCount(0);
   await expectUsesFullCardWidth(page.getByTestId("global-agent-provider"));
+  await expect(page.getByText("Provider", { exact: true })).toHaveCSS(
+    "color",
+    "rgb(23, 23, 23)",
+  );
   await expect(
     page.getByTestId("onboarding-use-different-harness"),
   ).toBeVisible();

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getRuntimesForConnectionMethod,
+  orderRuntimesForConnectionMethod,
   runtimeSupportsConnectionMethod,
 } from "./harnessConnectionOptions.ts";
 
@@ -35,4 +36,25 @@ test("custom harnesses are not assigned an onboarding connection method", () => 
     false,
   );
   assert.equal(runtimeSupportsConnectionMethod("custom", "api"), false);
+});
+
+test("runtime ordering keeps one contiguous not-installed section", () => {
+  const mixed = [
+    { id: "buzz-agent", availability: "not_installed" },
+    { id: "goose", availability: "available" },
+    { id: "openclaw", availability: "not_installed" },
+    { id: "opencode", availability: "available" },
+  ];
+
+  assert.deepEqual(
+    orderRuntimesForConnectionMethod(mixed, "api").map(
+      ({ id, availability }) => `${id}:${availability}`,
+    ),
+    [
+      "goose:available",
+      "opencode:available",
+      "buzz-agent:not_installed",
+      "openclaw:not_installed",
+    ],
+  );
 });

@@ -10,7 +10,7 @@ import {
 } from "./OnboardingSlideTransition";
 import { ONBOARDING_CARD_NEUTRAL_SURFACE_CLASS } from "./onboardingCardStyles";
 
-const GUIDANCE_ICON_CLASS = `flex size-10 shrink-0 items-center justify-center rounded-full ${ONBOARDING_CARD_NEUTRAL_SURFACE_CLASS}`;
+const GUIDANCE_ICON_CLASS = `flex size-10 shrink-0 items-center justify-center rounded-full text-foreground ${ONBOARDING_CARD_NEUTRAL_SURFACE_CLASS}`;
 
 export function IdentityKeyIntroduction({
   direction,
@@ -57,7 +57,10 @@ export function IdentityKeyIntroduction({
       <div className="flex w-full flex-1 items-center py-10">
         <div className="w-full space-y-6" data-testid="onboarding-key-guidance">
           <div className="flex min-h-14 items-center gap-4 text-left">
-            <span className={GUIDANCE_ICON_CLASS}>
+            <span
+              className={GUIDANCE_ICON_CLASS}
+              data-testid="identity-key-guidance-icon"
+            >
               <ShieldCheck aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">
@@ -65,7 +68,10 @@ export function IdentityKeyIntroduction({
             </p>
           </div>
           <div className="flex min-h-14 items-center gap-4 text-left">
-            <span className={GUIDANCE_ICON_CLASS}>
+            <span
+              className={GUIDANCE_ICON_CLASS}
+              data-testid="identity-key-guidance-icon"
+            >
               <CircleSlash2 aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">
@@ -73,7 +79,10 @@ export function IdentityKeyIntroduction({
             </p>
           </div>
           <div className="flex min-h-14 items-center gap-4 text-left">
-            <span className={GUIDANCE_ICON_CLASS}>
+            <span
+              className={GUIDANCE_ICON_CLASS}
+              data-testid="identity-key-guidance-icon"
+            >
               <HardDriveDownload aria-hidden className="size-5" />
             </span>
             <p className="text-base leading-6 text-foreground">

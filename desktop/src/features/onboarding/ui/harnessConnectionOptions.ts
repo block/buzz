@@ -46,3 +46,29 @@ export function getRuntimesForConnectionMethod(
     runtimeSupportsConnectionMethod(runtime.id, method),
   );
 }
+
+/**
+ * Keeps the installed and unavailable groups contiguous so the list can render
+ * a single "Not installed" divider. API-first choices stay prioritized within
+ * their availability group instead of splitting that divider in two.
+ */
+export function orderRuntimesForConnectionMethod(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  method: HarnessConnectionMethod,
+) {
+  const priority = (runtime: AcpRuntimeCatalogEntry) => {
+    if (method !== "api") return 0;
+    if (runtime.id === "buzz-agent") return 0;
+    if (runtime.id === "goose") return 1;
+    return 2;
+  };
+
+  return [...getRuntimesForConnectionMethod(runtimes, method)].sort(
+    (left, right) => {
+      const availabilityDifference =
+        Number(left.availability !== "available") -
+        Number(right.availability !== "available");
+      return availabilityDifference || priority(left) - priority(right);
+    },
+  );
+}
