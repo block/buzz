@@ -6,6 +6,8 @@ use crate::mcp::truncate_at_boundary;
 const MAX_HINTS_BYTES: usize = 128 * 1024;
 pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
+const HINTS_TRUNCATION_MARKER: &str =
+    "\n\n[Project hints truncated: additional AGENTS.md content was omitted.]";
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
@@ -65,20 +67,41 @@ fn load_hint_files_impl(cwd: &Path, home: Option<&Path>) -> String {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !result.is_empty() {
-            result.push_str("\n\n");
-        }
+        let separator_len = usize::from(!result.is_empty()) * 2;
         let remaining = MAX_HINTS_BYTES.saturating_sub(result.len());
-        if remaining == 0 {
-            break;
-        }
-        if content.len() <= remaining {
+        if separator_len.saturating_add(content.len()) <= remaining {
+            if separator_len > 0 {
+                result.push_str("\n\n");
+            }
             result.push_str(&content);
-        } else {
-            let truncated = truncate_at_boundary(&content, remaining);
-            result.push_str(truncated);
-            break;
+            continue;
         }
+
+        tracing::warn!(
+            path = %path.display(),
+            file_bytes = content.len(),
+            loaded_bytes = result.len(),
+            limit = MAX_HINTS_BYTES,
+            "project hints exceeded the byte limit; remaining AGENTS.md content omitted"
+        );
+
+        // Charge the marker against the existing prompt budget. A previously
+        // loaded file may already have consumed the space the marker needs.
+        let content_limit = MAX_HINTS_BYTES.saturating_sub(HINTS_TRUNCATION_MARKER.len());
+        if result.len() > content_limit {
+            let boundary = truncate_at_boundary(&result, content_limit).len();
+            result.truncate(boundary);
+        } else {
+            if result.is_empty() {
+                result.push_str(truncate_at_boundary(&content, content_limit));
+            } else if content_limit.saturating_sub(result.len()) >= 2 {
+                result.push_str("\n\n");
+                let remaining = content_limit.saturating_sub(result.len());
+                result.push_str(truncate_at_boundary(&content, remaining));
+            }
+        }
+        result.push_str(HINTS_TRUNCATION_MARKER);
+        break;
     }
     result
 }
@@ -336,6 +359,51 @@ mod tests {
         let root_pos = result.find("root hints").unwrap();
         let sub_pos = result.find("sub hints").unwrap();
         assert!(root_pos < sub_pos, "root hints should precede sub hints");
+    }
+
+    #[test]
+    fn load_hint_files_reports_omitted_deeper_hints() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "x".repeat(MAX_HINTS_BYTES)).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("AGENTS.md"), "nested sentinel").unwrap();
+
+        let result = load_hint_files_impl(&sub, None);
+
+        assert!(
+            result
+                .ends_with("[Project hints truncated: additional AGENTS.md content was omitted.]"),
+            "missing truncation marker"
+        );
+        assert!(
+            !result.contains("nested sentinel"),
+            "test setup should exceed the hints budget"
+        );
+        assert!(
+            result.len() <= MAX_HINTS_BYTES,
+            "result exceeded the hints budget: {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn load_hint_files_reports_truncated_multibyte_content() {
+        let tmp = TempDir::new().unwrap();
+        let content = format!("{}nested sentinel", "é".repeat(MAX_HINTS_BYTES));
+        std::fs::write(tmp.path().join("AGENTS.md"), content).unwrap();
+
+        let result = load_hint_files_impl(tmp.path(), None);
+
+        assert!(
+            result
+                .ends_with("[Project hints truncated: additional AGENTS.md content was omitted.]"),
+            "missing truncation marker"
+        );
+        assert!(!result.contains("nested sentinel"));
+        assert!(result.len() <= MAX_HINTS_BYTES);
     }
 
     #[test]
