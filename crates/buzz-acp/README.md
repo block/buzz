@@ -11,6 +11,19 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
 
 Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
+## Startup permission diagnostics
+
+Startup emits a `pool::permission` log and a `startup_permission_mode_outcome`
+observer frame with the requested wire ID, adapter-advertised IDs, and outcome:
+`default`, `skipped_unsupported`, `applied`, `rejected`, `failed_transport`, or
+`timed_out`. Unsupported IDs are never translated to broader modes. `applied`
+means the adapter accepted the RPC, not that its downstream policy was verified.
+
+The subsequent `session_config_captured` frame uses the successful permission
+response's options, modes, and models; omitted fields are unknown (`null`), not
+copied from before the mutation. These frames do not establish the provider's
+reviewer, sandbox, command-rule sources, or a narrow operation grant.
+
 ## Prerequisites
 
 - A running Buzz relay (`just relay` starts Docker services automatically, or use a hosted instance)
