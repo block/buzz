@@ -13,6 +13,9 @@ const _maximumAvatarPNGBytes = 64 * 1024;
 Future<void> _avatarEncodeTail = Future.value();
 Future<void> _presentationExportTail = Future.value();
 const _maximumPresentationExports = 8;
+// Match BuzzPushPresentationCacheStore's per-write admission limits.
+const _maximumProfilesPerWrite = 256;
+const _maximumChannelsPerWrite = 512;
 int _outstandingPresentationExports = 0;
 
 /// Temporary admission failure; detached producers must retain and retry input.
@@ -61,11 +64,13 @@ Future<void> cacheBuzzPushProfileEvents(
       debugLabel: 'buzz-push-profile-cache',
     );
     if (verified.isEmpty) return;
-    await _invokeBestEffort({
-      'section': 'profiles',
-      'communityId': communityID,
-      'events': [for (final event in verified) event.toJson()],
-    });
+    for (final chunk in _boundedChunks(verified, _maximumProfilesPerWrite)) {
+      await _invokeBestEffort({
+        'section': 'profiles',
+        'communityId': communityID,
+        'events': [for (final event in chunk) event.toJson()],
+      });
+    }
   });
 }
 
@@ -93,15 +98,37 @@ Future<void> cacheBuzzPushChannelEvents(
       debugLabel: 'buzz-push-channel-cache',
     );
     if (verified.metadata.isEmpty && verified.membership.isEmpty) return;
-    await _invokeBestEffort({
-      'section': 'channels',
-      'communityId': communityID,
-      'metadataEvents': [for (final event in verified.metadata) event.toJson()],
-      'membershipEvents': [
-        for (final event in verified.membership) event.toJson(),
-      ],
-    });
+    final metadata = {
+      for (final event in verified.metadata) event.getTagValue('d')!: event,
+    };
+    final membership = {
+      for (final event in verified.membership) event.getTagValue('d')!: event,
+    };
+    final channelIDs = {...metadata.keys, ...membership.keys}.toList();
+    // Keep each channel's metadata and membership in the same native write.
+    // All chunks retain this export's FIFO slot until handoff is complete.
+    for (final ids in _boundedChunks(channelIDs, _maximumChannelsPerWrite)) {
+      await _invokeBestEffort({
+        'section': 'channels',
+        'communityId': communityID,
+        'metadataEvents': [
+          for (final id in ids)
+            if (metadata[id] case final event?) event.toJson(),
+        ],
+        'membershipEvents': [
+          for (final id in ids)
+            if (membership[id] case final event?) event.toJson(),
+        ],
+      });
+    }
   });
+}
+
+Iterable<List<T>> _boundedChunks<T>(List<T> values, int maximum) sync* {
+  for (var start = 0; start < values.length; start += maximum) {
+    final end = start + maximum;
+    yield values.sublist(start, end < values.length ? end : values.length);
+  }
 }
 
 // Share one worker slot across profile/channel exports and retain FIFO native

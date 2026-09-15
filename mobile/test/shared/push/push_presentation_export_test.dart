@@ -33,6 +33,86 @@ void main() {
     pushPresentationCacheError.value = null;
   });
 
+  for (final profiles in [true, false]) {
+    test(
+      'large ${profiles ? "profile" : "channel"} exports fit native bounds',
+      () async {
+        final limit = profiles ? 256 : 512;
+        final events = [
+          for (var i = 0; i <= limit; i++)
+            _signed(
+              profiles ? 0 : 39000,
+              100,
+              channelID: 'channel-$i',
+              secretKey: profiles
+                  ? (i + 1).toRadixString(16).padLeft(64, '0')
+                  : _secret,
+            ),
+        ];
+        // Deliberately reverse roster order: each chunk must pair by channel ID.
+        final memberships = profiles
+            ? <NostrEvent>[]
+            : [
+                for (var i = limit; i >= 0; i--)
+                  _signed(39002, 100, channelID: 'channel-$i'),
+              ];
+        final received = <dynamic>[];
+        final receivedMemberships = <dynamic>[];
+        messenger.setMockMethodCallHandler(_channel, (call) async {
+          final args = call.arguments as Map;
+          if (args['communityId'] == 'following-community') {
+            calls.add(call);
+            return null;
+          }
+          final metadata = args[profiles ? 'events' : 'metadataEvents'] as List;
+          final rosters = profiles
+              ? <dynamic>[]
+              : args['membershipEvents'] as List;
+          if (metadata.length > limit || rosters.length > limit) {
+            throw PlatformException(code: 'invalid_arguments');
+          }
+          expect(args['communityId'], 'bounded-community');
+          if (!profiles) {
+            String id(dynamic event) =>
+                (event['tags'] as List).firstWhere((tag) => tag[0] == 'd')[1]
+                    as String;
+            expect(rosters.map(id).toSet(), metadata.map(id).toSet());
+          }
+          received.addAll(metadata);
+          receivedMemberships.addAll(rosters);
+          calls.add(call);
+          return null;
+        });
+        final largeExport = profiles
+            ? cacheBuzzPushProfileEvents('bounded-community', events)
+            : cacheBuzzPushChannelEvents(
+                'bounded-community',
+                events,
+                memberships,
+              );
+        final followingExport = cacheBuzzPushProfileEvents(
+          'following-community',
+          [_signed(0, 200)],
+        );
+        await Future.wait([largeExport, followingExport]);
+        expect(pushPresentationCacheError.value, isNull);
+        expect(calls.map((call) => call.arguments['communityId']), [
+          'bounded-community',
+          'bounded-community',
+          'following-community',
+        ]);
+        expect(
+          received,
+          unorderedEquals(events.map((event) => event.toJson())),
+        );
+        expect(
+          receivedMemberships,
+          unorderedEquals(memberships.map((event) => event.toJson())),
+        );
+      },
+    );
+  }
+
   for (final kind in [0, 39000]) {
     test(
       'kind $kind verifies off the calling isolate before native export',
@@ -220,20 +300,24 @@ void main() {
   );
 }
 
-NostrEvent _signed(int kind, int createdAt, {String channelID = 'channel'}) =>
-    NostrEvent.fromJson(
-      nostr.Event.from(
-        kind: kind,
-        createdAt: createdAt,
-        content: kind == 0 ? '{"name":"Synthetic profile"}' : '',
-        tags: kind == 0
-            ? []
-            : [
-                ['d', channelID],
-              ],
-        secretKey: _secret,
-      ).toMap(),
-    );
+NostrEvent _signed(
+  int kind,
+  int createdAt, {
+  String channelID = 'channel',
+  String secretKey = _secret,
+}) => NostrEvent.fromJson(
+  nostr.Event.from(
+    kind: kind,
+    createdAt: createdAt,
+    content: kind == 0 ? '{"name":"Synthetic profile"}' : '',
+    tags: kind == 0
+        ? []
+        : [
+            ['d', channelID],
+          ],
+    secretKey: secretKey,
+  ).toMap(),
+);
 
 NostrEvent _tampered(NostrEvent event) => NostrEvent(
   id: event.id,
