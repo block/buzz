@@ -1,6 +1,6 @@
 # buzz-acp
 
-ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
+ACP harness that connects AI agents to Buzz. The harness listens for @mentions and direct replies to the agent on the relay, prompts your agent, and the agent replies using the Buzz CLI.
 
 ```
 Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
@@ -62,7 +62,7 @@ export GOOSE_MODE=auto
 buzz-acp
 ```
 
-That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
+That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent or directly replies to one of its messages, goose receives the message and can reply using the Buzz CLI that the harness configures automatically. Direct messages continue to route through their participant `p` tags.
 
 ## Running with Codex
 
@@ -266,7 +266,7 @@ Forum event kinds:
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
+3. **Event loop** — Listens for the bounded channel-message kinds. It accepts explicit @mentions and verifies direct-reply parent events before accepting an unmentioned reply; unrelated unmentioned chatter is dropped. Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
