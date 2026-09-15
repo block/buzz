@@ -15,6 +15,7 @@ import 'channel_management_provider.dart'
     show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'huddle_channel_filter.dart';
+import '../../shared/read_state/read_marker_clamp.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -738,8 +739,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   void clearObservedUnreadCoveredByRead(String channelId, int readAt) {
+    // Second suppression path, independent of the read marker itself: callers
+    // pass the same event-derived timestamp here, and a poisoned value makes
+    // `latest <= readAt` trivially true, wiping the observed-unread evidence and
+    // taking the sidebar dot with it. Clamping the marker alone would leave the
+    // badge suppressed anyway, so the same repair has to happen here.
+    final clampedReadAt = clampReadMarker(readAt);
     final latest = _latestObservedByChannel[channelId];
-    if (latest != null && latest <= readAt) {
+    if (latest != null && latest <= clampedReadAt) {
       clearObservedUnreadForChannel(channelId);
     }
   }
