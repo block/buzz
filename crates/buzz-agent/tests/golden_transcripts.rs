@@ -391,7 +391,7 @@ async fn test_unsupported_content_block() {
             "session/prompt",
             json!({
                 "sessionId": sid,
-                "prompt": [{ "type": "image", "data": "..." }],
+                "prompt": [{ "type": "image", "data": "...", "mimeType": "image/png" }],
             }),
         )
         .await;

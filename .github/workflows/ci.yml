@@ -88,6 +88,8 @@ jobs:
         run: |
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh
+      - name: Realtime audio example
+        run: just realtime-audio-test
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract

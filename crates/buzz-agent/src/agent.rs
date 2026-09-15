@@ -831,7 +831,7 @@ impl RunCtx<'_> {
     /// `max_parallel_tools = 1` makes phase 2 effectively sequential
     /// (one in-flight call at a time via the semaphore). Larger values
     /// run that many calls concurrently.
-    async fn execute_calls(&mut self, calls: &[ToolCall]) -> Option<StopReason> {
+    pub(crate) async fn execute_calls(&mut self, calls: &[ToolCall]) -> Option<StopReason> {
         let mut results: Vec<Option<ToolResult>> = vec![None; calls.len()];
         let mut runnable: Vec<usize> = Vec::with_capacity(calls.len());
 
@@ -1187,13 +1187,13 @@ async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {
     .await;
 }
 
-fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
+pub(crate) fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
     let mut parts = Vec::with_capacity(prompt.len());
     for block in prompt {
         match block {
             ContentBlock::Text { text } => parts.push(text),
             ContentBlock::ResourceLink { uri } => parts.push(format!("[resource: {uri}]")),
-            ContentBlock::Unsupported => {
+            ContentBlock::Unsupported | ContentBlock::Audio { .. } | ContentBlock::Image { .. } => {
                 return Err(AgentError::InvalidParams(
                     "prompt: unsupported content block (only text and resource_link are advertised)".into(),
                 ));
