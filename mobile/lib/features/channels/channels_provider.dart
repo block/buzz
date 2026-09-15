@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_provider.dart';
@@ -23,6 +24,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channel_push_cache.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
 
@@ -43,6 +45,8 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 /// channel cap and incoming events bump `lastMessageAt` for their channel.
 class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final _pushExport = PushPresentationExportRecovery();
+  bool _pushCacheExporting = false;
+  bool _pushCacheDirty = false;
 
   static const _backstopInterval = Duration(seconds: 60);
 
@@ -303,12 +307,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // linkage validation and member-count hydration.
     if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
     unawaited(
-      _pushExport.export(
-        () => cacheBuzzPushChannelEvents(communityID, dedupedMetas, [
-          ...memberships,
-          ...memberEvents,
-        ]),
-      ),
+      _exportPushCache(communityID, dedupedMetas, [
+        ...memberships,
+        ...memberEvents,
+      ]),
     );
     final memberCounts = _memberCountsByChannelId(memberEvents);
     for (var i = 0; i < channels.length; i++) {

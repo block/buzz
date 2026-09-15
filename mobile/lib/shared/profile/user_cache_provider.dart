@@ -131,18 +131,23 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
       if (!_isCurrent(generation)) return;
       if (!await _verifyAndMerge(events, generation)) return;
+      // Profile consumers can proceed as soon as their data is ready. Keep the
+      // fetch slot occupied until export drains so later requests coalesce.
+      succeeded = true;
+      completer?.complete(true);
       if (communityID != null) {
-        unawaited(
-          _pushExport.export(
-            () => cacheBuzzPushProfileEvents(communityID, events),
-          ),
+        // Keep later profile requests in _pending until this exact batch has
+        // reached the cache or its bounded recovery has failed.
+        await _pushExport.export(
+          () => cacheBuzzPushProfileEvents(communityID, events),
         );
       }
-      succeeded = true;
     } catch (_) {
       // Silently fail — non-gating callers will just show pubkeys.
     } finally {
-      completer?.complete(succeeded);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(succeeded);
+      }
       _flushInFlight = false;
       if (ref.mounted && _pending.isNotEmpty) _scheduleBatch();
     }
