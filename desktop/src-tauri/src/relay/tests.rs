@@ -2,12 +2,162 @@
 //! Extracted from `relay.rs` to keep that module under the file-size ratchet.
 
 use super::{
-    build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    build_authenticated_relay_request, build_profile_event, classify_intercepted_response,
+    effective_agent_relay_url, extract_retry_in_hint, parse_command_response, relay_http_base_url,
+    MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
-// ── extract_retry_in_hint ────────────────────────────────────────────────
+const AUTH_HEADER: reqwest::header::HeaderName = reqwest::header::AUTHORIZATION;
+const CONTENT_TYPE_HEADER: reqwest::header::HeaderName = reqwest::header::CONTENT_TYPE;
+const X_AUTH_TAG_HEADER: reqwest::header::HeaderName =
+    reqwest::header::HeaderName::from_static("x-auth-tag");
+
+fn assert_header_values(
+    request: &reqwest::Request,
+    expected: &[(&reqwest::header::HeaderName, &[&str])],
+) {
+    let headers = request.headers();
+    let actual_names: std::collections::BTreeSet<String> = headers
+        .keys()
+        .map(|name| name.as_str().to_ascii_lowercase())
+        .collect();
+    let expected_names: std::collections::BTreeSet<String> = expected
+        .iter()
+        .map(|(name, _)| name.as_str().to_ascii_lowercase())
+        .collect();
+    assert_eq!(actual_names, expected_names, "unexpected header set");
+
+    for (name, values) in expected {
+        let actual: Vec<&str> = headers
+            .get_all(*name)
+            .iter()
+            .map(|value| value.to_str().expect("test header must be visible text"))
+            .collect();
+        assert_eq!(actual, *values, "unexpected values for {name}");
+    }
+}
+
+fn request_body_bytes(request: &reqwest::Request) -> Option<&[u8]> {
+    request.body().and_then(reqwest::Body::as_bytes)
+}
+
+#[test]
+fn authenticated_get_request_matches_existing_shape() {
+    let client = reqwest::Client::new();
+    let request = build_authenticated_relay_request(
+        &client,
+        reqwest::Method::GET,
+        "https://relay.example/info?verbose=1",
+        "Nostr signed-get",
+        None,
+        None,
+        None,
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.method(), reqwest::Method::GET);
+    assert_eq!(
+        request.url().as_str(),
+        "https://relay.example/info?verbose=1"
+    );
+    assert_header_values(&request, &[(&AUTH_HEADER, &["Nostr signed-get"])]);
+    assert!(request.timeout().is_none());
+    assert!(request_body_bytes(&request).is_none());
+}
+
+#[test]
+fn authenticated_json_post_request_preserves_final_body_bytes() {
+    let client = reqwest::Client::new();
+    let body = br#"[{"kinds":[9],"limit":1}]"#.to_vec();
+    let request = build_authenticated_relay_request(
+        &client,
+        reqwest::Method::POST,
+        "https://relay.example/query",
+        "Nostr signed-post",
+        Some(body.clone()),
+        None,
+        None,
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.method(), reqwest::Method::POST);
+    assert_eq!(request.url().as_str(), "https://relay.example/query");
+    assert_header_values(
+        &request,
+        &[
+            (&AUTH_HEADER, &["Nostr signed-post"]),
+            (&CONTENT_TYPE_HEADER, &["application/json"]),
+        ],
+    );
+    assert!(
+        request.headers().get("x-auth-tag").is_none(),
+        "absence of x-auth-tag must remain absence, not an empty header"
+    );
+    assert!(request.timeout().is_none());
+    assert_eq!(request_body_bytes(&request), Some(body.as_slice()));
+}
+
+#[test]
+fn authenticated_json_post_request_keeps_auth_tag_when_present() {
+    let client = reqwest::Client::new();
+    let body = b"{}".to_vec();
+    let request = build_authenticated_relay_request(
+        &client,
+        reqwest::Method::POST,
+        "https://relay.example/event-submit",
+        "Nostr signed-event",
+        Some(body.clone()),
+        Some("owner-auth-tag"),
+        None,
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.method(), reqwest::Method::POST);
+    assert_eq!(request.url().as_str(), "https://relay.example/event-submit");
+    assert_header_values(
+        &request,
+        &[
+            (&AUTH_HEADER, &["Nostr signed-event"]),
+            (&CONTENT_TYPE_HEADER, &["application/json"]),
+            (&X_AUTH_TAG_HEADER, &["owner-auth-tag"]),
+        ],
+    );
+    assert!(request.timeout().is_none());
+    assert_eq!(request_body_bytes(&request), Some(body.as_slice()));
+}
+
+#[test]
+fn authenticated_query_request_preserves_timeout() {
+    let client = reqwest::Client::new();
+    let timeout = std::time::Duration::from_millis(250);
+    let request = build_authenticated_relay_request(
+        &client,
+        reqwest::Method::POST,
+        "https://relay.example/query",
+        "Nostr signed-query",
+        Some(b"[]".to_vec()),
+        None,
+        Some(timeout),
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.method(), reqwest::Method::POST);
+    assert_eq!(request.url().as_str(), "https://relay.example/query");
+    assert_header_values(
+        &request,
+        &[
+            (&AUTH_HEADER, &["Nostr signed-query"]),
+            (&CONTENT_TYPE_HEADER, &["application/json"]),
+        ],
+    );
+    assert_eq!(request.timeout(), Some(&timeout));
+    assert_eq!(request_body_bytes(&request), Some(&b"[]"[..]));
+}
 
 #[test]
 fn extracts_hint_from_429_body() {
