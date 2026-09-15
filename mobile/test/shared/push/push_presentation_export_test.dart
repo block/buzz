@@ -37,8 +37,112 @@ void main() {
   });
 
   for (final profiles in [true, false]) {
+    for (final failedChunk in [0, 1]) {
+      test(
+        'native chunk transient failure retries ${profiles ? "profiles" : "channels"} chunk $failedChunk in FIFO slot',
+        () async {
+          final limit = profiles ? 256 : 512;
+          final observations = ReceivePort();
+          addTearDown(observations.close);
+          var workerReads = 0;
+          final caller = Isolate.current.debugName;
+          observations.listen((name) {
+            if (name != caller) workerReads++;
+          });
+          final events = [
+            for (var i = 0; i <= limit; i++)
+              _signed(
+                profiles ? 0 : 39000,
+                100,
+                channelID: 'channel-$i',
+                secretKey: profiles
+                    ? (i + 1).toRadixString(16).padLeft(64, '0')
+                    : _secret,
+              ),
+          ];
+          events[0] = _ObservedVerificationEvent(
+            events[0],
+            observations.sendPort,
+          );
+          final memberships = profiles
+              ? <NostrEvent>[]
+              : [
+                  for (var i = 0; i <= limit; i++)
+                    _signed(39002, 100, channelID: 'channel-$i'),
+                ];
+          var failed = false;
+          final successfulChunks = <Map>[];
+          messenger.setMockMethodCallHandler(_channel, (call) async {
+            calls.add(call);
+            final args = call.arguments as Map;
+            if (args['communityId'] == 'following-community') return null;
+            final chunk =
+                (args[profiles ? 'events' : 'metadataEvents'] as List).length ==
+                    limit
+                ? 0
+                : 1;
+            if (chunk == failedChunk && !failed) {
+              failed = true;
+              throw PlatformException(
+                code: profiles
+                    ? 'profile_cache_failed'
+                    : 'channel_cache_failed',
+              );
+            }
+            successfulChunks.add(args);
+            return null;
+          });
+          final exported = PushPresentationExportRecovery().export(
+            () => profiles
+                ? cacheBuzzPushProfileEvents('original-community', events)
+                : cacheBuzzPushChannelEvents(
+                    'original-community',
+                    events,
+                    memberships,
+                  ),
+          );
+          final following = cacheBuzzPushProfileEvents('following-community', [
+            _signed(0, 200),
+          ]);
+          expect(await exported, isTrue);
+          await following;
+          expect(calls.map((call) => call.arguments['communityId']), [
+            'original-community',
+            'original-community',
+            'original-community',
+            'following-community',
+          ]);
+          expect(
+            calls[failedChunk + 1].arguments,
+            equals(calls[failedChunk].arguments),
+            reason: 'retry must reuse the exact failed verified chunk',
+          );
+          expect(successfulChunks, hasLength(2));
+          expect([
+            for (final chunk in successfulChunks)
+              ...chunk[profiles ? 'events' : 'metadataEvents'] as List,
+          ], unorderedEquals(events.map((event) => event.toJson())));
+          if (!profiles) {
+            expect([
+              for (final chunk in successfulChunks)
+                ...chunk['membershipEvents'] as List,
+            ], unorderedEquals(memberships.map((event) => event.toJson())));
+          }
+          await Future<void>.delayed(Duration.zero);
+          expect(
+            workerReads,
+            1,
+            reason: 'native retries must not repeat signature verification',
+          );
+          expect(pushPresentationExportError.value, isNull);
+        },
+      );
+    }
+  }
+
+  for (final profiles in [true, false]) {
     test(
-      'failed first ${profiles ? "profile" : "channel"} chunk stops export and reports terminal recovery',
+      'permanent first ${profiles ? "profile" : "channel"} chunk failure exhausts retries and stops export',
       () async {
         final limit = profiles ? 256 : 512;
         final events = [
@@ -60,8 +164,10 @@ void main() {
               ];
         messenger.setMockMethodCallHandler(_channel, (call) async {
           calls.add(call);
-          if (calls.length == 1) {
-            throw PlatformException(code: 'cache_write_failed');
+          if (call.arguments['communityId'] == 'failed-community') {
+            throw PlatformException(
+              code: profiles ? 'profile_cache_failed' : 'channel_cache_failed',
+            );
           }
           return null;
         });
@@ -78,24 +184,80 @@ void main() {
         expect(succeeded, isFalse);
         expect(
           calls,
-          hasLength(1),
-          reason: 'no later chunk may conceal the failed write',
+          hasLength(6),
+          reason: 'initial attempt plus five retries, with no later chunk',
         );
         expect(
           pushPresentationCacheError.value,
-          contains('cache_write_failed'),
+          contains(profiles ? 'profile_cache_failed' : 'channel_cache_failed'),
         );
         final terminal = pushPresentationExportError.value;
-        expect(terminal, contains('cache_write_failed'));
+        expect(
+          terminal,
+          contains(profiles ? 'profile_cache_failed' : 'channel_cache_failed'),
+        );
         await cacheBuzzPushProfileEvents('following-community', [
           _signed(0, 200),
         ]);
-        expect(calls, hasLength(2));
+        expect(calls, hasLength(7));
+        for (final retry in calls.take(6)) {
+          expect(retry.arguments, equals(calls.first.arguments));
+        }
         expect(calls.last.arguments['communityId'], 'following-community');
         expect(pushPresentationExportError.value, terminal);
       },
     );
   }
+
+  test('native retry budget is shared across all chunks', () async {
+    final events = [
+      for (var i = 1; i <= 257; i++)
+        _signed(0, 100, secretKey: i.toRadixString(16).padLeft(64, '0')),
+    ];
+    messenger.setMockMethodCallHandler(_channel, (call) async {
+      calls.add(call);
+      final rows = call.arguments['events'] as List;
+      if (calls.length == 1 || rows.length == 1) {
+        throw PlatformException(code: 'profile_cache_failed');
+      }
+      return null;
+    });
+    expect(
+      await PushPresentationExportRecovery().export(
+        () => cacheBuzzPushProfileEvents('community', events),
+      ),
+      isFalse,
+    );
+    expect(calls, hasLength(7));
+    expect(calls.map((call) => (call.arguments['events'] as List).length), [
+      256,
+      256,
+      1,
+      1,
+      1,
+      1,
+      1,
+    ]);
+    expect(pushPresentationExportError.value, contains('profile_cache_failed'));
+  });
+
+  test(
+    'native argument errors are terminal without persistence retries',
+    () async {
+      messenger.setMockMethodCallHandler(_channel, (call) async {
+        calls.add(call);
+        throw PlatformException(code: 'invalid_arguments');
+      });
+      expect(
+        await PushPresentationExportRecovery().export(
+          () => cacheBuzzPushProfileEvents('community', [_signed(0, 100)]),
+        ),
+        isFalse,
+      );
+      expect(calls, hasLength(1));
+      expect(pushPresentationExportError.value, contains('invalid_arguments'));
+    },
+  );
 
   test('unavailable native bridge remains an intentional no-op', () async {
     messenger.setMockMethodCallHandler(_channel, (call) async {

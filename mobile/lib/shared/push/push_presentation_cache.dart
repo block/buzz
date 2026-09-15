@@ -48,7 +48,8 @@ bool isVerifiedPushPresentationEvent(NostrEvent event) {
 
 /// Exports raw verified kind-0 events. Native code verifies them again before storage.
 /// Fails with [StateError] when eight exports are already outstanding.
-/// Native write failures propagate and stop any remaining chunks.
+/// Native persistence failures retry with bounded backoff, then propagate and
+/// stop any remaining chunks. Other native errors propagate immediately.
 Future<void> cacheBuzzPushProfileEvents(
   String communityID,
   Iterable<NostrEvent> events,
@@ -65,19 +66,21 @@ Future<void> cacheBuzzPushProfileEvents(
       debugLabel: 'buzz-push-profile-cache',
     );
     if (verified.isEmpty) return;
+    final retryBudget = _NativeWriteRetryBudget();
     for (final chunk in _boundedChunks(verified, _maximumProfilesPerWrite)) {
-      await _invokeSnapshot({
+      await _invokeVerifiedChunk({
         'section': 'profiles',
         'communityId': communityID,
         'events': [for (final event in chunk) event.toJson()],
-      });
+      }, retryBudget);
     }
   });
 }
 
 /// Exports verified channel metadata and membership for native authority checks.
 /// Fails with [StateError] when eight exports are already outstanding.
-/// Native write failures propagate and stop any remaining chunks.
+/// Native persistence failures retry with bounded backoff, then propagate and
+/// stop any remaining chunks. Other native errors propagate immediately.
 Future<void> cacheBuzzPushChannelEvents(
   String? communityID,
   Iterable<NostrEvent> metadataEvents,
@@ -107,10 +110,11 @@ Future<void> cacheBuzzPushChannelEvents(
       for (final event in verified.membership) event.getTagValue('d')!: event,
     };
     final channelIDs = {...metadata.keys, ...membership.keys}.toList();
+    final retryBudget = _NativeWriteRetryBudget();
     // Keep each channel's metadata and membership in the same native write.
     // All chunks retain this export's FIFO slot until handoff is complete.
     for (final ids in _boundedChunks(channelIDs, _maximumChannelsPerWrite)) {
-      await _invokeSnapshot({
+      await _invokeVerifiedChunk({
         'section': 'channels',
         'communityId': communityID,
         'metadataEvents': [
@@ -121,7 +125,7 @@ Future<void> cacheBuzzPushChannelEvents(
           for (final id in ids)
             if (membership[id] case final event?) event.toJson(),
         ],
-      });
+      }, retryBudget);
     }
   });
 }
@@ -261,6 +265,37 @@ Future<void> cacheBuzzPushAvatarFromLoadedBytes(
     }, bestEffort: true);
   } finally {
     release.complete();
+  }
+}
+
+// One bounded backoff budget for the entire export, not one per chunk.
+class _NativeWriteRetryBudget {
+  static const _delays = [250, 500, 1000, 2000, 4000];
+  int _used = 0;
+
+  Duration? takeDelay() =>
+      _used == _delays.length ? null : Duration(milliseconds: _delays[_used++]);
+}
+
+// Retry only native persistence failures, retaining the verified payload and
+// the surrounding export's FIFO slot. Never repeat relay reads or verification.
+Future<void> _invokeVerifiedChunk(
+  Map<String, Object> arguments,
+  _NativeWriteRetryBudget budget,
+) async {
+  final retryableCode = arguments['section'] == 'profiles'
+      ? 'profile_cache_failed'
+      : 'channel_cache_failed';
+  while (true) {
+    try {
+      await _invokeSnapshot(arguments);
+      return;
+    } on PlatformException catch (error) {
+      if (error.code != retryableCode) rethrow;
+      final delay = budget.takeDelay();
+      if (delay == null) rethrow;
+      await Future<void>.delayed(delay);
+    }
   }
 }
 
