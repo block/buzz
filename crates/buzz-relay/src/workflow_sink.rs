@@ -380,6 +380,7 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
+<<<<<<< HEAD
             append_workflow_mention_tags(
                 &mut tags,
                 &text,
@@ -387,6 +388,20 @@ impl ActionSink for RelayActionSink {
                 &named_members,
                 &author_pubkey_hex,
             )?;
+=======
+            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
+                if mentioned == author_pubkey_hex {
+                    continue;
+                }
+                tags.push(
+                    Tag::parse(["p", &mentioned])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+                );
+                tags.push(Tag::parse(["mention", &mentioned]).map_err(|e| {
+                    ActionSinkError::EventBuild(format!("mention intent tag: {e}"))
+                })?);
+            }
+>>>>>>> d8b6d0d (fix(mention): emit parallel p + mention tags on intentional @mentions)
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
