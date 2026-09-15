@@ -31,30 +31,35 @@ void main() {
     PaintingBinding.instance.imageCache.clearLiveImages();
   });
 
-  group('MediaGetAuthService memoization', () {
-    test('repeated calls return byte-identical headers', () {
+  group('MediaGetAuthService mint-per-request', () {
+    test('consecutive calls return distinct headers (mint-per-request)', () {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
       final first = auth.headersFor(_mediaUrl);
       final second = auth.headersFor(_mediaUrl);
       expect(first, isNotEmpty);
-      expect(identical(first, second), isTrue);
+      // With lifetime == margin == 60s, refreshAt == signedAt, so the cache
+      // never hits: each call produces a fresh proof.
+      expect(identical(first, second), isFalse);
+      expect(second['Authorization'], isNot(first['Authorization']));
     });
 
-    test('re-signs only at the refresh margin before expiry', () {
+    test('each call produces a fresh token regardless of elapsed time', () {
       final nsec = nostr.Keys.generate().nsec;
       var current = DateTime.utc(2026, 7, 21, 12);
       final auth = _auth(nsec: nsec, now: () => current);
 
       final first = auth.headersFor(_mediaUrl);
-      // 600s lifetime - 60s margin = re-sign boundary at +540s.
-      current = current.add(const Duration(seconds: 539));
-      expect(identical(auth.headersFor(_mediaUrl), first), isTrue);
+      // No elapsed time: still mints fresh.
+      final atZero = auth.headersFor(_mediaUrl);
+      expect(identical(atZero, first), isFalse);
+      expect(atZero['Authorization'], isNot(first['Authorization']));
 
-      current = current.add(const Duration(seconds: 2));
-      final refreshed = auth.headersFor(_mediaUrl);
-      expect(identical(refreshed, first), isFalse);
-      expect(refreshed['Authorization'], isNot(first['Authorization']));
+      // Advance clock: still mints fresh.
+      current = current.add(const Duration(seconds: 30));
+      final at30 = auth.headersFor(_mediaUrl);
+      expect(identical(at30, first), isFalse);
+      expect(at30['Authorization'], isNot(first['Authorization']));
     });
 
     test('non-relay URLs get no headers even with a key', () {

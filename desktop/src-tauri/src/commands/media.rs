@@ -294,20 +294,21 @@ pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     Ok(mime)
 }
 
-/// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
-/// across a video's range-request stream while staying well inside the
-/// server's `created_at` freshness window (3600s, matching upload).
-pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+/// Lifetime of a Blossom `t=get` read token.
+///
+/// 60 seconds is the maximum permitted by NIP-FI §Freshness: `expiration <= created_at + 60s`.
+/// Callers that make range requests across longer video playback sessions must re-mint on
+/// a 401 or 403 from the server (expired/rejected token), using a single fresh mint+retry.
+pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Sign a Blossom (BUD-01) `t=get` authorization event, server-scoped to the
 /// relay's authority, and return the full `Authorization` header value.
 ///
 /// Server-scoped (a `server` tag, no `x` tag): one token authorizes reads of
-/// any blob on that host for its lifetime, which keeps avatar-grid bursts and
-/// video range requests cheap. This is deliberately broader than per-blob
-/// scoping and is safe only because the relay still enforces NIP-43
-/// membership on the verified pubkey — and because callers only attach this
-/// header to requests bound for the relay origin itself.
+/// any blob on that host for its lifetime. Callers must only attach this
+/// header to requests bound for the relay origin itself (never third-party
+/// origins). Tokens expire after `expiry_secs` (≤ 60 per NIP-FI §Freshness)
+/// and must be re-minted on 401 or 403 for long-running range-request streams.
 pub(crate) fn sign_blossom_get_auth_header(
     keys: &Keys,
     base_url: &str,
@@ -365,16 +366,16 @@ fn sign_blossom_upload_auth(
     expiry_secs: u64,
     base_url: &str,
 ) -> Result<nostr::Event, String> {
+    let server = extract_server_authority(base_url)
+        .ok_or_else(|| "cannot derive server authority from relay URL".to_string())?;
     let now = Timestamp::now().as_secs();
-    let mut tags = vec![
+    let tags = vec![
         Tag::parse(vec!["t", "upload"]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["x", sha256]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
+        Tag::parse(vec!["server".to_string(), server]).map_err(|e| e.to_string())?,
     ];
-    if let Some(domain) = extract_server_authority(base_url) {
-        tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
-    }
     EventBuilder::new(Kind::from(24242), "Upload buzz-media")
         .tags(tags)
         .sign_with_keys(keys)
@@ -414,14 +415,12 @@ async fn do_upload(
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
-    // Video uploads get a 1-hour auth window to survive slow connections;
-    // images use 5 minutes. Must match the server-side max_age_secs values
-    // in process_upload (600s) and process_video_upload (3600s).
-    let expiry_secs = if mime.starts_with("video/") {
-        3600
-    } else {
-        300
-    };
+    // All upload tokens use a 60-second expiry window per NIP-FI §Freshness:
+    // `expiration <= created_at + 60s`. Upload tokens are minted immediately
+    // before the PUT request, so 60 seconds is ample for any upload over a
+    // reasonable connection (the body is already hashed and ready to send).
+    // The server-side window is also 60s in Strict mode, matching this value.
+    let expiry_secs = 60u64;
     let base_url = relay_api_base_url_with_override(state);
     let auth_event = {
         let keys = state.signing_keys()?;
@@ -843,7 +842,7 @@ mod tests {
     #[test]
     fn test_sign_blossom_get_auth_header_shape() {
         let keys = Keys::generate();
-        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 600).unwrap();
+        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 60).unwrap();
         let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
         let json = URL_SAFE_NO_PAD.decode(b64).unwrap();
         let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
@@ -863,13 +862,48 @@ mod tests {
         assert!(tag("x").is_none());
         let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
         let now = Timestamp::now().as_secs();
-        assert!(expiration > now && expiration <= now + 600);
+        // Token expiry must be within the 60s NIP-FI window.
+        assert!(expiration > now && expiration <= now + 60);
     }
 
     #[test]
     fn test_sign_blossom_get_auth_header_invalid_base_url() {
         let keys = Keys::generate();
-        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
+        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 60).is_err());
+    }
+
+    #[test]
+    fn test_sign_blossom_upload_auth_shape() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let base_url = "http://relay.example:3000";
+        let event = sign_blossom_upload_auth(&keys, &sha256, 60, base_url).unwrap();
+
+        assert_eq!(event.kind, nostr::Kind::from(24242));
+        event.verify().expect("valid signature");
+
+        let tag = |name: &str| -> Option<String> {
+            event.tags.iter().find_map(|t| {
+                let v = t.as_slice();
+                (v.first().map(String::as_str) == Some(name)).then(|| v[1].clone())
+            })
+        };
+        assert_eq!(tag("t").as_deref(), Some("upload"));
+        assert_eq!(tag("x").as_deref(), Some(sha256.as_str()));
+        // server tag MUST be present (NIP-FI §Upload proofs)
+        assert_eq!(tag("server").as_deref(), Some("relay.example:3000"));
+        // expiry must be within the 60s NIP-FI window
+        let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
+        let now = nostr::Timestamp::now().as_secs();
+        assert!(expiration > now && expiration <= now + 60);
+    }
+
+    #[test]
+    fn test_sign_blossom_upload_auth_fails_without_valid_url() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        // URL that cannot yield a server authority → should fail (server tag mandatory)
+        assert!(sign_blossom_upload_auth(&keys, &sha256, 60, "not-a-url").is_err());
     }
 
     #[test]
