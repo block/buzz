@@ -1,6 +1,7 @@
 use launchdarkly_server_sdk::{
     BuildError, Client, ConfigBuildError, ConfigBuilder, ContextBuilder,
 };
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::{BooleanFlag, BooleanFlagEvaluator, EvaluationContext};
@@ -56,6 +57,17 @@ pub enum LaunchDarklyInitError {
     ClientBuild(#[from] BuildError),
 }
 
+/// Errors starting a LaunchDarkly evaluator and waiting for initialization.
+#[derive(Debug, Error)]
+pub enum LaunchDarklyStartError {
+    /// LaunchDarkly client did not initialize before timeout.
+    #[error("launchdarkly initialization timed out after {0:?}")]
+    InitializationTimeout(Duration),
+    /// LaunchDarkly client reported failed initialization.
+    #[error("launchdarkly initialization failed")]
+    InitializationFailed,
+}
+
 /// Boolean evaluator backed by the LaunchDarkly Rust server SDK.
 pub struct LaunchDarklyEvaluator {
     client: Client,
@@ -95,8 +107,28 @@ impl LaunchDarklyEvaluator {
 
         let config = builder.build()?;
         let client = Client::build(config)?;
-        client.start_with_default_executor();
         Ok(Self::new(client))
+    }
+
+    /// Start background tasks and wait for SDK initialization.
+    ///
+    /// This method must run inside a Tokio runtime.
+    pub async fn start_with_default_executor_and_wait(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), LaunchDarklyStartError> {
+        self.client.start_with_default_executor();
+
+        match self.client.wait_for_initialization(timeout).await {
+            Some(true) => Ok(()),
+            Some(false) => Err(LaunchDarklyStartError::InitializationFailed),
+            None => Err(LaunchDarklyStartError::InitializationTimeout(timeout)),
+        }
+    }
+
+    /// Gracefully stop background tasks and flush pending analytics events.
+    pub fn close(&self) {
+        self.client.close();
     }
 }
 

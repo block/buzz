@@ -89,6 +89,7 @@ mod tests {
     #[tokio::test]
     async fn launchdarkly_missing_flag_falls_back_to_declared_default() {
         use launchdarkly_server_sdk::{Client, ConfigBuilder, TestData};
+        use std::time::Duration;
 
         let test_data = TestData::new();
 
@@ -97,9 +98,12 @@ mod tests {
             .build()
             .expect("launchdarkly test config");
         let client = Client::build(config).expect("launchdarkly test client");
-        client.start_with_default_executor();
 
         let evaluator = crate::launchdarkly::LaunchDarklyEvaluator::new(client);
+        evaluator
+            .start_with_default_executor_and_wait(Duration::from_secs(1))
+            .await
+            .expect("launchdarkly initialized");
         let context = EvaluationContext::for_pubkey(
             PublicKey::from_hex("eb1539f3815379cbf4fdbb23609f730d9fce4fd2a7fbc6a93dbf39f8e9f4704d")
                 .expect("valid pubkey"),
@@ -108,14 +112,21 @@ mod tests {
 
         let got = evaluator.evaluate_bool(flag, &context);
         assert!(got);
+        evaluator.close();
     }
 
     #[cfg(feature = "launchdarkly")]
     #[tokio::test]
     async fn launchdarkly_type_error_falls_back_to_declared_default() {
         use launchdarkly_server_sdk::{Client, ConfigBuilder, FlagBuilder, FlagValue, TestData};
+        use std::time::Duration;
 
         let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("relay.feature.bool")
+                .variations(vec![FlagValue::Bool(true)])
+                .fallthrough_variation_index(0),
+        );
         test_data.update(
             FlagBuilder::new("relay.feature.string")
                 .variations(vec![FlagValue::Str("red".to_owned())])
@@ -127,16 +138,25 @@ mod tests {
             .build()
             .expect("launchdarkly test config");
         let client = Client::build(config).expect("launchdarkly test client");
-        client.start_with_default_executor();
 
         let evaluator = crate::launchdarkly::LaunchDarklyEvaluator::new(client);
+        evaluator
+            .start_with_default_executor_and_wait(Duration::from_secs(1))
+            .await
+            .expect("launchdarkly initialized");
         let context = EvaluationContext::for_pubkey(
             PublicKey::from_hex("5581946f95a03e6afb43027ec89b21507f040d35fd6f8594f168f4298f96f9cb")
                 .expect("valid pubkey"),
         );
+
+        let bool_flag = BooleanFlag::new("relay.feature.bool", false);
+        let bool_got = evaluator.evaluate_bool(bool_flag, &context);
+        assert!(bool_got);
+
         let flag = BooleanFlag::new("relay.feature.string", false);
 
         let got = evaluator.evaluate_bool(flag, &context);
         assert!(!got);
+        evaluator.close();
     }
 }
