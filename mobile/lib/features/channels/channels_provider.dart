@@ -232,41 +232,35 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
     final dedupedMetas = latestMetaPerId.values.toList();
 
-    // Resolve DM participant display names. Extracted into the part file so
-    // `channels_provider.dart` stays under the 1200-line ceiling enforced by
-    // `just file-size-check`.
-    final displayNames = await _resolveDmDisplayNames(
-      session,
-      fence,
-      dedupedMetas,
-      myPk,
-    );
-
-    final hiddenDmIds = await _fenced(fence, _fetchHiddenDmIds(session, myPk));
-    _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
-    // Fetch the authoritative membership snapshots before filtering Huddle
-    // backing channels. The relay-signed kind:39000 metadata identifies the
-    // relay, not the channel creator; the owner role in kind:39002 is the
-    // canonical creator identity used to reject forged Huddle links.
+    // These four reads depend on the metadata and member ids above, not on
+    // each other. Join them before publishing any derived state; the fence
+    // rejects a retired refresh on both the success and error paths.
     final memberCountChannelIds = memberChannelIds.toList();
-    final memberEvents = memberCountChannelIds.isEmpty
-        ? const <NostrEvent>[]
-        : await _fenced(
-            fence,
-            session.fetchHistory(
-              NostrFilter(
-                kinds: const [39002],
-                tags: {'#d': memberCountChannelIds},
-                limit: memberCountChannelIds.length,
+    final (
+      displayNames,
+      hiddenDmIds,
+      memberEvents,
+      huddleStarts,
+    ) = await _fenced(
+      fence,
+      (
+        _resolveDmDisplayNames(session, fence, dedupedMetas, myPk),
+        _fetchHiddenDmIds(session, myPk),
+        memberCountChannelIds.isEmpty
+            ? Future.value(const <NostrEvent>[])
+            : session.fetchHistory(
+                NostrFilter(
+                  kinds: const [39002],
+                  tags: {'#d': memberCountChannelIds},
+                  limit: memberCountChannelIds.length,
+                ),
               ),
-            ),
-          );
-    final huddleStarts = memberCountChannelIds.isEmpty
-        ? const <NostrEvent>[]
-        : await _fenced(
-            fence,
-            _fetchHuddleStarts(session, memberCountChannelIds),
-          );
+        _fetchHuddleStarts(session, memberCountChannelIds),
+      ).wait,
+    );
+    _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
+    // The authoritative member snapshots identify Huddle creators. Relay-
+    // signed channel metadata alone cannot establish ownership.
     final huddleBackingIds = huddleBackingChannelIds(
       huddleStarts,
       memberEvents,
