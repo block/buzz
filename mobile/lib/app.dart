@@ -28,6 +28,8 @@ import 'features/profile/profile_edit_page.dart';
 import 'features/profile/profile_text_editor.dart';
 import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
+import 'shared/auth/enterprise_identity.dart';
+import 'shared/auth/enterprise_login_page.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/push/push_subscription_provider.dart';
@@ -382,7 +384,9 @@ class App extends HookConsumerWidget {
       ),
       home: authState.when(
         loading: () => const _SplashScreen(),
-        error: (_, _) => const PairingPage(),
+        error: (_, _) => enterpriseEnabled
+            ? const EnterpriseLoginPage()
+            : const PairingPage(),
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => DeepLinkDispatcher(
             child: HomePage(
@@ -390,10 +394,13 @@ class App extends HookConsumerWidget {
               hasUnreadInbox: hasUnreadInbox,
             ),
           ),
-          _ => const DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            child: PairingPage(),
-          ),
+          _ =>
+            enterpriseEnabled
+                ? const EnterpriseLoginPage()
+                : const DeepLinkDispatcher(
+                    dispatchMessageLinks: false,
+                    child: PairingPage(),
+                  ),
         },
       ),
     );

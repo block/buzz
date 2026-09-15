@@ -16,6 +16,14 @@ class _ConnectionSection extends ConsumerWidget {
       label: 'Connection',
       verticalPadding: Grid.twelve,
       children: [
+        if (enterpriseEnabled)
+          const Padding(
+            padding: EdgeInsets.all(Grid.xs),
+            child: Text(
+              'Your organization holds your signing key. Private-key export, backup, and pairing are unavailable.',
+            ),
+          ),
+
         if (nsec != null && nsec.isNotEmpty && community != null) ...[
           _IdentityRow(nsec: nsec),
           AppListRow(

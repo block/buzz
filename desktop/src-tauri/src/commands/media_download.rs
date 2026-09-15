@@ -269,7 +269,7 @@ pub(super) async fn fetch_blob_bytes_with_cap(
     // `validate_download_url`, satisfying the mint_media_get_auth safety
     // contract (the token never leaves the relay origin).
     let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
+    if let Some(auth) = mint_media_get_auth(state, &relay_base).await {
         req = req.header("authorization", auth);
     }
 

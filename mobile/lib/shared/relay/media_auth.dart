@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../auth/enterprise_identity.dart';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -47,7 +48,56 @@ class MediaGetAuthService {
     return _isRelayMediaUrl(uri, relayUri);
   }
 
+  Future<Map<String, String>>? _pending;
+  final String? _corporatePubkey = enterpriseEnabled
+      ? EnterpriseIdentity.instance.pubkey
+      : null;
+
+  Future<Map<String, String>> headersForAsync(String url) async {
+    if (!enterpriseEnabled) return headersFor(url);
+    if (!isRelayMediaUrl(url)) return const {};
+    if (!EnterpriseIdentity.instance.authenticated ||
+        _corporatePubkey != EnterpriseIdentity.instance.pubkey) {
+      throw StateError('Corporate media identity changed');
+    }
+    if (_cachedHeaders != null &&
+        _refreshAt != null &&
+        _now().isBefore(_refreshAt!)) {
+      return _cachedHeaders!;
+    }
+    return _pending ??= _refreshCorporate().whenComplete(() => _pending = null);
+  }
+
+  Future<Map<String, String>> _refreshCorporate() async {
+    final expires = _now().millisecondsSinceEpoch ~/ 1000 + 120;
+    final event = await signClientEvent(
+      nsec: null,
+      kind: 24242,
+      content: 'Get buzz-media',
+      tags: [
+        ['t', 'get'],
+        ['server', Uri.parse(_baseUrl).authority],
+        ['expiration', '$expires'],
+      ],
+    );
+    if (!EnterpriseIdentity.instance.authenticated ||
+        _corporatePubkey != EnterpriseIdentity.instance.pubkey) {
+      throw StateError('Corporate media identity changed');
+    }
+    if (_now().millisecondsSinceEpoch ~/ 1000 >= expires - 15) {
+      throw StateError('Media credential expired while signing');
+    }
+    _cachedHeaders = Map.unmodifiable({
+      'Authorization': 'Nostr ${base64.encode(utf8.encode(event.toJson()))}',
+    });
+    _refreshAt = DateTime.fromMillisecondsSinceEpoch((expires - 15) * 1000);
+    return _cachedHeaders!;
+  }
+
   Map<String, String> headersFor(String url) {
+    if (enterpriseEnabled) {
+      throw StateError('Corporate media requires asynchronous credentials');
+    }
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return const {};
     if (!isRelayMediaUrl(url)) return const {};

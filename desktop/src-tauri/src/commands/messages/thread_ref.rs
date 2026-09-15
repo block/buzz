@@ -1,4 +1,5 @@
-use nostr::{EventId, Keys};
+use crate::enterprise_identity::SigningIdentity;
+use nostr::EventId;
 
 use crate::{
     app_state::AppState,
@@ -30,7 +31,7 @@ pub(super) async fn thread_ref(
     root_event_id: Option<&str>,
     state: &AppState,
     api_base_url: &str,
-    signing_keys: Option<&Keys>,
+    signing_keys: Option<&SigningIdentity>,
 ) -> Result<events::ThreadRef, String> {
     match root_event_id {
         Some(root_event_id) => provided_thread_ref(root_event_id, parent_event_id),
@@ -50,7 +51,7 @@ pub(super) async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
     api_base_url: &str,
-    keys: Option<&nostr::Keys>,
+    keys: Option<&SigningIdentity>,
 ) -> Result<events::ThreadRef, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   ReadStateManager,
   type ContextParentResolver,
@@ -18,6 +19,7 @@ export function useReadState(
   pubkey: string | undefined,
   relayClient: RelayClient | undefined,
 ) {
+  const corporate = useIdentityQuery().data?.storage === "enterprise";
   const [readStateVersion, forceUpdate] = React.useReducer(
     (x: number) => x + 1,
     0,
@@ -33,7 +35,7 @@ export function useReadState(
     if (!pubkey || !relayClient) return;
 
     let isCancelled = false;
-    const manager = new ReadStateManager(pubkey, relayClient);
+    const manager = new ReadStateManager(pubkey, relayClient, !corporate);
     managerRef.current = manager;
 
     const unsubscribe = manager.subscribe(() => {
@@ -52,7 +54,7 @@ export function useReadState(
       manager.destroy();
       managerRef.current = null;
     };
-  }, [pubkey, relayClient]);
+  }, [pubkey, relayClient, corporate]);
 
   const getEffectiveTimestamp = React.useCallback(
     (contextId: string): number | null => {

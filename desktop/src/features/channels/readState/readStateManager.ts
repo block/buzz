@@ -269,6 +269,7 @@ export function trimContextsToBudget(
 }
 
 export class ReadStateManager {
+  private remoteEnabled: boolean;
   private pubkey: string;
   private relayClient: RelayClient;
   private clientId: string;
@@ -290,7 +291,8 @@ export class ReadStateManager {
   /** Event ids we published ourselves; used to skip decrypting their echoes. */
   private recentlyPublishedIds = new Set<string>();
 
-  constructor(pubkey: string, relayClient: RelayClient) {
+  constructor(pubkey: string, relayClient: RelayClient, remoteEnabled = true) {
+    this.remoteEnabled = remoteEnabled;
     this.pubkey = pubkey;
     this.relayClient = relayClient;
     this.clientId = getOrCreatePersisted(clientIdKey(pubkey), () =>
@@ -311,6 +313,11 @@ export class ReadStateManager {
     );
 
     this.hydrateFromLocalStorage();
+    if (!this.remoteEnabled) {
+      this.initialized = true;
+      this.notifyListeners();
+      return;
+    }
 
     await this.fetchAndMerge();
     if (this.destroyed) return;
@@ -632,6 +639,7 @@ export class ReadStateManager {
   }
 
   private schedulePublish(): void {
+    if (!this.remoteEnabled) return;
     if (this.destroyed) return;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);

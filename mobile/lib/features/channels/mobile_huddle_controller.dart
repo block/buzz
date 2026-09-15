@@ -1,3 +1,4 @@
+import '../../shared/auth/enterprise_identity.dart';
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -491,12 +492,12 @@ final class MobileHuddleController extends Notifier<bool> {
   }) {
     final config = ref.read(relayConfigProvider);
     final nsec = config.nsec;
-    if (nsec == null || nsec.isEmpty) {
+    if (!enterpriseEnabled && (nsec == null || nsec.isEmpty)) {
       throw StateError('A paired identity is required.');
     }
     return HuddleConnectionParameters(
       relayWebSocketUrl: config.wsUrl,
-      nsec: nsec,
+      nsec: nsec ?? '',
       parentChannelId: parentChannelId,
       ephemeralChannelId: ephemeralChannelId,
     );

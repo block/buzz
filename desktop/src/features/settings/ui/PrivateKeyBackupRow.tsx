@@ -11,6 +11,7 @@ import {
   initialBackupTestProgress,
 } from "@/features/settings/ui/BackupTestFlow";
 import { EncryptedBackupCreator } from "@/features/settings/ui/EncryptedBackupCreator";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { getNsec } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
 import {
@@ -58,6 +59,18 @@ function BackupAvailabilityFill({
  * while expanded; encrypted backup state lives in the app-level provider.
  */
 export function PrivateKeyBackupRow() {
+  const identity = useIdentityQuery();
+  if (identity.data?.storage === "enterprise")
+    return (
+      <p className="text-sm text-muted-foreground">
+        Your organization holds your signing key. Private-key export, backup,
+        and pairing are unavailable.
+      </p>
+    );
+  return <LocalPrivateKeyBackupRow />;
+}
+
+function LocalPrivateKeyBackupRow() {
   const [isOpen, setIsOpen] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);

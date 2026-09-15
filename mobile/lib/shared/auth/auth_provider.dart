@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'enterprise_identity.dart';
 import '../community/community.dart';
 import '../community/community_provider.dart';
 
@@ -18,6 +19,30 @@ class AuthState {
 class AuthNotifier extends AsyncNotifier<AuthState> {
   @override
   Future<AuthState> build() async {
+    if (enterpriseEnabled) {
+      final revision = EnterpriseIdentity.instance.revision;
+      void changed() {
+        ref.invalidateSelf();
+      }
+
+      revision.addListener(changed);
+      ref.onDispose(() => revision.removeListener(changed));
+      await EnterpriseIdentity.instance.restore();
+      final identity = EnterpriseIdentity.instance;
+      if (!identity.authenticated) {
+        return const AuthState(status: AuthStatus.unauthenticated);
+      }
+      final community = Community(
+        id: 'enterprise-${identity.pubkey}',
+        name: 'Work',
+        relayUrl: identity.relayUrl!,
+        pubkey: identity.pubkey,
+        addedAt: DateTime.now(),
+      );
+      await syncCommunitySnapshot(ref, [community]);
+      return AuthState(status: AuthStatus.authenticated, community: community);
+    }
+
     // Read from storage directly — NOT from community providers.
     // Watching community providers here would create a circular dependency
     // because authenticateWithCommunity() writes to those providers.
@@ -57,6 +82,9 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   /// Writes to storage directly to avoid circular dependency with community
   /// providers.
   Future<void> authenticateWithCommunity(Community community) {
+    if (enterpriseEnabled) {
+      throw StateError('This build requires corporate login');
+    }
     return ref.read(communityTransitionProvider).runExclusive(() async {
       await ref.read(communityTransitionProvider).run();
       final storage = ref.read(communityStorageProvider);
@@ -75,6 +103,14 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   }
 
   Future<void> signOut() {
+    if (enterpriseEnabled) {
+      return () async {
+        await EnterpriseIdentity.instance.logout();
+        await syncCommunitySnapshot(ref, []);
+        state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
+      }();
+    }
+
     return () async {
       final storage = ref.read(communityStorageProvider);
       await ref

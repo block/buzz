@@ -8,6 +8,33 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_ENTERPRISE");
+    if let Ok(config) = std::env::var("BUZZ_BUILD_ENTERPRISE") {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&config).expect("BUZZ_BUILD_ENTERPRISE must be JSON");
+        assert!(
+            std::env::var_os("CARGO_FEATURE_SYSTEM_KEYRING").is_some(),
+            "Enterprise builds require system-keyring"
+        );
+        for field in [
+            "signerUrl",
+            "issuer",
+            "clientId",
+            "audience",
+            "organization",
+            "connection",
+        ] {
+            assert!(
+                parsed[field].as_str().is_some_and(|s| !s.is_empty()),
+                "Missing enterprise build field: {field}"
+            );
+        }
+        println!(
+            "cargo:rustc-env=BUZZ_DESKTOP_BUILD_ENTERPRISE={}",
+            serde_json::to_string(&parsed).expect("serialize enterprise config")
+        );
+    }
+
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

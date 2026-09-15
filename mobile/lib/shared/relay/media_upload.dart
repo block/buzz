@@ -1,3 +1,4 @@
+import '../auth/enterprise_identity.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -637,9 +638,10 @@ class MediaUploadService {
       Uri.parse(_baseUrl).resolve(path),
       abortTrigger: cancellationToken?.whenCancelled,
     );
+    request.followRedirects = false;
     request.contentLength = bytes.length;
     request.headers.addAll(
-      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+      await _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
     );
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
@@ -656,19 +658,38 @@ class MediaUploadService {
     }
   }
 
-  Map<String, String> _buildUploadHeaders({
+  Future<Map<String, String>> _buildUploadHeaders({
     required String mimeType,
     required String sha256,
-  }) {
+  }) async {
     final headers = <String, String>{
-      'Authorization': _buildUploadAuthHeader(sha256),
+      'Authorization': await _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
     };
     return headers;
   }
 
-  String _buildUploadAuthHeader(String sha256) {
+  Future<String> _buildUploadAuthHeader(String sha256) async {
+    if (enterpriseEnabled) {
+      if (Uri.parse(_baseUrl).origin !=
+          Uri.parse(EnterpriseIdentity.instance.relayUrl!).origin) {
+        throw StateError('Corporate media scope mismatch');
+      }
+      final event = await signClientEvent(
+        nsec: null,
+        kind: 24242,
+        content: 'Upload buzz-media',
+        tags: [
+          ['t', 'upload'],
+          ['x', sha256],
+          ['server', Uri.parse(_baseUrl).authority],
+          ['expiration', '${_now().millisecondsSinceEpoch ~/ 1000 + 300}'],
+        ],
+      );
+      return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
+    }
+
     final authEvent = _buildUploadAuthEvent(sha256);
     final authJson = authEvent.toJson();
     final encoded = base64Url.encode(utf8.encode(authJson)).replaceAll('=', '');

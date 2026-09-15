@@ -92,6 +92,43 @@ impl NostrWsConnection {
         Ok(())
     }
 
+    /// Authenticate through corporate custody, then receive events directly from the relay.
+    ///
+    /// Credentials are needed only for this challenge. No incoming message is sent to the signer.
+    pub async fn authenticate_enterprise(
+        &mut self,
+        signer: &crate::enterprise::EnterpriseSigner,
+        credentials: &crate::enterprise::EnterpriseCredentials,
+    ) -> Result<(), WsClientError> {
+        if self.relay_url != signer.identity().relay_ws_url {
+            return Err(WsClientError::AuthFailed(
+                "Enterprise relay scope mismatch".to_owned(),
+            ));
+        }
+        let challenge = self
+            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
+            .await?;
+        let template = crate::enterprise::EnterpriseTemplate {
+            kind: 22242,
+            created_at: nostr::Timestamp::now().as_secs(),
+            tags: vec![
+                vec!["relay".to_owned(), self.relay_url.clone()],
+                vec!["challenge".to_owned(), challenge],
+            ],
+            content: String::new(),
+        };
+        let event = signer.sign(&template, credentials).await?;
+        let id = event.id.to_hex();
+        self.send_raw(&json!(["AUTH", event])).await?;
+        let ok = self
+            .wait_for_ok(&id, Duration::from_secs(AUTH_OK_TIMEOUT_SECS))
+            .await?;
+        if !ok.accepted {
+            return Err(WsClientError::AuthFailed(ok.message));
+        }
+        Ok(())
+    }
+
     /// Sends a signed event to the relay and waits for the OK response.
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, WsClientError> {
         let event_id = event.id.to_hex();
@@ -120,7 +157,8 @@ impl NostrWsConnection {
     /// Sends a raw JSON value as a WebSocket text frame.
     pub async fn send_raw(&mut self, value: &Value) -> Result<(), WsClientError> {
         let text = serde_json::to_string(value)?;
-        debug!("→ relay: {text}");
+        // AUTH frames and event tags may contain bearer proofs; never log raw frames.
+        debug!(bytes = text.len(), "sending relay frame");
         self.ws.send(Message::Text(text.into())).await?;
         Ok(())
     }

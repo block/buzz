@@ -117,14 +117,13 @@ pub fn relay_api_base_url() -> String {
 
 // ── NIP-98 HTTP auth ────────────────────────────────────────────────────────
 
-pub fn build_nip98_auth_header(
+pub async fn build_nip98_auth_header(
     method: &Method,
     url: &str,
     body: &[u8],
     state: &AppState,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    build_nip98_auth_header_for_keys(&keys, method, url, body)
+    state.signing_identity()?.nip98(method, url, body).await
 }
 
 pub fn build_nip98_auth_header_for_keys(
@@ -374,7 +373,7 @@ pub async fn query_relay_at(
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
+    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state).await?;
     send_query_request(
         &state.http_client,
         &url,
@@ -390,14 +389,14 @@ pub async fn query_relay_at_with_keys(
     state: &AppState,
     api_base_url: &str,
     filters: &[serde_json::Value],
-    keys: &Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
     auth_tag: Option<&str>,
 ) -> Result<Vec<nostr::Event>, String> {
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth = keys.into().nip98(&Method::POST, &url, &body_bytes).await?;
     send_query_request(
         &state.http_client,
         &url,
@@ -634,22 +633,22 @@ pub use submit::{
 pub async fn submit_event_with_keys(
     builder: nostr::EventBuilder,
     state: &AppState,
-    keys: &Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
-    submit_signed_event_with_keys(&event, state, keys, auth_tag).await
+    let keys = keys.into();
+    let event = keys.sign(builder).await?;
+    submit_signed_event_with_keys(&event, state, &keys, auth_tag).await
 }
 
 /// POST an already-signed event using the same explicit identity for NIP-98.
 pub async fn submit_signed_event_with_keys(
     event: &nostr::Event,
     state: &AppState,
-    keys: &Keys,
+    keys: impl Into<crate::enterprise_identity::SigningIdentity>,
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
+    let keys = keys.into();
     if event.pubkey != keys.public_key() {
         return Err("signed event does not match the publishing identity".to_string());
     }
@@ -657,7 +656,7 @@ pub async fn submit_signed_event_with_keys(
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth_header = keys.nip98(&Method::POST, &url, &body_bytes).await?;
 
     let mut request = state
         .http_client

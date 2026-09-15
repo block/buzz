@@ -130,7 +130,7 @@ Future<void> _presentIosEmojiPicker({
       case 'mediaHeaders':
         final url = call.arguments;
         return url is String
-            ? mediaAuth.headersFor(url)
+            ? await mediaAuth.headersForAsync(url)
             : const <String, String>{};
       case 'selected':
         final emoji = call.arguments;
