@@ -44,6 +44,8 @@ import {
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
+import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
@@ -215,6 +217,10 @@ function InboxMessageDetailPane({
   const conversationId = item?.conversationId ?? null;
   const selectedChannelId = item?.item.channelId ?? null;
   const isDirectMessage = item?.item.channelType === "dm";
+  // Live typing for the open conversation. The channel screen subscribes via
+  // useChannelTyping; the inbox detail never did, so agents (and people) typing
+  // in a thread opened from the inbox were invisible until their reply landed.
+  const typingEntries = useChannelTyping(channel, currentPubkey);
   // Build the plain, non-virtualized timeline the shared hook anchors against.
   // Live arrivals rerun its layout compensation without changing the target.
 
@@ -257,6 +263,31 @@ function InboxMessageDetailPane({
       ...pendingReplyMessages,
     ];
   }, [item, messages, replies]);
+  const threadTypingPubkeys = React.useMemo(() => {
+    const scopeIds = new Set<string>();
+    if (conversationId) {
+      scopeIds.add(conversationId);
+    }
+    for (const message of displayMessages) {
+      scopeIds.add(message.id);
+    }
+    const seen = new Set<string>();
+    const pubkeys: string[] = [];
+    for (const entry of typingEntries) {
+      // DM conversations have no thread scope; thread conversations accept any
+      // scope inside the thread (head or a nested reply), so a reply to a deeper
+      // message still surfaces here.
+      const inScope = isDirectMessage
+        ? entry.threadHeadId === null
+        : entry.threadHeadId !== null && scopeIds.has(entry.threadHeadId);
+      if (!inScope || seen.has(entry.pubkey)) {
+        continue;
+      }
+      seen.add(entry.pubkey);
+      pubkeys.push(entry.pubkey);
+    }
+    return pubkeys;
+  }, [conversationId, displayMessages, isDirectMessage, typingEntries]);
   const videoReviewMessages = React.useMemo(
     () => displayMessages.map(toTimelineMessage),
     [displayMessages],
@@ -814,6 +845,16 @@ function InboxMessageDetailPane({
             }}
           />
           <div className="pointer-events-auto">
+            {threadTypingPubkeys.length > 0 ? (
+              <TypingIndicatorRow
+                channel={channel}
+                className="px-4 pb-1"
+                currentPubkey={currentPubkey}
+                profiles={profiles}
+                typingPubkeys={threadTypingPubkeys}
+                variant="activity"
+              />
+            ) : null}
             <MessageComposer
               audienceContext={
                 isDirectMessage
