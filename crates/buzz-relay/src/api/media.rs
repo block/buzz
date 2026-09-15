@@ -617,6 +617,12 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
 /// additional range requests.
 const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 
+/// Upper bound for the range-GET fallback's full-object download. A backend
+/// that rejects range requests (400/416) forces us to fetch the whole object
+/// to serve a slice; above this size that trade is worse than failing, and
+/// the error propagates instead. Mirrors #3894's 16 MiB stream-skip cap.
+const RANGE_FALLBACK_MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// GET /media/{sha256_ext} — Blossom BUD-01 serve blob, with HTTP 206 range support.
 ///
 /// `sha256_ext` is either:
@@ -756,7 +762,46 @@ pub(crate) async fn serve_blob_for_tenant(
                     let end = end
                         .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
                         .min(total.saturating_sub(1));
-                    let chunk = state.media_storage.get_range(&key, start, end).await?;
+
+                    // Try S3-native range GET first (efficient — only the
+                    // requested slice is transferred). Fall back to full
+                    // download + in-memory slice ONLY when the backend
+                    // rejected the range request itself (400/416, e.g. some
+                    // R2 edge cases) AND the object is small enough to fetch
+                    // whole. Auth failures and server errors propagate: the
+                    // full GET would fail the same way, and falling back on
+                    // them would turn every misconfiguration into a
+                    // full-object download per request. Same bounded-fallback
+                    // contract as #3894's stream-skip cap.
+                    let chunk = match state.media_storage.get_range(&key, start, end).await {
+                        Ok(bytes) => bytes,
+                        Err(range_err @ MediaError::RangeUnsupported { .. })
+                            if total <= RANGE_FALLBACK_MAX_OBJECT_BYTES =>
+                        {
+                            tracing::warn!(
+                                error = %range_err,
+                                key,
+                                start,
+                                end,
+                                "s3-native range GET failed, falling back to full download + slice"
+                            );
+                            let full = state.media_storage.get(&key).await?;
+                            let start_usize = start as usize;
+                            let end_usize = (end as usize).saturating_add(1).min(full.len());
+                            if start_usize >= full.len() {
+                                return axum::response::Response::builder()
+                                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                    .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                                    .body(axum::body::Body::empty())
+                                    .map_err(|_| MediaError::Internal);
+                            }
+                            full[start_usize..end_usize].to_vec()
+                        }
+                        // NotFound, auth failures, server errors, and
+                        // range-rejection on an object too large to fetch
+                        // whole all propagate untouched.
+                        Err(other) => return Err(other),
+                    };
                     let content_range = format!("bytes {start}-{end}/{total}");
 
                     Ok(axum::response::Response::builder()
@@ -1537,5 +1582,118 @@ mod tests {
     #[test]
     fn test_parse_byte_range_zero_start() {
         assert_eq!(parse_byte_range("bytes=0-0", 1000), Some((0, 0)));
+    }
+
+    /// The fallback runs only for backend range-rejection (400/416) on
+    /// objects small enough to fetch whole — an auth failure or 5xx must
+    /// propagate, not trigger a full-object download per request (review on
+    /// #4079; same bounded-fallback contract as #3894).
+    #[test]
+    fn test_range_fallback_error_classes() {
+        let rejected = MediaError::RangeUnsupported { code: 416 };
+        let auth = MediaError::StorageError("s3 range GET failed (HTTP 403): denied".into());
+        let small = RANGE_FALLBACK_MAX_OBJECT_BYTES;
+        let large = RANGE_FALLBACK_MAX_OBJECT_BYTES + 1;
+
+        let should_fallback = |err: &MediaError, total: u64| {
+            matches!(err, MediaError::RangeUnsupported { .. })
+                && total <= RANGE_FALLBACK_MAX_OBJECT_BYTES
+        };
+        assert!(should_fallback(&rejected, small));
+        assert!(
+            !should_fallback(&rejected, large),
+            "oversize object must propagate"
+        );
+        assert!(
+            !should_fallback(&auth, small),
+            "auth/server errors must propagate"
+        );
+        assert!(!should_fallback(&MediaError::NotFound, small));
+    }
+
+    /// Validates the fallback slice math used when S3-native range GET fails
+    /// and we fall back to fetching the full object and slicing in memory.
+    #[test]
+    fn test_fallback_slice_math() {
+        let full: Vec<u8> = (0u8..=255).cycle().take(1000).collect();
+
+        // Standard range
+        let (start, end) = (100u64, 199u64);
+        let start_usize = start as usize;
+        let end_usize = (end as usize).saturating_add(1).min(full.len());
+        let chunk = &full[start_usize..end_usize];
+        assert_eq!(chunk.len(), 100);
+        assert_eq!(chunk[0], full[100]);
+        assert_eq!(chunk[99], full[199]);
+
+        // Range to end of file
+        let (start, end) = (900u64, 999u64);
+        let start_usize = start as usize;
+        let end_usize = (end as usize).saturating_add(1).min(full.len());
+        let chunk = &full[start_usize..end_usize];
+        assert_eq!(chunk.len(), 100);
+
+        // Clamped end (end > file size)
+        let (start, end) = (990u64, 999u64);
+        let end = end.min(full.len() as u64 - 1);
+        let start_usize = start as usize;
+        let end_usize = (end as usize).saturating_add(1).min(full.len());
+        let chunk = &full[start_usize..end_usize];
+        assert_eq!(chunk.len(), 10);
+
+        // Start beyond file size should be caught before slicing
+        let (start, _end) = (1000u64, 2000u64);
+        assert!(start as usize >= full.len());
+
+        // Single byte
+        let (start, end) = (0u64, 0u64);
+        let start_usize = start as usize;
+        let end_usize = (end as usize).saturating_add(1).min(full.len());
+        let chunk = &full[start_usize..end_usize];
+        assert_eq!(chunk.len(), 1);
+    }
+
+    /// Validates that the end-clamping logic in the range branch of
+    /// `serve_blob_for_tenant` produces consistent results for edge cases.
+    #[test]
+    fn test_range_end_clamping() {
+        let total: u64 = 9896517; // ~9.4 MB, matching issue #3786
+
+        // bytes=0-99 → end = min(99, 0+16MiB-1, total-1) = 99
+        let end = 99u64
+            .min(total.saturating_sub(1))
+            .min(0u64.saturating_add(MAX_RANGE_CHUNK - 1))
+            .min(total.saturating_sub(1));
+        assert_eq!(end, 99);
+
+        // bytes=0-1023 → end = min(1023, 0+16MiB-1, total-1) = 1023
+        let end = 1023u64
+            .min(total.saturating_sub(1))
+            .min(0u64.saturating_add(MAX_RANGE_CHUNK - 1))
+            .min(total.saturating_sub(1));
+        assert_eq!(end, 1023);
+
+        // bytes=0-{very large} → end capped at total-1 (file is smaller than 16 MiB chunk)
+        let end = u64::MAX
+            .min(total.saturating_sub(1))
+            .min(0u64.saturating_add(MAX_RANGE_CHUNK - 1))
+            .min(total.saturating_sub(1));
+        assert_eq!(end, total - 1); // 9896516 < chunk limit, so file wins
+
+        // bytes={near end}- → end capped at total-1
+        let start = total.saturating_sub(10);
+        let end = u64::MAX
+            .min(total.saturating_sub(1))
+            .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
+            .min(total.saturating_sub(1));
+        assert_eq!(end, total - 1);
+
+        // On a file much larger than MAX_RANGE_CHUNK, end IS chunk-limited:
+        let big: u64 = 20 * 1024 * 1024; // 20 MiB
+        let end = u64::MAX
+            .min(big.saturating_sub(1))
+            .min(0u64.saturating_add(MAX_RANGE_CHUNK - 1))
+            .min(big.saturating_sub(1));
+        assert_eq!(end, MAX_RANGE_CHUNK - 1);
     }
 }

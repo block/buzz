@@ -308,6 +308,35 @@ impl MediaStorage {
         match self.bucket.get_object_range(key, start, Some(end)).await {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
+            Err(s3::error::S3Error::HttpFailWithBody(code, ref body)) => {
+                // Some S3-compatible backends (e.g. Cloudflare R2) return non-2xx
+                // errors for range GETs in edge cases where AWS S3 succeeds.
+                // Log the actual status/body so operators can diagnose, and map
+                // 416 to a caller-visible signal rather than an opaque 500.
+                tracing::warn!(
+                    s3_status = code,
+                    s3_body = body,
+                    key,
+                    start,
+                    end,
+                    "s3 range GET failed"
+                );
+                if is_range_rejection(code, body) {
+                    // The backend rejected the RANGE REQUEST itself (R2 &c.
+                    // return 400/416/403 where AWS S3 serves the slice). Only
+                    // this class is a candidate for the full-download
+                    // fallback: auth failures (401/403) and server errors
+                    // (5xx) would fail the full GET too, and falling back on
+                    // them turns every misconfiguration into a full-object
+                    // scan per request (review on #4079; same contract as
+                    // #3894).
+                    Err(MediaError::RangeUnsupported { code })
+                } else {
+                    Err(MediaError::StorageError(format!(
+                        "s3 range GET failed (HTTP {code}): {body}"
+                    )))
+                }
+            }
             Err(e) => Err(MediaError::StorageError(e.to_string())),
         }
     }
@@ -678,6 +707,33 @@ fn fold_delete_result(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn range_rejection_covers_r2_signature_mismatch_but_not_real_auth_failures() {
+        // R2's rejection of the ranged GET arrives as 403 SignatureDoesNotMatch
+        // because rust-s3 signs two extra headers on GetObjectRange but not on
+        // GetObject (block/buzz#3786). Without this the fallback never fires
+        // for the backend the issue was actually reported against.
+        assert!(is_range_rejection(
+            403,
+            "<Error><Code>SignatureDoesNotMatch</Code></Error>"
+        ));
+        assert!(is_range_rejection(400, ""));
+        assert!(is_range_rejection(416, ""));
+
+        // A genuine credential problem must stay an error: falling back would
+        // buy a full-object scan per request and still fail.
+        assert!(!is_range_rejection(
+            403,
+            "<Error><Code>AccessDenied</Code></Error>"
+        ));
+        assert!(!is_range_rejection(
+            403,
+            "<Error><Code>InvalidAccessKeyId</Code></Error>"
+        ));
+        assert!(!is_range_rejection(500, "SignatureDoesNotMatch"));
+        assert!(!is_range_rejection(404, ""));
+    }
 
     /// The bulk-delete fold is the retry-idempotence contract: legacy MinIO
     /// absent-key errors count as success, version artifacts are surfaced for
@@ -1114,4 +1170,26 @@ pub struct BlobMeta {
     /// Video duration in seconds. `None` for non-video blobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+}
+
+/// Whether an S3 error status/body is the backend rejecting the *range
+/// request* rather than the request as a whole -- the only class the
+/// full-download fallback may act on.
+///
+/// 400 and 416 are the plain cases. 403 needs the body: @eastriverlee's
+/// capture on block/buzz#3786 shows `rust-s3` exempts `Command::GetObject`
+/// from the header block that inserts `content-length: 0` and
+/// `content-type: text/plain`, but not `Command::GetObjectRange`, so a ranged
+/// GET signs two headers a plain GET does not. R2 enforces SigV4 strictly and
+/// answers `403 SignatureDoesNotMatch` while plain GET, PUT and HEAD on the
+/// same credentials succeed (durch/rust-s3#466, #470). Gating that 403 on the
+/// signature-mismatch code keeps real credential failures -- `AccessDenied`,
+/// `InvalidAccessKeyId` -- propagating as errors instead of buying each one a
+/// full-object scan.
+fn is_range_rejection(code: u16, body: &str) -> bool {
+    match code {
+        400 | 416 => true,
+        403 => body.contains("SignatureDoesNotMatch"),
+        _ => false,
+    }
 }
