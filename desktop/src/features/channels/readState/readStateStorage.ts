@@ -1,11 +1,13 @@
 import {
   isPlainRecord,
+  isPlausibleReadMarker,
   localIsoToUnixSeconds,
   localPublishableContextKey,
   localReadStateKey,
   localSourceCreatedAtKey,
   LOCAL_MAX_PRUNABLE_CONTEXTS,
   MSG_PREFIX,
+  nowUnixSeconds,
   READ_STATE_HORIZON_SECONDS,
   THREAD_PREFIX,
 } from "@/features/channels/readState/readStateFormat";
@@ -20,6 +22,7 @@ export type StoredReadState = {
 function mergeLocalStorageKey(
   contexts: Map<string, number>,
   key: string,
+  now: number,
 ): void {
   const raw = localStorage.getItem(key);
   if (!raw) return;
@@ -31,6 +34,11 @@ function mergeLocalStorageKey(
     for (const [channelId, value] of Object.entries(parsed)) {
       const unixSeconds = localIsoToUnixSeconds(value);
       if (unixSeconds === null) continue;
+      // A marker persisted before the skew policy existed — or written by a
+      // sibling desktop that still lacks it — is dropped on the way in, not
+      // clamped: hydration is the last chance to disarm it, since markers are
+      // monotonic and the next write persists whatever we load here.
+      if (!isPlausibleReadMarker(unixSeconds, now)) continue;
       const current = contexts.get(channelId) ?? 0;
       if (unixSeconds > current) {
         contexts.set(channelId, unixSeconds);
@@ -92,9 +100,12 @@ function readContextSourceCreatedAt(pubkey: string): Map<string, number> {
   return result;
 }
 
-export function readStoredReadState(pubkey: string): StoredReadState {
+export function readStoredReadState(
+  pubkey: string,
+  now: number = nowUnixSeconds(),
+): StoredReadState {
   const contexts = new Map<string, number>();
-  mergeLocalStorageKey(contexts, localReadStateKey(pubkey));
+  mergeLocalStorageKey(contexts, localReadStateKey(pubkey), now);
 
   return {
     contexts,
