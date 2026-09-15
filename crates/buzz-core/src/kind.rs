@@ -117,6 +117,9 @@ pub const KIND_PUSH_LEASE: u32 = 30350;
 /// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 
+/// Owner-private encrypted Desktop identity/name, keyed by installation coordinate.
+pub const KIND_DESKTOP_PROFILE: u32 = 30180;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -130,6 +133,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_EVENT_REMINDER,
     KIND_PUSH_LEASE,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_DESKTOP_PROFILE,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -659,6 +663,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_DESKTOP_PROFILE,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,

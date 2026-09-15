@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -911,7 +911,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+            .contains("kind IN (1059, 30179, 30180, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -2386,7 +2386,12 @@ mod postgres_tests {
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
+        for (marker, kind) in [
+            (1_u8, 1_i32),
+            (2_u8, 30_350_i32),
+            (3_u8, 30_179_i32),
+            (4_u8, 30_180_i32),
+        ] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
@@ -2413,7 +2418,10 @@ mod postgres_tests {
         .fetch_all(&pool)
         .await
         .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+        assert_eq!(
+            before,
+            vec![(1, true), (30_179, true), (30_180, true), (30_350, true)]
+        );
 
         // 0014 fixes 30350 only. A brownfield database that stopped here still
         // tokenized kind:30179 ciphertext — the gap 0033 closes.
@@ -2430,8 +2438,25 @@ mod postgres_tests {
         .expect("read pre-0033 search behavior");
         assert_eq!(
             pre_0033,
-            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+            vec![
+                (1, Some(true)),
+                (30_179, Some(true)),
+                (30_180, Some(true)),
+                (30_350, None)
+            ]
         );
+
+        run_migrations_through(&pool, 44)
+            .await
+            .expect("apply through 44");
+        let desktop_indexed: bool = sqlx::query_scalar(
+            "SELECT search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events WHERE kind = 30180",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read pre-0045 Desktop search behavior");
+        assert!(desktop_indexed, "upgrade fixture must exercise legacy FTS");
 
         run_migrations(&pool)
             .await
@@ -2443,7 +2468,23 @@ mod postgres_tests {
         .fetch_all(&pool)
         .await
         .expect("read post-upgrade search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+        assert_eq!(
+            after,
+            vec![
+                (1, Some(true)),
+                (30_179, None),
+                (30_180, None),
+                (30_350, None)
+            ]
+        );
+        let gin_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'events' \
+             AND indexname = 'idx_events_search_tsv' AND indexdef LIKE '%USING gin%')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(gin_exists, "upgrade must restore the search GIN index");
     }
 
     #[tokio::test]
