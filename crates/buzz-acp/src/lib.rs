@@ -336,8 +336,8 @@ fn effective_prompt_author(
 /// dropping the load inside it fails the construction regressions.
 mod inbound_author_gate {
     use super::{
-        effective_prompt_author, is_dm_channel, is_owner_or_sibling, pool, refresh_relay_self,
-        relay, OwnerCache, RespondTo,
+        effective_prompt_author, is_owner_or_sibling, pool, refresh_relay_self, relay, OwnerCache,
+        RespondTo,
     };
     use std::collections::HashSet;
 
@@ -365,6 +365,24 @@ mod inbound_author_gate {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ChannelTrust {
+        Unknown,
+        Dm,
+        Channel,
+    }
+
+    impl ChannelTrust {
+        #[cfg(test)]
+        fn known(is_dm: bool) -> Self {
+            if is_dm {
+                Self::Dm
+            } else {
+                Self::Channel
+            }
+        }
+    }
+
     /// Apply the configured raw-author policy after trusted workflow attribution.
     ///
     /// This stays private to the gate module so neither listener can bypass
@@ -373,24 +391,20 @@ mod inbound_author_gate {
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
         author: &str,
-        is_dm: bool,
+        channel_trust: ChannelTrust,
         owner_cache: &OwnerCache,
         rest_client: &relay::RestClient,
     ) -> bool {
-        if is_dm {
-            return match respond_to {
-                RespondTo::Nobody => false,
-                _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
-            };
-        }
         match respond_to {
-            RespondTo::Anyone => true,
             RespondTo::Nobody => false,
-            RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
-            RespondTo::Allowlist => {
-                allowlist.contains(author)
-                    || is_owner_or_sibling(author, owner_cache, rest_client).await
+            RespondTo::Anyone if matches!(channel_trust, ChannelTrust::Channel) => true,
+            RespondTo::Allowlist
+                if !matches!(channel_trust, ChannelTrust::Unknown)
+                    && allowlist.contains(author) =>
+            {
+                true
             }
+            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
         }
     }
 
@@ -407,7 +421,7 @@ mod inbound_author_gate {
             respond_to,
             allowlist,
             author,
-            is_dm,
+            ChannelTrust::known(is_dm),
             owner_cache,
             rest_client,
         )
@@ -482,12 +496,23 @@ mod inbound_author_gate {
                     self.refreshed_generation = Some(buzz_event.connection_generation);
                 }
             }
-            let is_dm = is_dm_channel(buzz_event.channel_id, channel_info).await;
+            // Unknown metadata must not inherit the explicit DM allowlist exception.
+            let channel_trust = match channel_info
+                .resolve_channel_metadata(buzz_event.channel_id)
+                .await
+            {
+                Some(info) => match info.channel_type.as_str() {
+                    "dm" => ChannelTrust::Dm,
+                    "stream" | "forum" => ChannelTrust::Channel,
+                    _ => ChannelTrust::Unknown,
+                },
+                None => ChannelTrust::Unknown,
+            };
             self.evaluate_with_channel_trust(
                 &buzz_event.event,
                 respond_to,
                 allowlist,
-                is_dm,
+                channel_trust,
                 owner_cache,
                 rest_client,
             )
@@ -499,7 +524,7 @@ mod inbound_author_gate {
             event: &nostr::Event,
             respond_to: &RespondTo,
             allowlist: &HashSet<String>,
-            is_dm: bool,
+            channel_trust: ChannelTrust,
             owner_cache: &OwnerCache,
             rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
@@ -509,7 +534,7 @@ mod inbound_author_gate {
                 respond_to,
                 allowlist,
                 &effective_author,
-                is_dm,
+                channel_trust,
                 owner_cache,
                 rest_client,
             )
@@ -517,7 +542,7 @@ mod inbound_author_gate {
             InboundAuthorGateDecision {
                 effective_author,
                 allowed,
-                is_dm,
+                is_dm: !matches!(channel_trust, ChannelTrust::Channel),
             }
         }
 
@@ -571,7 +596,7 @@ mod inbound_author_gate {
                 event,
                 respond_to,
                 allowlist,
-                is_dm,
+                ChannelTrust::known(is_dm),
                 owner_cache,
                 rest_client,
             )
@@ -6745,6 +6770,8 @@ mod workflow_owner_tests {
 mod author_gate_tests {
     use super::*;
 
+    mod dm_allowlist;
+
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
     /// this client is never actually used to make a request.
@@ -7044,7 +7071,8 @@ mod author_gate_tests {
 
     /// Both production boundaries must retain DM classification when composing
     /// trusted workflow attribution with configured author policy. External
-    /// allowlist entries and `Anyone` stay denied in a DM; owner and sibling
+    /// allowlist entries are admitted only in verified DMs; `Anyone` stays
+    /// owner/sibling-only. Owner and sibling
     /// principals remain allowed; `Nobody` remains absolute.
     #[tokio::test]
     async fn production_listener_boundaries_enforce_dm_author_policy() {
@@ -7053,7 +7081,7 @@ mod author_gate_tests {
             let relay_hex = relay_keys.public_key().to_hex();
             let external = nostr::Keys::generate().public_key().to_hex();
             let external_allowlist = HashSet::from([external.clone()]);
-            let denied_external = listener_boundary_scenario(ListenerBoundaryScenario {
+            let allowed_external = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
                 relay_keys: &relay_keys,
                 workflow_owner: &external,
@@ -7069,8 +7097,8 @@ mod author_gate_tests {
             })
             .await;
             assert!(
-                !denied_external.1,
-                "{} listener must deny an external allowlist entry in a DM",
+                allowed_external.1,
+                "{} listener must admit an explicit allowlist entry in a verified DM",
                 listener.name()
             );
 
@@ -7852,15 +7880,15 @@ mod author_gate_tests {
     //
     // In a DM, clients auto-p-tag every participant, and an agent can be
     // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // implicit mentions and `anyone` mode inside DMs. Only owner, verified
+    // siblings, or explicitly allowlisted principals in verified DMs fire turns.
 
     #[tokio::test]
-    async fn test_dm_rejects_allowlisted_external_pubkey() {
+    async fn test_dm_admits_allowlisted_external_pubkey() {
         let cache = cache_with_sibling();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            !inbound_author_gate::test_author_allowed(
+            inbound_author_gate::test_author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -7869,7 +7897,7 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+            "an allowlisted external pubkey may fire a turn inside a verified DM"
         );
     }
 
@@ -8053,23 +8081,37 @@ mod author_gate_tests {
         let id = Uuid::new_v4();
         let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
         let channel_info = resolver(discovered);
-        let owner_cache = cache_with_sibling();
-        let allowlist = HashSet::from([EXTERNAL.to_string()]);
-
-        let is_dm = is_dm_channel(id, &channel_info).await;
-        assert!(is_dm, "unknown startup metadata must fail closed as DM");
-        assert!(
-            !inbound_author_gate::test_author_allowed(
+        let sender = nostr::Keys::generate();
+        let author = sender.public_key().to_hex();
+        let owner_cache = OwnerCache::new(None);
+        let allowlist = HashSet::from([author]);
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let relay = nostr::Keys::generate().public_key().to_hex();
+        let (mut gate, rest, server) = connected_gate(&relay, &agent).await;
+        let event = relay::BuzzEvent {
+            connection_generation: 0,
+            channel_id: id,
+            event: nostr::EventBuilder::new(nostr::Kind::TextNote, "hello")
+                .sign_with_keys(&sender)
+                .unwrap(),
+        };
+        assert!(is_dm_channel(id, &channel_info).await);
+        let decision = gate
+            .evaluate_listener_event(
+                &event,
                 &RespondTo::Allowlist,
                 &allowlist,
-                EXTERNAL,
-                is_dm,
                 &owner_cache,
-                &dummy_rest_client(),
+                &channel_info,
+                &rest,
             )
-            .await,
-            "an external author must not pass when startup discovery omitted metadata"
+            .await;
+        assert!(decision.is_dm);
+        assert!(
+            !decision.allowed,
+            "missing metadata must not grant the DM exception"
         );
+        server.abort();
     }
 
     #[tokio::test]
