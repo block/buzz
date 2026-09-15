@@ -427,6 +427,52 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
+impl DbPoolStats {
+    /// Read a utilization snapshot from a physical SQLx pool handle.
+    pub fn from_pool(pool: &sqlx::PgPool) -> Self {
+        Self {
+            size: pool.size(),
+            idle: pool.num_idle() as u32,
+            max: pool.options().get_max_connections(),
+        }
+    }
+
+    /// Connections currently checked out from the pool.
+    pub const fn active(self) -> u32 {
+        self.size.saturating_sub(self.idle)
+    }
+}
+
+/// Physical role of a Postgres connection pool owned by the relay.
+///
+/// This vocabulary is intentionally closed so metrics labels remain bounded.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DbPoolRole {
+    /// Primary pool used for authoritative writes and consistency-sensitive reads.
+    Writer,
+    /// Optional read-replica pool used for eligible lag-tolerant reads.
+    Reader,
+    /// Optional independent pool used by the hash-chain audit service.
+    Audit,
+    /// Independent pool used for Postgres full-text search queries.
+    Search,
+}
+
+impl DbPoolRole {
+    /// Every physical pool role, in stable metrics-contract order.
+    pub const ALL: [Self; 4] = [Self::Writer, Self::Reader, Self::Audit, Self::Search];
+
+    /// Stable low-cardinality metrics label for this role.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writer => "writer",
+            Self::Reader => "reader",
+            Self::Audit => "audit",
+            Self::Search => "search",
+        }
+    }
+}
+
 /// Bounded outcome of the Postgres portion of a relay readiness check.
 ///
 /// The variants deliberately separate waiting for a pooled connection from
@@ -1073,9 +1119,9 @@ impl Db {
     /// exactly the ratio of the two pool sizes — in the direction that hides
     /// the problem.
     pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
-        self.read_pool.as_ref().map(|p| DbPoolStats {
-            size: p.size(),
-            idle: p.num_idle() as u32,
+        self.read_pool.as_ref().map(|pool| DbPoolStats {
+            size: pool.size(),
+            idle: pool.num_idle() as u32,
             max: self.read_max_connections,
         })
     }
@@ -1242,6 +1288,57 @@ impl Db {
                 RouteDecision::Writer
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_role_tests {
+    use super::{DbPoolRole, DbPoolStats};
+
+    #[test]
+    fn database_pool_role_vocabulary_is_exact() {
+        assert_eq!(
+            DbPoolRole::ALL.map(DbPoolRole::as_str),
+            ["writer", "reader", "audit", "search"]
+        );
+    }
+
+    #[test]
+    fn database_pool_active_connections_use_saturating_arithmetic() {
+        assert_eq!(
+            DbPoolStats {
+                size: 12,
+                idle: 5,
+                max: 20,
+            }
+            .active(),
+            7
+        );
+        assert_eq!(
+            DbPoolStats {
+                size: 2,
+                idle: 3,
+                max: 20,
+            }
+            .active(),
+            0
+        );
+    }
+
+    /// `from_pool` must read the live SQLx handle rather than a cached copy.
+    /// A lazy pool never opens a connection, so this stays infrastructure-free.
+    #[tokio::test]
+    async fn database_pool_stats_are_read_from_the_physical_pool_handle() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(7)
+            .connect_lazy(&crate::test_support::database_url())
+            .expect("construct lazy pool");
+
+        let stats = DbPoolStats::from_pool(&pool);
+        assert_eq!(stats.size, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.active(), 0);
+        assert_eq!(stats.max, 7);
     }
 }
 
