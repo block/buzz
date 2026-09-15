@@ -239,7 +239,10 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
-    let closed = match state.disconnect_community_clusterwide(&tenant).await {
+    let closed = match state
+        .disconnect_community_clusterwide(&tenant, record.archived_at)
+        .await
+    {
         Ok(closed) => closed,
         Err(error) => {
             tracing::warn!(community = %record.id, host = %record.host, %error, "community archived but disconnect propagation is pending");

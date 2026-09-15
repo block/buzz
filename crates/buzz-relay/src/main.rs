@@ -1054,10 +1054,41 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(scoped) => match scoped.command {
-                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
-                            state_for_conn_ctrl
-                                .community_connections
-                                .disconnect_community(scoped.community_id);
+                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity {
+                            archived_at,
+                        } => {
+                            if let Some(archived_at) = archived_at {
+                                match state_for_conn_ctrl
+                                    .db
+                                    .with_community_archive_fence(
+                                        scoped.community_id,
+                                        archived_at,
+                                        || {
+                                            state_for_conn_ctrl
+                                                .community_connections
+                                                .disconnect_archived_community(scoped.community_id)
+                                        },
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => tracing::info!(
+                                        community = %scoped.community_id,
+                                        %archived_at,
+                                        "ignored stale archived-community disconnect"
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        community = %scoped.community_id,
+                                        %archived_at,
+                                        %error,
+                                        "could not verify archived-community disconnect; retaining sockets"
+                                    ),
+                                }
+                            } else {
+                                state_for_conn_ctrl
+                                    .community_connections
+                                    .disconnect_deleted_community(scoped.community_id);
+                            }
                         }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
                             pubkey,
