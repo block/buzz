@@ -3,6 +3,7 @@ use std::{
     io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -10,6 +11,7 @@ use std::{
 use serde_json::Value;
 
 use buzz_relay::lifecycle::StartupPhase;
+use buzz_relay::state::REDIS_BOOTSTRAP_FAILURE;
 
 const VALID_RELAY_PRIVATE_KEY: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
@@ -454,4 +456,266 @@ fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
     assert_terminal(&events, "key_load", "succeeded", None);
     assert_terminal(&events, "metrics_bind", "succeeded", None);
     assert_terminal(&events, "process_telemetry", "succeeded", None);
+}
+
+/// Boot gates that need a live Postgres to reach the code under test. Named
+/// `postgres_tests` so `.config/nextest.toml`'s `postgres-ci` default filter
+/// discovers them structurally; the wrapper hands each test its own database
+/// through `DATABASE_URL`.
+mod postgres_tests {
+    use super::*;
+
+    const REDIS_BOOTSTRAP_BUDGET: Duration = Duration::from_secs(5);
+    const REDIS_BOOTSTRAP_SCHEDULING_SLACK: Duration = Duration::from_secs(3);
+
+    /// A TCP peer that completes Redis's metadata handshake, then reads and
+    /// holds PING without replying. This distinguishes a bounded checkout +
+    /// PING from a refused connection, which returns before the bootstrap
+    /// timeout is exercised.
+    struct HangingRedisPeer {
+        redis_url: String,
+        request_received: mpsc::Receiver<Vec<u8>>,
+        stop: mpsc::Sender<()>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl HangingRedisPeer {
+        fn spawn() -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake Redis peer");
+            listener
+                .set_nonblocking(true)
+                .expect("set fake Redis listener nonblocking");
+            let port = listener.local_addr().expect("fake Redis address").port();
+            let (request_tx, request_received) = mpsc::channel();
+            let (stop, stop_rx) = mpsc::channel();
+            let worker = thread::spawn(move || loop {
+                if stop_rx.try_recv().is_ok() {
+                    return;
+                }
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("accept fake Redis connection: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .expect("bound fake Redis read");
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 4096];
+                    match stream.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(read) => {
+                            request.extend_from_slice(&chunk[..read]);
+                            assert!(
+                                request.len() <= 4096,
+                                "fake Redis peer received an oversized request"
+                            );
+                            let setinfo_commands = request
+                                .windows(b"SETINFO".len())
+                                .filter(|window| *window == b"SETINFO")
+                                .count();
+                            if setinfo_commands >= 2 {
+                                // redis-rs pipelines CLIENT SETINFO lib-name
+                                // and lib-ver while establishing a connection.
+                                // Complete that handshake so the relay reaches
+                                // its explicit bootstrap PING, then hold it.
+                                stream
+                                    .write_all(b"+OK\r\n+OK\r\n")
+                                    .expect("reply to Redis client handshake");
+                                request.clear();
+                                continue;
+                            }
+                            if request
+                                .windows(b"PING".len())
+                                .any(|window| window == b"PING")
+                            {
+                                let _ = request_tx.send(request);
+                                let _ = stop_rx.recv_timeout(CHILD_TIMEOUT);
+                                return;
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            if stop_rx.try_recv().is_ok() {
+                                return;
+                            }
+                        }
+                        Err(error) => panic!("read fake Redis request: {error}"),
+                    }
+                }
+            });
+            Self {
+                redis_url: format!("redis://127.0.0.1:{port}"),
+                request_received,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn redis_url(&self) -> &str {
+            &self.redis_url
+        }
+
+        fn assert_request_received(&self, logs: &str) {
+            let request = self
+                .request_received
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap_or_else(|_| panic!("relay must reach the fake Redis peer: {logs}"));
+            assert!(!request.is_empty(), "fake Redis peer read an empty request");
+        }
+    }
+
+    impl Drop for HangingRedisPeer {
+        fn drop(&mut self) {
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                worker.join().expect("fake Redis peer must not panic");
+            }
+        }
+    }
+
+    fn reserve_closed_port() -> u16 {
+        let reserved = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let port = reserved.local_addr().expect("reserved address").port();
+        drop(reserved);
+        port
+    }
+
+    /// Runs the relay until it exits on its own, or kills it once `timeout`
+    /// passes. Unlike `run_relay`, a relay that keeps serving is a result to
+    /// assert on rather than a panic, which is the whole point here.
+    fn run_until_exit(environment: &[(&str, &str)], timeout: Duration) -> (bool, Output) {
+        let mut process = RelayProcess::spawn(environment);
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if process.try_wait().is_some() {
+                return (true, process.wait(Duration::from_secs(2)));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        (false, process.terminate())
+    }
+
+    /// Redis is required for pub/sub fan-out, presence, and typing, but nothing
+    /// in boot ever opened a command connection: `deadpool_redis` pools dial
+    /// lazily and `PubSubManager::new` only allocates channels, so "Redis
+    /// pub/sub connected" was logged against a dead port. A relay could
+    /// therefore boot with Redis unreachable, bind its health listener, and —
+    /// now that readiness answers from local lifecycle alone — advertise ready
+    /// for the rest of its life. The bootstrap gate is the one-time proof that
+    /// the command path has connected at least once, and it has to land before
+    /// the listener binds, because binding is the one-way latch that makes this
+    /// pod routable.
+    ///
+    /// The git conformance probe is disabled so the only remaining startup-fatal
+    /// gate is the one under test.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn unreachable_redis_fails_boot_before_the_health_listener_binds() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = format!("redis://127.0.0.1:{}", reserve_closed_port());
+        let metrics_port = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+
+        let (exited, output) = run_until_exit(
+            &[
+                ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+                ("BUZZ_METRICS_PORT", &metrics_port),
+                ("BUZZ_HEALTH_PORT", &health_port_value),
+                ("DATABASE_URL", &database_url),
+                ("REDIS_URL", &redis_url),
+                ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+            ],
+            CHILD_TIMEOUT,
+        );
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(
+            !logs.contains("Health probe listener started"),
+            "the Redis bootstrap gate must run before the health listener binds: {logs}"
+        );
+        assert!(
+            exited && !output.status.success(),
+            "an unreachable Redis command path must be startup-fatal: {logs}"
+        );
+        assert!(
+            logs.contains(REDIS_BOOTSTRAP_FAILURE),
+            "the failure must name the gate that rejected boot: {logs}"
+        );
+        assert!(
+            TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
+            "the health port must never have been bound"
+        );
+    }
+
+    /// A peer that accepts the socket but withholds its Redis response exercises
+    /// the outer timeout around both lazy pool checkout and PING. Removing or
+    /// narrowing that timeout makes this test kill a still-running relay at the
+    /// deadline instead of observing a startup failure.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn hanging_redis_peer_times_out_before_the_health_listener_binds() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_peer = HangingRedisPeer::spawn();
+        let metrics_port = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+        let timeout = REDIS_BOOTSTRAP_BUDGET + REDIS_BOOTSTRAP_SCHEDULING_SLACK;
+        let started_at = Instant::now();
+
+        let (exited, output) = run_until_exit(
+            &[
+                ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+                ("BUZZ_METRICS_PORT", &metrics_port),
+                ("BUZZ_HEALTH_PORT", &health_port_value),
+                ("DATABASE_URL", &database_url),
+                ("REDIS_URL", redis_peer.redis_url()),
+                ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+            ],
+            timeout,
+        );
+        let elapsed = started_at.elapsed();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        redis_peer.assert_request_received(&logs);
+
+        assert!(
+            elapsed >= REDIS_BOOTSTRAP_BUDGET,
+            "the fake peer must hold the request through the bootstrap budget: {elapsed:?}: {logs}"
+        );
+        assert!(
+            exited && elapsed < timeout && !output.status.success(),
+            "the outer bootstrap timeout must terminate the relay within scheduling slack: {elapsed:?}: {logs}"
+        );
+        assert!(
+            logs.contains(REDIS_BOOTSTRAP_FAILURE),
+            "the timeout must report the bounded Redis bootstrap failure: {logs}"
+        );
+        assert!(
+            !logs.contains("Health probe listener started"),
+            "the health listener must not bind before Redis bootstrap succeeds: {logs}"
+        );
+        assert!(
+            TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
+            "the health port must never have been bound"
+        );
+    }
 }
