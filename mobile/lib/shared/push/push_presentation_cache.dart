@@ -48,6 +48,7 @@ bool isVerifiedPushPresentationEvent(NostrEvent event) {
 
 /// Exports raw verified kind-0 events. Native code verifies them again before storage.
 /// Fails with [StateError] when eight exports are already outstanding.
+/// Native write failures propagate and stop any remaining chunks.
 Future<void> cacheBuzzPushProfileEvents(
   String communityID,
   Iterable<NostrEvent> events,
@@ -65,7 +66,7 @@ Future<void> cacheBuzzPushProfileEvents(
     );
     if (verified.isEmpty) return;
     for (final chunk in _boundedChunks(verified, _maximumProfilesPerWrite)) {
-      await _invokeBestEffort({
+      await _invokeSnapshot({
         'section': 'profiles',
         'communityId': communityID,
         'events': [for (final event in chunk) event.toJson()],
@@ -76,6 +77,7 @@ Future<void> cacheBuzzPushProfileEvents(
 
 /// Exports verified channel metadata and membership for native authority checks.
 /// Fails with [StateError] when eight exports are already outstanding.
+/// Native write failures propagate and stop any remaining chunks.
 Future<void> cacheBuzzPushChannelEvents(
   String? communityID,
   Iterable<NostrEvent> metadataEvents,
@@ -108,7 +110,7 @@ Future<void> cacheBuzzPushChannelEvents(
     // Keep each channel's metadata and membership in the same native write.
     // All chunks retain this export's FIFO slot until handoff is complete.
     for (final ids in _boundedChunks(channelIDs, _maximumChannelsPerWrite)) {
-      await _invokeBestEffort({
+      await _invokeSnapshot({
         'section': 'channels',
         'communityId': communityID,
         'metadataEvents': [
@@ -251,18 +253,21 @@ Future<void> cacheBuzzPushAvatarFromLoadedBytes(
   try {
     final png = await _boundedAvatarPNG(sourceBytes);
     if (png == null) return;
-    await _invokeBestEffort({
+    await _invokeSnapshot({
       'section': 'avatar',
       'communityId': communityID,
       'sourceUrl': sourceURL,
       'png': png,
-    });
+    }, bestEffort: true);
   } finally {
     release.complete();
   }
 }
 
-Future<void> _invokeBestEffort(Map<String, Object> arguments) async {
+Future<void> _invokeSnapshot(
+  Map<String, Object> arguments, {
+  bool bestEffort = false,
+}) async {
   try {
     await _pushPresentationChannel.invokeMethod<void>(
       'syncPushSnapshot',
@@ -275,6 +280,9 @@ Future<void> _invokeBestEffort(Map<String, Object> arguments) async {
     pushPresentationCacheError.value = error.toString();
     debugPrint('Push presentation cache update failed: $error');
     debugPrintStack(stackTrace: stackTrace);
+    // Event exports must stop at the failed chunk and report failure to their
+    // owner. Avatar updates preserve their existing detached best-effort policy.
+    if (!bestEffort) rethrow;
   }
 }
 

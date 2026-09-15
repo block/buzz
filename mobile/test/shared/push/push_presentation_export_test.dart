@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:buzz/shared/push/push_presentation_cache.dart';
+import 'package:buzz/shared/push/push_presentation_export_recovery.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -22,6 +23,7 @@ void main() {
     calls.clear();
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     pushPresentationCacheError.value = null;
+    pushPresentationExportError.value = null;
     messenger.setMockMethodCallHandler(_channel, (call) async {
       calls.add(call);
       return null;
@@ -31,6 +33,84 @@ void main() {
     messenger.setMockMethodCallHandler(_channel, null);
     debugDefaultTargetPlatformOverride = null;
     pushPresentationCacheError.value = null;
+    pushPresentationExportError.value = null;
+  });
+
+  for (final profiles in [true, false]) {
+    test(
+      'failed first ${profiles ? "profile" : "channel"} chunk stops export and reports terminal recovery',
+      () async {
+        final limit = profiles ? 256 : 512;
+        final events = [
+          for (var i = 0; i <= limit; i++)
+            _signed(
+              profiles ? 0 : 39000,
+              100,
+              channelID: 'channel-$i',
+              secretKey: profiles
+                  ? (i + 1).toRadixString(16).padLeft(64, '0')
+                  : _secret,
+            ),
+        ];
+        final memberships = profiles
+            ? <NostrEvent>[]
+            : [
+                for (var i = 0; i <= limit; i++)
+                  _signed(39002, 100, channelID: 'channel-$i'),
+              ];
+        messenger.setMockMethodCallHandler(_channel, (call) async {
+          calls.add(call);
+          if (calls.length == 1) {
+            throw PlatformException(code: 'cache_write_failed');
+          }
+          return null;
+        });
+        final recovery = PushPresentationExportRecovery();
+        final succeeded = await recovery.export(
+          () => profiles
+              ? cacheBuzzPushProfileEvents('failed-community', events)
+              : cacheBuzzPushChannelEvents(
+                  'failed-community',
+                  events,
+                  memberships,
+                ),
+        );
+        expect(succeeded, isFalse);
+        expect(
+          calls,
+          hasLength(1),
+          reason: 'no later chunk may conceal the failed write',
+        );
+        expect(
+          pushPresentationCacheError.value,
+          contains('cache_write_failed'),
+        );
+        final terminal = pushPresentationExportError.value;
+        expect(terminal, contains('cache_write_failed'));
+        await cacheBuzzPushProfileEvents('following-community', [
+          _signed(0, 200),
+        ]);
+        expect(calls, hasLength(2));
+        expect(calls.last.arguments['communityId'], 'following-community');
+        expect(pushPresentationExportError.value, terminal);
+      },
+    );
+  }
+
+  test('unavailable native bridge remains an intentional no-op', () async {
+    messenger.setMockMethodCallHandler(_channel, (call) async {
+      calls.add(call);
+      throw MissingPluginException('synthetic non-Runner embedding');
+    });
+    expect(
+      await PushPresentationExportRecovery().export(
+        () => cacheBuzzPushProfileEvents('community', [_signed(0, 100)]),
+      ),
+      isTrue,
+    );
+    expect(calls, hasLength(1));
+    expect(pushPresentationCacheError.value, isNull);
+    expect(pushPresentationExportError.value, isNull);
   });
 
   for (final profiles in [true, false]) {
