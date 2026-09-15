@@ -27,10 +27,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{Db, DbConfig};
+use buzz_db::{partition::PartitionAuditReport, Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
+use serde::Serialize;
+use sqlx::Row;
 use tracing::warn;
 
 #[derive(Parser)]
@@ -78,6 +80,12 @@ enum Command {
     GenerateKey,
     /// Run pending database migrations.
     Migrate,
+    /// Run the partition catalog audit using a read-only database session.
+    PartitionAudit {
+        /// Future months to include in the coverage check.
+        #[arg(long, default_value_t = 3)]
+        months_ahead: u32,
+    },
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
@@ -154,6 +162,7 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Database migrations complete.");
             Ok(0)
         }
+        Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
@@ -166,6 +175,94 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+#[derive(Serialize)]
+struct PartitionAuditIdentity {
+    database: String,
+    user: String,
+    schema: String,
+    default_transaction_read_only: bool,
+    transaction_read_only: bool,
+}
+
+#[derive(Serialize)]
+struct PartitionAuditOutput {
+    schema_version: u32,
+    mode: &'static str,
+    source_sha: &'static str,
+    build_id: &'static str,
+    build_url: &'static str,
+    outcome: &'static str,
+    months_ahead: u32,
+    identity: PartitionAuditIdentity,
+    report: PartitionAuditReport,
+}
+
+async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
+    let db_url = std::env::var("DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required for partition-audit"))?;
+    let config = DbConfig {
+        database_url: db_url,
+        max_connections: 1,
+        min_connections: 1,
+        statement_timeout_ms: 30_000,
+        default_transaction_read_only: true,
+        ..DbConfig::default()
+    };
+    let pool = Db::connect_writer_pool(&config).await?;
+    let row = sqlx::query(
+        "SELECT current_database() AS database, current_user AS user, \
+                current_schema() AS schema, \
+                current_setting('default_transaction_read_only') = 'on' \
+                    AS default_transaction_read_only, \
+                current_setting('transaction_read_only') = 'on' AS transaction_read_only",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let identity = PartitionAuditIdentity {
+        database: row.try_get("database")?,
+        user: row.try_get("user")?,
+        schema: row.try_get("schema")?,
+        default_transaction_read_only: row.try_get("default_transaction_read_only")?,
+        transaction_read_only: row.try_get("transaction_read_only")?,
+    };
+    if !identity.default_transaction_read_only || !identity.transaction_read_only {
+        anyhow::bail!("partition-audit connection is not read-only");
+    }
+
+    let report = Db::from_pool(pool)
+        .audit_partitions_report(months_ahead)
+        .await;
+    let outcome = if !report.errors.is_empty() {
+        "error"
+    } else if !report.serving_safe() {
+        "unsafe"
+    } else if report.tables.iter().any(|table| table.degraded()) {
+        "degraded"
+    } else {
+        "ok"
+    };
+    let code = match outcome {
+        "error" => 5,
+        "unsafe" => 2,
+        _ => 0,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PartitionAuditOutput {
+            schema_version: 1,
+            mode: "read_only",
+            source_sha: option_env!("BUZZ_SOURCE_SHA").unwrap_or("unknown"),
+            build_id: option_env!("BUZZ_BUILD_ID").unwrap_or("local"),
+            build_url: option_env!("BUZZ_BUILD_URL").unwrap_or("unknown"),
+            outcome,
+            months_ahead,
+            identity,
+            report,
+        })?
+    );
+    Ok(code)
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -431,8 +528,7 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 }
 
 async fn connect_db() -> Result<Db> {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DbConfig::default().database_url);
     let db = Db::new(
         &DbConfig {
             database_url: db_url,
@@ -630,4 +726,19 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_partition_audit_month_horizon() {
+        let cli = Cli::try_parse_from(["buzz-admin", "partition-audit", "--months-ahead", "6"])
+            .expect("parse partition-audit command");
+        assert!(matches!(
+            cli.command,
+            Command::PartitionAudit { months_ahead: 6 }
+        ));
+    }
 }
