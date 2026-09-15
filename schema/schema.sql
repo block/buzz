@@ -1803,6 +1803,14 @@ CREATE TABLE relay_admin_actions (
     -- retries and lets the recovery worker claim/re-drive stranded actions.
     action_lease_token      UUID,
     action_lease_expires_at TIMESTAMPTZ,
+    -- Authoritative enforcement target (migration 0045): persisted at claim time
+    -- so crash-recovery can fire live side effects without re-deriving from mutable
+    -- sources. enforcement_target_pubkey is the resolved target pubkey bytes for
+    -- kick/ban/timeout actions; NULL for event/blob targets. enforcement_channel_id
+    -- is the channel targeted by kick actions; NULL for community-wide actions.
+    enforcement_target_pubkey BYTEA
+        CHECK (enforcement_target_pubkey IS NULL OR length(enforcement_target_pubkey) = 32),
+    enforcement_channel_id  UUID,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Report-scoped idempotency: one action per (report, request_id).
