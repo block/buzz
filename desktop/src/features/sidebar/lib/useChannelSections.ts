@@ -11,27 +11,50 @@ import {
 import { ChannelSectionSyncManager } from "./channelSectionsSync";
 import type { RemoteSections } from "./channelSectionsSync";
 import { swapSectionOrder } from "./channelSectionsHelpers";
+import {
+  applyAutomaticSmartSectionAssignments,
+  assignChannelsToSection,
+  manuallyUnassignChannel,
+  type SmartSectionChannel,
+} from "./smartChannelSections";
 
-export type { ChannelSection } from "./channelSectionsStorage";
+const EMPTY_SMART_SECTION_CHANNELS: readonly SmartSectionChannel[] = [];
+
+export type {
+  ChannelSection,
+  SmartSectionRule,
+} from "./channelSectionsStorage";
 
 import type {
   ChannelSection,
   ChannelSectionStore,
+  SmartSectionRule,
 } from "./channelSectionsStorage";
 
 export function useChannelSections(
   pubkey: string | undefined,
   relayUrl?: string,
+  channels: readonly SmartSectionChannel[] = EMPTY_SMART_SECTION_CHANNELS,
 ): {
   sections: ChannelSection[];
   assignments: Record<string, string>;
-  createSection: (name: string, icon?: string) => ChannelSection | null;
-  renameSection: (sectionId: string, newName: string, icon?: string) => void;
+  createSection: (
+    name: string,
+    icon?: string,
+    smartRule?: SmartSectionRule,
+  ) => ChannelSection | null;
+  renameSection: (
+    sectionId: string,
+    newName: string,
+    icon?: string,
+    smartRule?: SmartSectionRule,
+  ) => void;
   deleteSection: (sectionId: string) => void;
   moveSectionUp: (sectionId: string) => void;
   moveSectionDown: (sectionId: string) => void;
   reorderSections: (orderedIds: string[]) => void;
   assignChannel: (channelId: string, sectionId: string) => void;
+  assignChannels: (channelIds: string[], sectionId: string) => void;
   unassignChannel: (channelId: string) => void;
 } {
   const [store, setStore] = React.useState<ChannelSectionStore>(() => {
@@ -168,7 +191,11 @@ export function useChannelSections(
   );
 
   const createSection = React.useCallback(
-    (name: string, icon?: string): ChannelSection | null => {
+    (
+      name: string,
+      icon?: string,
+      smartRule?: SmartSectionRule,
+    ): ChannelSection | null => {
       if (!pubkey) return null;
       const prev = readChannelSectionsStore(pubkey, relayUrl);
       const maxOrder =
@@ -180,6 +207,7 @@ export function useChannelSections(
         name,
         ...(icon ? { icon } : {}),
         order: maxOrder + 1,
+        ...(smartRule ? { smartRule } : {}),
       };
       setStore((current) => {
         const next = boundChannelSectionsStore({
@@ -196,7 +224,12 @@ export function useChannelSections(
   );
 
   const renameSection = React.useCallback(
-    (sectionId: string, newName: string, icon?: string) => {
+    (
+      sectionId: string,
+      newName: string,
+      icon?: string,
+      smartRule?: SmartSectionRule,
+    ) => {
       if (!pubkey) {
         return;
       }
@@ -206,10 +239,11 @@ export function useChannelSections(
           sections: prev.sections.map((s) =>
             s.id === sectionId
               ? {
-                  id: s.id,
+                  ...s,
                   name: newName,
                   ...(icon ? { icon } : {}),
-                  order: s.order,
+                  ...(icon ? {} : { icon: undefined }),
+                  ...(smartRule ? { smartRule } : {}),
                 }
               : s,
           ),
@@ -302,16 +336,27 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        delete assignments[channelId];
-        assignments[channelId] = sectionId;
-        const next = boundChannelSectionsStore({
-          ...prev,
-          assignments,
-        });
+        const next = boundChannelSectionsStore(
+          assignChannelsToSection(prev, [channelId], sectionId),
+        );
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
+        managerRef.current?.publishSections(next);
+        return next;
+      });
+    },
+    [pubkey, relayUrl],
+  );
+
+  const assignChannels = React.useCallback(
+    (channelIds: string[], sectionId: string) => {
+      if (!pubkey || channelIds.length === 0) return;
+      setStore((prev) => {
+        const next = boundChannelSectionsStore(
+          assignChannelsToSection(prev, channelIds, sectionId),
+        );
+        if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return prev;
         managerRef.current?.publishSections(next);
         return next;
       });
@@ -325,9 +370,9 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        delete assignments[channelId];
-        const next: ChannelSectionStore = { ...prev, assignments };
+        const next = boundChannelSectionsStore(
+          manuallyUnassignChannel(prev, channelId),
+        );
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
@@ -337,6 +382,26 @@ export function useChannelSections(
     },
     [pubkey, relayUrl],
   );
+
+  const smartRulesKey = JSON.stringify(
+    store.sections.flatMap((section) =>
+      section.smartRule
+        ? [[section.id, section.order, section.smartRule] as const]
+        : [],
+    ),
+  );
+
+  React.useEffect(() => {
+    if (!pubkey || channels.length === 0 || smartRulesKey === "[]") return;
+    setStore((prev) => {
+      const matched = applyAutomaticSmartSectionAssignments(prev, channels);
+      if (matched === prev) return prev;
+      const next = boundChannelSectionsStore(matched);
+      if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return prev;
+      managerRef.current?.publishSections(next);
+      return next;
+    });
+  }, [pubkey, relayUrl, channels, smartRulesKey]);
 
   return {
     sections,
@@ -348,6 +413,7 @@ export function useChannelSections(
     moveSectionDown,
     reorderSections,
     assignChannel,
+    assignChannels,
     unassignChannel,
   };
 }
