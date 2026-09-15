@@ -877,7 +877,7 @@ pub(crate) async fn resolve_nip10_thread_meta(
                 parent_created
             };
             let depth = meta.depth + 1;
-            if depth > 100 {
+            if i64::from(depth) > state.config.max_thread_depth as i64 {
                 return Err("thread depth limit exceeded".to_string());
             }
             (effective_root, root_ts, depth)
@@ -1088,7 +1088,7 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
         }
     };
 
-    if depth > 100 {
+    if i64::from(depth) > state.config.max_thread_depth as i64 {
         return Err("thread depth limit exceeded".to_string());
     }
 
