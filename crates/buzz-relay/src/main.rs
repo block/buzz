@@ -1801,17 +1801,24 @@ async fn run_storage_sweep_tick(
                     }
                     Err(error) => {
                         warn!(error = %error, "stored storage snapshot is invalid");
+                        storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                            .await;
                     }
                 },
-                Ok(None) => {}
+                Ok(None) => {
+                    storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                        .await;
+                }
                 Err(error) => {
                     warn!(error = %error, "failed to load stored storage snapshot");
+                    storage_sweep::record_persisted_snapshot_load_failure(&state.storage_sweep)
+                        .await;
                 }
             }
         }
     }
 
-    storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
+    storage_sweep::emit_storage_metrics(&state.storage_sweep, config.mode, host_map, |id| {
         emission_scope.allows(id)
     })
     .await;

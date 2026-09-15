@@ -337,8 +337,11 @@ externalRedis:
 # worker scans require `s3:ListBucket` on the bucket ARN itself (bucket-level;
 # distinct from the object-level GetObject/PutObject/DeleteObject permissions
 # already required for media). Without it the scan fails AccessDenied and no
-# other media functionality is affected. The configured-cap and cap-utilization
-# gauges are external-only because inline snapshots do not persist their cap.
+# other media functionality is affected. External mode emits
+# buzz_storage_snapshot_{age_seconds,duration_seconds,max_objects,
+# cap_utilization,load_ok}; it does not infer worker-attempt health from the
+# last successful snapshot. Monitor CronJob/Job status for worker failures,
+# including deadline expiry and OOM termination.
 #
 # Whole-community deletion (`buzz-admin deletions ...`) permanently removes
 # tenant-owned object versions through the v5 deletion path. In addition to the
@@ -348,8 +351,8 @@ externalRedis:
 # never-versioned buckets, which S3 exposes through `ListObjectVersions` with the
 # `null` version id.
 #
-# Note: buzz_storage_sweep_failures is a process-local gauge — on leader
-# failover it resets to the new leader's local count, not a global total.
+# Note: inline-only buzz_storage_sweep_failures is a process-local gauge — on
+# leader failover it resets to the new leader's local count, not a global total.
 # Note: on a failed sweep attempt, the next retry fires on the next usage tick
 # (default 300 s BUZZ_USAGE_METRICS_INTERVAL_SECS), not at sweep-interval
 # cadence — so a permanently missing s3:ListBucket yields one cheap LIST call
