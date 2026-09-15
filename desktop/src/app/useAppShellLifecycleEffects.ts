@@ -9,6 +9,7 @@ import { useRelayResumeTriggers } from "@/shared/api/useRelayResumeTriggers";
 
 type AppShellLifecycleEffectsOptions = {
   desktopBadgeEnabled: boolean;
+  hasHomeMentionAttention: boolean;
   homeBadgeCountExcludingHighPriority: number;
   topLevelUnreadChannelIds: ReadonlySet<string>;
   unreadChannelNotificationCount: number;
@@ -16,6 +17,7 @@ type AppShellLifecycleEffectsOptions = {
 
 export function useAppShellLifecycleEffects({
   desktopBadgeEnabled,
+  hasHomeMentionAttention,
   homeBadgeCountExcludingHighPriority,
   topLevelUnreadChannelIds,
   unreadChannelNotificationCount,
@@ -80,10 +82,16 @@ export function useAppShellLifecycleEffects({
     void setDesktopAppBadge(
       count
         ? { kind: "count", count }
-        : { kind: topLevelUnreadChannelIds.size ? "dot" : "none" },
+        : {
+            kind:
+              hasHomeMentionAttention || topLevelUnreadChannelIds.size
+                ? "dot"
+                : "none",
+          },
     );
   }, [
     desktopBadgeEnabled,
+    hasHomeMentionAttention,
     homeBadgeCountExcludingHighPriority,
     topLevelUnreadChannelIds,
     unreadChannelNotificationCount,

@@ -265,13 +265,13 @@ export function NotificationSettingsCard({
                 className="text-sm font-medium"
                 htmlFor="home-badge-switch"
               >
-                Home badge
+                Inbox badge
               </label>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Show a Home badge for mentions and needs-action items in the
+                Show an Inbox badge for mentions and needs-action items in the
                 sidebar.
               </p>
             </div>

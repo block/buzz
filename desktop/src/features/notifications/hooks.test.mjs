@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildHomeBadgeFeedItems,
+  hasUnseenHomeMention,
   isHomeBadgeFeedItemUnread,
   resolveHomeBadgeFeedItemReadAt,
   shouldCountTowardHomeBadgeSubtotal,
@@ -69,6 +70,15 @@ test("home badge excludes thread activity already shown in a channel preview", (
       "locally-unread-agent",
     ],
   );
+});
+
+test("mention attention remains until the Inbox has seen the mention", () => {
+  const feed = homeFeed({
+    mentions: [feedItem("mention", "mention")],
+  });
+
+  assert.equal(hasUnseenHomeMention(feed, new Set()), true);
+  assert.equal(hasUnseenHomeMention(feed, new Set(["mention"])), false);
 });
 
 test("home badge subtotal excludes channel-counted high-priority items", () => {

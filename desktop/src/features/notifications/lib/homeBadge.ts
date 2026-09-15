@@ -50,6 +50,15 @@ export function buildHomeBadgeFeedItems(
   return dedupeFeedItemsById(items);
 }
 
+export function hasUnseenHomeMention(
+  feed: HomeFeedResponse | undefined,
+  seenMentionIds: ReadonlySet<string>,
+): boolean {
+  return (
+    feed?.feed.mentions.some((item) => !seenMentionIds.has(item.id)) ?? false
+  );
+}
+
 export function shouldCountTowardHomeBadgeSubtotal(
   item: Pick<FeedItem, "channelId" | "channelType" | "tags">,
   highPriorityChannelIds: ReadonlySet<string>,

@@ -456,26 +456,29 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
-    useHomeFeedNotificationState(
-      homeFeedQuery.data,
-      identityQuery.data?.pubkey,
-      notificationSettings.settings,
-      notificationSettings.setDesktopEnabled,
-      !isHuddleRoom,
-      selectedView === "home" && !settingsOpen,
-      getChannelReadAt,
-      readStateVersion,
-      highPriorityUnreadChannelIds,
-      feedProfilesQuery.data?.profiles,
-      mutedChannelIds,
-      feedItemState.unreadSet,
-      threadActivityFeedItems,
-      getThreadReadAt,
-      getMessageReadAt,
-      channels,
-      huddleBackingChannelIds,
-    );
+  const {
+    hasHomeMentionAttention,
+    homeBadgeCount,
+    homeBadgeCountExcludingHighPriority,
+  } = useHomeFeedNotificationState(
+    homeFeedQuery.data,
+    identityQuery.data?.pubkey,
+    notificationSettings.settings,
+    notificationSettings.setDesktopEnabled,
+    !isHuddleRoom,
+    selectedView === "home" && !settingsOpen,
+    getChannelReadAt,
+    readStateVersion,
+    highPriorityUnreadChannelIds,
+    feedProfilesQuery.data?.profiles,
+    mutedChannelIds,
+    feedItemState.unreadSet,
+    threadActivityFeedItems,
+    getThreadReadAt,
+    getMessageReadAt,
+    channels,
+    huddleBackingChannelIds,
+  );
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
@@ -672,6 +675,7 @@ export function AppShell() {
   );
   useAppShellLifecycleEffects({
     desktopBadgeEnabled: !isHuddleRoom,
+    hasHomeMentionAttention,
     homeBadgeCountExcludingHighPriority,
     topLevelUnreadChannelIds,
     unreadChannelNotificationCount,
