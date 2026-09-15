@@ -56,6 +56,8 @@ import { useIndependentThreadPanel } from "@/features/messages/useIndependentThr
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
+import { useForumPostsQuery } from "@/features/forum/hooks";
+import { latestForumPostAt } from "@/features/forum/lib/latestPostAt";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode } from "@/shared/api/types";
@@ -219,9 +221,22 @@ export function ChannelScreen({
     }
     return null;
   }, [messagesQuery.data]);
-  const activeReadAt = latestActiveMessage
-    ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
-    : null;
+  // Forum channels never populate `messagesQuery` (`useChannelMessagesQuery`
+  // is disabled for them), so their newest top-level event comes from the post
+  // list instead. Without this the open-read marker resolves to null for every
+  // forum and the channel can never become read. Same query key as ForumView,
+  // so this shares that cache rather than issuing a second read.
+  const forumPostsQuery = useForumPostsQuery(
+    activeChannel?.channelType === "forum" ? activeChannel : null,
+  );
+  const latestTopLevelAt =
+    activeChannel?.channelType === "forum"
+      ? latestForumPostAt(forumPostsQuery.data)
+      : (latestActiveMessage?.created_at ?? null);
+  const activeReadAt =
+    latestTopLevelAt === null
+      ? null
+      : new Date(latestTopLevelAt * 1_000).toISOString();
   useChannelOpenReadState(
     activeChannelId,
     activeChannel?.isMember,
