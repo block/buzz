@@ -64,6 +64,7 @@ function recoverEmbeddedCode(trimmed: string): {
 export function friendlyAgentLastError(
   raw: string | null,
   code?: number | null,
+  provider?: string | null,
 ): FriendlyAgentLastError | null {
   if (raw == null) return null;
   const trimmed = raw.trim();
@@ -78,7 +79,18 @@ export function friendlyAgentLastError(
   if (effectiveCode != null) {
     switch (effectiveCode) {
       case -32001:
-        return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+        // `-32001` is a generic buzz-agent llm-auth failure — it fires for
+        // *any* LLM provider (anthropic, openai, databricks, openai-compat…),
+        // not only relay-mesh. Rewriting it to the mesh copy misdirects
+        // users debugging a non-mesh agent: they see "Community access
+        // denied" when the real fix is "your configured API key was rejected
+        // by your upstream". Only when the agent's provider is the mesh
+        // preset do we know the 401 came from Buzz's own admission and can
+        // afford the more actionable mesh copy.
+        if (provider != null && provider.trim() === "relay-mesh") {
+          return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+        }
+        return { severity: "generic", copy: trimmed };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
       case -32603: {
@@ -106,11 +118,19 @@ export function friendlyAgentLastError(
 
   // Legacy string fallback for records written before codes existed.
   // Match either the unwrapped buzz-agent prefix or the buzz-acp v0 wrap.
+  // Same overbroad-rewriting concern as the structured path: "llm auth:"
+  // fires for any provider's 401/403, so only relay-mesh agents can safely
+  // be summarised as "community access denied". For everyone else, keep the
+  // underlying message so the actionable cause (upstream auth rejected your
+  // key) is preserved.
   if (
     trimmed.startsWith("Agent reported error: llm auth:") ||
     trimmed.startsWith("llm auth:")
   ) {
-    return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+    if (provider != null && provider.trim() === "relay-mesh") {
+      return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+    }
+    return { severity: "generic", copy: trimmed };
   }
 
   return { severity: "generic", copy: trimmed };
@@ -120,9 +140,19 @@ export function friendlyAgentLastError(
  * Convenience for `turn_error` / `agent_panic` observer payloads: coerce the
  * payload's untyped `code` JSON value and return the display copy, falling
  * back to the raw error text when no classification applies.
+ *
+ * `provider` must be the agent's configured LLM provider (e.g. "anthropic",
+ * "relay-mesh"). It's threaded through to [`friendlyAgentLastError`] so the
+ * `-32001` → mesh-copy rewrite fires only for mesh agents; non-mesh agents
+ * keep their underlying llm-auth message (upstream 401 details are the
+ * actionable signal).
  */
-export function friendlyTurnErrorCopy(raw: string, code: unknown): string {
+export function friendlyTurnErrorCopy(
+  raw: string,
+  code: unknown,
+  provider?: string | null,
+): string {
   const numeric = code == null ? null : Number(code);
   const safe = Number.isFinite(numeric) ? (numeric as number) : null;
-  return friendlyAgentLastError(raw, safe)?.copy ?? raw;
+  return friendlyAgentLastError(raw, safe, provider)?.copy ?? raw;
 }
