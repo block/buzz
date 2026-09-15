@@ -702,7 +702,8 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2663,6 +2664,51 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("drop late-table fixtures");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0045_preserves_legacy_hashes_and_writer_defaults() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 44).await.unwrap();
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("audit-version-{community}.example"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO audit_log (community_id, seq, hash, action, detail) VALUES ($1, 1, $2, 'event_created', '{}')")
+            .bind(community).bind(vec![0xab_u8; 32]).execute(&pool).await.unwrap();
+        run_migrations_through(&pool, 45).await.unwrap();
+        let (version, hash): (i16, Vec<u8>) = sqlx::query_as(
+            "SELECT hash_version, hash FROM audit_log WHERE community_id = $1 AND seq = 1",
+        )
+        .bind(community)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(hash, vec![0xab_u8; 32]);
+        let old_writer_version: i16 = sqlx::query_scalar("INSERT INTO audit_log (community_id, seq, hash, action, detail) VALUES ($1, 2, $2, 'event_created', '{}') RETURNING hash_version")
+            .bind(community).bind(vec![0xcd_u8; 32]).fetch_one(&pool).await.unwrap();
+        assert_eq!(old_writer_version, 1);
+        for version in [2_i16, 3] {
+            let result = sqlx::query("INSERT INTO audit_log (community_id, seq, hash, action, detail, hash_version) VALUES ($1, $2, $3, 'event_created', '{}', $4)")
+                .bind(community).bind(i64::from(version) + 1).bind(vec![0xef_u8; 32]).bind(version).execute(&pool).await;
+            if version == 2 {
+                result.unwrap();
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .as_database_error()
+                    .unwrap()
+                    .is_check_violation());
+            }
+        }
     }
 
     /// Verify migration 0044 applies cleanly against a DB that has rows in

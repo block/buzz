@@ -81,19 +81,20 @@ async fn spawn_oidc() -> (String, Arc<AtomicU64>) {
     (base, counter)
 }
 
-/// Cache key construction matches the auth module: sha256(discovery|client|scopes).
+/// Seed the version 2 cache used by the auth module.
 fn cache_path_for(cache_dir: &std::path::Path, cfg: &PkceOAuthConfig) -> std::path::PathBuf {
     use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(cfg.discovery_url.as_bytes());
-    h.update(b"|");
-    h.update(cfg.client_id.as_bytes());
-    h.update(b"|");
-    h.update(cfg.scopes.join(",").as_bytes());
-    let hash = hex::encode(h.finalize());
+    let identity = serde_json::to_vec(&(
+        "buzz:oauth-cache:v2",
+        &cfg.discovery_url,
+        &cfg.client_id,
+        &cfg.scopes,
+    ))
+    .unwrap();
+    let hash = hex::encode(sha2::Sha256::digest(identity));
     cache_dir
         .join(&cfg.cache_namespace)
-        .join(format!("{hash}.json"))
+        .join(format!("v2-{hash}.json"))
 }
 
 /// Write a token file the engine should pick up on construction.
@@ -1088,18 +1089,19 @@ fn databricks_oauth_cache_path(home: &std::path::Path, host: &str) -> std::path:
         "{}/oidc/.well-known/oauth-authorization-server",
         host.trim_end_matches('/')
     );
-    let mut hasher = Sha256::new();
-    hasher.update(discovery_url.as_bytes());
-    hasher.update(b"|");
-    hasher.update(b"databricks-cli");
-    hasher.update(b"|");
-    hasher.update(b"all-apis,offline_access");
-    let hash = hex::encode(hasher.finalize());
+    let identity = serde_json::to_vec(&(
+        "buzz:oauth-cache:v2",
+        &discovery_url,
+        "databricks-cli",
+        ["all-apis", "offline_access"],
+    ))
+    .unwrap();
+    let hash = hex::encode(Sha256::digest(identity));
     home.join(".config")
         .join("buzz-agent")
         .join("oauth")
         .join("databricks")
-        .join(format!("{hash}.json"))
+        .join(format!("v2-{hash}.json"))
 }
 
 fn write_cached_oauth_token(home: &std::path::Path, host: &str, access_token: &str) {

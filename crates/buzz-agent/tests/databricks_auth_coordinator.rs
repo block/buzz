@@ -543,16 +543,17 @@ fn future_secs() -> u64 {
 
 fn cache_file_path(cfg: &PkceOAuthConfig, cache_dir: &std::path::Path) -> std::path::PathBuf {
     use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(cfg.discovery_url.as_bytes());
-    h.update(b"|");
-    h.update(cfg.client_id.as_bytes());
-    h.update(b"|");
-    h.update(cfg.scopes.join(",").as_bytes());
-    let hash = hex::encode(h.finalize());
+    let identity = serde_json::to_vec(&(
+        "buzz:oauth-cache:v2",
+        &cfg.discovery_url,
+        &cfg.client_id,
+        &cfg.scopes,
+    ))
+    .unwrap();
+    let hash = hex::encode(sha2::Sha256::digest(identity));
     cache_dir
         .join(&cfg.cache_namespace)
-        .join(format!("{hash}.json"))
+        .join(format!("v2-{hash}.json"))
 }
 
 /// The cross-process attempt sidecar path for a config, matching the

@@ -114,7 +114,7 @@ The base64 content decodes to a JSON object:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "pk": "<pubkey-hex>",
   "sig": "<signature-hex>",
   "t": <created-at>,
@@ -124,7 +124,7 @@ The base64 content decodes to a JSON object:
 
 | Field | Type    | Required | Constraints | Description |
 |-------|---------|----------|-------------|-------------|
-| `v`   | integer | MUST     | MUST be `1` | Schema version. |
+| `v`   | integer | MUST     | `2` for new signatures; `1` for legacy verification | Hash encoding version. |
 | `pk`  | string  | MUST     | Exactly 64 lowercase hex characters. MUST be a valid BIP-340 x-only public key (i.e., the x-coordinate of a point on the secp256k1 curve). | Signer's public key. |
 | `sig` | string  | MUST     | Exactly 128 lowercase hex characters. | BIP-340 Schnorr signature over the git object. |
 | `t`   | integer | MUST     | MUST be in the range 0 to 4294967295. MUST NOT be negative, a float, or a string. | Claimed unix timestamp (seconds) of the signing event. See Security Considerations for implications of signer-controlled timestamps. |
@@ -142,8 +142,8 @@ JSON parsing rules:
 - Duplicate keys: verifiers MUST reject the signature. Implementations SHOULD
   use a JSON parser configured to fault on duplicate keys, or verify key
   uniqueness before parsing.
-- For `v=1`, the only permitted keys are `v`, `pk`, `sig`, `t`, and `oa`.
-  Any other key MUST cause rejection. Future versions (`v=2`, etc.) define
+- For `v=1` and `v=2`, the only permitted keys are `v`, `pk`, `sig`, `t`, and `oa`.
+  Any other key MUST cause rejection. Future versions (`v=3`, etc.) define
   their own field sets. This prevents unsigned extension fields from being
   injected into the envelope.
 - The total decoded JSON MUST NOT exceed 2048 bytes (the `oa` field adds
@@ -152,52 +152,55 @@ JSON parsing rules:
 
 ### Signing Hash
 
-All envelope metadata (`t`, `oa`) is included in the hash preimage so that it
-is cryptographically bound to the signature. Tampering with any field
-invalidates the signature.
-
-Given a git object payload (the bytes git pipes to stdin), a signing timestamp
-`t`, and an optional owner attestation:
+New signatures MUST use version 2. Each variable-length value is framed as
+`field(x) = u64be(byte_length(x)) || x`. Strings use UTF-8; lengths count bytes.
+The timestamp uses eight unsigned big-endian bytes.
 
 ```
-hash = SHA-256( "nostr:git:v1:" || decimal(t) || ":" || oa_binding || payload_bytes )
+hash = SHA-256("nostr:git:v2:" || u64be(t) || oa_binding || field(payload_bytes))
 ```
 
-Where:
-- `"nostr:git:v1:"` is the domain separator: exactly 13 bytes of UTF-8
-  (`6e6f7374723a6769743a76313a`).
-- `decimal(t)` is the ASCII decimal encoding of `t` with no leading zeroes
-  (except `0` itself). Example: `1700000000`.
-- `":"` is a single colon byte (`3a`), separating the timestamp from the next
-  field.
-- `oa_binding` is:
-  - If `oa` is present: `oa[0] || ":" || oa[1] || ":" || oa[2] || ":"` (the
-    three `oa` array elements concatenated with colon separators, followed by a
-    trailing colon). All elements are their exact string values (hex pubkey,
-    conditions string which may be empty, hex signature).
-  - If `oa` is absent: empty (zero bytes). The colon after `decimal(t)` is
-    immediately followed by `payload_bytes`.
-- `payload_bytes` is the raw bytes git pipes to stdin.
+If `oa` is absent, `oa_binding` is the single byte `0x00`. If it is present,
+`oa_binding` is `0x01 || field(oa[0]) || field(oa[1]) || field(oa[2])`.
+The public keys and signatures remain lowercase hex strings as in the envelope.
+The presence byte distinguishes absence from an attestation, including one with
+empty conditions. The lengths prevent bytes moving between fields or into the
+payload. The version-specific domain separator prevents signature reuse across
+versions and other Nostr protocols.
 
-**Important:** Because the `oa` data is included in the signing hash, stripping
-or modifying the `oa` field invalidates the NIP-GS `sig`. This is intentional —
-the signature envelope is immutable once signed.
+#### Legacy version 1 verification
 
-The domain separator prevents cross-protocol signature reuse:
-- NIP-01 event signatures sign `SHA-256(serialized_event)` — different preimage.
-- NIP-98 HTTP auth signatures sign a kind:27235 event — different preimage.
-- NIP-OA attestations sign `SHA-256("nostr:agent-auth:" || ...)` — different
-  domain separator.
+Version 1 used:
+
+```
+hash = SHA-256("nostr:git:v1:" || decimal(t) || ":" || oa_binding || payload_bytes)
+```
+
+Here `oa_binding` is empty when absent, or
+`oa[0] || ":" || oa[1] || ":" || oa[2] || ":"` when present. This encoding
+is ambiguous for arbitrary payloads: removing `oa` and prepending its binding
+to the payload preserves the hash.
+
+Verifiers MAY accept legacy signatures only if the payload starts with
+`tree <oid>\n` (commit) or `object <oid>\n` (tag), where `<oid>` is exactly
+40 or 64 lowercase hex characters. These headers cannot begin with an
+attestation's hex public key, so the two interpretations cannot both verify.
+All envelope and attestation structural checks still apply. Other legacy
+payloads MUST be rejected. Verifiers MUST select the hash by `v`, and MUST NOT
+retry another version after failure. Existing valid commit and tag signatures
+retain their original digests; version 1 verifiers need an upgrade to read new
+version 2 signatures.
+
+Legacy acceptance assumes the original payload came from Git. The version 1
+signature alone cannot prove which interpretation an arbitrary-byte signer
+intended before this upgrade. Version 2 binds that distinction explicitly.
 
 ### Signing Procedure
 
 1. Record the current unix timestamp as `t`.
 2. Read the git object payload from stdin. If the payload exceeds 100 MB,
    exit with code 1 and a diagnostic on stderr. MUST NOT write to stdout.
-3. Compute the signing hash per the Signing Hash section:
-   `hash = SHA-256("nostr:git:v1:" || decimal(t) || ":" || oa_binding || payload)`.
-   If including `oa`, the `oa_binding` is `oa[0] || ":" || oa[1] || ":" || oa[2] || ":"`.
-   If not including `oa`, the `oa_binding` is empty (zero bytes).
+3. Compute the version 2 signing hash per the Signing Hash section.
 4. Produce a BIP-340 Schnorr signature over `hash` using the signer's secret
    key. Implementations MUST use a cryptographically secure nonce per BIP-340
    §4. Implementations SHOULD use auxiliary randomness (BIP-340 §4 default
@@ -206,8 +209,8 @@ The domain separator prevents cross-protocol signature reuse:
    reproducible test vectors.
 5. Construct the JSON object with compact serialization (no whitespace).
    Field order MUST be `v`, `pk`, `sig`, `t`, then `oa` if present.
-   Example without `oa`: `{"v":1,"pk":"<hex>","sig":"<hex>","t":<integer>}`
-   Example with `oa`: `{"v":1,"pk":"<hex>","sig":"<hex>","t":<integer>,"oa":["<owner>","","<sig>"]}`
+   Example without `oa`: `{"v":2,"pk":"<hex>","sig":"<hex>","t":<integer>}`
+   Example with `oa`: `{"v":2,"pk":"<hex>","sig":"<hex>","t":<integer>,"oa":["<owner>","","<sig>"]}`
 6. Base64-encode the JSON bytes (standard alphabet, with padding).
 7. Write to stdout:
    ```
@@ -240,17 +243,14 @@ The domain separator prevents cross-protocol signature reuse:
    any given set of field values.
 3. Validate all fields per the constraints table. If any field is invalid or
    missing, write `ERRSIG` (see below) and exit with code 1.
-4. If `v` is not `1`, write `ERRSIG` and exit with code 1.
+4. If `v` is neither `1` nor `2`, write `ERRSIG` and exit with code 1.
 5. Validate that `pk` is a valid BIP-340 x-only public key (not just hex — the
    value must be the x-coordinate of a point on secp256k1, i.e., `lift_x(pk)`
    must succeed per BIP-340 §5.3.2).
 6. Read the git object payload from stdin. If the payload exceeds 100 MB,
    write `ERRSIG` to the status fd and exit with code 1.
-7. Compute the signing hash per the Signing Hash section. If the `oa` field is
-   present and structurally valid (array of 3 strings), include the oa_binding:
-   `hash = SHA-256("nostr:git:v1:" || decimal(t) || ":" || oa[0] || ":" || oa[1] || ":" || oa[2] || ":" || payload)`.
-   If `oa` is absent:
-   `hash = SHA-256("nostr:git:v1:" || decimal(t) || ":" || payload)`.
+7. Select the signing hash by `v` per the Signing Hash section. For version 1,
+   enforce the legacy payload header restriction before computing the hash.
 8. Verify the BIP-340 Schnorr signature `sig` over `hash` against public key
    `pk`.
 9. If verification fails, write to the status fd:
@@ -523,6 +523,14 @@ absence of `SIG_CREATED` as a signing failure.
 
 ## Test Vectors
 
+The detailed signatures below are retained as legacy version 1 vectors. For
+version 2, the same payload and timestamp (`1700000000`) produce these hashes:
+
+- Without `oa`: `0f3a88b1c5eb1a13bcbcc30d33bfc95589182b7b7b7a548f40427e8271335fbd`
+- With the owner attestation below: `80d4e5e24736147be9ed7c89e122e96eaef83df09ec3725b8d813f3073ea2f71`
+
+### Legacy version 1 vectors
+
 ### Test Key
 
 ```
@@ -723,7 +731,7 @@ Implementations MUST handle the following:
 
 ### Domain Separation
 
-The `nostr:git:v1:` prefix in the hash preimage ensures that a signature over a
+The version-specific `nostr:git:v2:` prefix in the hash preimage ensures that a signature over a
 git object cannot be replayed in another context. The timestamp is included in
 the preimage so that `t` is cryptographically bound — tampering with `t`
 invalidates the signature.

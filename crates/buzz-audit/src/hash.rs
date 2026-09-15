@@ -5,8 +5,11 @@ use crate::entry::AuditEntry;
 use crate::error::AuditError;
 
 /// The 32-byte sentinel hashed in place of `prev_hash` for a community's first
-/// entry. Stored as `prev_hash = NULL`; hashed as all-zero bytes.
+/// entry in the legacy encoding. Version 2 encodes `None` explicitly.
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
+
+/// Version written by the audit service. Older rows retain their original hash.
+pub const CURRENT_HASH_VERSION: i16 = 2;
 
 /// Reduce a timestamp to the precision the audit store round-trips.
 ///
@@ -23,23 +26,90 @@ pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
     created_at.trunc_subsecs(6)
 }
 
-/// SHA-256 over the entry's identity, chain, and context fields.
+/// SHA-256 over a versioned encoding of the entry, excluding `hash` itself.
 ///
-/// Field order is fixed — changing it invalidates all existing chains. The
-/// `community_id` is hashed first so chain identity carries the tenant: an entry
-/// cannot be lifted out of one community's chain and re-verified inside another.
-///
-/// `created_at` is normalized through [`to_storage_precision`] here rather than
-/// hashed as given. Write paths truncate before storing so the row matches the
-/// in-memory entry, but normalizing again at the single point that consumes the
-/// value means no future caller can reintroduce the write/read preimage split
-/// by forgetting to. Values already at storage precision are unaffected —
-/// truncation is idempotent — so this does not change any digest.
-///
-/// `detail` is serialized via [`canonical_json`] (sorted keys) so the hash is
-/// stable across machines and Rust versions. A serialization failure is a hard
-/// error, never silently hashed as empty.
+/// Version 2 encodes each field with a tag and a big-endian u64 byte length;
+/// optional fields additionally encode a presence byte. JSON keys are sorted
+/// and timestamps use storage precision. Legacy hashes are accepted only for
+/// fixed-width cryptographic fields and unambiguous object identifiers.
 pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    for (field, value) in [
+        ("actor_pubkey must be 32 bytes", &entry.actor_pubkey),
+        ("prev_hash must be 32 bytes", &entry.prev_hash),
+    ] {
+        if value.as_ref().is_some_and(|bytes| bytes.len() != 32) {
+            return Err(AuditError::InvalidField {
+                seq: entry.seq,
+                field,
+            });
+        }
+    }
+    match entry.hash_version {
+        1 => compute_legacy_hash(entry),
+        CURRENT_HASH_VERSION => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"buzz:audit:v2\0");
+            hash_field(&mut hasher, 1, entry.community_id.as_bytes());
+            hash_field(&mut hasher, 2, &entry.seq.to_be_bytes());
+            hash_field(
+                &mut hasher,
+                3,
+                to_storage_precision(entry.created_at)
+                    .to_rfc3339()
+                    .as_bytes(),
+            );
+            hash_field(&mut hasher, 4, entry.action.as_str().as_bytes());
+            hash_optional(&mut hasher, 5, entry.actor_pubkey.as_deref());
+            hash_optional(
+                &mut hasher,
+                6,
+                entry.object_id.as_deref().map(str::as_bytes),
+            );
+            hash_field(&mut hasher, 7, canonical_json(&entry.detail)?.as_bytes());
+            hash_optional(&mut hasher, 8, entry.prev_hash.as_deref());
+            Ok(hasher.finalize().into())
+        }
+        version => Err(AuditError::UnsupportedHashVersion { version }),
+    }
+}
+
+fn hash_field(hasher: &mut Sha256, tag: u8, bytes: &[u8]) {
+    hasher.update([tag]);
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_optional(hasher: &mut Sha256, tag: u8, bytes: Option<&[u8]>) {
+    hasher.update([tag, u8::from(bytes.is_some())]);
+    if let Some(bytes) = bytes {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+}
+
+fn compute_legacy_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    if entry.seq < 1 || (entry.seq == 1) != entry.prev_hash.is_none() {
+        return Err(AuditError::InvalidField {
+            seq: entry.seq,
+            field: "legacy prev_hash must be absent only at seq 1",
+        });
+    }
+    // Legacy producers used event/blob hashes or channel UUIDs. Their encodings
+    // are prefix-free: a canonical UUID has a '-' at byte 8, unlike hex hashes.
+    // Arbitrary identifiers cannot be safely separated from the following JSON.
+    if entry.object_id.as_deref().is_some_and(|id| {
+        let hash = id.len() == 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let uuid = uuid::Uuid::parse_str(id).is_ok_and(|value| value.to_string() == id);
+        !hash && !uuid
+    }) {
+        return Err(AuditError::InvalidField {
+            seq: entry.seq,
+            field: "legacy object_id must be a canonical UUID or 64-character lowercase hex",
+        });
+    }
     let mut hasher = Sha256::new();
     // Tenant binding: community_id leads the hash.
     hasher.update(entry.community_id.as_bytes());
@@ -71,6 +141,10 @@ pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
     }
     Ok(hasher.finalize().into())
 }
+
+#[cfg(test)]
+#[path = "hash_encoding_tests.rs"]
+mod encoding_tests;
 
 /// Serialize a JSON value with sorted object keys for deterministic output.
 ///
@@ -124,6 +198,7 @@ mod tests {
 
     fn sample_entry() -> AuditEntry {
         AuditEntry {
+            hash_version: CURRENT_HASH_VERSION,
             community_id: Uuid::from_u128(1),
             seq: 1,
             hash: Vec::new(),
@@ -255,11 +330,10 @@ mod tests {
 
     #[test]
     fn presence_tag_distinguishes_none_from_empty() {
-        // Some(empty) must not collide with None — the presence tag prevents it.
         let mut none = sample_entry();
-        none.actor_pubkey = None;
+        none.object_id = None;
         let mut empty = sample_entry();
-        empty.actor_pubkey = Some(Vec::new());
+        empty.object_id = Some(String::new());
         assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
     }
 

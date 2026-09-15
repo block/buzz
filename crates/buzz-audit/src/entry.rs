@@ -12,6 +12,8 @@ use crate::action::AuditAction;
 /// community*. The chain is independent per tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
+    /// Encoding used to compute `hash`; legacy rows use 1, new writes use 2.
+    pub hash_version: i16,
     /// Server-resolved community this entry belongs to. Leads the primary key.
     pub community_id: Uuid,
     /// Sequence number, monotonic within `community_id` (starts at 1).
@@ -19,7 +21,7 @@ pub struct AuditEntry {
     /// SHA-256 of this entry's fields including `community_id` and `prev_hash`.
     pub hash: Vec<u8>,
     /// SHA-256 of the previous entry in *this community's* chain, or `None` for
-    /// the community's first entry (hashed as [`crate::hash::GENESIS_HASH`]).
+    /// the community's first entry. Version 2 explicitly encodes its absence.
     pub prev_hash: Option<Vec<u8>>,
     /// Action that was performed.
     pub action: AuditAction,

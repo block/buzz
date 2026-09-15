@@ -442,7 +442,8 @@ type TaxonomySweepRow = (
 /// The executor's prefix enumeration and the destructive freeze's chunk
 /// validation both fold entries through this, so "the chunk rows are exactly
 /// the frozen enumeration" reduces to digest equality. Each entry is hashed
-/// with a trailing newline so concatenation cannot alias two streams.
+/// with a trailing newline; embedded newlines are rejected so concatenation
+/// cannot alias two streams, including legacy manifests with raw keys.
 pub struct KeyStreamDigest {
     hasher: Sha256,
     last: Option<String>,
@@ -485,6 +486,11 @@ impl KeyStreamDigest {
     /// require strictly ascending serialized entries. Digest equality still
     /// binds the exact stream that was listed and chunked.
     pub fn fold_unordered(&mut self, key: &str) -> Result<()> {
+        if key.contains('\n') {
+            return Err(DbError::DeletionSafety(
+                "storage manifest entry contains the stream newline delimiter".to_string(),
+            ));
+        }
         self.hasher.update(key.as_bytes());
         self.hasher.update(b"\n");
         self.last = Some(key.to_owned());
@@ -3306,6 +3312,47 @@ mod tests {
         let mut duplicate = KeyStreamDigest::new();
         duplicate.fold("a").expect("first key");
         assert!(duplicate.fold("a").is_err());
+    }
+
+    #[test]
+    fn key_stream_rejects_newlines_without_changing_state() {
+        for ordered in [true, false] {
+            let mut digest = KeyStreamDigest::new();
+            digest.fold("a").unwrap();
+            let error = if ordered {
+                digest.fold("z\nz")
+            } else {
+                digest.fold_unordered("z\nz")
+            };
+            assert!(error.is_err());
+            // A failed fold must neither hash bytes, increment the count, nor
+            // advance `last` and reject the next otherwise valid key.
+            digest.fold("b").unwrap();
+            assert_eq!(digest.finish(), (hex::encode(Sha256::digest(b"a\nb\n")), 2));
+        }
+    }
+
+    #[test]
+    fn legacy_chunks_reject_equal_count_newline_collision() {
+        let first = vec!["_meta/c/a".to_string(), "_meta/c/b\n_meta/c/c".to_string()];
+        let second = vec!["_meta/c/a\n_meta/c/b".to_string(), "_meta/c/c".to_string()];
+        let old_bytes = |keys: &[String]| format!("{}\n", keys.join("\n"));
+        assert_eq!(old_bytes(&first), old_bytes(&second));
+        assert_eq!(first.len(), second.len());
+        let mut manifest = storage_manifest();
+        manifest.version = 4;
+        manifest.prefixes[0].object_count = 2;
+        manifest.prefixes[0].keys_digest = hex::encode(Sha256::digest(old_bytes(&first)));
+        for keys in [first, second] {
+            assert!(keys[0] < keys[1]);
+            let result = validate_manifest_key_chunks(
+                &manifest,
+                &[(0, "_meta/c/".to_string(), sqlx::types::Json(keys))],
+            );
+            assert!(
+                matches!(result, Err(DbError::DeletionSafety(message)) if message.contains("newline delimiter"))
+            );
+        }
     }
 
     #[test]

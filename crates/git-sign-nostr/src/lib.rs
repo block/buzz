@@ -109,7 +109,7 @@ impl Drop for KeypairGuard {
     }
 }
 
-const DOMAIN_SEPARATOR: &str = "nostr:git:v1:";
+const SIGNATURE_VERSION: u64 = 2;
 const ARMOR_BEGIN: &str = "-----BEGIN SIGNED MESSAGE-----";
 const ARMOR_END: &str = "-----END SIGNED MESSAGE-----";
 
@@ -883,7 +883,63 @@ fn read_keyfile_secure(path: &str) -> Result<zeroize::Zeroizing<String>, Error> 
     Ok(trimmed)
 }
 
-/// Compute the NIP-GS signing hash.
+/// Bind the timestamp, attestation presence, and each variable-length field.
+fn compute_signing_hash(
+    timestamp: u64,
+    oa: Option<&(String, String, String)>,
+    payload: &[u8],
+) -> [u8; 32] {
+    let mut engine = Sha256Hash::engine();
+    engine.input(b"nostr:git:v2:");
+    engine.input(&timestamp.to_be_bytes());
+    engine.input(&[u8::from(oa.is_some())]);
+    if let Some((owner, conditions, sig)) = oa {
+        for field in [owner, conditions, sig] {
+            engine.input(&(field.len() as u64).to_be_bytes());
+            engine.input(field.as_bytes());
+        }
+    }
+    engine.input(&(payload.len() as u64).to_be_bytes());
+    engine.input(payload);
+    Sha256Hash::from_engine(engine).to_byte_array()
+}
+
+fn verification_hash(envelope: &Envelope, payload: &[u8]) -> Result<[u8; 32], String> {
+    match envelope.version {
+        1 => {
+            // A legacy attestation starts with a hex public key. Requiring a
+            // Git object header makes it impossible to move that attestation
+            // into an unattested payload while keeping the same signed bytes.
+            let first_line = payload.split(|b| *b == b'\n').next().unwrap_or_default();
+            let oid = first_line
+                .strip_prefix(b"tree ")
+                .or_else(|| first_line.strip_prefix(b"object "));
+            if !payload.contains(&b'\n')
+                || !oid.is_some_and(|oid| {
+                    matches!(oid.len(), 40 | 64)
+                        && oid
+                            .iter()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                })
+            {
+                return Err("legacy signatures require a Git commit or tag header".into());
+            }
+            Ok(compute_legacy_signing_hash(
+                envelope.t,
+                envelope.oa.as_ref(),
+                payload,
+            ))
+        }
+        SIGNATURE_VERSION => Ok(compute_signing_hash(
+            envelope.t,
+            envelope.oa.as_ref(),
+            payload,
+        )),
+        version => Err(format!("unsupported version: {version}")),
+    }
+}
+
+/// Compute the legacy NIP-GS signing hash.
 ///
 /// ```text
 /// hash = SHA-256("nostr:git:v1:" || decimal(t) || ":" || oa_binding || payload)
@@ -892,13 +948,13 @@ fn read_keyfile_secure(path: &str) -> Result<zeroize::Zeroizing<String>, Error> 
 /// Where `oa_binding` is:
 /// - If oa present: `oa[0] || ":" || oa[1] || ":" || oa[2] || ":"`
 /// - If oa absent: empty (zero bytes)
-fn compute_signing_hash(
+fn compute_legacy_signing_hash(
     timestamp: u64,
     oa: Option<&(String, String, String)>,
     payload: &[u8],
 ) -> [u8; 32] {
     let mut engine = Sha256Hash::engine();
-    engine.input(DOMAIN_SEPARATOR.as_bytes());
+    engine.input(b"nostr:git:v1:");
     engine.input(timestamp.to_string().as_bytes());
     engine.input(b":");
 
@@ -921,15 +977,21 @@ fn compute_signing_hash(
 /// is `v, pk, sig, t[, oa]`, no whitespace, no trailing commas. We use
 /// `format!` rather than serde to guarantee this exact byte layout — serde's
 /// serialization order depends on the `Map` implementation and feature flags.
-fn build_envelope(pk: &str, sig: &str, t: u64, oa: Option<&(String, String, String)>) -> String {
+fn build_envelope(
+    version: u64,
+    pk: &str,
+    sig: &str,
+    t: u64,
+    oa: Option<&(String, String, String)>,
+) -> String {
     match oa {
         Some((owner, conditions, owner_sig)) => {
             format!(
-                r#"{{"v":1,"pk":"{pk}","sig":"{sig}","t":{t},"oa":["{owner}","{conditions}","{owner_sig}"]}}"#
+                r#"{{"v":{version},"pk":"{pk}","sig":"{sig}","t":{t},"oa":["{owner}","{conditions}","{owner_sig}"]}}"#
             )
         }
         None => {
-            format!(r#"{{"v":1,"pk":"{pk}","sig":"{sig}","t":{t}}}"#)
+            format!(r#"{{"v":{version},"pk":"{pk}","sig":"{sig}","t":{t}}}"#)
         }
     }
 }
@@ -1059,7 +1121,7 @@ fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
     drop(keypair);
 
     // Build envelope and armor
-    let json = build_envelope(&pk_hex, &sig_hex, t, oa.as_ref());
+    let json = build_envelope(SIGNATURE_VERSION, &pk_hex, &sig_hex, t, oa.as_ref());
     let armored = armor(json.as_bytes());
 
     // Write signature to stdout — errors are fatal because git reads
@@ -1174,6 +1236,7 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     // Canonical JSON reconstruction check — ensures no field reordering or
     // extra whitespace was present in the original.
     let reconstructed = build_envelope(
+        envelope.version,
         &envelope.pk,
         &envelope.sig,
         envelope.t,
@@ -1203,7 +1266,13 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     })?;
 
     // Compute signing hash
-    let hash = compute_signing_hash(envelope.t, envelope.oa.as_ref(), &payload);
+    let hash = verification_hash(&envelope, &payload).map_err(|msg| {
+        write_errsig(status, Some(&envelope.pk));
+        Error::VerifyFailed {
+            pk: Some(envelope.pk.clone()),
+            msg,
+        }
+    })?;
     let message = Message::from_digest(hash);
 
     // Parse signature
@@ -1336,6 +1405,7 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
 
 #[derive(Debug)]
 struct Envelope {
+    version: u64,
     pk: String,
     sig: String,
     t: u64,
@@ -1348,21 +1418,21 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
 
     let obj = val.as_object().ok_or("JSON must be an object")?;
 
-    // Reject unknown keys — v=1 envelope allows only: v, pk, sig, t, oa
+    // Both supported versions allow only: v, pk, sig, t, oa
     let allowed = ["v", "pk", "sig", "t", "oa"];
     for key in obj.keys() {
         if !allowed.contains(&key.as_str()) {
-            return Err(format!("unknown key in v=1 envelope: {key:?}"));
+            return Err(format!("unknown key in envelope: {key:?}"));
         }
     }
 
-    // v (required, must be 1)
+    // v (required; never fall back to an older hash on verification failure)
     let v = obj
         .get("v")
         .ok_or("missing required field: v")?
         .as_u64()
         .ok_or("v must be an integer")?;
-    if v != 1 {
+    if !matches!(v, 1 | SIGNATURE_VERSION) {
         return Err(format!("unsupported version: {v}"));
     }
 
@@ -1421,6 +1491,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
 
         // Validate oa[0] is a valid BIP-340 x-only public key (not just hex)
         PublicKey::from_hex(owner)
+            .and_then(|pk| pk.xonly())
             .map_err(|e| format!("oa[0] is not a valid BIP-340 public key: {e}"))?;
 
         // Self-attestation is meaningless — owner must differ from signer
@@ -1438,6 +1509,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
     };
 
     Ok(Envelope {
+        version: v,
         pk: pk.to_string(),
         sig: sig.to_string(),
         t,
@@ -1808,9 +1880,13 @@ Initial commit"
     #[test]
     fn test_signing_hash_matches_spec() {
         // From NIP-GS spec: SHA-256 of preimage with t=1700000000, no oa
-        let hash = compute_signing_hash(1700000000, None, &test_payload());
+        let hash = compute_legacy_signing_hash(1700000000, None, &test_payload());
         let expected = "a11a32173aa35125aaefaad8854f2eda5a144268a4a355905c841f79ff44aa18";
         assert_eq!(hex::encode(hash), expected);
+        assert_eq!(
+            hex::encode(compute_signing_hash(1700000000, None, &test_payload())),
+            "0f3a88b1c5eb1a13bcbcc30d33bfc95589182b7b7b7a548f40427e8271335fbd"
+        );
     }
 
     #[test]
@@ -1821,17 +1897,27 @@ Initial commit"
             "".to_string(),
             "54b97dfd2b7d61c1bc1b5facab9d12a991fe0ac3dcb9044b3176f63bebb6f67340eb0ad866f2d5568b78b58ba234ee9f490f8c41e64a949c200315801520ed25".to_string(),
         );
-        let hash = compute_signing_hash(1700000000, Some(&oa), &test_payload());
+        let hash = compute_legacy_signing_hash(1700000000, Some(&oa), &test_payload());
         let expected = "b61f1658836a4f63a2d2f5d621014a064435dde0765dd9c1dc79c9530fe879f0";
         assert_eq!(hex::encode(hash), expected);
+        assert_eq!(
+            hex::encode(compute_signing_hash(1700000000, Some(&oa), &test_payload())),
+            "80d4e5e24736147be9ed7c89e122e96eaef83df09ec3725b8d813f3073ea2f71"
+        );
     }
 
     #[test]
     fn test_canonical_json_no_oa() {
-        let json = build_envelope(TEST_PK, &"a".repeat(128), 1700000000, None);
+        let json = build_envelope(
+            SIGNATURE_VERSION,
+            TEST_PK,
+            &"a".repeat(128),
+            1700000000,
+            None,
+        );
         // Must be compact (no whitespace), field order: v, pk, sig, t
         assert!(!json.contains(' '));
-        assert!(json.starts_with(r#"{"v":1,"pk":""#));
+        assert!(json.starts_with(r#"{"v":2,"pk":""#));
         assert!(json.contains(r#","t":1700000000}"#));
         assert!(!json.contains("oa"));
     }
@@ -1843,7 +1929,13 @@ Initial commit"
             "".to_string(),
             "b".repeat(128),
         );
-        let json = build_envelope(TEST_PK, &"a".repeat(128), 1700000000, Some(&oa));
+        let json = build_envelope(
+            SIGNATURE_VERSION,
+            TEST_PK,
+            &"a".repeat(128),
+            1700000000,
+            Some(&oa),
+        );
         // Field order: v, pk, sig, t, oa
         assert!(json.contains(r#","oa":["#));
         let v_pos = json.find(r#""v""#).unwrap();
@@ -2018,7 +2110,7 @@ Initial commit"
         let message = Message::from_digest(hash);
         let sig = SECP256K1.sign_schnorr(&message, &keypair);
         let sig_hex = hex::encode(sig.serialize());
-        let json = build_envelope(&pk_hex, &sig_hex, t, None);
+        let json = build_envelope(SIGNATURE_VERSION, &pk_hex, &sig_hex, t, None);
         armor(json.as_bytes())
     }
 
@@ -2031,6 +2123,7 @@ Initial commit"
         let json_str = std::str::from_utf8(&decoded).map_err(|e| format!("utf8: {e}"))?;
         let envelope = parse_envelope(json_str)?;
         let reconstructed = build_envelope(
+            envelope.version,
             &envelope.pk,
             &envelope.sig,
             envelope.t,
@@ -2040,7 +2133,7 @@ Initial commit"
             return Err("non-canonical JSON".to_string());
         }
         let pk = PublicKey::from_hex(&envelope.pk).map_err(|e| format!("invalid pk: {e}"))?;
-        let hash = compute_signing_hash(envelope.t, envelope.oa.as_ref(), payload);
+        let hash = verification_hash(&envelope, payload)?;
         let message = Message::from_digest(hash);
         let sig_bytes = hex::decode(&envelope.sig).map_err(|_| "bad sig hex")?;
         let sig = Signature::from_slice(&sig_bytes).map_err(|_| "bad sig")?;
@@ -2372,9 +2465,9 @@ Initial commit"
     }
 
     #[test]
-    fn test_envelope_rejects_v_not_1() {
+    fn test_envelope_rejects_unsupported_version() {
         let json = format!(
-            r#"{{"v":2,"pk":"{pk}","sig":"{sig}","t":1700000000}}"#,
+            r#"{{"v":3,"pk":"{pk}","sig":"{sig}","t":1700000000}}"#,
             pk = valid_pk(),
             sig = valid_sig(),
         );
@@ -2434,7 +2527,7 @@ Initial commit"
     fn test_canonical_json_roundtrip() {
         let json = valid_envelope_json();
         let env = parse_envelope(&json).unwrap();
-        let rebuilt = build_envelope(&env.pk, &env.sig, env.t, env.oa.as_ref());
+        let rebuilt = build_envelope(env.version, &env.pk, &env.sig, env.t, env.oa.as_ref());
         assert_eq!(rebuilt.as_bytes(), json.as_bytes());
     }
 

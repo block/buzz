@@ -81,6 +81,12 @@ run_unit_tests() {
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 
+  run_test_step "buzz-audit tests" \
+    cargo test -p buzz-audit --lib -- --nocapture
+
+  run_test_step "git-sign-nostr tests" \
+    cargo test -p git-sign-nostr -- --nocapture
+
   run_test_step "buzz-auth unit tests" \
     cargo test -p buzz-auth --lib -- --nocapture
 

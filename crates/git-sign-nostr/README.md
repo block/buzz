@@ -44,3 +44,16 @@ Git invokes this program as a signing/verification backend:
   payload from stdin, verifies signature from file, status lines to fd 1 (stdout)
 
 See [NIP-GS](../../docs/nips/NIP-GS.md) for the full specification.
+
+### Signature encoding upgrade
+
+New signatures use NIP-GS version 2, with an attestation presence byte and
+length-prefixed fields. Upgrade verifiers before enabling the new signer;
+older binaries reject version 2. Existing version 1 commit and tag signatures
+remain verifiable. Legacy signatures over arbitrary payloads are rejected
+because their optional attestation can otherwise be moved into the payload
+without changing the signed bytes. See [NIP-GS](../../docs/nips/NIP-GS.md#signing-hash).
+
+Legacy verification assumes the original signer received a Git object. It
+cannot recover the intended attestation boundary of historical version 1
+signatures produced over arbitrary bytes.
