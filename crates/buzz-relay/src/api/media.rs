@@ -436,6 +436,21 @@ pub async fn upload_blob(
             }
         })??;
 
+    // Every successful pipeline, including deduplicated uploads, has verified
+    // the supplied bytes against this hash. A signed hash alone proves nothing.
+    state
+        .db
+        .record_media_upload(
+            auth.tenant.community(),
+            &descriptor.sha256,
+            auth.auth_event.pubkey.as_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to record media uploader");
+            MediaError::ServiceUnavailable
+        })?;
+
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
         &state.config.relay_url,
@@ -546,11 +561,23 @@ async fn authenticate_media_read(
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
 
+    let allowed = state
+        .db
+        .can_read_media(tenant.community(), sha256, auth_event.pubkey.as_bytes())
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "media authorization lookup failed");
+            MediaError::ServiceUnavailable
+        })?;
+    if !allowed {
+        return Err(MediaError::NotFound);
+    }
+
     Ok(MediaReadAuth { tenant })
 }
 
 fn blob_cache_control() -> &'static str {
-    "private, max-age=31536000, immutable"
+    "private, no-store"
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -1009,6 +1036,10 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 }
 
 #[cfg(test)]
+#[path = "media_access_tests.rs"]
+mod access_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1131,12 +1162,25 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
+        test_state_with_media(None).await
+    }
+
+    pub(super) async fn test_state_with_media(endpoint: Option<&str>) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.database_url = crate::test_support::database_url();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;
         config.media_max_concurrent_uploads = 2;
         config.media_max_concurrent_uploads_per_pubkey = 1;
+        if let Some(endpoint) = endpoint {
+            config.media.s3_endpoint = endpoint.to_string();
+            config.media.s3_access_key = "test".into();
+            config.media.s3_secret_key = "test".into();
+            config.media.s3_addressing_style = buzz_media::config::S3AddressingStyle::Path;
+            config.media.upload_records_enabled = false;
+            config.media_uploads_per_minute = 100;
+        }
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());

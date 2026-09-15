@@ -6,8 +6,25 @@
 -- apply caller must run this idempotent script so fresh bootstraps converge on
 -- the same live database contract as migration-managed databases.
 
+-- Function-based indexes retain pgschema's temporary schema qualifier in the
+-- generated plan. Create this index after functions exist in the real schema.
+CREATE INDEX IF NOT EXISTS idx_events_media_hashes
+    ON events USING GIN (buzz_media_hashes(content, tags));
+
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.indexrelid = 'idx_events_media_hashes'::regclass
+          AND i.indrelid = 'events'::regclass AND i.indisvalid
+          AND am.amname = 'gin'
+          AND pg_get_expr(i.indexprs, i.indrelid) = 'buzz_media_hashes(content, tags)'
+    ) THEN
+        RAISE EXCEPTION 'events must index media references after pgschema apply';
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM pg_inherits
         WHERE inhparent = 'events'::regclass
