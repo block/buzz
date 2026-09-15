@@ -1,5 +1,6 @@
 import AVFoundation
 import BuzzPushKit
+import DeclaredAgeRange
 import Flutter
 import UIKit
 import UserNotifications
@@ -16,7 +17,7 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
-  private var appGroupIdentifier: String? {
+  var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
   private var pushKeychainAccessGroup: String? {
@@ -29,6 +30,10 @@ import os.log
   )
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
+  private var ageSignalChannel: FlutterMethodChannel?
+  private var ageSignalTask: Task<Void, Never>?
+  private var ageSignalRequestID: UUID?
+  private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
@@ -40,8 +45,26 @@ import os.log
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    do {
+      try prepareLaunchAgeRestrictionFence()
+    } catch {
+      // Flutter must start so the existing age-check retry screen is reachable.
+      // requestAgeSignal retries this protection before returning any age result.
+      os_log(
+        "Launch notification protection failed: %{public}@", type: .error,
+        error.localizedDescription)
+    }
     UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func prepareLaunchAgeRestrictionFence() throws {
+    let container = appGroupIdentifier.flatMap {
+      FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+    }
+    try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: container) {
+      try BuzzPushKeychain.replace(signingKeys: [:], accessGroup: self.pushKeychainAccessGroup)
+    }
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -86,6 +109,21 @@ import os.log
       } else {
         result(false)
       }
+    }
+
+    ageSignalChannel = FlutterMethodChannel(
+      name: "buzz/age_signal",
+      binaryMessenger: messenger
+    )
+    let ageSignalRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzAgeSignal"
+    )
+    ageSignalChannel?.setMethodCallHandler { [weak self] call, result in
+      self?.handleAgeSignalMethodCall(
+        call,
+        viewController: ageSignalRegistrar?.viewController,
+        result: result
+      )
     }
 
     if let inlinePhotoPickerRegistrar = engineBridge.pluginRegistry.registrar(
@@ -223,6 +261,119 @@ import os.log
       }
     }
   }
+
+  func handleAgeSignalMethodCall(
+    _ call: FlutterMethodCall,
+    viewController: UIViewController?,
+    result: @escaping FlutterResult
+  ) {
+    // iOS can retire the request in process. The generation fence prevents
+    // a late result from the cancelled task from completing a fresh request.
+    if call.method == "cancelAgeSignalRequest" || call.method == "restartForAgeSignal" {
+      cancelAgeSignalRequest()
+      result(true)
+      return
+    }
+    guard call.method == "requestAgeSignal" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    do {
+      try prepareLaunchAgeRestrictionFence()
+    } catch {
+      result(
+        FlutterError(
+          code: "age_signal_notification_protection_failed",
+          message: "Unable to protect notifications before checking age. Please retry.",
+          details: error.localizedDescription
+        )
+      )
+      return
+    }
+    guard #available(iOS 26.0, *) else {
+      result(Self.noAgeSignalResponse)
+      return
+    }
+    guard let viewController else {
+      result(
+        FlutterError(
+          code: "age_signal_unavailable",
+          message: "The age signal presenter is unavailable.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let requestID = UUID()
+    ageSignalRequestID = requestID
+    ageSignalResult = result
+    ageSignalTask = Task { @MainActor [weak self] in
+      do {
+        let response = try await AgeRangeService.shared.requestAgeRange(
+          ageGates: 18,
+          in: viewController
+        )
+        switch response {
+        case .declinedSharing:
+          self?.completeAgeSignalRequest(requestID, value: Self.noAgeSignalResponse)
+        case .sharing(let range):
+          self?.completeAgeSignalRequest(
+            requestID,
+            value: BuzzAgeSignalPayload.sharing(exclusiveUpperBound: range.upperBound)
+          )
+        @unknown default:
+          self?.completeAgeSignalRequest(
+            requestID,
+            value:
+            FlutterError(
+              code: "age_signal_unavailable",
+              message: "The age signal response is unsupported.",
+              details: nil
+            )
+          )
+        }
+      } catch {
+        self?.completeAgeSignalRequest(
+          requestID,
+          value:
+          FlutterError(
+            code: "age_signal_unavailable",
+            message: "The age signal request failed.",
+            details: String(describing: type(of: error))
+          )
+        )
+      }
+    }
+  }
+
+  private func completeAgeSignalRequest(_ requestID: UUID, value: Any?) {
+    guard ageSignalRequestID == requestID, let result = ageSignalResult else { return }
+    ageSignalRequestID = nil
+    ageSignalResult = nil
+    ageSignalTask = nil
+    result(value)
+  }
+
+  private func cancelAgeSignalRequest() {
+    let result = ageSignalResult
+    ageSignalRequestID = nil
+    ageSignalResult = nil
+    ageSignalTask?.cancel()
+    ageSignalTask = nil
+    result?(
+      FlutterError(
+        code: "age_signal_cancelled",
+        message: "The age signal request was cancelled.",
+        details: nil
+      )
+    )
+  }
+
+  private static let noAgeSignalResponse: [String: Any] = [
+    "status": "noSignal",
+    "ageUpper": NSNull(),
+  ]
 
   private static func handleQrScannerMethodCall(
     _ call: FlutterMethodCall,

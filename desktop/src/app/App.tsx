@@ -37,7 +37,6 @@ import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboa
 import {
   MachineOnboardingFlow,
   type MachineOnboardingPage,
-  type PostOnboardingNavigation,
 } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
@@ -299,9 +298,11 @@ function CommunityIdentityReplacementSentinel({
 }
 
 function AppReady({
+  continueOnboarding,
   isSharedIdentity,
   isCommunitySwitch,
 }: {
+  continueOnboarding: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
 }) {
@@ -319,12 +320,18 @@ function AppReady({
     return <RelaunchRequiredScreen />;
   }
 
-  if (onboarding.stage === "onboarding") {
+  if (
+    onboarding.stage === "onboarding" ||
+    (continueOnboarding && onboarding.stage === "blocking")
+  ) {
     return (
       <OnboardingFlow
         actions={onboarding.flow.actions}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
+        initialProfileDecisionSettled={
+          onboarding.flow.initialProfileDecisionSettled
+        }
         key={onboarding.currentPubkey ?? "anonymous"}
       />
     );
@@ -351,10 +358,12 @@ function AppReady({
 }
 
 function CommunityApp({
+  continueOnboarding,
   currentPubkey,
   onBackToMachineConfig,
   sharedIdentity,
 }: {
+  continueOnboarding: boolean;
   currentPubkey: string | null;
   onBackToMachineConfig: () => void;
   sharedIdentity: boolean;
@@ -415,6 +424,7 @@ function CommunityApp({
     hasSwitchedCommunityRef.current = true;
   }
   const isCommunitySwitch = hasSwitchedCommunityRef.current;
+  const isContinuingOnboarding = continueOnboarding && !isCommunitySwitch;
 
   const community = useCommunityInit(
     activeCommunity,
@@ -581,7 +591,7 @@ function CommunityApp({
   // overlay just keeps the bee on screen long enough to be seen, then fades.
   // Community switches keep their quiet gate.
   const showBootSplashOverlay =
-    bootSplashPhase !== "done" && !isCommunitySwitch;
+    bootSplashPhase !== "done" && !isCommunitySwitch && !isContinuingOnboarding;
 
   let appContent: ReactNode = null;
   if (!transaction) {
@@ -636,6 +646,7 @@ function CommunityApp({
         />
         <CommunityThemeController />
         <AppReady
+          continueOnboarding={isContinuingOnboarding}
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
           isSharedIdentity={sharedIdentity}
@@ -654,7 +665,7 @@ function CommunityApp({
           </div>
         ) : null}
       </CommunityQueryProvider>
-    ) : isCommunitySwitch ? (
+    ) : isCommunitySwitch || isContinuingOnboarding ? (
       <CommunitySwitchGate />
     ) : (
       <AppLoadingGate />
@@ -692,42 +703,22 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   });
   const [machineInitialPage, setMachineInitialPage] =
     useState<MachineOnboardingPage>();
-  const [postOnboardingNav, setPostOnboardingNav] =
-    useState<PostOnboardingNavigation | null>(null);
+  const [continueOnboarding, setContinueOnboarding] = useState(false);
 
   const reopenMachineConfig = useCallback(() => {
+    setContinueOnboarding(false);
     setMachineInitialPage("config");
     machine.reopen();
   }, [machine.reopen]);
 
   const completeMachineOnboarding = useCallback(
-    (pubkey?: string) => {
+    (pubkey?: string, options?: { continueToProfile?: boolean }) => {
+      setContinueOnboarding(options?.continueToProfile === true);
       setMachineInitialPage(undefined);
       machine.complete(pubkey);
     },
     [machine.complete],
   );
-
-  const navigateAfterOnboarding = useCallback(
-    (nav: PostOnboardingNavigation) => {
-      setPostOnboardingNav(nav);
-    },
-    [],
-  );
-
-  // Execute the pending navigation once the RouterProvider is mounted (i.e.
-  // machine.stage transitions to "ready").  We wait for the ready stage rather
-  // than using setTimeout(0) so the router is guaranteed to exist before we call
-  // router.navigate().
-  useEffect(() => {
-    if (machine.stage === "ready" && postOnboardingNav) {
-      void router.navigate({
-        to: postOnboardingNav.to,
-        search: postOnboardingNav.search ?? {},
-      });
-      setPostOnboardingNav(null);
-    }
-  }, [machine.stage, postOnboardingNav]);
 
   const openAddCommunity = useCallback(
     (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
@@ -765,6 +756,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   if (machine.stage === "ready") {
     return (
       <CommunityApp
+        continueOnboarding={continueOnboarding}
         currentPubkey={machine.currentPubkey}
         onBackToMachineConfig={reopenMachineConfig}
         sharedIdentity={sharedIdentity}
@@ -789,7 +781,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
-        navigateAfterComplete={navigateAfterOnboarding}
         queryClient={machine.queryClient}
       />
       {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}

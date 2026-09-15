@@ -45,7 +45,16 @@ enum BuzzPushKeychain {
 
   static func replace(signingKeys: [String: String], accessGroup: String?) throws {
     var query = baseQuery(accessGroup: accessGroup)
-    SecItemDelete(query as CFDictionary)
+    let deletionStatus = SecItemDelete(query as CFDictionary)
+    guard deletionStatus == errSecSuccess || deletionStatus == errSecItemNotFound else {
+      throw NSError(
+        domain: NSOSStatusErrorDomain, code: Int(deletionStatus),
+        userInfo: [
+          NSLocalizedDescriptionKey: SecCopyErrorMessageString(deletionStatus, nil)
+            ?? "Keychain deletion failed" as CFString
+        ]
+      )
+    }
     for (communityID, privateKeyHex) in signingKeys {
       query[kSecAttrAccount as String] = communityID
       query[kSecValueData as String] = Data(privateKeyHex.utf8)
