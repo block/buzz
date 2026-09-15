@@ -293,6 +293,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    if state.config.experimental_interactions {
+        info.supported_extensions
+            .get_or_insert_default()
+            .push(buzz_core::interaction::EXTENSION.to_string());
+    }
     let tenant_host = if state.config.push_enabled {
         crate::tenant::bind_community(&state.db, raw_host)
             .await

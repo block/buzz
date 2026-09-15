@@ -491,6 +491,14 @@ pub const KIND_STREAM_MESSAGE_SCHEDULED: u32 = 40006;
 pub const KIND_STREAM_REMINDER: u32 = 40007;
 /// A diff/patch message showing file changes (unified diff format).
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
+/// Experimental channel interaction prompt (typed schema in tags).
+pub const KIND_INTERACTION_PROMPT: u32 = 40010;
+/// Experimental responder-signed interaction answer.
+pub const KIND_INTERACTION_RESPONSE: u32 = 40011;
+/// Experimental asker-signed close command; does not delete the prompt.
+pub const KIND_INTERACTION_CLOSE: u32 = 40012;
+/// Experimental relay-signed, addressable interaction state; d = prompt ID.
+pub const KIND_INTERACTION_STATE: u32 = 39010;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
 /// System message for channel state changes (join, leave, rename, etc.).
@@ -635,6 +643,10 @@ pub const KIND_PROJECT: u32 = 30621;
 
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
+    KIND_INTERACTION_PROMPT,
+    KIND_INTERACTION_RESPONSE,
+    KIND_INTERACTION_CLOSE,
+    KIND_INTERACTION_STATE,
     KIND_PROFILE,
     KIND_TEXT_NOTE,
     KIND_CONTACT_LIST,
@@ -834,6 +846,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
         KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_INTERACTION_STATE
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
