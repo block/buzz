@@ -1055,6 +1055,16 @@ impl Db {
         }
     }
 
+    /// Return a reference to the writer pool.
+    ///
+    /// Callers that need a pool handle for standalone free functions (e.g.,
+    /// `buzz_db::insert_mentions`) can use this. Prefer the `Db` method
+    /// equivalents when they exist; use `pool()` only for functions that have
+    /// no `Db` wrapper yet.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Refresh all expected operation-specific waiter gauges, including zero.
     ///
     /// The relay pool sampler calls this periodically so an exporter idle

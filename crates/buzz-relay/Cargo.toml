@@ -39,6 +39,7 @@ tower-http = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -94,7 +95,7 @@ mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag 
 buzz-test-client = { path = "../buzz-test-client" }
 ed25519-dalek = "=3.0.0-rc.0"
 buzz-core = { workspace = true, features = ["test-utils"] }
-buzz-auth = { workspace = true, features = ["dev"] }
+buzz-auth = { workspace = true, features = ["dev", "test-utils"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = "0.3"

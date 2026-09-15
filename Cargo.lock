@@ -1343,6 +1343,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "infer",
+ "jsonwebtoken",
  "mesh-llm-host-runtime",
  "mesh-llm-sdk",
  "metrics",
