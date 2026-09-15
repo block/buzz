@@ -333,7 +333,7 @@ buzz users presence --pubkeys "$MY_PUBKEY" | jq .
 buzz users set-presence --status online | jq .
 buzz users set-presence --status away | jq .
 buzz users set-presence --status offline | jq .
-# Note: set-presence may fail — kind:20001 is ephemeral and rejected by the HTTP bridge
+# set-presence publishes kind:20001 over WebSocket because ephemeral events are rejected by the HTTP bridge
 
 # users set-status — NIP-38 kind:30315 on the d:general coordinate
 buzz users set-status --text "reviewing PRs" --emoji "🔍" | jq .
