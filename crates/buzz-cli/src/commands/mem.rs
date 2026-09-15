@@ -321,9 +321,12 @@ pub async fn cmd_set(
     let slug =
         normalize_slug(raw_slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
     let value = if raw_value == "-" {
-        // Bound the stdin read so a runaway producer can't OOM us. We allow
-        // one extra byte over the NIP-44 plaintext cap so the build step can
-        // surface an exact `BodyTooLarge` if the cap is breached.
+        // Bound the stdin read so a runaway producer can't OOM us. This is a
+        // coarse guard at the NIP-44 spec size (+1 byte so an over-cap value is
+        // still detectable rather than silently truncated), not the
+        // authoritative size check: `build_event` enforces the effective encrypt
+        // limit (`NIP44_ENCRYPT_MAX`, 65,408) and surfaces the exact
+        // `BodyTooLarge`.
         let limit = engram::NIP44_PLAINTEXT_MAX + 1;
         let mut buf = String::new();
         std::io::stdin()
