@@ -82,8 +82,6 @@ import {
 
 type MessageQueryContext = {
   optimisticId: string;
-  previousMessages: RelayEvent[];
-  previousWindow: ChannelWindowStore | undefined;
   channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
@@ -717,8 +715,6 @@ export function useSendMessageMutation(
 
       return {
         optimisticId: optimisticMessage.id,
-        previousMessages,
-        previousWindow,
         channelId: effectiveChannel.id,
         queryKey,
       };
@@ -732,10 +728,20 @@ export function useSendMessageMutation(
         return;
       }
 
-      queryClient.setQueryData(context.queryKey, context.previousMessages);
-      queryClient.setQueryData(
+      // Roll back only this send. Restoring its pre-send snapshot would erase
+      // replies, edits, history pages, and other sends received in the meantime.
+      queryClient.setQueryData<ChannelWindowStore>(
         channelWindowKey(context.channelId),
-        context.previousWindow,
+        (current) =>
+          current && {
+            ...current,
+            liveOverlay: current.liveOverlay.filter(
+              (event) => event.id !== context.optimisticId,
+            ),
+          },
+      );
+      queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current) =>
+        current?.filter((event) => event.id !== context.optimisticId),
       );
     },
     onSuccess: (message, _variables, context) => {
