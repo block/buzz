@@ -5898,6 +5898,14 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .expect("secret key bech32 encoding should never fail"),
                 },
             ];
+            for name in buzz_ws_client::identity_adapter::ENV_KEYS {
+                if let Ok(value) = std::env::var(name) {
+                    env.push(EnvVar {
+                        name: name.into(),
+                        value,
+                    });
+                }
+            }
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {

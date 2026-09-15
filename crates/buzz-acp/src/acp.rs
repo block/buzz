@@ -10,7 +10,9 @@
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout};
+#[cfg(not(test))]
+use tokio::process::ChildStdout;
+use tokio::process::{Child, ChildStdin};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -38,10 +40,19 @@ pub struct McpServer {
 }
 
 /// A single environment variable for an MCP server.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for EnvVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvVar")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Stop reason returned by `session/prompt` when the agent finishes a turn.
@@ -149,7 +160,10 @@ pub struct AcpClient {
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
+    #[cfg(not(test))]
     reader: FramedRead<ChildStdout, LinesCodec>,
+    #[cfg(test)]
+    reader: FramedRead<Box<dyn tokio::io::AsyncRead + Send + Unpin>, LinesCodec>,
     /// Monotonically increasing JSON-RPC request id counter.
     /// Harness-generated IDs are always numeric.
     next_id: u64,
@@ -560,7 +574,13 @@ impl AcpClient {
         Ok(Self {
             child,
             stdin,
+            #[cfg(not(test))]
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
+            #[cfg(test)]
+            reader: FramedRead::new(
+                Box::new(stdout),
+                LinesCodec::new_with_max_length(MAX_LINE_SIZE),
+            ),
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
@@ -1125,7 +1145,9 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        // session/new carries MCP credentials (including enterprise capabilities).
+        // Log only method/id; never serialize credential-bearing parameters.
+        tracing::debug!(target: "acp::wire", method, id, "→ request");
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -3206,31 +3228,54 @@ mod tests {
         );
     }
 
+    // Drives the actual bounded reader/deadline implementation with in-memory
+    // bytes and virtual time. No dependency on OS scheduling a shell every 50ms.
+    async fn assert_activity_resets_idle(update: serde_json::Value, count: u32, idle_ms: u64) {
+        let mut client = spawn_script("read _done").await;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        client.reader = FramedRead::new(
+            Box::new(reader),
+            LinesCodec::new_with_max_length(MAX_LINE_SIZE),
+        );
+        tokio::time::pause();
+        let max_dur = std::time::Duration::from_secs(10);
+        let start = tokio::time::Instant::now();
+        let read = client.read_until_response_with_idle_timeout(
+            "test",
+            999,
+            std::time::Duration::from_millis(idle_ms),
+            start + max_dur,
+            max_dur,
+        );
+        let send = async {
+            for _ in 0..count {
+                let message = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"update":update}});
+                writer
+                    .write_all(format!("{message}\n").as_bytes())
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            // Keep the pipe open: the production result must be idle, not EOF.
+            std::future::pending::<()>().await;
+        };
+        tokio::pin!(send);
+        let result = tokio::select! { result = read => result, _ = &mut send => unreachable!() };
+        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+        let expected = std::time::Duration::from_millis(u64::from(count - 1) * 50 + idle_ms);
+        // Tokio's millisecond timer wheel rounds each scheduled wake. Keep the
+        // exact lower bound, allowing at most two ticks per scheduled timer.
+        assert!(start.elapsed() >= expected);
+        assert!(
+            start.elapsed()
+                <= expected + std::time::Duration::from_millis(u64::from(count + 1) * 2)
+        );
+        tokio::time::resume();
+    }
+
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
-        )
-        .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(200),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+        assert_activity_resets_idle(serde_json::json!({"sessionUpdate":"agent_thought_chunk", "content":{"text":"thinking"}}), 10, 200).await;
     }
 
     #[tokio::test]
@@ -3405,33 +3450,8 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
-        )
-        .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
+        assert_activity_resets_idle(serde_json::json!({"sessionUpdate":"keepalive"}), 20, 100)
             .await;
-        let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
-        assert!(
-            elapsed >= std::time::Duration::from_millis(500),
-            "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(5));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]

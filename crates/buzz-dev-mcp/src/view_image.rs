@@ -50,7 +50,7 @@ pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lifetime of a Blossom `t=get` read token for relay media fetches.
 /// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
-const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Build the decoder allocation cap. Centralised so the resize path uses the
 /// same value tests can reason about.
@@ -322,6 +322,18 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
     let auth = relay_media_get_auth(&parsed);
+    let enterprise = match std::env::var("BUZZ_NIP_FI_ORIGINS") {
+        Ok(origins) => buzz_ws_client::federated_identity::IdentitySession::new(
+            &origins.split(',').collect::<Vec<_>>(),
+        )
+        .and_then(|s| s.protects(url))
+        .map_err(|e| invalid_params(e.to_string()))?,
+        Err(std::env::VarError::NotPresent) => false,
+        Err(_) => return Err(invalid_params("invalid enterprise configuration".into())),
+    };
+    if enterprise && auth.is_none() {
+        return Err(invalid_params("enterprise media proof unavailable".into()));
+    }
     let mut client_builder = reqwest::Client::builder()
         .connect_timeout(FETCH_TIMEOUT)
         .timeout(FETCH_TIMEOUT);
@@ -343,6 +355,15 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
                 req = req.header("x-auth-tag", auth_tag);
             }
         }
+    }
+    if enterprise {
+        let raw = std::env::var("BUZZ_PRIVATE_KEY")
+            .map_err(|_| invalid_params("enterprise signing key missing".into()))?;
+        let keys = nostr::Keys::parse(&raw)
+            .map_err(|_| invalid_params("enterprise signing key invalid".into()))?;
+        req = buzz_ws_client::identity_adapter::authorize(req, &keys)
+            .await
+            .map_err(|e| invalid_params(e.to_string()))?;
     }
     let resp = req
         .send()

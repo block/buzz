@@ -1,3 +1,4 @@
+import '../../shared/auth/federated_identity.dart';
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -495,6 +496,7 @@ final class MobileHuddleController extends Notifier<bool> {
       throw StateError('A paired identity is required.');
     }
     return HuddleConnectionParameters(
+      federatedHeaders: ref.read(federatedIdentityProvider).headers,
       relayWebSocketUrl: config.wsUrl,
       nsec: nsec,
       parentChannelId: parentChannelId,

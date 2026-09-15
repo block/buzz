@@ -49,6 +49,7 @@ pub(crate) struct GitAuthConfig {
     credential_helper: Option<std::path::PathBuf>,
     nsec: String,
     allow_file_transport: bool,
+    enterprise_env: Vec<(String, String)>,
 }
 
 fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
@@ -77,6 +78,93 @@ pub(crate) fn run_git(
         LOCAL_GIT_TIMEOUT
     };
     configure_git_auth(&mut command, auth, needs_credentials);
+    if needs_credentials && !auth.enterprise_env.is_empty() {
+        // This function runs in spawn_blocking. Native broker refreshes just
+        // before Git starts; capabilities never enter a git config file.
+        let keys = Keys::parse(&auth.nsec).map_err(|_| "invalid git identity")?;
+        let endpoint = auth
+            .enterprise_env
+            .iter()
+            .find(|(k, _)| k == "BUZZ_NIP_FI_ENDPOINT")
+            .map(|(_, v)| v)
+            .ok_or("missing broker")?;
+        let credential = auth
+            .enterprise_env
+            .iter()
+            .find(|(k, _)| k == "BUZZ_NIP_FI_CREDENTIAL")
+            .map(|(_, v)| v)
+            .ok_or("missing broker credential")?;
+        let relay = auth
+            .enterprise_env
+            .iter()
+            .find(|(k, _)| k == "BUZZ_NIP_FI_ORIGINS")
+            .map(|(_, v)| v)
+            .ok_or("missing broker origin")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "git authentication unavailable")?;
+        let assertion = runtime.block_on(async {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| "git authentication unavailable")?;
+            let result = buzz_ws_client_pkg::identity_adapter::exchange(
+                &client, endpoint, credential, &keys, relay, None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let identity = buzz_ws_client_pkg::federated_identity::IdentitySession::new(&[relay])
+                .map_err(|e| e.to_string())?;
+            identity
+                .install(
+                    0,
+                    result
+                        .into_assertion(keys.public_key(), crate::federated_identity::now()?)
+                        .map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+            identity
+                .header(relay, keys.public_key(), crate::federated_identity::now()?)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "git assertion missing".to_string())
+        })?;
+        let base = command
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_CONFIG_COUNT")
+            .and_then(|(_, v)| v)
+            .and_then(|v| v.to_str())
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or("git configuration missing")?;
+        let origin = crate::relay::relay_http_base_url(relay);
+        let entries = [
+            (format!("http.{origin}/git.extraHeader"), String::new()),
+            (
+                format!("http.{origin}/git.extraHeader"),
+                format!(
+                    "Nostr-Federated-Identity: {}",
+                    assertion.to_str().map_err(|_| "invalid assertion")?
+                ),
+            ),
+            ("http.followRedirects".into(), "false".into()),
+        ];
+        command.env("GIT_CONFIG_COUNT", (base + entries.len()).to_string());
+        for (i, (key, value)) in entries.into_iter().enumerate() {
+            command
+                .env(format!("GIT_CONFIG_KEY_{}", base + i), key)
+                .env(format!("GIT_CONFIG_VALUE_{}", base + i), value);
+        }
+        for key in [
+            "GIT_TRACE",
+            "GIT_TRACE_CURL",
+            "GIT_CURL_VERBOSE",
+            "GIT_TRACE2",
+            "GIT_TRACE2_EVENT",
+            "GIT_TRACE2_PERF",
+        ] {
+            command.env_remove(key);
+        }
+    }
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -200,7 +288,29 @@ fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
 
 pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
     let keys = state.signing_keys()?;
-    build_git_auth_config_for_keys(&keys)
+    build_scoped_git_auth_config(state, &keys)
+}
+
+pub(crate) fn build_scoped_git_auth_config(
+    state: &AppState,
+    keys: &Keys,
+) -> Result<GitAuthConfig, String> {
+    let mut auth = build_git_auth_config_for_keys(keys)?;
+    let relay = crate::relay::relay_ws_url_with_override(state);
+    if crate::federated_identity::session(state)?
+        .protects(&relay)
+        .map_err(|e| e.to_string())?
+    {
+        let app = state
+            .app_handle
+            .lock()
+            .map_err(|_| "application unavailable")?
+            .clone()
+            .ok_or("application unavailable")?;
+        auth.enterprise_env =
+            crate::federated_agent_broker::launch_env(&app, &keys.public_key().to_hex(), &relay)?;
+    }
+    Ok(auth)
 }
 
 pub(crate) fn build_git_clone_auth_config(
@@ -214,6 +324,7 @@ pub(crate) fn build_git_clone_auth_config(
             credential_helper: None,
             nsec: String::new(),
             allow_file_transport: false,
+            enterprise_env: vec![],
         });
     }
     build_git_auth_config(state)
@@ -231,6 +342,7 @@ pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfi
         credential_helper,
         nsec,
         allow_file_transport: false,
+        enterprise_env: vec![],
     })
 }
 

@@ -3,16 +3,19 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../relay/nostr_models.dart';
 import 'huddle_wire.dart';
+import '../auth/federated_identity.dart';
 
 /// Immutable connection inputs for one Huddle audio WebSocket.
 @immutable
 final class HuddleConnectionParameters {
+  final FederatedHeaders? federatedHeaders;
   final String relayWebSocketUrl;
   final String nsec;
   final String parentChannelId;
   final String ephemeralChannelId;
 
   HuddleConnectionParameters({
+    this.federatedHeaders,
     required this.relayWebSocketUrl,
     required this.nsec,
     required this.parentChannelId,

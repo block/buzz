@@ -31,6 +31,29 @@ void main() {
     PaintingBinding.instance.imageCache.clearLiveImages();
   });
 
+  test(
+    'media composes current enterprise evidence with a cached local proof',
+    () {
+      final keys = nostr.Keys.generate();
+      var token = 'Bearer first';
+      final auth = MediaGetAuthService(
+        baseUrl: _relayBase,
+        nsec: keys.nsec,
+        federatedHeaders: (url, nsec) {
+          expect(url, _mediaUrl);
+          expect(nsec, keys.nsec);
+          return {'Nostr-Federated-Identity': token};
+        },
+      );
+      final first = auth.headersFor(_mediaUrl);
+      token = 'Bearer second';
+      final next = auth.headersFor(_mediaUrl);
+      expect(next['Authorization'], first['Authorization']);
+      expect(next['Nostr-Federated-Identity'], 'Bearer second');
+      expect(auth.headersFor('https://elsewhere.example/media/x'), isEmpty);
+    },
+  );
+
   group('MediaGetAuthService memoization', () {
     test('repeated calls return byte-identical headers', () {
       final nsec = nostr.Keys.generate().nsec;
@@ -47,8 +70,8 @@ void main() {
       final auth = _auth(nsec: nsec, now: () => current);
 
       final first = auth.headersFor(_mediaUrl);
-      // 600s lifetime - 60s margin = re-sign boundary at +540s.
-      current = current.add(const Duration(seconds: 539));
+      // 60s lifetime - 10s margin = re-sign boundary at +50s.
+      current = current.add(const Duration(seconds: 49));
       expect(identical(auth.headersFor(_mediaUrl), first), isTrue);
 
       current = current.add(const Duration(seconds: 2));

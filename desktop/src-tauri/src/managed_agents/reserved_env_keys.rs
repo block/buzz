@@ -28,6 +28,9 @@
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Identity / secrets.
     "BUZZ_PRIVATE_KEY",
+    "BUZZ_NIP_FI_ENDPOINT",
+    "BUZZ_NIP_FI_CREDENTIAL",
+    "BUZZ_NIP_FI_ORIGINS",
     "NOSTR_PRIVATE_KEY",
     "BUZZ_AUTH_TAG",
     "BUZZ_API_TOKEN",

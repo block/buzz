@@ -229,7 +229,18 @@ final class HuddleTransport implements HuddleTransportClient {
     );
 
     try {
-      final channel = _channelFactory(parameters.audioWebSocketUri);
+      final headers = parameters.federatedHeaders?.call(
+        parameters.audioWebSocketUri.toString(),
+        parameters.nsec,
+      );
+      // Sketch: production authenticated transport; factory seam needs a header argument.
+      final channel = headers == null || headers.isEmpty
+          ? _channelFactory(parameters.audioWebSocketUri)
+          : IOWebSocketChannel.connect(
+              parameters.audioWebSocketUri,
+              headers: headers,
+              pingInterval: const Duration(seconds: 30),
+            );
       _channel = channel;
       await channel.ready.timeout(connectTimeout);
       if (!_isCurrent(generation)) {

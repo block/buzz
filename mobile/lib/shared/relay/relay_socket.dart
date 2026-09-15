@@ -7,6 +7,7 @@ import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
+import '../auth/federated_identity.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -43,6 +44,8 @@ class RelaySocket {
   final void Function() _onConnected;
   final void Function(Object? error) _onDisconnected;
 
+  FederatedHeaders? federatedHeaders;
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   SocketState _state = SocketState.disconnected;
@@ -73,6 +76,7 @@ class RelaySocket {
       _channel = IOWebSocketChannel.connect(
         Uri.parse(_wsUrl),
         pingInterval: debugPingInterval,
+        headers: federatedHeaders?.call(_wsUrl, _nsec),
       );
       await _channel!.ready;
     } catch (e) {

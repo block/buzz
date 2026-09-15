@@ -828,6 +828,15 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // Apply last, after persona/environment layers. Never snapshot capabilities.
+    for name in buzz_ws_client_pkg::identity_adapter::ENV_KEYS {
+        command.env_remove(name);
+    }
+    for (name, value) in
+        crate::federated_agent_broker::launch_env(app, &record.pubkey, &effective_relay_url)?
+    {
+        command.env(name, value);
+    }
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",

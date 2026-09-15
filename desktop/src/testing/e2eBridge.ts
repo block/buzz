@@ -221,6 +221,7 @@ type E2eConfig = {
     /** Delay remote repository snapshots so project loading UI is observable. */
     projectRepoSnapshotDelayMs?: number;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
+    enterpriseIdentityRequired?: boolean;
     builderlabAuth?: {
       email?: string;
       name?: string;
@@ -12481,6 +12482,16 @@ export function maybeInstallE2eTauriMocks() {
           registry: await handleMockCommand("list_voice_registry", null),
         };
       }
+      case "federated_identity_required":
+        return activeConfig?.mock?.enterpriseIdentityRequired ?? false;
+      case "acquire_federated_assertion":
+        if (
+          activeConfig?.mock?.enterpriseIdentityRequired &&
+          !activeConfig.mock.builderlabAuth
+        ) {
+          throw new Error("enterprise sign-in required");
+        }
+        return null;
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {

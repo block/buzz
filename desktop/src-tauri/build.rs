@@ -8,6 +8,9 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_LOGIN_API_URL");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_NIP_FI_ORIGINS");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_NIP_FI_ASSERTION_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

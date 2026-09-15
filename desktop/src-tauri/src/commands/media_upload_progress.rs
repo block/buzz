@@ -82,55 +82,69 @@ pub(super) async fn send_upload_attempt(
         progress,
         cancellation,
     } = attempt;
-    let req = state
-        .http_client
-        .put(url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", mime)
-        .header("X-SHA-256", sha256);
+    let req = crate::federated_identity::authorize(
+        state,
+        state
+            .media_fetch_client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .header("Content-Type", mime)
+            .header("X-SHA-256", sha256),
+        &url,
+        auth_header,
+    )
+    .await?;
 
-    let response = if let Some((app, progress_id)) = progress {
-        let app = app.clone();
-        let progress_id = progress_id.clone();
-        let total = body.len() as u64;
-        let chunk_size = 64 * 1024;
-        let chunk_count = body.len().div_ceil(chunk_size);
-        let mut sent: u64 = 0;
-        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, body.len());
-            let chunk = body.slice(start..end);
-            sent += chunk.len() as u64;
-            let _ = app.emit(
-                "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
-            );
-            Ok::<bytes::Bytes, std::io::Error>(chunk)
-        }));
-        let request = req
-            .header(reqwest::header::CONTENT_LENGTH, total)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send();
-        if let Some(cancellation) = cancellation {
-            tokio::select! {
-                _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
-                response = request => response,
-            }
-        } else {
-            request.await
-        }
-    } else {
-        let request = req.body(body).send();
-        if let Some(cancellation) = cancellation {
-            tokio::select! {
-                _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
-                response = request => response,
-            }
-        } else {
-            request.await
-        }
-    };
-    response.map_err(|error| classify_request_error(&error))
+    crate::federated_identity::guard(
+        state,
+        &url,
+        crate::federated_identity::proof_key(auth_header)?,
+        async {
+            let response = if let Some((app, progress_id)) = progress {
+                let app = app.clone();
+                let progress_id = progress_id.clone();
+                let total = body.len() as u64;
+                let chunk_size = 64 * 1024;
+                let chunk_count = body.len().div_ceil(chunk_size);
+                let mut sent: u64 = 0;
+                let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
+                    let start = i * chunk_size;
+                    let end = usize::min(start + chunk_size, body.len());
+                    let chunk = body.slice(start..end);
+                    sent += chunk.len() as u64;
+                    let _ = app.emit(
+                        "media-upload-progress",
+                        serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+                    );
+                    Ok::<bytes::Bytes, std::io::Error>(chunk)
+                }));
+                let request = req
+                    .header(reqwest::header::CONTENT_LENGTH, total)
+                    .body(reqwest::Body::wrap_stream(stream))
+                    .send();
+                if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
+                        response = request => response,
+                    }
+                } else {
+                    request.await
+                }
+            } else {
+                let request = req.body(body).send();
+                if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
+                        response = request => response,
+                    }
+                } else {
+                    request.await
+                }
+            };
+            response.map_err(|error| classify_request_error(&error))
+        },
+    )
+    .await
 }
 
 pub(super) fn emit_media_upload_phase(

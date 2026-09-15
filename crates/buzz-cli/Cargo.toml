@@ -93,3 +93,6 @@ tempfile = "3"
 axum = { workspace = true }
 # `test-util` enables paused-time control for deterministic timeout tests
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

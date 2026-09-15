@@ -15,3 +15,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+sha2 = "0.11"
+
+hex = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

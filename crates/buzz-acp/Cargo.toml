@@ -37,6 +37,7 @@ futures-util = { workspace = true }
 
 # HTTP (channel discovery REST API)
 reqwest = { workspace = true }
+buzz-ws-client = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

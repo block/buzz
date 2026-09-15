@@ -441,6 +441,9 @@ pub(crate) fn commit_imported_identity(
     let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
 
     let storage = persist(&keys)?;
+    crate::federated_identity::session(state)?
+        .invalidate()
+        .map_err(|e| e.to_string())?;
 
     // Update in-memory keys BEFORE clearing recovery flags. The Release
     // stores below pair with Acquire loads in get_identity: a reader

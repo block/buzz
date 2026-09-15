@@ -18,6 +18,11 @@ use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
 pub struct AppState {
     pub keys: Mutex<Keys>,
+    pub(crate) federated_broker: crate::federated_agent_broker::AgentBroker,
+    pub(crate) federated_retry_after: AtomicU64,
+    pub(crate) federated_acquisition: AsyncMutex<()>,
+    pub(crate) federated_identity:
+        Result<Arc<buzz_ws_client_pkg::federated_identity::IdentitySession>, String>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
@@ -200,6 +205,10 @@ pub fn build_app_state() -> AppState {
 
     AppState {
         keys: Mutex::new(keys),
+        federated_identity: crate::federated_identity::configured_session(),
+        federated_broker: Default::default(),
+        federated_retry_after: AtomicU64::new(0),
+        federated_acquisition: AsyncMutex::new(()),
         identity_storage: AtomicU8::new(identity_storage as u8),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))

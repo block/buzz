@@ -327,7 +327,7 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 600).to_string();
+    let exp_str = (now + 60).to_string();
     let domain = relay_server_tag(media_url)
         .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
     let tags = vec![
@@ -350,18 +350,14 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
 fn sign_blossom_upload(
     keys: &Keys,
     sha256: &str,
-    mime: &str,
+    _mime: &str,
     relay_url: &str,
 ) -> Result<String, CliError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let expiry: u64 = if mime.starts_with("video/") {
-        3600
-    } else {
-        600
-    };
+    let expiry: u64 = 60;
     let exp_str = (now + expiry).to_string();
 
     let mut tags = vec![
@@ -545,6 +541,7 @@ impl BuzzClient {
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()
@@ -613,11 +610,17 @@ impl BuzzClient {
     }
 
     /// Attach the `x-auth-tag` header if configured (NIP-OA relay membership delegation).
-    fn with_auth_tag(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.auth_tag_json {
+    async fn with_auth_tag(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, CliError> {
+        let req = buzz_ws_client::identity_adapter::authorize(req, &self.keys)
+            .await
+            .map_err(|e| CliError::Auth(e.to_string()))?;
+        Ok(match self.auth_tag_json {
             Some(ref json) => req.header("x-auth-tag", json),
             None => req,
-        }
+        })
     }
 
     /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
@@ -810,6 +813,7 @@ impl BuzzClient {
                             .header("Content-Type", "application/json")
                             .body(body),
                     )
+                    .await?
                     .send()
                     .await?;
                 self.handle_response(resp).await
@@ -840,6 +844,7 @@ impl BuzzClient {
                             .header("Content-Type", "application/json")
                             .body(body),
                     )
+                    .await?
                     .send()
                     .await?;
                 self.handle_response(resp).await
@@ -862,6 +867,7 @@ impl BuzzClient {
                 let auth = sign_nip98(&self.keys, "GET", &url, None)?;
                 let resp = self
                     .with_auth_tag(self.http.get(&url).header("Authorization", auth))
+                    .await?
                     .send()
                     .await?;
                 self.handle_response(resp).await
@@ -898,6 +904,7 @@ impl BuzzClient {
                             .header("Content-Type", "application/json")
                             .body(body_bytes),
                     )
+                    .await?
                     .send()
                     .await?;
                 // 204 No Content: return empty string rather than failing on
@@ -934,6 +941,7 @@ impl BuzzClient {
                     .header("Content-Type", "application/json")
                     .body(body),
             )
+            .await?
             .send()
             .await
             .map_err(|e| {
@@ -1003,6 +1011,7 @@ impl BuzzClient {
                         .header("Content-Type", "application/json")
                         .body(body.clone()),
                 )
+                .await?
                 .send()
                 .await
                 .map_err(CliError::from);
@@ -1155,6 +1164,7 @@ impl BuzzClient {
                                 .header("Content-Type", "application/json")
                                 .body(body),
                         )
+                        .await?
                         .send()
                         .await?;
                     self.handle_response(resp).await
@@ -1278,6 +1288,7 @@ impl BuzzClient {
                                 .header("X-SHA-256", &sha256)
                                 .body(upload_body),
                         )
+                        .await?
                         .send()
                         .await?;
                     let status = resp.status();
@@ -1324,6 +1335,7 @@ impl BuzzClient {
                             .header("X-SHA-256", &sha256)
                             .body(upload_body),
                     )
+                    .await?
                     .send()
                     .await?;
                 if !resp.status().is_success() {
@@ -1342,6 +1354,7 @@ impl BuzzClient {
         let url = media_url_from_input(&self.relay_url, input)?;
         // Use a dedicated client: 120 s timeout, no redirect forwarding.
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             // Do not forward Authorization or x-auth-tag to redirect targets.
             .redirect(reqwest::redirect::Policy::none())
@@ -1354,6 +1367,7 @@ impl BuzzClient {
                 let auth_header = sign_blossom_get(&self.keys, &url)?;
                 let resp = self
                     .with_auth_tag(client.get(&url).header("Authorization", auth_header))
+                    .await?
                     .send()
                     .await?;
                 if !resp.status().is_success() {
@@ -2605,8 +2619,8 @@ mod tests {
         assert_eq!(auth_tags[0].as_slice()[1], "c".repeat(64));
     }
 
-    #[test]
-    fn with_auth_tag_sets_header_when_configured() {
+    #[tokio::test]
+    async fn with_auth_tag_sets_header_when_configured() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
@@ -2618,7 +2632,7 @@ mod tests {
         .unwrap();
 
         let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
+        let req = client.with_auth_tag(req).await.unwrap();
         let built = req.build().unwrap();
         let header = built
             .headers()
@@ -2631,13 +2645,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_auth_tag_omits_header_when_not_configured() {
+    #[tokio::test]
+    async fn with_auth_tag_omits_header_when_not_configured() {
         let keys = Keys::generate();
         let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
 
         let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
+        let req = client.with_auth_tag(req).await.unwrap();
         let built = req.build().unwrap();
         assert!(
             built.headers().get("x-auth-tag").is_none(),

@@ -84,6 +84,7 @@ pub(crate) struct MatchedEvent {
 #[derive(Default)]
 pub(crate) struct NativeRelayClient {
     current: Mutex<Option<ManagedSession>>,
+    identity: Option<Result<Arc<buzz_ws_client_pkg::federated_identity::IdentitySession>, String>>,
 }
 
 struct ManagedSession {
@@ -132,6 +133,15 @@ impl Drop for SessionLease {
 }
 
 impl NativeRelayClient {
+    pub(crate) fn with_identity(
+        identity: Result<Arc<buzz_ws_client_pkg::federated_identity::IdentitySession>, String>,
+    ) -> Self {
+        Self {
+            current: Mutex::default(),
+            identity: Some(identity),
+        }
+    }
+
     /// Installs the session for `scope`, shutting down whatever scope held the
     /// slot. Destructive on entry, so every caller must already hold proof it
     /// is the current owner — today that is
@@ -145,7 +155,7 @@ impl NativeRelayClient {
         if let Some(previous) = current.take() {
             previous.session.shutdown();
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = start_managed(relay_url, keys, None, self.identity.clone());
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -187,12 +197,12 @@ impl NativeRelayClient {
                 }
             } else {
                 SessionLease {
-                    session: start_managed(relay_url, keys, None),
+                    session: start_managed(relay_url, keys, None, self.identity.clone()),
                     private: true,
                 }
             };
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = start_managed(relay_url, keys, None, self.identity.clone());
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -389,12 +399,17 @@ pub(crate) async fn start(
     keys: Keys,
     auth_tag: Option<nostr::Tag>,
 ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
-    let session = start_managed(relay_url, keys, auth_tag);
+    let session = start_managed(relay_url, keys, auth_tag, None);
     let events = session.attach_archive().await;
     (session, events)
 }
 
-fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) -> Arc<RelaySession> {
+fn start_managed(
+    relay_url: String,
+    keys: Keys,
+    auth_tag: Option<nostr::Tag>,
+    identity: Option<Result<Arc<buzz_ws_client_pkg::federated_identity::IdentitySession>, String>>,
+) -> Arc<RelaySession> {
     let (wake, wake_rx) = mpsc::channel(1);
     let session = Arc::new(RelaySession {
         state: Arc::new(Mutex::new(SessionState::default())),
@@ -408,6 +423,7 @@ fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) ->
         relay_url,
         keys,
         auth_tag,
+        identity,
         Arc::clone(&session),
         wake_rx,
     ));
@@ -419,6 +435,7 @@ async fn run_session(
     relay_url: String,
     keys: Keys,
     auth_tag: Option<nostr::Tag>,
+    identity: Option<Result<Arc<buzz_ws_client_pkg::federated_identity::IdentitySession>, String>>,
     session: Arc<RelaySession>,
     mut wake_rx: mpsc::Receiver<()>,
 ) {
@@ -428,14 +445,62 @@ async fn run_session(
             return;
         }
 
-        match NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref()).await {
+        let identity_lease = identity
+            .as_ref()
+            .and_then(|i| i.as_ref().ok())
+            .map(|i| i.lease_ended(&relay_url, keys.public_key()));
+        let identity_lease = async move {
+            match identity_lease {
+                Some(lease) => lease.await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(identity_lease);
+        let connect = async {
+            let mut conn = if let Some(identity) = &identity {
+                let request = identity
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .websocket_request(
+                        &relay_url,
+                        keys.public_key(),
+                        crate::federated_identity::now()?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                NostrWsConnection::connect_request(&relay_url, request)
+                    .await
+                    .map_err(|e| e.to_string())?
+            } else {
+                NostrWsConnection::connect(&relay_url)
+                    .await
+                    .map_err(|e| e.to_string())?
+            };
+            conn.authenticate(&keys, auth_tag.as_ref())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(conn)
+        };
+        let connection = tokio::select! {
+            biased;
+            _ = &mut identity_lease => Err("enterprise authentication changed".to_string()),
+            _ = session.cancel.cancelled() => return,
+            result = connect => result,
+        };
+        match connection {
             Ok(conn) => {
                 // A connection that authenticated is healthy regardless of how
                 // long it then lived, so backoff resets here rather than on
                 // clean exit — a socket that drops after one event must not
                 // inherit the previous failure's delay.
                 delay = RECONNECT_BASE_DELAY;
-                run_connection(conn, &session, &mut wake_rx).await;
+                if let Some(Ok(_)) = &identity {
+                    tokio::select! {
+                        _ = &mut identity_lease => {},
+                        _ = run_connection(conn, &session, &mut wake_rx) => {},
+                    }
+                } else {
+                    run_connection(conn, &session, &mut wake_rx).await;
+                }
             }
             Err(error) => {
                 eprintln!("buzz-desktop: native_relay_client: connect failed: {error}");

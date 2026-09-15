@@ -675,7 +675,11 @@ pub async fn mint_agent_card(
             let auth = is_same_origin(url, &relay_base)
                 .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))
                 .flatten();
-            fetch_avatar(url, auth.as_deref()).await?
+            let identity = match auth.as_deref() {
+                Some(auth) => crate::federated_identity::http_header(&state, url, auth).await?,
+                None => None,
+            };
+            fetch_avatar(url, auth.as_deref(), identity).await?
         }
         _ => {
             return Err(
@@ -915,7 +919,11 @@ fn is_same_origin(url: &str, relay_base: &str) -> bool {
 /// Content-Length header is checked before any body bytes are read, and the
 /// body is streamed with a running count so a missing or dishonest header
 /// still cannot exceed the cap (same contract as `media_download.rs`).
-async fn fetch_avatar(url: &str, auth: Option<&str>) -> Result<Vec<u8>, String> {
+async fn fetch_avatar(
+    url: &str,
+    auth: Option<&str>,
+    identity: Option<reqwest::header::HeaderValue>,
+) -> Result<Vec<u8>, String> {
     use futures_util::StreamExt;
 
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
@@ -929,6 +937,12 @@ async fn fetch_avatar(url: &str, auth: Option<&str>) -> Result<Vec<u8>, String> 
     let mut req = client.get(url);
     if let Some(auth) = auth {
         req = req.header("authorization", auth);
+    }
+    if let Some(identity) = identity {
+        req = req.header(
+            buzz_ws_client_pkg::federated_identity::IDENTITY_HEADER,
+            identity,
+        );
     }
     let resp = req
         .send()

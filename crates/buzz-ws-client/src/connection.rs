@@ -5,13 +5,14 @@ use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
 use tracing::debug;
 
 use crate::error::WsClientError;
 use crate::message::{build_auth_event, parse_relay_message, OkResponse, RelayMessage};
 
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream = crate::identity_socket::IdentitySocket<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Seconds to wait for the relay to send the NIP-42 AUTH challenge after connecting.
 pub const AUTH_CHALLENGE_TIMEOUT_SECS: u64 = 20;
@@ -39,7 +40,33 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
-        let mut conn = Self::connect(url).await?;
+        let mut request = url
+            .into_client_request()
+            .map_err(WsClientError::WebSocket)?;
+        let identity = crate::identity_adapter::environment_admission(url, keys)
+            .await
+            .map_err(|e| WsClientError::AuthFailed(e.to_string()))?;
+        if let Some((header, _)) = identity.clone() {
+            request
+                .headers_mut()
+                .insert(crate::federated_identity::IDENTITY_HEADER, header);
+        }
+        let (socket, _) = connect_async(request)
+            .await
+            .map_err(WsClientError::WebSocket)?;
+        let ws = crate::identity_socket::IdentitySocket::admitted(
+            socket,
+            identity.map(|(_, expiry)| expiry),
+            url.into(),
+            keys.clone(),
+        )
+        .map_err(|e| WsClientError::AuthFailed(e.to_string()))?;
+        let mut conn = Self {
+            ws,
+            buffer: VecDeque::new(),
+            pending_challenge: None,
+            relay_url: url.into(),
+        };
         conn.authenticate(keys, auth_tag).await?;
         Ok(conn)
     }
@@ -50,14 +77,30 @@ impl NostrWsConnection {
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
 
-        let (ws, _response) = connect_async(parsed.as_str())
+        Self::connect_request(
+            url,
+            parsed
+                .as_str()
+                .into_client_request()
+                .map_err(WsClientError::WebSocket)?,
+        )
+        .await
+    }
+
+    /// Open a native upgrade carrying a scoped NIP-FI assertion.
+    /// Caller must still authenticate with the same proof key.
+    pub async fn connect_request(
+        url: &str,
+        request: tokio_tungstenite::tungstenite::http::Request<()>,
+    ) -> Result<Self, WsClientError> {
+        let (ws, _response) = connect_async(request)
             .await
             .map_err(WsClientError::WebSocket)?;
 
         debug!("connected to relay at {url}");
 
         Ok(Self {
-            ws,
+            ws: ws.into(),
             buffer: VecDeque::new(),
             pending_challenge: None,
             relay_url: url.to_string(),
@@ -282,8 +325,7 @@ pub async fn publish_event(
     timeout_secs: u64,
 ) -> Result<OkResponse, WsClientError> {
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut conn = NostrWsConnection::connect(relay_url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        let mut conn = NostrWsConnection::connect_authenticated(relay_url, keys, auth_tag).await?;
         let ok = conn.send_event(event).await?;
         let _ = conn.disconnect().await;
         Ok::<_, WsClientError>(ok)

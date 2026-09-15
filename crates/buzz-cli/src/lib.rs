@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod help_tree;
+mod identity_git;
 mod links;
 mod validate;
 
@@ -210,6 +211,11 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run Git with a fresh, origin-scoped enterprise assertion
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -2170,6 +2176,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Git { args } => identity_git::run(args, client.keys(), client.relay_url()).await,
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2327,6 +2334,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "git",
             "issues",
             "media",
             "mem",

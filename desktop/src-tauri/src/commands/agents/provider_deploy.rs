@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::{
     app_state::AppState,
@@ -109,6 +109,67 @@ pub(crate) async fn deploy_to_provider(
         })
         .map_or_else(|| resolve_provider_binary(&provider_id), Ok)?;
 
+    // The assertion service, not NIP-OA alone, authorizes detached agent access.
+    // Only the scoped agent renewal credential enters the provider's secret env;
+    // the employee login credential and human assertion never leave this process.
+    let relay = agent_json["relay_url"]
+        .as_str()
+        .ok_or("missing agent relay")?
+        .to_owned();
+    let identity = crate::federated_identity::session(state)?;
+    if identity.protects(&relay).map_err(|e| e.to_string())? {
+        let generation = identity.generation().map_err(|e| e.to_string())?;
+        let keys = nostr::Keys::parse(
+            agent_json["private_key_nsec"]
+                .as_str()
+                .ok_or("missing agent key")?,
+        )
+        .map_err(|_| "invalid agent key")?;
+        let auth_tag = agent_json["auth_tag"]
+            .as_str()
+            .map(serde_json::from_str::<nostr::Tag>)
+            .transpose()
+            .map_err(|_| "invalid agent delegation")?;
+        let credential = app
+            .state::<crate::builderlab::BuilderlabSession>()
+            .credential_for_federated_identity()?;
+        let assertion_endpoint = option_env!("BUZZ_BUILD_NIP_FI_ASSERTION_URL")
+            .unwrap_or("https://app.builderlab.xyz/api/goose/v1/buzz/identity/assertions");
+        let mut delegation_endpoint =
+            buzz_ws_client_pkg::identity_adapter::endpoint(assertion_endpoint)
+                .map_err(|e| e.to_string())?;
+        delegation_endpoint.set_path(&format!(
+            "{}/agent-delegations",
+            delegation_endpoint.path().trim_end_matches("/assertions")
+        ));
+        let result = buzz_ws_client_pkg::identity_adapter::exchange(
+            &state.media_fetch_client,
+            delegation_endpoint.as_str(),
+            &credential,
+            &keys,
+            &relay,
+            auth_tag.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let delegated = result
+            .agent_credential
+            .clone()
+            .filter(|s| !s.is_empty() && s.len() <= 16 * 1024)
+            .ok_or("adapter did not grant detached agent renewal")?;
+        result
+            .into_assertion(keys.public_key(), crate::federated_identity::now()?)
+            .map_err(|e| e.to_string())?;
+        if identity.generation().map_err(|e| e.to_string())? != generation {
+            return Err("enterprise login changed during agent deployment".into());
+        }
+        let policy = agent_json["launch"]["policy_env"]
+            .as_object_mut()
+            .ok_or("missing launch policy")?;
+        policy.insert("BUZZ_NIP_FI_ENDPOINT".into(), assertion_endpoint.into());
+        policy.insert("BUZZ_NIP_FI_CREDENTIAL".into(), delegated.into());
+        policy.insert("BUZZ_NIP_FI_ORIGINS".into(), relay.into());
+    }
     let deployed_agent_json = agent_json.clone();
     let config_clone = config.clone();
     let deploy_result =

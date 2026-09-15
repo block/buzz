@@ -166,6 +166,12 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // buzz CLI needs tokio (async HTTP client).
+    if cmd == "git" {
+        let args = ["buzz".to_owned(), "git".to_owned()]
+            .into_iter()
+            .chain(std::env::args().skip(1));
+        std::process::exit(buzz_cli::run_from_args(args).await);
+    }
     if cmd == "buzz" {
         std::process::exit(buzz_cli::run_from_args(std::env::args()).await);
     }

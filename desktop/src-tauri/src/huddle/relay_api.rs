@@ -70,6 +70,7 @@ fn build_audio_auth_event(
 }
 
 async fn connect_authenticated_audio_socket(
+    state: &AppState,
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
@@ -79,7 +80,15 @@ async fn connect_authenticated_audio_socket(
     use nostr::JsonUtil;
 
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
-    let (ws_stream, _) = connect_async(&ws_url)
+    crate::federated_identity::ensure(state, &ws_url, keys.public_key()).await?;
+    let request = crate::federated_identity::session(state)?
+        .websocket_request(
+            &ws_url,
+            keys.public_key(),
+            crate::federated_identity::now()?,
+        )
+        .map_err(|e| e.to_string())?;
+    let (ws_stream, _) = connect_async(request)
         .await
         .map_err(|e| format!("audio WS connect failed: {e}"))?;
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
@@ -208,11 +217,27 @@ pub(crate) async fn connect_audio_relay(
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, _peer_index, initial_peers) =
-        connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
-            .await?;
+    let (ws_tx, ws_rx, _peer_index, initial_peers) = connect_authenticated_audio_socket(
+        state,
+        channel_id,
+        parent_channel_id,
+        &relay_url,
+        &keys,
+        None,
+    )
+    .await?;
 
     let cancel = CancellationToken::new();
+    let identity = Arc::clone(crate::federated_identity::session(state)?);
+    let lease_cancel = cancel.clone();
+    let lease_url = relay_url.clone();
+    let lease_key = keys.public_key();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = lease_cancel.cancelled() => {},
+            _ = identity.lease_ended(&lease_url, lease_key) => lease_cancel.cancel(),
+        }
+    });
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
     let output_device_name = state
@@ -323,6 +348,7 @@ pub(crate) async fn connect_tts_audio_publisher(
 ) -> Result<super::tts::TtsAudioPublisher, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
     let (ws_tx, ws_rx, peer_index, _) = connect_authenticated_audio_socket(
+        state,
         channel_id,
         parent_channel_id,
         &relay_url,
@@ -332,6 +358,16 @@ pub(crate) async fn connect_tts_audio_publisher(
     .await?;
 
     let cancel = CancellationToken::new();
+    let identity = Arc::clone(crate::federated_identity::session(state)?);
+    let lease_cancel = cancel.clone();
+    let lease_url = relay_url.clone();
+    let lease_key = keys.public_key();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = lease_cancel.cancelled() => {},
+            _ = identity.lease_ended(&lease_url, lease_key) => lease_cancel.cancel(),
+        }
+    });
     let publisher_cancel = cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel(TTS_BROADCAST_QUEUE_DEPTH);
     let publisher = super::tts::TtsAudioPublisher::new(tx, cancel);

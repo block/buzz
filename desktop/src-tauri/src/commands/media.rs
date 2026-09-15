@@ -294,10 +294,8 @@ pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     Ok(mime)
 }
 
-/// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
-/// across a video's range-request stream while staying well inside the
-/// server's `created_at` freshness window (3600s, matching upload).
-pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+/// NIP-FI Blossom proofs live at most 60 seconds; range requests must remint.
+pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Sign a Blossom (BUD-01) `t=get` authorization event, server-scoped to the
 /// relay's authority, and return the full `Authorization` header value.
@@ -372,9 +370,8 @@ fn sign_blossom_upload_auth(
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
     ];
-    if let Some(domain) = extract_server_authority(base_url) {
-        tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
-    }
+    let domain = extract_server_authority(base_url).ok_or("invalid media tenant host")?;
+    tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
     EventBuilder::new(Kind::from(24242), "Upload buzz-media")
         .tags(tags)
         .sign_with_keys(keys)
@@ -414,19 +411,11 @@ async fn do_upload(
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
-    // Video uploads get a 1-hour auth window to survive slow connections;
-    // images use 5 minutes. Must match the server-side max_age_secs values
-    // in process_upload (600s) and process_video_upload (3600s).
-    let expiry_secs = if mime.starts_with("video/") {
-        3600
-    } else {
-        300
-    };
+    // Admission freshness is bounded to 60s, independently of upload duration.
+    let expiry_secs = 60;
     let base_url = relay_api_base_url_with_override(state);
-    let auth_event = {
-        let keys = state.signing_keys()?;
-        sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
-    };
+    let keys = state.signing_keys()?;
+    let auth_event = sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?;
 
     let auth_header = format!(
         "Nostr {}",
@@ -450,6 +439,11 @@ async fn do_upload(
     )
     .await?;
     if should_retry_legacy_upload(resp.status()) {
+        let fresh = sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?;
+        let auth_header = format!(
+            "Nostr {}",
+            URL_SAFE_NO_PAD.encode(fresh.as_json().as_bytes())
+        );
         resp = send_upload_attempt(
             state,
             UploadAttempt {

@@ -210,6 +210,11 @@ pub async fn apply_workspace(
         // cannot advance it until this transaction releases the guard.
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
+        if crate::relay::relay_ws_url_with_override(&state) != relay_url || parsed_keys.is_some() {
+            crate::federated_identity::session(&state)?
+                .invalidate()
+                .map_err(|e| e.to_string())?;
+        }
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;

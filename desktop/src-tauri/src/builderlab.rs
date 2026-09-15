@@ -12,7 +12,10 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::{net::TcpListener, sync::oneshot};
 use url::Url;
 
-const BUILDERLAB_API_BASE_URL: &str = "https://app.builderlab.xyz/api/goose";
+const BUILDERLAB_API_BASE_URL: &str = match option_env!("BUZZ_BUILD_LOGIN_API_URL") {
+    Some(value) => value,
+    None => "https://app.builderlab.xyz/api/goose",
+};
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
 // Builderlab enforces an Origin check on the identity bind endpoints. Browsers
@@ -142,6 +145,17 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 #[derive(Default)]
 pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
 
+impl BuilderlabSession {
+    pub(crate) fn credential_for_federated_identity(&self) -> Result<String, String> {
+        self.0
+            .lock()
+            .map_err(|_| "login session unavailable")?
+            .as_ref()
+            .map(|session| session.credential.clone())
+            .ok_or("Sign in first".into())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BuilderlabLogin(Mutex<Option<PendingLogin>>);
 
@@ -210,8 +224,8 @@ async fn login_callback(
 }
 
 fn api_url(path: &str) -> Result<Url, String> {
-    Url::parse(&format!("{BUILDERLAB_API_BASE_URL}{path}"))
-        .map_err(|error| format!("invalid Builderlab API URL: {error}"))
+    buzz_ws_client_pkg::identity_adapter::endpoint(&format!("{BUILDERLAB_API_BASE_URL}{path}"))
+        .map_err(|error| error.to_string())
 }
 
 fn login_url(return_to: &str) -> Result<Url, String> {
@@ -254,6 +268,13 @@ pub(crate) async fn start_builderlab_login(
     session: tauri::State<'_, BuilderlabSession>,
     login: tauri::State<'_, BuilderlabLogin>,
 ) -> Result<BuilderlabAuthInfo, String> {
+    *session.0.lock().map_err(|_| "login unavailable")? = None;
+    let enterprise_generation = crate::federated_identity::session(&app_state)?
+        .invalidate()
+        .map_err(|e| e.to_string())?;
+    app_state
+        .federated_retry_after
+        .store(0, std::sync::atomic::Ordering::Release);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|error| format!("could not start local authentication callback: {error}"))?;
@@ -318,7 +339,7 @@ pub(crate) async fn start_builderlab_login(
     server.abort();
 
     let response = app_state
-        .http_client
+        .media_fetch_client
         .post(api_url("/v1/auth/login/exchange")?)
         .json(&serde_json::json!({ "code": exchange_code }))
         .timeout(Duration::from_secs(30))
@@ -339,7 +360,8 @@ pub(crate) async fn start_builderlab_login(
         return Err("Builderlab code exchange returned an empty credential".to_owned());
     }
 
-    let me = authenticated_user(&app_state.http_client, &exchanged.session_credential).await?;
+    let me =
+        authenticated_user(&app_state.media_fetch_client, &exchanged.session_credential).await?;
     if exchanged.expires_at != me.expires_at {
         return Err("Builderlab session expiry did not match code exchange".to_owned());
     }
@@ -356,11 +378,24 @@ pub(crate) async fn start_builderlab_login(
         {
             return Err("Builderlab authentication canceled".to_owned());
         }
+        if crate::federated_identity::session(&app_state)?
+            .generation()
+            .map_err(|e| e.to_string())?
+            != enterprise_generation
+        {
+            return Err("enterprise login scope changed".into());
+        }
         *pending = None;
+        *session.0.lock().map_err(|error| error.to_string())? = Some(StoredSession {
+            credential: exchanged.session_credential,
+        });
     }
-    *session.0.lock().map_err(|error| error.to_string())? = Some(StoredSession {
-        credential: exchanged.session_credential,
-    });
+    crate::federated_identity::ensure(
+        &app_state,
+        &crate::relay::relay_ws_url_with_override(&app_state),
+        app_state.signing_keys()?.public_key(),
+    )
+    .await?;
     Ok(info)
 }
 
@@ -378,17 +413,20 @@ pub(crate) async fn get_builderlab_auth(
     let Some(credential) = stored else {
         return Ok(None);
     };
-    match authenticated_user(&app_state.http_client, &credential).await {
+    match authenticated_user(&app_state.media_fetch_client, &credential).await {
         Ok(me) => Ok(Some(BuilderlabAuthInfo {
             expires_at: me.expires_at,
             email: me.email,
             name: me.name,
         })),
         Err(error) => {
-            *session
-                .0
-                .lock()
-                .map_err(|lock_error| lock_error.to_string())? = None;
+            let mut stored = session.0.lock().map_err(|_| "login unavailable")?;
+            if stored.as_ref().is_some_and(|s| s.credential == credential) {
+                *stored = None;
+                crate::federated_identity::session(&app_state)?
+                    .invalidate()
+                    .map_err(|e| e.to_string())?;
+            }
             Err(error)
         }
     }
@@ -406,9 +444,18 @@ pub(crate) fn cancel_builderlab_login(
 
 #[tauri::command]
 pub(crate) fn clear_builderlab_auth(
+    app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
+    login: tauri::State<'_, BuilderlabLogin>,
 ) -> Result<(), String> {
-    *session.0.lock().map_err(|error| error.to_string())? = None;
+    let mut pending = login.0.lock().map_err(|_| "login unavailable")?;
+    if let Some(previous) = pending.take() {
+        let _ = previous.cancel.send(());
+    }
+    *session.0.lock().map_err(|_| "login unavailable")? = None;
+    crate::federated_identity::session(&app_state)?
+        .invalidate()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -469,7 +516,7 @@ pub(crate) async fn get_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/current",
@@ -484,7 +531,7 @@ pub(crate) async fn bind_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     let challenge_value = authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/challenge",
@@ -510,7 +557,7 @@ pub(crate) async fn bind_builderlab_nostr_identity(
         &challenge.expires_at,
     )?;
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/verify",
@@ -529,7 +576,7 @@ pub(crate) async fn delete_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/delete",
@@ -544,7 +591,7 @@ pub(crate) async fn list_builderlab_communities(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/list",
@@ -560,7 +607,7 @@ pub(crate) async fn check_builderlab_community_name(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/availability",
@@ -576,7 +623,7 @@ pub(crate) async fn create_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities",
@@ -592,7 +639,7 @@ pub(crate) async fn archive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/archive",
@@ -608,7 +655,7 @@ pub(crate) async fn unarchive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/unarchive",
@@ -628,7 +675,7 @@ pub(crate) async fn transfer_builderlab_community(
     // archive/unarchive endpoints which take `community_id`; mirror the web
     // client's payload exactly.
     authenticated_json(
-        &app_state.http_client,
+        &app_state.media_fetch_client,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/transfer",

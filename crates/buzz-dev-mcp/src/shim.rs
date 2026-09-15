@@ -40,6 +40,16 @@ impl Shim {
         }
 
         let original = std::env::var_os("PATH").unwrap_or_default();
+        if std::env::var_os("BUZZ_NIP_FI_ENDPOINT").is_some() {
+            let git = std::env::split_paths(&original)
+                .map(|p| p.join(if cfg!(windows) { "git.exe" } else { "git" }))
+                .find(|p| p.is_file())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "git not found")
+                })?;
+            std::env::set_var("BUZZ_NIP_FI_GIT_BINARY", git);
+            symlink(&self_exe, &dir.path().join("git"))?;
+        }
         let mut entries = vec![PathBuf::from(dir.path())];
         entries.extend(std::env::split_paths(&original));
         // join_paths uses the platform separator (':' on Unix, ';' on Windows).

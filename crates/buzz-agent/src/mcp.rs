@@ -89,6 +89,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
+    "BUZZ_NIP_FI_ENDPOINT",
+    "BUZZ_NIP_FI_CREDENTIAL",
+    "BUZZ_NIP_FI_ORIGINS",
     // Agent display name — dev-mcp uses it as the git author name. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
     // (which wins here anyway); the allowlist entry covers ACP clients that

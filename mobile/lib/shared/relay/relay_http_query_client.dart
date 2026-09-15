@@ -26,8 +26,19 @@ class RelayHttpQueryClient {
         : null;
     generation?.acquire();
     try {
-      return await (_injectedClient ?? generation!.client)
-          .post(url, headers: headers, body: body)
+      final client = _injectedClient ?? generation!.client;
+      if (!headers.containsKey('Nostr-Federated-Identity')) {
+        return await client
+            .post(url, headers: headers, body: body)
+            .timeout(timeout);
+      }
+      final request = http.Request('POST', url)
+        ..followRedirects = false
+        ..headers.addAll(headers)
+        ..bodyBytes = body;
+      return await client
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       if (identical(_currentGeneration, generation)) {

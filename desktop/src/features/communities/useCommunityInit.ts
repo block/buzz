@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -316,6 +316,7 @@ export function useCommunityInit(
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
         );
+        await invoke("acquire_federated_assertion");
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
         // it as non-fatal (relay/keys apply, bad value not persisted, REPOS

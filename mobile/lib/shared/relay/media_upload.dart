@@ -13,6 +13,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import 'animated_image_sanitizer.dart';
+import '../auth/federated_identity.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -33,7 +34,7 @@ const _requiresLegacyMediaStoragePermissionMethod =
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
-const _uploadAuthLifetimeSeconds = 300;
+const _uploadAuthLifetimeSeconds = 60;
 const _heicBrands = {
   'heic',
   'heix',
@@ -235,6 +236,7 @@ class BlobDescriptor {
 }
 
 class MediaUploadService {
+  final FederatedHeaders? federatedHeaders;
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
@@ -253,6 +255,7 @@ class MediaUploadService {
   final bool _ownsHttpClient;
 
   MediaUploadService({
+    this.federatedHeaders,
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
@@ -637,6 +640,7 @@ class MediaUploadService {
       Uri.parse(_baseUrl).resolve(path),
       abortTrigger: cancellationToken?.whenCancelled,
     );
+    request.followRedirects = false;
     request.contentLength = bytes.length;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
@@ -661,6 +665,7 @@ class MediaUploadService {
     required String sha256,
   }) {
     final headers = <String, String>{
+      ...?federatedHeaders?.call(_baseUrl, _nsec),
       'Authorization': _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,

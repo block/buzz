@@ -15,6 +15,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final config = ref.watch(relayConfigProvider);
   final picker = ImagePicker();
   final service = MediaUploadService(
+    federatedHeaders: ref.watch(federatedIdentityProvider).headers,
     baseUrl: config.baseUrl,
     nsec: config.nsec,
     pickGalleryImage: () => picker.pickImage(

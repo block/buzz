@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'nostr_models.dart';
+import '../auth/federated_identity.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
 
@@ -66,6 +67,7 @@ class SignedEventRelay {
 /// This is used for community-removal tombstones because the community being
 /// removed is not necessarily the app's active relay session.
 Future<NostrEvent> submitSignedEventOnce({
+  FederatedHeaders? federatedHeaders,
   required String wsUrl,
   required String nsec,
   required int kind,
@@ -122,6 +124,7 @@ Future<NostrEvent> submitSignedEventOnce({
       }
     },
   );
+  socket.federatedHeaders = federatedHeaders;
   final resultFuture = result.future.timeout(timeout);
   try {
     await socket.connect();

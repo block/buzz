@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
+import '../auth/federated_identity.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
@@ -164,6 +165,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final response = await _httpQueryClient.post(
       Uri.parse(url),
       headers: {
+        ...ref.read(federatedIdentityProvider).headers(url, config.nsec),
         'Authorization': buildNip98AuthHeader(
           method: 'POST',
           url: url,
@@ -493,6 +495,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       onConnected: () => _handleConnected(generation),
       onDisconnected: (error) => _handleDisconnected(generation, error),
     );
+    socket.federatedHeaders = ref.read(federatedIdentityProvider).headers;
     _socket = socket;
 
     await socket.connect();

@@ -57,6 +57,7 @@ import {
   requestAddCommunityPrefill,
 } from "@/features/communities/addCommunityPrefill";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
+import { EnterpriseSessionNotice } from "@/features/communities/ui/EnterpriseSessionNotice";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
@@ -645,6 +646,7 @@ function CommunityApp({
           onIdentityReplaced={bumpSignerEpoch}
         />
         <CommunityThemeController />
+        <EnterpriseSessionNotice />
         <AppReady
           continueOnboarding={isContinuingOnboarding}
           isCommunitySwitch={isCommunitySwitch}

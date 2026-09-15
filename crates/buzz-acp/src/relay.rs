@@ -125,7 +125,9 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+#[cfg(test)]
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -406,7 +408,7 @@ impl RestClient {
     ) -> Result<reqwest::Response, RelayError>
     where
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+        Fut: std::future::Future<Output = Result<reqwest::Response, RelayError>>,
     {
         let mut last_err = None;
 
@@ -439,11 +441,11 @@ impl RestClient {
                         resp.status()
                     )));
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => {
+                Err(RelayError::HttpTransport(e)) if e.is_timeout() || e.is_connect() => {
                     tracing::warn!("{method} {path} network error: {e}");
                     last_err = Some(RelayError::Http(e.to_string()));
                 }
-                Err(e) => return Err(RelayError::Http(e.to_string())),
+                Err(e) => return Err(e),
             }
         }
 
@@ -460,12 +462,11 @@ impl RestClient {
         let url = format!("{}{}", self.base_url, path);
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
-        self.request_with_retry("POST", path, || {
-            // NIP-98 is re-signed each attempt (fresh created_at).
-            // sign_nip98 is infallible in practice (key is always valid).
-            let auth = self
-                .nip98_header("POST", &url, Some(&body_owned))
-                .unwrap_or_default();
+        self.request_with_retry("POST", path, || async {
+            let identity = buzz_ws_client::identity_adapter::environment_header(&url, &self.keys)
+                .await
+                .map_err(|e| RelayError::Http(e.to_string()))?;
+            let auth = self.nip98_header("POST", &url, Some(&body_owned))?;
             let mut req = self
                 .http
                 .post(&url)
@@ -474,7 +475,13 @@ impl RestClient {
             if let Some(ref tag) = auth_tag_header {
                 req = req.header("x-auth-tag", tag);
             }
-            req.body(body_owned.clone()).send()
+            if let Some(header) = identity {
+                req = req.header(buzz_ws_client::federated_identity::IDENTITY_HEADER, header);
+            }
+            req.body(body_owned.clone())
+                .send()
+                .await
+                .map_err(RelayError::HttpTransport)
         })
         .await
     }
@@ -597,6 +604,9 @@ pub struct BuzzEvent {
 /// Errors from relay operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
+    /// HTTP transport failure, retaining retry classification.
+    #[error("HTTP transport error: {0}")]
+    HttpTransport(reqwest::Error),
     #[error("WebSocket error: {0}")]
     WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
 
@@ -684,7 +694,8 @@ enum RelayCommand {
     SetStartupWatermark { ts: u64 },
 }
 
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream =
+    buzz_ws_client::identity_socket::IdentitySocket<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Harness-side relay client.
 ///
@@ -799,6 +810,7 @@ impl HarnessRelay {
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
             http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(10))
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .build()
@@ -3838,6 +3850,7 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 /// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
+        RelayError::HttpTransport(_) => false,
         RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
         RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
         RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
@@ -4013,13 +4026,32 @@ async fn do_connect(
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = parsed
+        .as_str()
+        .into_client_request()
+        .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+    let identity = buzz_ws_client::identity_adapter::environment_admission(relay_url, keys)
+        .await
+        .map_err(|e| RelayError::Http(e.to_string()))?;
+    if let Some((header, _)) = identity.clone() {
+        request
+            .headers_mut()
+            .insert(buzz_ws_client::federated_identity::IDENTITY_HEADER, header);
+    }
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
     debug!("connected to relay at {relay_url}");
 
-    let mut ws = ws;
+    let mut ws = buzz_ws_client::identity_socket::IdentitySocket::admitted(
+        ws,
+        identity.as_ref().map(|(_, deadline)| *deadline),
+        relay_url.into(),
+        keys.clone(),
+    )
+    .map_err(|e| RelayError::Http(e.to_string()))?;
     let mut buffer: VecDeque<RelayMessage> = VecDeque::new();
 
     let challenge = wait_for_auth_challenge(&mut ws, &mut buffer, AUTH_TIMEOUT).await?;
@@ -4719,7 +4751,10 @@ mod tests {
         let (client, _) = connect_async(format!("ws://{address}"))
             .await
             .expect("connect test websocket");
-        (client, server.await.expect("join test websocket server"))
+        (
+            client.into(),
+            server.await.expect("join test websocket server"),
+        )
     }
 
     pub(super) async fn next_test_frame(

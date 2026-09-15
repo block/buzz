@@ -5,13 +5,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'relay_provider.dart';
+import '../auth/federated_identity.dart';
 
 const _mediaGetAuthKind = 24242;
-const _mediaGetAuthLifetimeSeconds = 600;
+const _mediaGetAuthLifetimeSeconds = 60;
 
 /// Re-sign this long before the cached auth event expires, so an in-flight
 /// request signed just before the boundary still lands well within validity.
-const _mediaGetAuthRefreshMarginSeconds = 60;
+const _mediaGetAuthRefreshMarginSeconds = 10;
 
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
 ///
@@ -25,6 +26,7 @@ const _mediaGetAuthRefreshMarginSeconds = 60;
 /// rebuilt (dropping the memo) whenever the relay config — base URL or signing
 /// identity — changes, via [mediaGetAuthServiceProvider].
 class MediaGetAuthService {
+  final FederatedHeaders? federatedHeaders;
   final String _baseUrl;
   final String? _nsec;
   final DateTime Function() _now;
@@ -33,6 +35,7 @@ class MediaGetAuthService {
   DateTime? _refreshAt;
 
   MediaGetAuthService({
+    this.federatedHeaders,
     required String baseUrl,
     required String? nsec,
     DateTime Function()? now,
@@ -52,10 +55,13 @@ class MediaGetAuthService {
     if (nsec == null || nsec.isEmpty) return const {};
     if (!isRelayMediaUrl(url)) return const {};
 
+    // Outside the permissive proof catch: corporate failures must propagate.
+    final identity =
+        federatedHeaders?.call(url, nsec) ?? const <String, String>{};
     final cached = _cachedHeaders;
     final refreshAt = _refreshAt;
     if (cached != null && refreshAt != null && _now().isBefore(refreshAt)) {
-      return cached;
+      return identity.isEmpty ? cached : {...cached, ...identity};
     }
 
     try {
@@ -74,7 +80,7 @@ class MediaGetAuthService {
               _mediaGetAuthLifetimeSeconds - _mediaGetAuthRefreshMarginSeconds,
         ),
       );
-      return headers;
+      return identity.isEmpty ? headers : {...headers, ...identity};
     } catch (_) {
       // Read auth is best-effort: while the relay rollout flag is off, an
       // unsigned fetch still works. Once the flag is on, this request will 403
@@ -125,7 +131,11 @@ class MediaGetAuthService {
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(
+    baseUrl: config.baseUrl,
+    nsec: config.nsec,
+    federatedHeaders: ref.watch(federatedIdentityProvider).headers,
+  );
 });
 
 Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {

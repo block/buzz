@@ -269,64 +269,82 @@ pub(super) async fn fetch_blob_bytes_with_cap(
     // `validate_download_url`, satisfying the mint_media_get_auth safety
     // contract (the token never leaves the relay origin).
     let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
-        req = req.header("authorization", auth);
+    let auth = mint_media_get_auth(state, &relay_base);
+    if auth.is_none()
+        && crate::federated_identity::session(state)?
+            .protects(url)
+            .map_err(|e| e.to_string())?
+    {
+        return Err("enterprise sign-in required".into());
+    }
+    if let Some(auth) = auth {
+        req = crate::federated_identity::authorize(
+            state,
+            req.header("authorization", &auth),
+            url,
+            &auth,
+        )
+        .await?;
     }
 
-    let request = req.send();
-    let resp = if let Some(cancellation) = cancellation {
-        tokio::select! {
-            _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
-            result = request => result,
-        }
-    } else {
-        request.await
-    }
-    .map_err(|e| classify_request_error(&e))?;
-
-    if let Some(err) = redirect_refusal_error(resp.status()) {
-        return Err(err);
-    }
-
-    if !resp.status().is_success() {
-        return Err(relay_error_message(resp).await);
-    }
-
-    // Check Content-Length header upfront if present.
-    if let Some(content_length) = resp.content_length() {
-        if content_length > cap {
-            return Err(format!(
-                "file too large ({} MiB, max {} MiB)",
-                content_length / (1024 * 1024),
-                cap / (1024 * 1024)
-            ));
-        }
-    }
-
-    // Stream the response with a running byte count to enforce the size cap
-    // even when Content-Length is missing or dishonest.
-    let mut bytes = Vec::new();
-    let mut stream = resp.bytes_stream();
-    loop {
-        let next = if let Some(cancellation) = cancellation {
+    let key = state.signing_keys()?.public_key();
+    crate::federated_identity::guard(state, url, key, async {
+        let request = req.send();
+        let resp = if let Some(cancellation) = cancellation {
             tokio::select! {
                 _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
-                next = stream.next() => next,
+                result = request => result,
             }
         } else {
-            stream.next().await
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk.map_err(|e| classify_request_error(&e))?;
-        if bytes.len() as u64 + chunk.len() as u64 > cap {
-            return Err(format!("file too large (max {} MiB)", cap / (1024 * 1024)));
+            request.await
         }
-        bytes.extend_from_slice(&chunk);
-    }
+        .map_err(|e| classify_request_error(&e))?;
 
-    Ok(bytes)
+        if let Some(err) = redirect_refusal_error(resp.status()) {
+            return Err(err);
+        }
+
+        if !resp.status().is_success() {
+            return Err(relay_error_message(resp).await);
+        }
+
+        // Check Content-Length header upfront if present.
+        if let Some(content_length) = resp.content_length() {
+            if content_length > cap {
+                return Err(format!(
+                    "file too large ({} MiB, max {} MiB)",
+                    content_length / (1024 * 1024),
+                    cap / (1024 * 1024)
+                ));
+            }
+        }
+
+        // Stream the response with a running byte count to enforce the size cap
+        // even when Content-Length is missing or dishonest.
+        let mut bytes = Vec::new();
+        let mut stream = resp.bytes_stream();
+        loop {
+            let next = if let Some(cancellation) = cancellation {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
+                    next = stream.next() => next,
+                }
+            } else {
+                stream.next().await
+            };
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = chunk.map_err(|e| classify_request_error(&e))?;
+            if bytes.len() as u64 + chunk.len() as u64 > cap {
+                return Err(format!("file too large (max {} MiB)", cap / (1024 * 1024)));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+
+        Ok(bytes)
+    })
+    .await
 }
 
 /// The snapshot file format inferred from the sanitized filename suffix.

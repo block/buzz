@@ -10,6 +10,8 @@ use tauri::{
 
 use crate::native_websocket_batch::{is_auth_challenge, FrameBatch, BATCH_MAX_SERIALIZED_BYTES};
 use tokio::sync::{mpsc, oneshot, Mutex};
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message},
@@ -127,15 +129,30 @@ impl WebSocketManager {
     }
 }
 
+#[cfg(test)]
 async fn open_connection(
     manager: &WebSocketManager,
     url: &str,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<Id, String> {
+    open_connection_request(
+        manager,
+        url.into_client_request()
+            .map_err(|_| "invalid WebSocket URL")?,
+        on_message,
+    )
+    .await
+}
+
+async fn open_connection_request(
+    manager: &WebSocketManager,
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    on_message: Channel<InvokeResponseBody>,
+) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
     let (socket, _) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };
@@ -180,12 +197,49 @@ async fn open_connection(
 
 #[tauri::command]
 async fn connect(
+    state: tauri::State<'_, crate::app_state::AppState>,
     manager: tauri::State<'_, WebSocketManager>,
     url: String,
     on_message: Channel<InvokeResponseBody>,
     _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
-    open_connection(manager.inner(), &url, on_message).await
+    let key = state.signing_keys()?.public_key();
+    crate::federated_identity::ensure(&state, &url, key).await?;
+    let identity = Arc::clone(crate::federated_identity::session(&state)?);
+    let request = identity
+        .websocket_request(&url, key, crate::federated_identity::now()?)
+        .map_err(|e| e.to_string())?;
+    let generation = identity.generation().map_err(|e| e.to_string())?;
+    let deadline = identity
+        .expires_at(key)
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    let lease = identity.lease_ended(&url, key);
+    tokio::pin!(lease);
+    let id = tokio::select! {
+        biased;
+        _ = &mut lease => return Err("enterprise authentication changed".into()),
+        result = open_connection_request(manager.inner(), request, on_message) => result?,
+    };
+    if identity.protects(&url).map_err(|e| e.to_string())? {
+        let manager = manager.inner().clone();
+        let identity = Arc::clone(&identity);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if !manager.connections.lock().await.contains_key(&id) {
+                    return;
+                }
+                if identity.generation().ok() != Some(generation)
+                    || crate::federated_identity::now().unwrap_or(u64::MAX) >= deadline
+                {
+                    manager.disconnect(id).await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
+    }
+    Ok(id)
 }
 
 pub(crate) async fn send_message(
@@ -283,6 +337,10 @@ async fn run_connection<S>(
                         reason: "disconnect".into(),
                     }))),
                 ).await;
+                if let Ok(frame) = serde_json::to_string(&OutboundMessage::Close(None)) {
+                    batch.push(frame);
+                    batch.flush(&on_message);
+                }
                 break;
             }
             _ = batch.due() => batch.flush(&on_message),
