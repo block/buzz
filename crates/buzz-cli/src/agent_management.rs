@@ -36,6 +36,8 @@ pub struct UpdateAgentDraft {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub respond_to_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,42 @@ fn required(value: String, label: &str, max: usize) -> Result<String, CliError> 
 
 fn optional(value: Option<String>, label: &str) -> Result<Option<String>, CliError> {
     value.map(|value| required(value, label, 300)).transpose()
+}
+
+/// Normalize allowlist entries to lowercase 64-char hex pubkeys.
+pub fn normalize_allowlist_pubkeys(
+    entries: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, CliError> {
+    let Some(entries) = entries else {
+        return Ok(None);
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let hex = if trimmed.starts_with("npub1") {
+            PublicKey::parse(trimmed)
+                .map_err(|_| {
+                    CliError::Usage(format!(
+                        "invalid npub in respond-to-allowlist: {trimmed}"
+                    ))
+                })?
+                .to_hex()
+        } else if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            trimmed.to_ascii_lowercase()
+        } else {
+            return Err(CliError::Usage(format!(
+                "invalid pubkey in respond-to-allowlist: '{trimmed}' (64-char hex or npub)"
+            )));
+        };
+        if seen.insert(hex.clone()) {
+            out.push(hex);
+        }
+    }
+    Ok(Some(out))
 }
 
 fn build<T: Serialize>(
@@ -173,12 +211,24 @@ pub fn build_update(
     uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
     let respond_to = optional(draft.respond_to, "respond-to")?;
-    if respond_to
-        .as_deref()
-        .is_some_and(|value| value != "owner-only" && value != "anyone")
+    if respond_to.as_deref().is_some_and(|value| {
+        value != "owner-only" && value != "allowlist" && value != "anyone"
+    }) {
+        return Err(CliError::Usage(
+            "respond-to must be owner-only, allowlist, or anyone".into(),
+        ));
+    }
+    let respond_to_allowlist = normalize_allowlist_pubkeys(draft.respond_to_allowlist)?;
+    if respond_to.as_deref() == Some("allowlist")
+        && respond_to_allowlist.as_ref().is_none_or(|v| v.is_empty())
     {
         return Err(CliError::Usage(
-            "respond-to must be owner-only or anyone".into(),
+            "respond-to allowlist requires at least one --respond-to-allowlist pubkey".into(),
+        ));
+    }
+    if respond_to.is_none() && respond_to_allowlist.is_some() {
+        return Err(CliError::Usage(
+            "respond-to-allowlist requires --respond-to allowlist".into(),
         ));
     }
     let request = UpdateAgentDraft {
@@ -193,6 +243,7 @@ pub fn build_update(
         provider: optional(draft.provider, "provider")?,
         model: optional(draft.model, "model")?,
         respond_to,
+        respond_to_allowlist,
     };
     if request.display_name.is_none()
         && request.system_prompt.is_none()
@@ -200,6 +251,7 @@ pub fn build_update(
         && request.provider.is_none()
         && request.model.is_none()
         && request.respond_to.is_none()
+        && request.respond_to_allowlist.is_none()
     {
         return Err(CliError::Usage(
             "include at least one field to update".into(),
@@ -320,10 +372,61 @@ mod tests {
                 provider: None,
                 model: None,
                 respond_to: None,
+                respond_to_allowlist: None,
             },
         )
         .unwrap_err();
         assert!(error.to_string().contains("at least one field"));
+    }
+
+    #[test]
+    fn update_allowlist_round_trips_pubkeys() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let allowed = Keys::generate().public_key().to_hex();
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: Some(vec![allowed.clone(), allowed.clone()]),
+            },
+        )
+        .unwrap();
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["request"]["respondTo"], "allowlist");
+        assert_eq!(
+            payload["payload"]["request"]["respondToAllowlist"],
+            serde_json::json!([allowed])
+        );
+    }
+
+    #[test]
+    fn update_allowlist_requires_pubkeys() {
+        let error = build_update(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("respond-to-allowlist"));
     }
 
     #[test]
