@@ -236,22 +236,24 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+`subscribe=mentions` subscribes by default to kinds **9, 40002, 45001, 45003, 46010, 40007** — both canonical stream message kinds, forum posts and comments, approval requests and reminders. A forum post or comment that @mentions the agent is therefore delivered with no extra flags.
+
+What still needs opting in is *all* forum traffic — posts and comments that do not mention the agent, and votes (45002), which are never mentions. That means dropping the mention filter:
 
 **CLI flags:**
 ```bash
-buzz-acp --kinds 9,46010,40007,45001,45002,45003 --no-mention-filter
+buzz-acp --kinds 9,40002,46010,40007,45001,45002,45003 --no-mention-filter
 ```
 
 **Or with `--subscribe all`:**
 ```bash
-buzz-acp --subscribe all --kinds 9,46010,40007,45001,45002,45003
+buzz-acp --subscribe all --kinds 9,40002,46010,40007,45001,45002,45003
 ```
 
 **Per-channel config:**
 ```toml
 [channel.CHANNEL_UUID]
-kinds = [9, 46010, 40007, 45001, 45002, 45003]
+kinds = [9, 40002, 46010, 40007, 45001, 45002, 45003]
 require_mention = false
 ```
 
@@ -260,7 +262,9 @@ Forum event kinds:
 - **45002** — Vote on a post or comment
 - **45003** — Comment reply on a forum post
 
-> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
+> **Note:** `--kinds` **replaces** the default list rather than adding to it, so any list you pass must repeat the kinds you still want. Leaving 40002 out of one of these examples is enough to go deaf to direct mentions in v2 stream messages.
+>
+> Without `--no-mention-filter` (or `require_mention = false`), `subscribe=mentions` still filters out events that don't @mention the agent — forum posts addressed to nobody in particular remain invisible.
 
 ## How It Works
 
