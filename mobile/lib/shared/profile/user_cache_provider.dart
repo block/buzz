@@ -12,8 +12,12 @@ import 'profile_event_parser.dart';
 /// In-memory cache of user profiles, fetched in batches from the relay.
 ///
 /// Lookups requested via [get] or [preload] are coalesced into a single
-/// kind:0 batch query (NIP-01 `authors` filter) every 50ms.
+/// kind:0 batch query (NIP-01 `authors` filter) every 50ms. Larger requests
+/// drain sequentially in pages bounded by the relay response limit.
 class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
+  // The relay clamps each history response to DEFAULT_MAX_PAGE_LIMIT (1000).
+  static const _maximumProfilesPerQuery = 1000;
+
   final Set<String> _pending = {};
   final _pushExport = PushPresentationExportRecovery();
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
@@ -83,11 +87,15 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final generation = _generation;
     try {
       final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.fetchHistory(
-        NostrFilters.profilesBatch(normalized),
-      );
-      if (!_isCurrent(generation)) return false;
-      return await _verifyAndMerge(events, generation);
+      for (final batch in _profileQueryBatches(normalized)) {
+        if (!_isCurrent(generation)) return false;
+        final events = await session.fetchHistory(
+          NostrFilters.profilesBatch(batch),
+        );
+        if (!_isCurrent(generation)) return false;
+        if (!await _verifyAndMerge(events, generation)) return false;
+      }
+      return true;
     } catch (_) {
       return false;
     }
@@ -125,22 +133,27 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     try {
       final communityID = ref.read(activeCommunityProvider).value?.id;
       final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.fetchHistory(
-        NostrFilters.profilesBatch(pubkeys),
-      );
-
-      if (!_isCurrent(generation)) return;
-      if (!await _verifyAndMerge(events, generation)) return;
-      // Profile consumers can proceed as soon as their data is ready. Keep the
-      // fetch slot occupied until export drains so later requests coalesce.
-      succeeded = true;
-      completer?.complete(true);
-      if (communityID != null) {
-        // Keep later profile requests in _pending until this exact batch has
-        // reached the cache or its bounded recovery has failed.
-        await _pushExport.export(
-          () => cacheBuzzPushProfileEvents(communityID, events),
+      var remaining = pubkeys.length;
+      for (final batch in _profileQueryBatches(pubkeys)) {
+        if (!_isCurrent(generation)) return;
+        final events = await session.fetchHistory(
+          NostrFilters.profilesBatch(batch),
         );
+        if (!_isCurrent(generation)) return;
+        if (!await _verifyAndMerge(events, generation)) return;
+        remaining -= batch.length;
+        if (remaining == 0) {
+          // All requested pages are ready. Native export does not gate readers.
+          succeeded = true;
+          completer?.complete(true);
+        }
+        if (communityID != null) {
+          // Drain each page before fetching another, retaining at most one raw
+          // response while later requests coalesce as pubkeys in _pending.
+          await _pushExport.export(
+            () => cacheBuzzPushProfileEvents(communityID, events),
+          );
+        }
       }
     } catch (_) {
       // Silently fail — non-gating callers will just show pubkeys.
@@ -150,6 +163,17 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       }
       _flushInFlight = false;
       if (ref.mounted && _pending.isNotEmpty) _scheduleBatch();
+    }
+  }
+
+  Iterable<List<String>> _profileQueryBatches(List<String> pubkeys) sync* {
+    for (
+      var start = 0;
+      start < pubkeys.length;
+      start += _maximumProfilesPerQuery
+    ) {
+      final end = start + _maximumProfilesPerQuery;
+      yield pubkeys.sublist(start, end < pubkeys.length ? end : pubkeys.length);
     }
   }
 
