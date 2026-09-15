@@ -1415,20 +1415,52 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
-    let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
-    let _ = gate_tx.send(()); // unblock round 2
-
+    // Now send cancel and wait for its acknowledgement *before* releasing the
+    // round-2 gate.  The agent processes session/cancel in the sequential
+    // read_loop while round-2's HTTP request is still blocked, so it can write
+    // the cancel ACK to stdout before round-2 ever responds.  Releasing the
+    // gate only after the ACK guarantees the cancel token is set before the
+    // turn sees round-2's response, making stopReason: "cancelled" deterministic.
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
     let mut saw_prompt_response = false;
-    for _ in 0..40 {
+    let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+
+    // Drain stdout until we see the cancel ACK; buffer other messages so they
+    // can be processed in the main loop below.
+    let mut buffered: Vec<serde_json::Value> = Vec::new();
+    loop {
         let v = h.recv().await;
         if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
+            break; // cancel ACK received — cancel token is now set
+        }
+        buffered.push(v);
+    }
+    let saw_cancel_ok = true; // loop only exits via break after the ACK
+    let _ = gate_tx.send(()); // safe: cancel is fully processed and ACKed
+
+    // Replay buffered messages through the same classification logic.
+    for v in buffered {
+        if is_usage_update(&v) {
+            saw_usage = true;
+            if !saw_prompt_response {
+                saw_usage_before_prompt_response = true;
+            }
+        } else if v["id"] == json!(p_id) {
+            saw_prompt_response = true;
+            assert_eq!(
+                v["result"]["stopReason"], "cancelled",
+                "turn must end with stopReason: cancelled"
+            );
+        }
+    }
+
+    for _ in 0..40 {
+        if saw_usage && saw_prompt_response {
+            break;
+        }
+        let v = h.recv().await;
+        if is_usage_update(&v) {
             saw_usage = true;
             if !saw_prompt_response {
                 saw_usage_before_prompt_response = true;
@@ -1441,7 +1473,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                 "turn must end with stopReason: cancelled"
             );
         }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
+        if saw_usage && saw_prompt_response {
             break;
         }
     }
