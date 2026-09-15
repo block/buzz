@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 #[path = "postgres/bootstrap_tests.rs"]
-mod bootstrap_tests;
+mod bootstrap_postgres_tests;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
