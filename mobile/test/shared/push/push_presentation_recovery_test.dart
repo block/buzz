@@ -255,6 +255,11 @@ void main() {
           );
           expect(session.subscriptions, subscriptionsBefore);
           expect(
+            session.directoryLoads,
+            0,
+            reason: 'notification recovery must not fetch the open directory',
+          );
+          expect(
             payloads.last['membershipEvents'],
             unorderedEquals([
               session.membership.toJson(),
@@ -350,7 +355,7 @@ void main() {
       await container.read(channelsProvider.future);
       await nativeEntered.future;
       await container.read(channelsProvider.notifier).refresh();
-      session.beforeDirectory = () async {
+      session.beforeMetadata = () async {
         refetchEntered.complete();
         await releaseRefetch.future;
         if (mode == 'failure') throw StateError('synthetic refetch failure');
@@ -384,7 +389,8 @@ void main() {
         await Future<void>.delayed(Duration.zero);
       }
       if (mode == 'failure') {
-        expect(session.directoryLoads, 1);
+        expect(session.metadataLoads, 3);
+        expect(session.directoryLoads, 0);
         expect(payloads, hasLength(1));
         expect(
           pushPresentationExportError.value,
@@ -401,12 +407,115 @@ void main() {
         ]);
         expect(pushPresentationExportError.value, isNull);
       } else {
-        expect(session.directoryLoads, 2);
+        expect(session.metadataLoads, 5);
+        expect(session.directoryLoads, 0);
         expect(payloads.last['metadataEvents'], hasLength(2));
         expect(payloads.last['membershipEvents'], hasLength(2));
         expect(pushPresentationExportError.value, isNull);
       }
     });
+  }
+
+  for (final failedOperation in ['initial export', 'dirty refetch']) {
+    test(
+      'pending channel input drains after exhausted $failedOperation',
+      () async {
+        final blockerEntered = Completer<void>();
+        final releaseBlocker = Completer<void>();
+        final initialEntered = Completer<void>();
+        final releaseInitial = Completer<void>();
+        final refetchEntered = Completer<void>();
+        final releaseRefetch = Completer<void>();
+        final terminal = Completer<void>();
+        final latestDelivered = Completer<Map<dynamic, dynamic>>();
+        final latest = _signed(39000, channel: 'latest');
+        final latestMembership = _signed(39002, channel: 'latest');
+        messenger.setMockMethodCallHandler(_bridge, (call) async {
+          final args = call.arguments as Map<dynamic, dynamic>;
+          if (args['communityId'] == 'blocker' && !blockerEntered.isCompleted) {
+            blockerEntered.complete();
+            await releaseBlocker.future;
+          }
+          if (args['communityId'] == 'original') {
+            if (failedOperation == 'dirty refetch' &&
+                !initialEntered.isCompleted) {
+              initialEntered.complete();
+              await releaseInitial.future;
+            }
+            if ((args['metadataEvents'] as List).any(
+                  (event) => event['id'] == latest.id,
+                ) &&
+                !latestDelivered.isCompleted) {
+              latestDelivered.complete(args);
+            }
+          }
+          return null;
+        });
+        void onFailure() {
+          if (pushPresentationExportError.value != null &&
+              !terminal.isCompleted) {
+            terminal.complete();
+          }
+        }
+
+        pushPresentationExportError.addListener(onFailure);
+        addTearDown(
+          () => pushPresentationExportError.removeListener(onFailure),
+        );
+        final queued = <Future<void>>[];
+        Future<void> saturate() async {
+          queued.add(cacheBuzzPushProfileEvents('blocker', [_signed(0)]));
+          await blockerEntered.future;
+          for (var i = 1; i < 8; i++) {
+            queued.add(cacheBuzzPushProfileEvents('queued-$i', [_signed(0)]));
+          }
+        }
+
+        final session = _Session(_signed(39000), _signed(39002));
+        final container = _container(session);
+        addTearDown(container.dispose);
+        try {
+          if (failedOperation == 'initial export') await saturate();
+          await container.read(activeCommunityProvider.future);
+          await container.read(channelsProvider.future);
+          if (failedOperation == 'dirty refetch') {
+            await initialEntered.future;
+            await container.read(channelsProvider.notifier).refresh();
+            session.beforeMetadata = () async {
+              refetchEntered.complete();
+              await releaseRefetch.future;
+            };
+            releaseInitial.complete();
+            await refetchEntered.future.timeout(const Duration(seconds: 5));
+            await saturate();
+          }
+          session.extra.addAll([latest, latestMembership]);
+          await container.read(channelsProvider.notifier).refresh();
+          if (!releaseRefetch.isCompleted) releaseRefetch.complete();
+          await terminal.future.timeout(const Duration(seconds: 12));
+          expect(pushPresentationExportError.value, contains('queue is full'));
+          // Capacity returns only after the predecessor has exhausted every retry.
+          releaseBlocker.complete();
+          await Future.wait(queued);
+          final payload = await latestDelivered.future.timeout(
+            const Duration(seconds: 5),
+          );
+          expect(payload['communityId'], 'original');
+          expect(payload['metadataEvents'], contains(equals(latest.toJson())));
+          expect(
+            payload['membershipEvents'],
+            contains(equals(latestMembership.toJson())),
+          );
+          expect(session.directoryLoads, 0);
+          expect(pushPresentationExportError.value, contains('queue is full'));
+        } finally {
+          if (!releaseBlocker.isCompleted) releaseBlocker.complete();
+          if (!releaseInitial.isCompleted) releaseInitial.complete();
+          if (!releaseRefetch.isCompleted) releaseRefetch.complete();
+          await Future.wait(queued);
+        }
+      },
+    );
   }
 
   test('bounded retries terminate and a later operation can succeed', () {
@@ -470,7 +579,8 @@ class _Session extends RelaySessionNotifier {
   int profileFetches = 0;
   int subscriptions = 0;
   int directoryLoads = 0;
-  Future<void> Function()? beforeDirectory;
+  int metadataLoads = 0;
+  Future<void> Function()? beforeMetadata;
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
   @override
@@ -479,6 +589,12 @@ class _Session extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filter.kinds.contains(0)) profileFetches++;
+    if (filter.kinds.contains(39000)) {
+      metadataLoads++;
+      final hook = beforeMetadata;
+      beforeMetadata = null;
+      if (hook != null) await hook();
+    }
     return [
       for (final candidate in [event, membership, ...extra])
         if (filter.kinds.contains(candidate.kind) &&
@@ -500,9 +616,6 @@ class _Session extends RelaySessionNotifier {
           filter.extensions['before_id'] == null,
     )) {
       directoryLoads++;
-      final hook = beforeDirectory;
-      beforeDirectory = null;
-      if (hook != null) await hook();
     }
     return [
       for (final filter in filters)

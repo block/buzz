@@ -17,10 +17,11 @@ extension _ChannelPushCache on ChannelsNotifier {
     }
     _pushCacheExporting = true;
     try {
-      final exported = await _pushExport.export(
+      await _pushExport.export(
         () => cacheBuzzPushChannelEvents(communityID, metadata, membership),
       );
-      if (!exported) return; // Terminal failure is recorded by recovery.
+      // A failed operation is terminal only for its own input. A refresh that
+      // arrived meanwhile still owns an independent dirty obligation.
       while (_lifecycleRef.mounted && _pushCacheDirty) {
         _pushCacheDirty = false;
         final session = _lifecycleRef.read(relaySessionProvider.notifier);
@@ -45,7 +46,7 @@ extension _ChannelPushCache on ChannelsNotifier {
 
         // This fetch has no UI writes or channel-refresh generation changes.
         // New ordinary refreshes can proceed and mark this snapshot dirty again.
-        final recovered = await _pushExport.export(() async {
+        await _pushExport.export(() async {
           try {
             if (!current()) return;
             final members = await _fetchChannelMemberships(
@@ -63,11 +64,6 @@ extension _ChannelPushCache on ChannelsNotifier {
                 ? const <NostrEvent>[]
                 : await session.fetchHistory(NostrFilters.channelMetadata(ids));
             if (!current()) return;
-            final directory = await _fetchChannelDirectoryMetas(
-              session,
-              ensureCurrent: ensureCurrent,
-            );
-            if (!current()) return;
             final memberSnapshots = ids.isEmpty
                 ? const <NostrEvent>[]
                 : await session.fetchHistory(
@@ -78,18 +74,18 @@ extension _ChannelPushCache on ChannelsNotifier {
                     ),
                   );
             if (!current()) return;
-            await cacheBuzzPushChannelEvents(
-              community,
-              [...memberMetadata, ...directory],
-              [...members, ...memberSnapshots],
-            );
+            await cacheBuzzPushChannelEvents(community, memberMetadata, [
+              ...members,
+              ...memberSnapshots,
+            ]);
           } catch (_) {
             if (current()) rethrow;
             // Retired fetches must neither write nor report an error in the
             // replacement scope. Its ordinary refresh owns any new dirty work.
           }
         });
-        if (!recovered) return;
+        // Only new producer input can set dirty again; failure alone never
+        // schedules another attempt after recovery's bounded retries.
       }
     } finally {
       _pushCacheExporting = false;
