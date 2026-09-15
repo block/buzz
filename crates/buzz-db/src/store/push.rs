@@ -328,7 +328,8 @@ pub async fn accept_lease_event(
     // uniqueness forever. The author lock makes this cleanup atomic with the
     // subsequent author-wide checks and replacement.
     sqlx::query(
-        "UPDATE push_leases SET active=false, endpoint_enabled=false, updated_at=now() \
+        "UPDATE push_leases SET active=false, endpoint_enabled=false, app_profile=NULL, \
+         endpoint_hash=NULL, endpoint_grant=NULL, max_class=NULL, subscriptions=NULL, updated_at=now() \
          WHERE community_id=$1 AND author=$2 AND active \
            AND expires_at <= EXTRACT(EPOCH FROM now())::bigint",
     )
@@ -1663,6 +1664,82 @@ mod postgres_tests {
         .await
         .expect("count leases");
         assert_eq!((event_count, lease_count), (0, 0));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replacing_naturally_expired_lease_replaces_old_state() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let keys = nostr::Keys::generate();
+        let endpoint = [42; 32];
+        let subscriptions = serde_json::json!([]);
+
+        let expired_event = lease_event(&keys, "install", 100);
+        assert_eq!(
+            accept_lease_event(
+                &pool,
+                community,
+                &expired_event,
+                "install",
+                LeaseVersion {
+                    source_event_id: expired_event.id.as_bytes(),
+                    source_created_at: 100,
+                    generation: 1,
+                    expires_at: 1,
+                },
+                Some(ActiveLease {
+                    app_profile: "ios-production",
+                    endpoint_hash: &endpoint,
+                    endpoint_grant: "opaque-grant",
+                    max_class: "default",
+                    subscriptions: &subscriptions,
+                }),
+                16,
+            )
+            .await
+            .expect("insert expired lease"),
+            AcceptLeaseOutcome::Accepted
+        );
+
+        let replacement_event = lease_event(&keys, "install", 200);
+        let outcome = accept_lease_event(
+            &pool,
+            community,
+            &replacement_event,
+            "install",
+            LeaseVersion {
+                source_event_id: replacement_event.id.as_bytes(),
+                source_created_at: 200,
+                generation: 2,
+                expires_at: i64::MAX / 2,
+            },
+            Some(ActiveLease {
+                app_profile: "ios-production",
+                endpoint_hash: &[43; 32],
+                endpoint_grant: "replacement-grant",
+                max_class: "default",
+                subscriptions: &subscriptions,
+            }),
+            16,
+        )
+        .await
+        .expect("replace expired lease");
+        assert_eq!(outcome, AcceptLeaseOutcome::Accepted);
+
+        let persisted: (bool, Vec<u8>, i64) = sqlx::query_as(
+            "SELECT active, source_event_id, generation FROM push_leases \
+             WHERE community_id=$1 AND author=$2 AND installation_id=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(expired_event.pubkey.as_bytes())
+        .bind("install")
+        .fetch_one(&pool)
+        .await
+        .expect("read original lease");
+        assert!(persisted.0, "replacement lease must be active");
+        assert_eq!(persisted.1, replacement_event.id.as_bytes());
+        assert_eq!(persisted.2, 2);
     }
 
     #[tokio::test]
