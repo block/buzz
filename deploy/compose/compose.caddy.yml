@@ -2,11 +2,20 @@ services:
   relay:
     ports: !reset []
 
+  pairing-relay:
+    ports: !reset []
+
   caddy:
     image: caddy:2-alpine
     depends_on:
       relay:
         condition: service_healthy
+      # service_started, not service_healthy: pairing is one route. Gating the
+      # proxy on the sidecar's health would let an unhealthy sidecar keep the
+      # whole site — messaging, media, git — from coming up. Pairing degrades
+      # on its own; a stopped sidecar just makes /pair a 502.
+      pairing-relay:
+        condition: service_started
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
     ports:
