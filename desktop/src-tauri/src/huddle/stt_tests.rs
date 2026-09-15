@@ -1,10 +1,28 @@
-use std::sync::{atomic::AtomicBool, mpsc, Arc, Barrier};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Barrier,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use super::{
-    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, HumanFloor, SttAudioInput,
+    flush_to_stt, has_enough_voiced_audio, run_stt_receive_loop, spawn_openai_decoder,
+    vad_flush_allowed, DecodeOutcome, HumanFloor, OpenAiSttConfig, SpeechDecoder, SttAudioInput,
     SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
     SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
 };
+
+struct FailingDecoder;
+
+impl SpeechDecoder for FailingDecoder {
+    fn decode(&self, _speech: &[f32]) -> Result<DecodeOutcome, String> {
+        Err("endpoint unavailable".into())
+    }
+}
 
 #[derive(Clone, Copy)]
 enum WorkerExit {
@@ -257,4 +275,79 @@ fn held_push_to_talk_never_silence_flushes() {
     assert!(!vad_flush_allowed(true, true, true));
     // Manually open mic with the shortcut up: normal VAD behavior.
     assert!(vad_flush_allowed(true, true, false));
+}
+
+#[test]
+fn decoder_failure_does_not_publish_transcript() {
+    let (text_tx, mut text_rx) = tokio::sync::mpsc::channel(1);
+
+    flush_to_stt(
+        &[0.25; 16_000],
+        MIN_VOICED_FRAMES,
+        &FailingDecoder,
+        &text_tx,
+    );
+
+    assert!(text_rx.try_recv().is_err());
+}
+
+#[test]
+fn slow_openai_decode_does_not_block_later_utterance_capture() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let address = listener.local_addr().expect("test server address");
+    let server = thread::spawn(move || {
+        for text in ["ilk bölüm", "ikinci bölüm"] {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            assert!(!request.is_empty());
+            thread::sleep(Duration::from_millis(100));
+            let body = format!(r#"{{"text":"{text}"}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        }
+    });
+
+    let config = OpenAiSttConfig::new(
+        format!("http://{address}/v1/audio/transcriptions"),
+        "test-key".into(),
+        "whisper-large-v3-turbo-asr-fp16".into(),
+        "tr".into(),
+        String::new(),
+    )
+    .expect("valid loopback config");
+    let (text_tx, mut text_rx) = tokio::sync::mpsc::channel(2);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let decoder =
+        spawn_openai_decoder(config, text_tx, Arc::clone(&shutdown)).expect("decoder worker");
+
+    let started = Instant::now();
+    assert_eq!(
+        decoder.decode(&[0.25; 16_000]).expect("queue first"),
+        DecodeOutcome::Queued
+    );
+    assert_eq!(
+        decoder.decode(&[0.25; 16_000]).expect("queue second"),
+        DecodeOutcome::Queued
+    );
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert_eq!(text_rx.blocking_recv().as_deref(), Some("ilk bölüm"));
+    assert_eq!(text_rx.blocking_recv().as_deref(), Some("ikinci bölüm"));
+
+    shutdown.store(true, Ordering::Release);
+    server.join().expect("server thread");
 }
