@@ -407,6 +407,7 @@ impl WorkflowEngine {
                 .create_workflow_run(
                     community_id,
                     workflow.id,
+                    workflow.definition_event_id.as_deref(),
                     Some(&trigger_event_id_bytes),
                     Some(&trigger_ctx_json),
                 )
@@ -669,6 +670,7 @@ impl WorkflowEngine {
                     .create_workflow_run(
                         community_id,
                         workflow.id,
+                        workflow.definition_event_id.as_deref(),
                         None, // no trigger event for cron
                         trigger_ctx_json.as_ref(),
                     )
