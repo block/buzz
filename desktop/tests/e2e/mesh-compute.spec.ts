@@ -27,9 +27,6 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
 
   await expect(card).not.toContainText("Not sharing right now");
   await expect(
-    page.getByTestId("mesh-share-compute-options-motion"),
-  ).toHaveCount(0);
-  await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
   ).toHaveCount(0);
   await expect(model).toBeVisible();
@@ -39,17 +36,20 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   await page.getByLabel("Custom model reference").fill(modelRef);
 
   await toggle.click();
-  await expect(
-    page.getByTestId("mesh-share-compute-options-motion"),
-  ).toBeVisible();
+  await expect(toggle).toBeChecked();
+  await expect(card).toContainText("You’re sharing compute");
+  await expect(card).toContainText("This machine is actively sharing compute");
+  await expect(model).toBeVisible();
+  await expect(card).toContainText(
+    "Buzz downloads the selected model when sharing starts",
+  );
+
+  // Runtime/model details are intentionally secondary to the successful
+  // sharing state and remain available under Advanced.
+  await page.getByTestId("mesh-share-compute-advanced-toggle").click();
   await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
   ).toBeVisible();
-  await expect(model).toBeVisible();
-  await expect(card).toContainText(
-    "Buzz downloads remote models when sharing starts",
-  );
-  await expect(toggle).toBeChecked();
   await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
   ).toContainText("SmolLM2 135M with relay members");
@@ -74,9 +74,6 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   await toggle.click();
   await expect(toggle).not.toBeChecked();
   await expect(card).not.toContainText("Not sharing right now");
-  await expect(
-    page.getByTestId("mesh-share-compute-options-motion"),
-  ).toHaveCount(0);
   await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
   ).toHaveCount(0);
@@ -123,9 +120,6 @@ test("a consuming client can switch to sharing its saved local model", async ({
   );
   await expect(card).toContainText("Buzz may briefly restart");
   await expect(toggle).not.toBeChecked();
-  await expect(
-    page.getByTestId("mesh-share-compute-options-motion"),
-  ).toHaveCount(0);
   await expect(toggle).toBeEnabled();
   const customModel = page.getByLabel("Custom model reference");
   await expect(customModel).toHaveValue(localModel);
