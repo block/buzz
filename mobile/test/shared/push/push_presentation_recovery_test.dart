@@ -427,6 +427,9 @@ void main() {
         final refetchEntered = Completer<void>();
         final releaseRefetch = Completer<void>();
         final terminal = Completer<void>();
+        late _Session session;
+        List<int>? readsBeforeAdmissionRetries;
+        List<int>? readsAtTerminal;
         final latestDelivered = Completer<Map<dynamic, dynamic>>();
         final latest = _signed(39000, channel: 'latest');
         final latestMembership = _signed(39002, channel: 'latest');
@@ -454,6 +457,7 @@ void main() {
         void onFailure() {
           if (pushPresentationExportError.value != null &&
               !terminal.isCompleted) {
+            readsAtTerminal = session.snapshotReadCounts;
             terminal.complete();
           }
         }
@@ -471,7 +475,7 @@ void main() {
           }
         }
 
-        final session = _Session(_signed(39000), _signed(39002));
+        session = _Session(_signed(39000), _signed(39002));
         final container = _container(session);
         addTearDown(container.dispose);
         try {
@@ -491,9 +495,22 @@ void main() {
           }
           session.extra.addAll([latest, latestMembership]);
           await container.read(channelsProvider.notifier).refresh();
+          readsBeforeAdmissionRetries = session.snapshotReadCounts;
           if (!releaseRefetch.isCompleted) releaseRefetch.complete();
           await terminal.future.timeout(const Duration(seconds: 12));
           expect(pushPresentationExportError.value, contains('queue is full'));
+          if (failedOperation == 'dirty refetch') {
+            // Membership pages and metadata were fetched before the paused
+            // metadata response. Only the remaining member snapshot is read;
+            // all five admission retries must reuse those same raw events.
+            expect(
+              [
+                for (var i = 0; i < 3; i++)
+                  readsAtTerminal![i] - readsBeforeAdmissionRetries[i],
+              ],
+              [0, 0, 1],
+            );
+          }
           // Capacity returns only after the predecessor has exhausted every retry.
           releaseBlocker.complete();
           await Future.wait(queued);
@@ -580,6 +597,13 @@ class _Session extends RelaySessionNotifier {
   int subscriptions = 0;
   int directoryLoads = 0;
   int metadataLoads = 0;
+  int membershipPages = 0;
+  int memberSnapshotLoads = 0;
+  List<int> get snapshotReadCounts => [
+    membershipPages,
+    metadataLoads,
+    memberSnapshotLoads,
+  ];
   Future<void> Function()? beforeMetadata;
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -589,6 +613,9 @@ class _Session extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filter.kinds.contains(0)) profileFetches++;
+    if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
+      memberSnapshotLoads++;
+    }
     if (filter.kinds.contains(39000)) {
       metadataLoads++;
       final hook = beforeMetadata;
@@ -609,6 +636,11 @@ class _Session extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filters.any(
+      (filter) => filter.kinds.contains(39002) && filter.tags['#p'] != null,
+    )) {
+      membershipPages++;
+    }
     if (filters.any(
       (filter) =>
           filter.kinds.contains(39000) &&

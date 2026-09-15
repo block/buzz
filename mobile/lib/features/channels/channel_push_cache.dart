@@ -46,15 +46,17 @@ extension _ChannelPushCache on ChannelsNotifier {
 
         // This fetch has no UI writes or channel-refresh generation changes.
         // New ordinary refreshes can proceed and mark this snapshot dirty again.
-        await _pushExport.export(() async {
+        // Start once. Admission retries await this same snapshot rather than
+        // repeating relay reads while the native export queue remains full.
+        final snapshot = () async {
           try {
-            if (!current()) return;
+            if (!current()) return null;
             final members = await _fetchChannelMemberships(
               session,
               pubkey,
               ensureCurrent: ensureCurrent,
             );
-            if (!current()) return;
+            if (!current()) return null;
             final ids = members
                 .map((event) => event.getTagValue('d'))
                 .whereType<String>()
@@ -63,7 +65,7 @@ extension _ChannelPushCache on ChannelsNotifier {
             final memberMetadata = ids.isEmpty
                 ? const <NostrEvent>[]
                 : await session.fetchHistory(NostrFilters.channelMetadata(ids));
-            if (!current()) return;
+            if (!current()) return null;
             final memberSnapshots = ids.isEmpty
                 ? const <NostrEvent>[]
                 : await session.fetchHistory(
@@ -73,16 +75,26 @@ extension _ChannelPushCache on ChannelsNotifier {
                       limit: ids.length,
                     ),
                   );
-            if (!current()) return;
-            await cacheBuzzPushChannelEvents(community, memberMetadata, [
-              ...members,
-              ...memberSnapshots,
-            ]);
+            if (!current()) return null;
+            return (
+              metadata: memberMetadata,
+              membership: [...members, ...memberSnapshots],
+            );
           } catch (_) {
             if (current()) rethrow;
             // Retired fetches must neither write nor report an error in the
             // replacement scope. Its ordinary refresh owns any new dirty work.
           }
+          return null;
+        }();
+        await _pushExport.export(() async {
+          final events = await snapshot;
+          if (events == null || !current()) return;
+          await cacheBuzzPushChannelEvents(
+            community,
+            events.metadata,
+            events.membership,
+          );
         });
         // Only new producer input can set dirty again; failure alone never
         // schedules another attempt after recovery's bounded retries.
