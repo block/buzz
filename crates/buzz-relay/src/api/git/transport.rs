@@ -2042,7 +2042,7 @@ async fn finalize_push_inner(
                         // Routed through the guarded send path for uniformity;
                         // the access gate no-ops for this globally-scoped
                         // (channel_id = None) ref-state event.
-                        crate::handlers::event::fan_out_event_to_local_subscribers(
+                        let _ = crate::handlers::event::fan_out_event_to_local_subscribers(
                             state,
                             ctx.tenant.community(),
                             &stored,
