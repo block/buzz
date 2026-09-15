@@ -104,6 +104,12 @@ run_unit_tests() {
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
 
+  run_test_step "buzz-media storage snapshot serialization test" \
+    cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
+
+  run_test_step "buzz-admin completed snapshot persistence test" \
+    cargo test -p buzz-admin storage_snapshot_tests::failed_fold_never_invokes_snapshot_persistence -- --exact --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \
@@ -142,6 +148,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
+
+  run_test_step "buzz-relay storage snapshot tests" \
+    cargo test -p buzz-relay --lib storage_sweep::tests:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
