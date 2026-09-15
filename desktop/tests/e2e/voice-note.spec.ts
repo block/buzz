@@ -35,13 +35,22 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
-  await page.addInitScript(() => {
+  await page.addInitScript((silentRecording) => {
+    if (silentRecording) {
+      AudioContext.prototype.decodeAudioData = async () =>
+        ({
+          duration: 0.1,
+          getChannelData: () => new Float32Array(4_800),
+          numberOfChannels: 1,
+          sampleRate: 48_000,
+        }) as AudioBuffer;
+    }
     Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
       configurable: true,
       async value() {
         const context = new AudioContext();
-        const oscillator = context.createOscillator();
         const destination = context.createMediaStreamDestination();
+        const oscillator = context.createOscillator();
         oscillator.frequency.value = 220;
         oscillator.connect(destination);
         oscillator.start();
@@ -56,7 +65,7 @@ test.beforeEach(async ({ page }, testInfo) => {
         return destination.stream;
       },
     });
-  });
+  }, testInfo.title.includes("silent recording"));
 
   await installMockBridge(page, {
     deferredComposerUploads: true,
@@ -851,6 +860,70 @@ test("records from the composer and renders an inline waveform card", async ({
   await card.screenshot({
     path: "test-results/voice-note/voice-note-card.png",
   });
+});
+
+test("keeps a silent recording at minimum waveform height after sending", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByRole("button", { name: "Record voice note" }).click();
+  await page.waitForTimeout(100);
+  await page.getByRole("button", { name: "Finish voice note" }).click();
+  await expect(page.getByTestId("composer-voice-note-card")).toBeVisible();
+  const send = page.getByTestId("send-message");
+  await expect(send).toBeEnabled();
+  await send.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const payload = window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+          (call) => call.command === "send_channel_message",
+        )?.payload as { mediaTags?: string[][] } | undefined;
+        return payload?.mediaTags?.find(
+          (tag) =>
+            tag[0] === "imeta" &&
+            tag.some((field) => field.startsWith("waveform ")),
+        );
+      }),
+    )
+    .not.toBeUndefined();
+  const persistedSamples = await page.evaluate(() => {
+    const payload = window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+      (call) => call.command === "send_channel_message",
+    )?.payload as { mediaTags?: string[][] } | undefined;
+    const tag = payload?.mediaTags?.find(
+      (candidate) =>
+        candidate[0] === "imeta" &&
+        candidate.some((field) => field.startsWith("waveform ")),
+    );
+    const waveform = tag?.find((field) => field.startsWith("waveform "));
+    return waveform?.slice("waveform ".length).split(" ").map(Number) ?? [];
+  });
+  expect(persistedSamples).toHaveLength(48);
+  expect(new Set(persistedSamples)).toEqual(new Set([0]));
+
+  const waveform = page
+    .getByTestId("audio-message-attachment")
+    .last()
+    .getByTestId("voice-note-playback-waveform");
+  await expect(waveform).toHaveAttribute("data-waveform-state", "ready");
+  await waitForAnimations(page);
+  expect(
+    await waveform
+      .locator("span")
+      .evaluateAll((bars) =>
+        bars.map((bar) => bar.getBoundingClientRect().height),
+      ),
+  ).toEqual(expect.arrayContaining([3]));
+  expect(
+    await waveform
+      .locator("span")
+      .evaluateAll((bars) =>
+        Math.max(...bars.map((bar) => bar.getBoundingClientRect().height)),
+      ),
+  ).toBe(3);
 });
 
 test("keeps emoji available but blocks GIFs beside a queued voice note", async ({

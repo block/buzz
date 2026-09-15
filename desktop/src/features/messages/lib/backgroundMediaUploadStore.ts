@@ -17,6 +17,7 @@ export type QueuedMediaAttachment = {
   id: number;
   previewUrl?: string;
   spoilered: boolean;
+  waveform?: number[];
 };
 
 type BackgroundUploadTask = {
@@ -303,7 +304,10 @@ export function prepareBackgroundMediaUpload(
               total: task.fileProgress[index].total,
             };
             rebuildSnapshot();
-            descriptors.push(descriptor);
+            descriptors.push({
+              ...descriptor,
+              ...(attachment.waveform ? { waveform: attachment.waveform } : {}),
+            });
           }
 
           if (!task.canceled) {

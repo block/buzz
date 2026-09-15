@@ -15,6 +15,7 @@ class ImetaEntry {
   final double? duration;
   final String? filename;
   final int? size;
+  final List<double> waveform;
 
   const ImetaEntry({
     required this.url,
@@ -26,6 +27,7 @@ class ImetaEntry {
     this.duration,
     this.filename,
     this.size,
+    this.waveform = const [],
   });
 
   bool get isVideo => mimeType?.startsWith('video/') == true;
@@ -61,6 +63,7 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
     double? duration;
     String? filename;
     int? size;
+    var waveform = const <double>[];
 
     for (final part in tag.skip(1)) {
       final separator = part.indexOf(' ');
@@ -92,6 +95,16 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
           filename = value;
         case 'size':
           size = int.tryParse(value);
+        case 'waveform':
+          final parsed = value
+              .split(RegExp(r'\s+'))
+              .map(int.tryParse)
+              .whereType<int>()
+              .where((sample) => sample >= 0 && sample <= 100)
+              .take(100)
+              .map((sample) => sample / 100)
+              .toList(growable: false);
+          if (parsed.isNotEmpty) waveform = parsed;
       }
     }
 
@@ -106,6 +119,7 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
       duration: duration,
       filename: filename,
       size: size,
+      waveform: waveform,
     );
   }
   return byUrl;

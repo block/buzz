@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import {
   formatVoiceNoteDuration,
+  applyVoiceNotePlaybackRate,
   isVoiceNoteAttachment,
   nextVoiceNotePlaybackRate,
   resolveAudioAttachment,
@@ -115,6 +116,7 @@ export function AudioMessageAttachment({
   filename,
   href,
   onRemove,
+  waveform,
 }: {
   composer?: boolean;
   duration?: number;
@@ -122,6 +124,7 @@ export function AudioMessageAttachment({
   filename: string;
   href: string;
   onRemove?: () => void;
+  waveform?: number[];
 }) {
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const playbackId = React.useId();
@@ -240,6 +243,11 @@ export function AudioMessageAttachment({
 
   React.useEffect(() => {
     if (!playbackHref) return;
+    if (waveform?.length) {
+      setWaveformError(false);
+      setWaveformSummary(Float32Array.from(waveform.slice(0, 100)));
+      return;
+    }
     let active = true;
     setWaveformReady(false);
     setWaveformError(false);
@@ -259,7 +267,7 @@ export function AudioMessageAttachment({
       active = false;
       load.cancel();
     };
-  }, [playbackHref]);
+  }, [playbackHref, waveform]);
 
   React.useEffect(() => {
     setPeaks(
@@ -515,8 +523,7 @@ export function AudioMessageAttachment({
               const next = nextVoiceNotePlaybackRate(playbackRate);
               setPlaybackRate(next);
               if (audioRef.current) {
-                audioRef.current.defaultPlaybackRate = next;
-                audioRef.current.playbackRate = next;
+                applyVoiceNotePlaybackRate(audioRef.current, next);
               }
             }}
             type="button"
