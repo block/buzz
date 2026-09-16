@@ -70,6 +70,7 @@ class Community {
     return Community(
       id: _uuid.v4(),
       name: name,
+      localName: '',
       relayUrl: relayUrl,
       pubkey: pubkey,
       nsec: nsec,

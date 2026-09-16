@@ -235,15 +235,16 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           w.id === dup.id
             ? {
                 ...w,
-                name:
-                  w.localName || w.canonicalName || community.name || w.name,
                 token: community.token ?? w.token,
                 pubkey: community.pubkey ?? w.pubkey,
               }
             : w,
         );
       } else {
-        next = [...prev, community];
+        next = [
+          ...prev,
+          { ...community, localName: community.localName ?? "" },
+        ];
       }
       saveCommunities(next);
       return next;
@@ -345,7 +346,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
                 ...updated,
                 canonicalName: undefined,
                 fallbackName: updates.name ?? w.fallbackName ?? w.name,
-                name: updates.name ?? w.localName ?? w.fallbackName ?? w.name,
+                name: updates.name || w.localName || w.fallbackName || w.name,
               };
             }
             return updates.localName !== undefined

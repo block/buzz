@@ -25,7 +25,8 @@ async function setup(page: Page, profiles: Profiles, isOffline = () => false) {
           JSON.stringify([
             {
               id: "a",
-              name: "Local Dev",
+              name: "Invite label",
+              localName: "",
               relayUrl: a,
               addedAt: "2026-01-01",
             },
@@ -145,7 +146,7 @@ test("two clean installations show a shared name and reconcile a rename after fo
       "BitLab Builders",
     );
     await expect(
-      dialog.getByText(/Previous device label: Local Dev/),
+      dialog.getByText(/Previous device label: Invite label/),
     ).toBeVisible();
     await waitForAnimations(page);
     await dialog.screenshot({

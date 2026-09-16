@@ -29,6 +29,14 @@ void main() {
       reconcileCommunityName(named, const CommunityProfile(null)).name,
       'buzz',
     );
+    final fresh = Community.create(
+      name: 'Invite label',
+      relayUrl: community.relayUrl,
+    );
+    expect(
+      reconcileCommunityName(fresh, const CommunityProfile('Shared')).name,
+      'Shared',
+    );
     final legacy = reconcileCommunityName(
       community.copyWith(name: 'My label'),
       const CommunityProfile('Shared'),

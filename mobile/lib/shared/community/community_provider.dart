@@ -405,8 +405,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           return existing.id;
         }
 
-        await storage.save(community);
-        final updatedList = [...current, community];
+        final added = community.copyWith(localName: community.localName ?? '');
+        await storage.save(added);
+        final updatedList = [...current, added];
         state = AsyncData(updatedList);
         await syncCommunitySnapshot(ref, updatedList);
         return community.id;

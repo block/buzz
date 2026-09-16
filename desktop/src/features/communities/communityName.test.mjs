@@ -4,7 +4,7 @@ import {
   reconcileCommunityName,
   withLocalCommunityName,
 } from "./communityName.ts";
-import { deriveCommunityName } from "./communityStorage.ts";
+import { deriveCommunityName, initFirstCommunity } from "./communityStorage.ts";
 const community = {
   id: "one",
   name: "buzz",
@@ -55,4 +55,31 @@ test("legacy custom labels become explicit local nicknames", () => {
     { name: "Shared" },
   );
   assert.equal(ip.name, "Shared");
+});
+
+test("new invited connections follow canonical names rather than infer aliases", (t) => {
+  const previousWindow = globalThis.window;
+  const previousStorage = globalThis.localStorage;
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+  globalThis.window = { localStorage: storage };
+  globalThis.localStorage = storage;
+  t.after(() => {
+    globalThis.window = previousWindow;
+    globalThis.localStorage = previousStorage;
+  });
+  const first = initFirstCommunity(
+    community.relayUrl,
+    "identity",
+    "Invite label",
+  );
+  assert.ok(first);
+  assert.equal(
+    reconcileCommunityName(first, { name: "Shared" }).name,
+    "Shared",
+  );
 });

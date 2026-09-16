@@ -222,6 +222,8 @@ export function initFirstCommunity(
   const community: Community = {
     id: crypto.randomUUID(),
     name: trimmedName || deriveCommunityName(normalizedUrl),
+    // New connections follow relay truth; only legacy records infer an alias.
+    localName: "",
     relayUrl: normalizedUrl,
     // Compiled default relays must admit the first token-less connection; there
     // is no invite-token prompt on this auto-connect path.
