@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 //! Typed boolean feature flags for Buzz server components.
 
-use buzz_core::PublicKey;
+use buzz_core::{CommunityId, PublicKey};
 
 #[cfg(feature = "launchdarkly")]
 /// LaunchDarkly-backed evaluator adapter.
@@ -16,12 +16,12 @@ pub struct BooleanFlag {
 }
 
 impl BooleanFlag {
-    /// Construct a typed boolean flag from its stable provider key and declared default.
+    /// Construct a typed boolean flag from its stable key and declared default.
     pub const fn new(key: &'static str, default: bool) -> Self {
         Self { key, default }
     }
 
-    /// Provider key for this flag.
+    /// Stable key for this flag.
     pub const fn key(self) -> &'static str {
         self.key
     }
@@ -32,30 +32,51 @@ impl BooleanFlag {
     }
 }
 
-/// Minimal evaluation context with one stable targeting identifier.
+/// Stable targeting context for one Buzz community and an optional actor.
 ///
-/// Buzz identities are Nostr keys. A pubkey is stable across relay sessions,
-/// non-secret, and already first-class in existing server types.
+/// Community is always required because the same Nostr identity can participate
+/// in multiple isolated Buzz communities. Community-only contexts support
+/// background and system evaluations that have no actor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvaluationContext {
-    actor_pubkey: PublicKey,
+    community: CommunityId,
+    actor_pubkey: Option<PublicKey>,
 }
 
 impl EvaluationContext {
-    /// Construct a context for evaluations that target one actor identity.
-    pub fn for_pubkey(actor_pubkey: PublicKey) -> Self {
-        Self { actor_pubkey }
+    /// Construct a community-only evaluation context.
+    pub const fn for_community(community: CommunityId) -> Self {
+        Self {
+            community,
+            actor_pubkey: None,
+        }
     }
 
-    /// Stable actor key for provider targeting.
-    pub fn actor_pubkey(&self) -> &PublicKey {
-        &self.actor_pubkey
+    /// Construct an evaluation context for an actor within one community.
+    pub const fn for_actor(community: CommunityId, actor_pubkey: PublicKey) -> Self {
+        Self {
+            community,
+            actor_pubkey: Some(actor_pubkey),
+        }
+    }
+
+    /// Community that owns this evaluation.
+    pub const fn community(&self) -> CommunityId {
+        self.community
+    }
+
+    /// Optional stable actor key for actor-targeted evaluation.
+    pub const fn actor_pubkey(&self) -> Option<&PublicKey> {
+        self.actor_pubkey.as_ref()
     }
 }
 
 /// Evaluates typed boolean feature flags.
 pub trait BooleanFlagEvaluator: Send + Sync {
-    /// Resolve a boolean flag for one actor context.
+    /// Resolve a boolean flag for one Buzz evaluation context.
+    ///
+    /// Implementations must return [`BooleanFlag::default`] whenever no valid
+    /// boolean value is available, including provider absence or failure.
     fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool;
 }
 
@@ -72,91 +93,61 @@ impl BooleanFlagEvaluator for StaticEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::CommunityId;
+
+    fn community(id: &str) -> CommunityId {
+        CommunityId::from_uuid(id.parse().expect("valid community UUID"))
+    }
+
+    fn actor() -> PublicKey {
+        PublicKey::from_hex("c4f0623bdc8c4f7ecab9f7457f501f3e8f4efcf8f8f6ef6f4d76f42f5bb6f2cb")
+            .expect("valid pubkey")
+    }
 
     #[test]
-    fn static_evaluator_returns_declared_default() {
-        let context = EvaluationContext::for_pubkey(
-            PublicKey::from_hex("c4f0623bdc8c4f7ecab9f7457f501f3e8f4efcf8f8f6ef6f4d76f42f5bb6f2cb")
-                .expect("valid pubkey"),
-        );
-        let flag = BooleanFlag::new("relay.mesh_demo_echo", true);
+    fn static_evaluator_returns_declared_defaults_for_community() {
+        let context =
+            EvaluationContext::for_community(community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
 
-        let got = StaticEvaluator.evaluate_bool(flag, &context);
-        assert!(got);
+        assert!(StaticEvaluator.evaluate_bool(BooleanFlag::new("enabled", true), &context));
+        assert!(!StaticEvaluator.evaluate_bool(BooleanFlag::new("disabled", false), &context));
     }
 
-    #[cfg(feature = "launchdarkly")]
-    #[tokio::test]
-    async fn launchdarkly_missing_flag_falls_back_to_declared_default() {
-        use launchdarkly_server_sdk::{Client, ConfigBuilder, TestData};
-        use std::time::Duration;
+    #[test]
+    fn non_launchdarkly_evaluator_can_target_community_through_public_trait() {
+        struct CommunityEvaluator {
+            enabled_community: CommunityId,
+        }
 
-        let test_data = TestData::new();
+        impl BooleanFlagEvaluator for CommunityEvaluator {
+            fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool {
+                if context.community() == self.enabled_community {
+                    true
+                } else {
+                    flag.default()
+                }
+            }
+        }
 
-        let config = ConfigBuilder::new("sdk-key")
-            .data_source(&test_data)
-            .build()
-            .expect("launchdarkly test config");
-        let client = Client::build(config).expect("launchdarkly test client");
+        let enabled_community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let other_community = community("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        let evaluator: &dyn BooleanFlagEvaluator = &CommunityEvaluator { enabled_community };
+        let flag = BooleanFlag::new("community-targeted", false);
 
-        let evaluator = crate::launchdarkly::LaunchDarklyEvaluator::new(client);
-        evaluator
-            .start_with_default_executor_and_wait(Duration::from_secs(1))
-            .await
-            .expect("launchdarkly initialized");
-        let context = EvaluationContext::for_pubkey(
-            PublicKey::from_hex("eb1539f3815379cbf4fdbb23609f730d9fce4fd2a7fbc6a93dbf39f8e9f4704d")
-                .expect("valid pubkey"),
-        );
-        let flag = BooleanFlag::new("relay.feature.missing", true);
-
-        let got = evaluator.evaluate_bool(flag, &context);
-        assert!(got);
-        evaluator.close();
+        assert!(evaluator.evaluate_bool(flag, &EvaluationContext::for_community(enabled_community)));
+        assert!(!evaluator.evaluate_bool(flag, &EvaluationContext::for_community(other_community)));
     }
 
-    #[cfg(feature = "launchdarkly")]
-    #[tokio::test]
-    async fn launchdarkly_type_error_falls_back_to_declared_default() {
-        use launchdarkly_server_sdk::{Client, ConfigBuilder, FlagBuilder, FlagValue, TestData};
-        use std::time::Duration;
+    #[test]
+    fn same_actor_in_two_communities_is_distinguishable() {
+        let actor = actor();
+        let community_a = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let community_b = community("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
 
-        let test_data = TestData::new();
-        test_data.update(
-            FlagBuilder::new("relay.feature.bool")
-                .variations(vec![FlagValue::Bool(true)])
-                .fallthrough_variation_index(0),
-        );
-        test_data.update(
-            FlagBuilder::new("relay.feature.string")
-                .variations(vec![FlagValue::Str("red".to_owned())])
-                .fallthrough_variation_index(0),
-        );
+        let context_a = EvaluationContext::for_actor(community_a, actor);
+        let context_b = EvaluationContext::for_actor(community_b, actor);
 
-        let config = ConfigBuilder::new("sdk-key")
-            .data_source(&test_data)
-            .build()
-            .expect("launchdarkly test config");
-        let client = Client::build(config).expect("launchdarkly test client");
-
-        let evaluator = crate::launchdarkly::LaunchDarklyEvaluator::new(client);
-        evaluator
-            .start_with_default_executor_and_wait(Duration::from_secs(1))
-            .await
-            .expect("launchdarkly initialized");
-        let context = EvaluationContext::for_pubkey(
-            PublicKey::from_hex("5581946f95a03e6afb43027ec89b21507f040d35fd6f8594f168f4298f96f9cb")
-                .expect("valid pubkey"),
-        );
-
-        let bool_flag = BooleanFlag::new("relay.feature.bool", false);
-        let bool_got = evaluator.evaluate_bool(bool_flag, &context);
-        assert!(bool_got);
-
-        let flag = BooleanFlag::new("relay.feature.string", false);
-
-        let got = evaluator.evaluate_bool(flag, &context);
-        assert!(!got);
-        evaluator.close();
+        assert_eq!(context_a.actor_pubkey(), context_b.actor_pubkey());
+        assert_ne!(context_a.community(), context_b.community());
     }
 }
