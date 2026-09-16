@@ -183,28 +183,28 @@ endpoint no longer produces a flat dashboard during the outage it exists to
 explain.
 
 `buzz_readiness_dependency_sample_completed_timestamp_seconds` carries **when
-the cached report completed**, in Unix seconds, and is written only by a
-completed sample — nothing ages it in the background. The age is therefore a
-property of the query, not of a server-side loop:
+the cached report completed**, in Unix seconds. The relay writes it once per
+completed sample, immediately after the cache is replaced, and nothing else
+writes it — there is no background loop that ages it. So the value stands still
+when sampling stops, and the time elapsed since it was written is whatever the
+reader computes at read time.
 
-```promql
-time() - buzz_readiness_dependency_sample_completed_timestamp_seconds > 60
-```
+Following the `buzz_storage_sweep_age_seconds` convention, the series is not
+emitted until the first sample completes: its absence means "not yet sampled",
+not "fresh".
 
-That expression grows on its own while a pod is wedged, which is the point of a
-timestamp rather than an age: a gauge carrying the age would have to be advanced
-by the very loop whose absence it is meant to report, so a stopped sampler would
-freeze it at its last value and read as permanently fresh. `60` is two cadences,
-the same threshold `/_status` uses to call a report `stale`.
+That is the whole server-side contract. Freshness alerting is built from this
+gauge in the monitoring provider, and the monitor query, thresholds, and
+per-pod tag grouping belong with the deployment's monitor configuration rather
+than in this chart — they depend on the provider's query grammar and on the
+tags its agent attaches, neither of which this repo owns.
 
-Do not alert on no-data for `buzz_readiness_dependency_checks_total` or
-`buzz_readiness_check_duration_seconds`. Both are cumulative: a stopped sampler
-leaves their last values being scraped indefinitely, so the series stay present
-and flat. The timestamp gauge is the only series whose derived age moves when
-sampling stops. Following the `buzz_storage_sweep_age_seconds` convention, that
-gauge is **absent until the first sample completes**, so absence means "not yet
-sampled", never "fresh" — alert on `absent()` as well. Per-report freshness for
-a human reading a single pod stays on the `sample`, `sample_age_seconds`, and
+Two properties of the neighboring families are worth knowing when building
+that alerting. `buzz_readiness_dependency_checks_total` and
+`buzz_readiness_check_duration_seconds` are cumulative, so a sampler that stops
+leaves their last values exported and scraped indefinitely: those series stay
+present and flat rather than disappearing. And per-report freshness for a human
+reading a single pod is already on the `sample`, `sample_age_seconds`, and
 `sample_interval_seconds` fields of `/_status` above.
 
 The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
