@@ -24,6 +24,80 @@ use axum::{
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder};
 use metrics_util::MetricKindMask;
 
+/// The fixed method label for the WebSocket NIP-42 challenge lifecycle.
+pub(crate) const AUTH_METHOD_NIP42: &str = "nip42";
+
+/// Bounded terminal results for one WebSocket authentication attempt.
+///
+/// Keep this enum free of user-controlled or error-string values. Rollout
+/// analysis relies on these labels having a small, stable cardinality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthOutcome {
+    Success,
+    Invalid,
+    Banned,
+    BanCheckError,
+    AllowlistCheckError,
+    AllowlistDenied,
+    RelayMembershipCheckError,
+    NotRelayMember,
+    Timeout,
+    Disconnect,
+    Shutdown,
+}
+
+impl AuthOutcome {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::Success,
+        Self::Invalid,
+        Self::Banned,
+        Self::BanCheckError,
+        Self::AllowlistCheckError,
+        Self::AllowlistDenied,
+        Self::RelayMembershipCheckError,
+        Self::NotRelayMember,
+        Self::Timeout,
+        Self::Disconnect,
+        Self::Shutdown,
+    ];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Invalid => "invalid",
+            Self::Banned => "banned",
+            Self::BanCheckError => "ban_check_error",
+            Self::AllowlistCheckError => "allowlist_check_error",
+            Self::AllowlistDenied => "allowlist_denied",
+            Self::RelayMembershipCheckError => "relay_membership_check_error",
+            Self::NotRelayMember => "not_relay_member",
+            Self::Timeout => "timeout",
+            Self::Disconnect => "disconnect",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+/// Bounded state of an AUTH frame received after the issued challenge had
+/// already reached a terminal. These frames are protocol misuse, not recovery
+/// lifecycles, and therefore stay outside rollout-gating attempts/outcomes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthPostTerminalState {
+    Authenticated,
+    Failed,
+}
+
+impl AuthPostTerminalState {
+    pub(crate) const ALL: [Self; 2] = [Self::Authenticated, Self::Failed];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authenticated => "authenticated",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// HTTP latency buckets (milliseconds) — only for `http_request_latency_ms`.
 const LATENCY_BUCKETS_MS: [f64; 11] = [
     5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
@@ -206,6 +280,8 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
         .map_err(|_error| MetricsInstallError::RecorderConflict)?;
     describe_readiness_metrics();
     describe_db_pool_metrics();
+    describe_auth_metrics();
+    initialize_auth_metric_series();
     tokio::spawn(exporter);
     Ok(())
 }
@@ -255,6 +331,181 @@ pub(crate) fn describe_db_pool_metrics() {
         "buzz_db_pool_waiters",
         "Current tracked-operation database pool checkout attempts in progress by valid pool role and operation"
     );
+    metrics::describe_gauge!(
+        "buzz_db_pool_connections",
+        "Current Postgres pool connections by physical pool role and bounded utilization state"
+    );
+    metrics::describe_gauge!(
+        "buzz_db_pool_max_connections",
+        "Maximum Postgres pool connections by physical pool role"
+    );
+    metrics::describe_gauge!(
+        "buzz_db_pool_configured",
+        "Whether a physical Postgres pool role is configured, where 1 is configured and 0 is not configured"
+    );
+}
+
+/// Named utilization snapshots for every physical Postgres pool role.
+pub struct DbPoolMetricsInput {
+    /// Primary writer pool utilization.
+    pub writer: buzz_db::DbPoolStats,
+    /// Optional read-replica pool utilization.
+    pub reader: Option<buzz_db::DbPoolStats>,
+    /// Optional audit pool utilization.
+    pub audit: Option<buzz_db::DbPoolStats>,
+    /// Search pool utilization.
+    pub search: buzz_db::DbPoolStats,
+}
+
+/// Record fixed-cardinality utilization for every physical Postgres pool role.
+///
+/// Optional roles emit zero-valued utilization when absent so the unified
+/// scrape always contains four roles by two states, four maximum-capacity
+/// series, and four configured series. The original writer and reader gauges
+/// are also emitted unchanged for dashboard compatibility.
+pub fn record_db_pool_metrics(input: DbPoolMetricsInput) {
+    let DbPoolMetricsInput {
+        writer,
+        reader,
+        audit,
+        search,
+    } = input;
+    let pools = [Some(writer), reader, audit, Some(search)];
+    for (role, stats) in buzz_db::DbPoolRole::ALL.into_iter().zip(pools) {
+        let role = role.as_str();
+        let configured = stats.is_some();
+        let stats = stats.unwrap_or(buzz_db::DbPoolStats {
+            size: 0,
+            idle: 0,
+            max: 0,
+        });
+        metrics::gauge!("buzz_db_pool_configured", "pool_role" => role).set(if configured {
+            1.0
+        } else {
+            0.0
+        });
+        for (state, value) in [("idle", stats.idle), ("active", stats.active())] {
+            metrics::gauge!(
+                "buzz_db_pool_connections",
+                "pool_role" => role,
+                "state" => state,
+            )
+            .set(value as f64);
+        }
+        metrics::gauge!("buzz_db_pool_max_connections", "pool_role" => role).set(stats.max as f64);
+    }
+
+    metrics::gauge!("buzz_db_pool_size").set(writer.size as f64);
+    metrics::gauge!("buzz_db_pool_idle").set(writer.idle as f64);
+    metrics::gauge!("buzz_db_pool_active").set(writer.active() as f64);
+    metrics::gauge!("buzz_db_pool_max").set(writer.max as f64);
+
+    if let Some(reader) = reader {
+        metrics::gauge!("buzz_db_read_pool_size").set(reader.size as f64);
+        metrics::gauge!("buzz_db_read_pool_idle").set(reader.idle as f64);
+        metrics::gauge!("buzz_db_read_pool_active").set(reader.active() as f64);
+        metrics::gauge!("buzz_db_read_pool_max").set(reader.max as f64);
+    }
+}
+
+/// Register the bounded WebSocket authentication metric contract.
+pub(crate) fn describe_auth_metrics() {
+    metrics::describe_counter!(
+        "buzz_auth_attempts_total",
+        "NIP-42 challenge lifecycles issued to WebSocket clients by bounded method"
+    );
+    metrics::describe_counter!(
+        "buzz_auth_outcomes_total",
+        "WebSocket authentication attempts by bounded method and terminal outcome"
+    );
+    metrics::describe_histogram!(
+        "buzz_auth_duration_seconds",
+        metrics::Unit::Seconds,
+        "WebSocket authentication attempt duration by bounded method and terminal outcome"
+    );
+    metrics::describe_gauge!(
+        "buzz_ws_authenticated_connections_active",
+        "Current WebSocket connections that completed authentication on this pod"
+    );
+    metrics::describe_counter!(
+        "buzz_auth_post_terminal_frames_total",
+        "AUTH frames received after the issued challenge reached a terminal, by bounded state"
+    );
+}
+
+/// Publish zero-valued authentication series at process start.
+///
+/// Counters are never idle-evicted by the configured recorder. The active
+/// gauge is refreshed alongside the other lifecycle-relative gauges in
+/// `main.rs`, so a quiet healthy pod remains distinguishable from a missing
+/// scrape target without racing its increments and decrements.
+pub(crate) fn initialize_auth_metric_series() {
+    metrics::counter!(
+        "buzz_auth_attempts_total",
+        "method" => AUTH_METHOD_NIP42
+    )
+    .increment(0);
+    for outcome in AuthOutcome::ALL {
+        metrics::counter!(
+            "buzz_auth_outcomes_total",
+            "method" => AUTH_METHOD_NIP42,
+            "outcome" => outcome.as_str()
+        )
+        .increment(0);
+        // Register the fixed-label histogram without recording a fake sample.
+        // Prometheus then exports zero buckets, `_sum`, and `_count` at boot.
+        let _ = metrics::histogram!(
+            "buzz_auth_duration_seconds",
+            "method" => AUTH_METHOD_NIP42,
+            "outcome" => outcome.as_str()
+        );
+    }
+    for state in AuthPostTerminalState::ALL {
+        metrics::counter!(
+            "buzz_auth_post_terminal_frames_total",
+            "state" => state.as_str()
+        )
+        .increment(0);
+    }
+    metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
+}
+
+/// Record one issued NIP-42 challenge after it enters the connection writer.
+///
+/// Before this lifecycle contract, `buzz_auth_attempts_total` incremented only
+/// when an AUTH frame reached the pending handler. It now uses one consistent,
+/// recovery-oriented unit: challenges successfully queued to the connection.
+pub(crate) fn record_auth_attempt_started() {
+    metrics::counter!(
+        "buzz_auth_attempts_total",
+        "method" => AUTH_METHOD_NIP42
+    )
+    .increment(1);
+}
+
+/// Record exactly one bounded terminal for an authentication attempt.
+pub(crate) fn record_auth_outcome(outcome: AuthOutcome, duration: Duration) {
+    metrics::counter!(
+        "buzz_auth_outcomes_total",
+        "method" => AUTH_METHOD_NIP42,
+        "outcome" => outcome.as_str()
+    )
+    .increment(1);
+    metrics::histogram!(
+        "buzz_auth_duration_seconds",
+        "method" => AUTH_METHOD_NIP42,
+        "outcome" => outcome.as_str()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Record protocol noise after the issued challenge already terminalized.
+pub(crate) fn record_post_terminal_auth_frame(state: AuthPostTerminalState) {
+    metrics::counter!(
+        "buzz_auth_post_terminal_frames_total",
+        "state" => state.as_str()
+    )
+    .increment(1);
 }
 
 #[cfg(test)]
@@ -329,6 +580,7 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod contract_tests {
     use std::collections::BTreeSet;
+    use std::time::Duration;
 
     const OUTCOMES: [&str; 4] = ["success", "timeout", "error", "cancelled"];
 
@@ -342,6 +594,219 @@ mod contract_tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn sample_value<'a>(scrape: &'a str, metric: &str, labels: &[(&str, &str)]) -> &'a str {
+        scrape
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!(r#"{key}="{value}""#)))
+            })
+            .and_then(|line| line.rsplit_once(' ').map(|(_, value)| value))
+            .unwrap_or_else(|| panic!("missing {metric} with {labels:?} in scrape:\n{scrape}"))
+    }
+
+    #[test]
+    fn production_pool_sampler_has_fixed_roles_utilization_and_compatibility_metrics() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_db_pool_metrics();
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
+                    size: 12,
+                    idle: 5,
+                    max: 20,
+                },
+                reader: None,
+                audit: None,
+                search: buzz_db::DbPoolStats {
+                    size: 4,
+                    idle: 1,
+                    max: 10,
+                },
+            });
+        });
+
+        let scrape = handle.render();
+        let connections = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_connections{"))
+            .collect::<Vec<_>>();
+        let max_connections = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_max_connections{"))
+            .collect::<Vec<_>>();
+        let configured = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_configured{"))
+            .collect::<Vec<_>>();
+        assert_eq!(connections.len(), 8, "unexpected scrape:\n{scrape}");
+        assert_eq!(max_connections.len(), 4, "unexpected scrape:\n{scrape}");
+        assert_eq!(configured.len(), 4, "unexpected scrape:\n{scrape}");
+        assert_eq!(
+            connections.len() + max_connections.len() + configured.len(),
+            16,
+            "physical pool contract must stay fixed at 16 raw series:\n{scrape}"
+        );
+
+        let roles = connections
+            .iter()
+            .filter_map(|line| {
+                ["writer", "reader", "audit", "search"]
+                    .into_iter()
+                    .find(|role| line.contains(&format!(r#"pool_role="{role}""#)))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            BTreeSet::from(["writer", "reader", "audit", "search"])
+        );
+        assert!(connections
+            .iter()
+            .all(|line| label_keys(line) == BTreeSet::from(["pool_role", "state"])));
+        assert!(max_connections
+            .iter()
+            .all(|line| label_keys(line) == BTreeSet::from(["pool_role"])));
+        assert!(connections.iter().all(|line| {
+            line.contains(r#"state="idle""#) || line.contains(r#"state="active""#)
+        }));
+        assert!(!connections
+            .iter()
+            .any(|line| line.contains(r#"state="size""#) || line.contains(r#"state="max""#)));
+
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_connections{",
+                &[("pool_role", "writer"), ("state", "active")]
+            ),
+            "7"
+        );
+        for state in ["idle", "active"] {
+            assert_eq!(
+                sample_value(
+                    &scrape,
+                    "buzz_db_pool_connections{",
+                    &[("pool_role", "reader"), ("state", state)]
+                ),
+                "0"
+            );
+        }
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "writer")]
+            ),
+            "20"
+        );
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "reader")]
+            ),
+            "0"
+        );
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_configured{",
+                &[("pool_role", "reader")]
+            ),
+            "0"
+        );
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_size ", &[]), "12");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_idle ", &[]), "5");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_active ", &[]), "7");
+        assert_eq!(sample_value(&scrape, "buzz_db_pool_max ", &[]), "20");
+        assert!(!scrape.contains("buzz_db_read_pool_size"));
+    }
+
+    #[test]
+    fn production_pool_sampler_reports_configured_reader_and_legacy_reader_family() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 50,
+                },
+                reader: Some(buzz_db::DbPoolStats {
+                    size: 9,
+                    idle: 2,
+                    max: 15,
+                }),
+                audit: None,
+                search: buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 10,
+                },
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_configured{",
+                &[("pool_role", "reader")]
+            ),
+            "1"
+        );
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_size ", &[]), "9");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_idle ", &[]), "2");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_active ", &[]), "7");
+        assert_eq!(sample_value(&scrape, "buzz_db_read_pool_max ", &[]), "15");
+    }
+
+    #[tokio::test]
+    async fn production_pool_sampler_preserves_audit_and_search_pool_provenance() {
+        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgres://localhost/buzz")
+            .expect("construct lazy audit pool");
+        let search_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .connect_lazy("postgres://localhost/buzz")
+            .expect("construct lazy search pool");
+        let (recorder, handle) = super::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            super::record_db_pool_metrics(super::DbPoolMetricsInput {
+                writer: buzz_db::DbPoolStats {
+                    size: 1,
+                    idle: 1,
+                    max: 50,
+                },
+                reader: None,
+                audit: Some(buzz_db::DbPoolStats::from_pool(&audit_pool)),
+                search: buzz_db::DbPoolStats::from_pool(&search_pool),
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "audit")]
+            ),
+            "5"
+        );
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "search")]
+            ),
+            "10"
+        );
     }
 
     #[test]
@@ -429,6 +894,109 @@ mod contract_tests {
             }
             assert!(!line.contains("operation=\"other\""));
             assert!(!line.contains("result="));
+        }
+    }
+
+    #[test]
+    fn production_builder_exports_bounded_auth_contract_and_stable_zeros() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_auth_metrics();
+            super::initialize_auth_metric_series();
+        });
+
+        let stable_zero_scrape = handle.render();
+        assert!(stable_zero_scrape.contains("buzz_auth_attempts_total{method=\"nip42\"} 0"));
+        assert!(stable_zero_scrape.contains("buzz_ws_authenticated_connections_active 0"));
+        let zero_outcomes = stable_zero_scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_auth_outcomes_total{") && line.ends_with(" 0"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zero_outcomes.len(),
+            super::AuthOutcome::ALL.len(),
+            "every bounded outcome must exist before the first attempt:\n{stable_zero_scrape}"
+        );
+        let zero_duration_counts = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_count{") && line.ends_with(" 0")
+            })
+            .count();
+        let zero_duration_sums = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_sum{") && line.ends_with(" 0")
+            })
+            .count();
+        let zero_duration_buckets = stable_zero_scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_duration_seconds_bucket{") && line.ends_with(" 0")
+            })
+            .count();
+        assert_eq!(zero_duration_counts, super::AuthOutcome::ALL.len());
+        assert_eq!(zero_duration_sums, super::AuthOutcome::ALL.len());
+        assert_eq!(
+            zero_duration_buckets,
+            super::AuthOutcome::ALL.len() * 11,
+            "every fixed outcome must export all zero buckets before traffic:\n{stable_zero_scrape}"
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            super::record_auth_attempt_started();
+            for outcome in super::AuthOutcome::ALL {
+                super::record_auth_outcome(outcome, Duration::from_millis(20));
+            }
+            for state in super::AuthPostTerminalState::ALL {
+                super::record_post_terminal_auth_frame(state);
+            }
+            let active = metrics::gauge!("buzz_ws_authenticated_connections_active");
+            active.increment(1.0);
+            active.decrement(1.0);
+        });
+
+        let scrape = handle.render();
+        assert!(scrape.contains("# TYPE buzz_auth_attempts_total counter"));
+        assert!(scrape.contains("# TYPE buzz_auth_outcomes_total counter"));
+        assert!(scrape.contains("# TYPE buzz_auth_duration_seconds histogram"));
+        assert!(scrape.contains("# TYPE buzz_ws_authenticated_connections_active gauge"));
+
+        let raw_series = scrape
+            .lines()
+            .filter(|line| {
+                line.starts_with("buzz_auth_attempts_total{")
+                    || line.starts_with("buzz_auth_outcomes_total{")
+                    || line.starts_with("buzz_auth_duration_seconds")
+                    || line.starts_with("buzz_auth_post_terminal_frames_total{")
+                    || line.starts_with("buzz_ws_authenticated_connections_active ")
+            })
+            .collect::<Vec<_>>();
+        // 1 challenge + 11 outcomes + 2 post-terminal states + 1 active gauge +, for each outcome,
+        // 11 histogram buckets (including +Inf), sum, and count.
+        assert_eq!(raw_series.len(), 158, "unexpected raw scrape:\n{scrape}");
+
+        for line in raw_series {
+            let keys = label_keys(line);
+            if line.starts_with("buzz_auth_attempts_total{") {
+                assert_eq!(keys, BTreeSet::from(["method"]));
+            } else if line.starts_with("buzz_auth_outcomes_total{") {
+                assert_eq!(keys, BTreeSet::from(["method", "outcome"]));
+            } else if line.starts_with("buzz_auth_post_terminal_frames_total{") {
+                assert_eq!(keys, BTreeSet::from(["state"]));
+            } else if line.starts_with("buzz_auth_duration_seconds_bucket{") {
+                assert_eq!(keys, BTreeSet::from(["le", "method", "outcome"]));
+            } else if line.starts_with("buzz_auth_duration_seconds") {
+                assert_eq!(keys, BTreeSet::from(["method", "outcome"]));
+            } else {
+                assert!(keys.is_empty(), "active gauge must not add labels: {line}");
+            }
+            assert!(!line.contains("pubkey="));
+            assert!(!line.contains("community="));
+            assert!(!line.contains("connection="));
+            assert!(!line.contains("pod="));
+            assert!(!line.contains("version="));
+            assert!(!line.contains("error="));
         }
     }
 }

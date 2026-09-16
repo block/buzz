@@ -7,6 +7,8 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::DbPoolRole;
+
 /// One valid pool/operation acquisition family.
 ///
 /// Keeping role and operation in one enum makes invalid combinations
@@ -111,9 +113,9 @@ impl PoolOperation {
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
             Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
-                "reader"
+                DbPoolRole::Reader.as_str()
             }
-            _ => "writer",
+            _ => DbPoolRole::Writer.as_str(),
         }
     }
 
@@ -138,17 +140,17 @@ impl PoolOperation {
 }
 
 pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
-    ("writer", "bootstrap"),
-    ("reader", "bootstrap"),
-    ("writer", "readiness"),
-    ("writer", "tenant_resolution"),
-    ("writer", "authentication"),
-    ("writer", "authorization"),
-    ("reader", "authorization"),
-    ("writer", "subscription_history"),
-    ("reader", "subscription_history"),
-    ("writer", "event_write"),
-    ("writer", "maintenance"),
+    (DbPoolRole::Writer.as_str(), "bootstrap"),
+    (DbPoolRole::Reader.as_str(), "bootstrap"),
+    (DbPoolRole::Writer.as_str(), "readiness"),
+    (DbPoolRole::Writer.as_str(), "tenant_resolution"),
+    (DbPoolRole::Writer.as_str(), "authentication"),
+    (DbPoolRole::Writer.as_str(), "authorization"),
+    (DbPoolRole::Reader.as_str(), "authorization"),
+    (DbPoolRole::Writer.as_str(), "subscription_history"),
+    (DbPoolRole::Reader.as_str(), "subscription_history"),
+    (DbPoolRole::Writer.as_str(), "event_write"),
+    (DbPoolRole::Writer.as_str(), "maintenance"),
 ];
 
 /// Eleven valid pairs × (12 histogram series + 4 outcome counters + 1 gauge).
@@ -355,7 +357,7 @@ fn publish_waiters(pair: PoolOperation, value: u64) {
 /// idle eviction cannot turn an expected zero into ambiguous missing data.
 pub(crate) fn refresh_pool_waiters(include_reader: bool) {
     for pair in PoolOperation::ALL {
-        if pair.pool_role() == "reader" && !include_reader {
+        if pair.pool_role() == DbPoolRole::Reader.as_str() && !include_reader {
             continue;
         }
         let waiters = POOL_WAITERS[pair.index()]
