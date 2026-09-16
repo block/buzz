@@ -385,6 +385,11 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # Redis subscription state, supervision inputs, and metric bookkeeping
+        # are infrastructure-free except for the explicitly ignored Redis
+        # round trips. Run the complete non-ignored package here; the required
+        # PostgreSQL/Redis lane selects the ignored cases separately.
+        cargo nextest run -p buzz-pubsub
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -449,9 +454,15 @@ test-unit:
         # `handlers::`: the wider set is mostly Postgres-backed, and five of its
         # non-postgres_tests cases only "pass" without a database by waiting out
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
-        # unit job either.
+        # unit job either. The final two clauses cover the process-owned Redis
+        # runtime and its raw metric contract without widening into unrelated
+        # relay tests that require infrastructure.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/)'
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^metrics::contract_tests::/) + test(/^redis_subscription_runtime::tests::/)'
+        # The production startup call site and child-process boot contract live
+        # outside the relay library target, so enumerate both targets explicitly.
+        cargo nextest run -p buzz-relay --bin buzz-relay
+        cargo nextest run -p buzz-relay --test boot_lifecycle
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
