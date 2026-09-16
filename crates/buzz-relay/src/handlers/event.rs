@@ -743,8 +743,21 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             Ok(()) => {
                 conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             }
-            Err(message) => {
-                reject("invalid");
+            Err(e) => {
+                // Rejections carry the ingest taxonomy so backend failures
+                // count as `error` — a Redis presence-storage outage is a
+                // server fault, not client misbehavior — while genuine
+                // client-input rejections (bad signature, non-member
+                // sender) stay `invalid`. The ephemeral handler only emits
+                // fixed, sanitized message strings, so unlike the
+                // persistent arm below, `Internal` text is safe to forward
+                // verbatim.
+                let (message, reason) = match e {
+                    IngestError::Rejected(message) => (message, "invalid"),
+                    IngestError::AuthFailed(message) => (message, "auth"),
+                    IngestError::Internal(message) => (message, "error"),
+                };
+                reject(reason);
                 conn.send(RelayMessage::ok(&event_id_hex, false, &message));
             }
         }
@@ -792,6 +805,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 }
 
 /// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
+///
+/// Rejections are typed with the ingest taxonomy: [`IngestError::Rejected`]
+/// is a client-input refusal (stays `invalid` in the rejection counter),
+/// while [`IngestError::Internal`] is a backend failure — e.g. a Redis
+/// presence-storage outage — which the dispatcher counts as `error`. Every
+/// message is a fixed, sanitized string that is forwarded verbatim.
 async fn handle_ephemeral_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -799,15 +818,15 @@ async fn handle_ephemeral_event(
     auth_pubkey: nostr::PublicKey,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<(), IngestError> {
     let event_clone = event.clone();
     let event_id = event.id.to_hex();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
 
     match verify_result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(format!("invalid: {e}")),
-        Err(_) => return Err("error: internal error".to_string()),
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
     }
 
     // Special handling for presence events (kind:20001).
@@ -829,16 +848,45 @@ async fn handle_ephemeral_event(
             raw
         };
 
+        // Presence mutation is the inclusion contract for the live fan-out
+        // below: a client that observes the fanned-out event treats a later
+        // snapshot as reflecting it (see `synthesize_presence` in
+        // `api/bridge.rs`, which reads Redis). If the mutation failed we
+        // published nothing — so we must also fan out nothing and reject the
+        // ACK, or a snapshot later "confirms" stale storage over a live event
+        // the sender believes was delivered.
         if status == "offline" {
-            let _ = state
+            if let Err(e) = state
                 .pubsub
                 .clear_presence(&conn.tenant, &auth_pubkey)
-                .await;
-        } else {
-            let _ = state
-                .pubsub
-                .set_presence(&conn.tenant, &auth_pubkey, &status)
-                .await;
+                .await
+            {
+                warn!(
+                    conn_id = %conn_id,
+                    event_id = %event_id,
+                    "Presence clear failed, refusing publish and fan-out: {e}"
+                );
+                // Internal, not Rejected: a storage outage is a server
+                // failure, so the dispatcher must count it under the
+                // `error` reason, not as client-invalid input.
+                return Err(IngestError::Internal(
+                    "error: presence storage unavailable".to_string(),
+                ));
+            }
+        } else if let Err(e) = state
+            .pubsub
+            .set_presence(&conn.tenant, &auth_pubkey, &status)
+            .await
+        {
+            warn!(
+                conn_id = %conn_id,
+                event_id = %event_id,
+                "Presence set failed, refusing publish and fan-out: {e}"
+            );
+            // Internal for the same reason as the clear arm above.
+            return Err(IngestError::Internal(
+                "error: presence storage unavailable".to_string(),
+            ));
         }
 
         // Presence is a channel-less ephemeral event. After updating Redis
@@ -848,8 +896,12 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
+        // Membership refusals are client-input rejections, and the shared
+        // gate's message text is surfaced verbatim exactly as before this
+        // typed classification; no behavior change on this path.
         super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
-            .await?;
+            .await
+            .map_err(IngestError::Rejected)?;
 
         // Mark as local before Redis publish to prevent double-delivery when
         // the event comes back through the Redis subscriber loop.
@@ -1433,6 +1485,321 @@ mod tests {
             frame[3],
             "restricted: observer frame is not authorized for this agent owner"
         );
+    }
+
+    // PostgreSQL/Redis tests are discovered by the isolated postgres-ci lane.
+    mod presence_storage_postgres_tests {
+        use super::*;
+        use buzz_core::{CommunityId, TenantContext};
+        use nostr::Filter;
+
+        async fn exercise(storage_available: bool, statuses: &[&str]) {
+            let redis_url = std::env::var("REDIS_URL").expect("test Redis URL required");
+            // Pick an unused local endpoint for a real connection failure.
+            let dead_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let dead_port = dead_socket.local_addr().unwrap().port();
+            drop(dead_socket);
+            let dead_url = format!("redis://127.0.0.1:{dead_port}");
+            let state = fanout_access::test_state_with_redis_url(if storage_available {
+                &redis_url
+            } else {
+                &dead_url
+            })
+            .await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("presence-storage-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("seed active community");
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let keys = Keys::generate();
+            let (send_tx, mut send_rx) = mpsc::channel(10);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+            });
+            let watcher = Uuid::new_v4();
+            let (tx, mut rx) = mpsc::channel(10);
+            let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            state.conn_manager.register(
+                watcher,
+                tx,
+                ctrl,
+                None,
+                CancellationToken::new(),
+                tenant.community(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            state.sub_registry.register_scoped(
+                tenant.community(),
+                watcher,
+                "presence".into(),
+                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+                None,
+            );
+            // Online followed by offline also proves DEL removes an existing value.
+            for &status in statuses {
+                let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+                    .sign_with_keys(&keys)
+                    .unwrap();
+                super::super::handle_event(event.clone(), conn.clone(), state.clone()).await;
+                let axum::extract::ws::Message::Text(text) = send_rx.try_recv().expect("ACK")
+                else {
+                    panic!("expected text ACK");
+                };
+                let ack: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(ack[0], "OK");
+                assert_eq!(ack[1], event.id.to_hex());
+                assert_eq!(ack[2], storage_available);
+                if storage_available {
+                    assert_eq!(ack[3], "");
+                    let stored = state
+                        .pubsub
+                        .get_presence(&tenant, &keys.public_key())
+                        .await
+                        .unwrap();
+                    assert_eq!(stored.as_deref(), (status != "offline").then_some(status));
+                    let axum::extract::ws::Message::Text(text) =
+                        rx.try_recv().expect("live fanout")
+                    else {
+                        panic!("expected text event");
+                    };
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(frame[0], "EVENT");
+                    assert_eq!(frame[2]["id"], event.id.to_hex());
+                } else {
+                    assert_eq!(ack[3], "error: presence storage unavailable");
+                    assert!(state
+                        .local_event_ids
+                        .get(&(tenant.community(), event.id.to_bytes()))
+                        .is_none());
+                }
+                assert!(rx.try_recv().is_err(), "no extra or rejected-event fanout");
+                assert!(send_rx.try_recv().is_err(), "exactly one ACK");
+            }
+            sqlx::query("DELETE FROM communities WHERE id = $1")
+                .bind(community_uuid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn rejects_online_when_presence_storage_fails() {
+            exercise(false, &["online"]).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn rejects_offline_when_presence_storage_fails() {
+            exercise(false, &["offline"]).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn accepts_stores_and_fans_out_online_and_offline() {
+            exercise(true, &["online", "offline"]).await;
+        }
+
+        /// Production-seam regression for the rejection classification: a
+        /// Redis presence-storage outage must count as a server `error`,
+        /// never as client `invalid`, while a genuinely invalid event
+        /// through the same seam stays `invalid`. Both rejections still ACK
+        /// `false` with no fan-out and no local-event marker (the shared
+        /// storage guard is unchanged); only the counter routing is under
+        /// test here.
+        ///
+        /// The recorder guard form (not `metrics::with_local_recorder`,
+        /// whose closure cannot host an await) keeps the thread-local
+        /// recorder installed across the `.await` points of this
+        /// single-threaded test runtime — the same convention as the
+        /// buzz-db route-decision counter tests. The isolated postgres-ci
+        /// lane runs each test in its own nextest process, so no parallel
+        /// test can race this counter snapshot.
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL"]
+        async fn counts_presence_storage_failure_as_error_not_invalid() {
+            // Pick an unused local endpoint for a real connection failure.
+            let dead_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let dead_port = dead_socket.local_addr().unwrap().port();
+            drop(dead_socket);
+            let dead_url = format!("redis://127.0.0.1:{dead_port}");
+            let state = fanout_access::test_state_with_redis_url(&dead_url).await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("presence-metrics-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("seed active community");
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let keys = Keys::generate();
+            let (send_tx, mut send_rx) = mpsc::channel(10);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+            });
+            // Same watcher registration as the ACK/fan-out cases, proving
+            // the storage failure still reaches no subscriber while its
+            // rejection is counted under `error`.
+            let watcher = Uuid::new_v4();
+            let (tx, mut rx) = mpsc::channel(10);
+            let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            state.conn_manager.register(
+                watcher,
+                tx,
+                ctrl,
+                None,
+                CancellationToken::new(),
+                tenant.community(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            state.sub_registry.register_scoped(
+                tenant.community(),
+                watcher,
+                "presence".into(),
+                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+                None,
+            );
+
+            let valid = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+                .sign_with_keys(&keys)
+                .unwrap();
+            // Invalid control through the same production seam: identical
+            // event, signature no longer verifies. The id is unchanged (it
+            // does not cover the signature), so ACKs are told apart by
+            // order and message text below.
+            use nostr::JsonUtil as _;
+            let mut json: serde_json::Value =
+                serde_json::from_str(&valid.as_json()).expect("parse event json");
+            json["sig"] = serde_json::Value::String("0".repeat(128));
+            let tampered = nostr::Event::from_json(json.to_string()).expect("parse tampered");
+
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let acks: Vec<serde_json::Value> = {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                super::super::handle_event(valid.clone(), conn.clone(), state.clone()).await;
+                super::super::handle_event(tampered, conn.clone(), state.clone()).await;
+                (0..2)
+                    .map(|_| {
+                        let axum::extract::ws::Message::Text(text) =
+                            send_rx.try_recv().expect("ACK")
+                        else {
+                            panic!("expected text ACK");
+                        };
+                        serde_json::from_str(&text).unwrap()
+                    })
+                    .collect()
+            };
+
+            // Storage failure: rejected ACK, no fan-out frame, no marker.
+            assert_eq!(acks[0][0], "OK");
+            assert_eq!(acks[0][1], valid.id.to_hex());
+            assert_eq!(acks[0][2], false);
+            assert_eq!(acks[0][3], "error: presence storage unavailable");
+            // Invalid control through the same dispatcher arm.
+            assert_eq!(acks[1][0], "OK");
+            assert_eq!(acks[1][1], valid.id.to_hex());
+            assert_eq!(acks[1][2], false);
+            assert!(
+                acks[1][3].as_str().unwrap().starts_with("invalid:"),
+                "tampered control must stay an invalid rejection, got: {}",
+                acks[1][3]
+            );
+            assert!(rx.try_recv().is_err(), "no fan-out for either rejection");
+            assert!(send_rx.try_recv().is_err(), "exactly two ACKs");
+            assert!(state
+                .local_event_ids
+                .get(&(tenant.community(), valid.id.to_bytes()))
+                .is_none());
+
+            let mut rejections: Vec<(String, String, u64)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                        panic!("buzz_events_rejected_total must be a counter");
+                    };
+                    let labels: Vec<_> = key.key().labels().collect();
+                    let label = |name: &str| {
+                        labels
+                            .iter()
+                            .find(|l| l.key() == name)
+                            .map(|l| l.value().to_owned())
+                            .unwrap_or_default()
+                    };
+                    (label("transport"), label("reason"), count)
+                })
+                .collect();
+            rejections.sort();
+            assert_eq!(
+                rejections,
+                vec![
+                    ("ws".to_owned(), "error".to_owned(), 1),
+                    ("ws".to_owned(), "invalid".to_owned(), 1),
+                ],
+                "storage outage must count as reason=\"error\" and the tampered \
+                 control as reason=\"invalid\"; got {rejections:?}"
+            );
+
+            sqlx::query("DELETE FROM communities WHERE id = $1")
+                .bind(community_uuid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 
     mod pubsub_fanout {

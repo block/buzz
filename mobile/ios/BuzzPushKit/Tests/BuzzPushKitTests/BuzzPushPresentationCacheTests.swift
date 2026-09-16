@@ -11,6 +11,253 @@ struct BuzzPushPresentationCacheTests {
   private let relayKey = String(repeating: "0", count: 63) + "2"
   private let otherRelayKey = String(repeating: "0", count: 63) + "3"
 
+  @Test("Age restriction fence persists a new token for other processes")
+  func ageRestrictionFencePersistsGeneration() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let writer = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let reader = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    #expect(reader.current() == .unavailable)
+    let first = try writer.begin()
+    #expect(first.isFencing)
+    #expect(reader.current() == first)
+    let second = try writer.settleIfFencing()
+    #expect(!second.isFencing)
+    #expect(second.token != first.token)
+    #expect(reader.current() == second)
+  }
+
+  @Test("Legacy notification state without a fence fails closed until restored")
+  func legacyNotificationStateWithoutFenceFailsClosed() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let legacySnapshot = directory.appendingPathComponent(
+      BuzzPushPresentationCacheStore.fileName
+    )
+    try Data("legacy notification snapshot".utf8).write(to: legacySnapshot)
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    let beforeAgeCheck = store.current()
+    #expect(beforeAgeCheck == .unavailable)
+    #expect(beforeAgeCheck.requiresDiscard(since: beforeAgeCheck))
+
+    let restored = try store.settleIfFencing()
+    #expect(!restored.isFencing)
+    #expect(store.current() == restored)
+    #expect(!restored.requiresDiscard(since: restored))
+  }
+
+  @Test("Fenced cleanup rotates before work and settles only after success")
+  func fencedCleanupOrdersTransitions() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let writer = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let reader = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let initial = reader.current()
+    var observedDuringCleanup: BuzzAgeRestrictionFence?
+
+    try writer.performFencedCleanup {
+      observedDuringCleanup = reader.current()
+    }
+
+    let active = try #require(observedDuringCleanup)
+    let settled = reader.current()
+    #expect(active.isFencing)
+    #expect(active.token != initial.token)
+    #expect(!settled.isFencing)
+    #expect(settled.token != active.token)
+  }
+
+  @Test("Failed fenced cleanup remains active")
+  func failedFencedCleanupRemainsActive() throws {
+    struct CleanupFailure: Error {}
+
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+
+    #expect(throws: CleanupFailure.self) {
+      try store.performFencedCleanup {
+        throw CleanupFailure()
+      }
+    }
+    #expect(store.current().isFencing)
+  }
+
+  @Test("Asynchronous fenced cleanup waits for acknowledged success")
+  func asynchronousFencedCleanupWaitsForSuccess() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var acknowledge: ((Error?) -> Void)?
+    var didComplete = false
+
+    try store.performFencedAsyncCleanup(
+      { acknowledge = $0 },
+      completion: { error in
+        #expect(error == nil)
+        didComplete = true
+      }
+    )
+
+    #expect(store.current().isFencing)
+    #expect(!didComplete)
+    let acknowledgeCleanup = try #require(acknowledge)
+    acknowledgeCleanup(nil)
+    #expect(!store.current().isFencing)
+    #expect(didComplete)
+  }
+
+  @Test("Failed asynchronous cleanup remains fenced")
+  func failedAsynchronousCleanupRemainsFenced() throws {
+    struct CleanupFailure: Error {}
+
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var reportedFailure = false
+
+    try store.performFencedAsyncCleanup(
+      { $0(CleanupFailure()) },
+      completion: { error in
+        reportedFailure = error is CleanupFailure
+      }
+    )
+
+    #expect(reportedFailure)
+    #expect(store.current().isFencing)
+  }
+
+  @Test("Older asynchronous cleanup cannot settle a newer fence")
+  func olderAsynchronousCleanupCannotSettleNewerFence() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    var acknowledgeOlder: ((Error?) -> Void)?
+    var acknowledgeNewer: ((Error?) -> Void)?
+
+    try store.performFencedAsyncCleanup(
+      { acknowledgeOlder = $0 },
+      completion: { _ in }
+    )
+    try store.performFencedAsyncCleanup(
+      { acknowledgeNewer = $0 },
+      completion: { _ in }
+    )
+    let newerFence = store.current()
+
+    let completeOlder = try #require(acknowledgeOlder)
+    completeOlder(nil)
+    #expect(store.current() == newerFence)
+    #expect(store.current().isFencing)
+
+    let completeNewer = try #require(acknowledgeNewer)
+    completeNewer(nil)
+    #expect(!store.current().isFencing)
+  }
+
+  @Test("Cross-process lock prevents an older settle from overwriting a newer fence")
+  func crossProcessLockSerializesSettleAndBegin() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let settleReachedWrite = DispatchSemaphore(value: 0)
+    let releaseSettle = DispatchSemaphore(value: 0)
+    let settleFinished = DispatchSemaphore(value: 0)
+    let beginFinished = DispatchSemaphore(value: 0)
+    let settlingStore = BuzzAgeRestrictionFenceStore(
+      containerURL: directory,
+      beforeSettledWrite: {
+        settleReachedWrite.signal()
+        releaseSettle.wait()
+      }
+    )
+    let beginningStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let active = try settlingStore.begin()
+
+    DispatchQueue.global().async {
+      _ = try? settlingStore.settleIfFencing(expectedToken: active.token)
+      settleFinished.signal()
+    }
+    #expect(settleReachedWrite.wait(timeout: .now() + 1) == .success)
+
+    DispatchQueue.global().async {
+      _ = try? beginningStore.begin()
+      beginFinished.signal()
+    }
+    #expect(beginFinished.wait(timeout: .now() + 0.05) == .timedOut)
+
+    releaseSettle.signal()
+    #expect(settleFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginFinished.wait(timeout: .now() + 1) == .success)
+    let newest = beginningStore.current()
+    #expect(newest.isFencing)
+    #expect(newest.token != active.token)
+  }
+
+  @Test("Cross-process lock orders a final handoff before cleanup begins")
+  func crossProcessLockSerializesHandoffAndBegin() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let handoffEntered = DispatchSemaphore(value: 0)
+    let releaseHandoff = DispatchSemaphore(value: 0)
+    let handoffFinished = DispatchSemaphore(value: 0)
+    let beginFinished = DispatchSemaphore(value: 0)
+    let handingOffStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let beginningStore = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let settled = try handingOffStore.settleIfFencing()
+
+    DispatchQueue.global().async {
+      _ = try? handingOffStore.performIfUnchanged(since: settled) {
+        handoffEntered.signal()
+        releaseHandoff.wait()
+      }
+      handoffFinished.signal()
+    }
+    #expect(handoffEntered.wait(timeout: .now() + 1) == .success)
+
+    DispatchQueue.global().async {
+      _ = try? beginningStore.begin()
+      beginFinished.signal()
+    }
+    #expect(beginFinished.wait(timeout: .now() + 0.05) == .timedOut)
+
+    releaseHandoff.signal()
+    #expect(handoffFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginFinished.wait(timeout: .now() + 1) == .success)
+    #expect(beginningStore.current().isFencing)
+  }
+
+  @Test("A changed fence refuses the final handoff")
+  func changedFenceRefusesHandoff() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    let settled = try store.settleIfFencing()
+    _ = try store.begin()
+    var handedOff = false
+
+    let accepted = try store.performIfUnchanged(since: settled) {
+      handedOff = true
+    }
+
+    #expect(!accepted)
+    #expect(!handedOff)
+  }
+
+  @Test("Age restriction fence discards active and superseded resolutions")
+  func ageRestrictionFenceDiscardPolicy() {
+    let initial = BuzzAgeRestrictionFence.initial
+    let active = BuzzAgeRestrictionFence(token: "active", isFencing: true)
+    let settled = BuzzAgeRestrictionFence(token: "settled", isFencing: false)
+
+    #expect(!initial.requiresDiscard(since: initial))
+    #expect(active.requiresDiscard(since: initial))
+    #expect(BuzzAgeRestrictionFence.unavailable.requiresDiscard(since: initial))
+    #expect(settled.requiresDiscard(since: initial))
+    #expect(!settled.requiresDiscard(since: settled))
+  }
+
   @Test("Verified profile uses display_name, then name, and attaches a bounded local avatar")
   func verifiedProfilePrecedenceAndAvatar() throws {
     let directory = try temporaryDirectory()
@@ -325,6 +572,130 @@ struct BuzzPushPresentationCacheTests {
           )
         }.sorted()
     )
+  }
+
+  @Test("Retrying a partial batch prefix preserves newer state and original scope")
+  func partialBatchPrefixReplayIsIdempotent() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzPushPresentationCacheStore(
+      containerURL: directory,
+      now: { Date(timeIntervalSince1970: 1_700_000_100) }
+    )
+    let relayPubkey = try pubkey(for: relayKey)
+    let member = try pubkey(for: profileKey)
+    let addedMember = try pubkey(for: otherRelayKey)
+    let profiles = try [profileKey, otherRelayKey].map { key in
+      try signedEvent(privateKey: key, createdAt: 100, kind: 0, content: #"{"name":"Original"}"#)
+    }
+    let metadata = try ["prefix", "suffix"].map { channel in
+      try signedEvent(
+        privateKey: relayKey, createdAt: 100, kind: 39_000,
+        tags: [["d", channel], ["name", "Original"], ["t", "stream"]]
+      )
+    }
+    let memberships = try ["prefix", "suffix"].map { channel in
+      try signedEvent(
+        privateKey: relayKey, createdAt: 100, kind: 39_002,
+        tags: [["d", channel], ["p", member]]
+      )
+    }
+    func deliver(
+      _ index: Int, community: String = "original", origin: String = "https://relay.example"
+    ) throws {
+      try store.updateProfiles(
+        communityID: community, relayOrigin: origin,
+        updates: [BuzzPushProfileCacheUpdate(event: profiles[index])]
+      )
+      try store.updateChannels(
+        communityID: community, relayOrigin: origin, relayMetadataPubkey: relayPubkey,
+        metadataEvents: [metadata[index]], membershipEvents: [memberships[index]]
+      )
+    }
+
+    // Native storage accepts the prefix, but the caller loses its acknowledgement.
+    try deliver(0)
+    try deliver(0, community: "other-community")
+    try deliver(0, origin: "https://other-relay.example")
+    let beforeRetry = try loadSnapshot(directory)
+    let untouchedProfiles = beforeRetry.profiles.filter {
+      $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+    }
+    let untouchedChannels = beforeRetry.channels.filter {
+      $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+    }
+    let newerProfile = try signedEvent(
+      privateKey: profileKey, createdAt: 101, kind: 0, content: #"{"name":"Newest"}"#
+    )
+    let newerMetadata = try signedEvent(
+      privateKey: relayKey, createdAt: 101, kind: 39_000,
+      tags: [["d", "prefix"], ["name", "Newest"], ["t", "forum"]]
+    )
+    let newerMembership = try signedEvent(
+      privateKey: relayKey, createdAt: 101, kind: 39_002,
+      tags: [["d", "prefix"], ["p", member], ["p", addedMember]]
+    )
+    try store.updateProfiles(
+      communityID: "original", relayOrigin: "https://relay.example",
+      updates: [BuzzPushProfileCacheUpdate(event: newerProfile)]
+    )
+    try store.updateChannels(
+      communityID: "original", relayOrigin: "https://relay.example",
+      relayMetadataPubkey: relayPubkey,
+      metadataEvents: [newerMetadata], membershipEvents: [newerMembership]
+    )
+
+    // Replay exact events from the accepted prefix, then deliver the missing suffix.
+    try deliver(0)
+    try deliver(1)
+    let completed = try loadSnapshot(directory)
+    try deliver(0)
+    try deliver(1)
+    let replayed = try loadSnapshot(directory)
+    #expect(replayed.profiles == completed.profiles)
+    #expect(replayed.channels == completed.channels)
+    #expect(replayed.profiles.count == 4)
+    #expect(replayed.channels.count == 4)
+    #expect(
+      replayed.profiles.filter {
+        $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+      } == untouchedProfiles)
+    #expect(
+      replayed.channels.filter {
+        $0.communityID != "original" || $0.relayOrigin != "https://relay.example"
+      } == untouchedChannels)
+    let profile = try #require(
+      replayed.profile(
+        communityID: "original", relayOrigin: "https://relay.example", pubkey: member
+      ))
+    #expect(profile.eventID == newerProfile.id)
+    #expect(profile.displayName == "Newest")
+    let channel = try #require(
+      replayed.channel(
+        communityID: "original", relayOrigin: "https://relay.example", channelID: "prefix"
+      ))
+    #expect(channel.eventID == newerMetadata.id)
+    #expect(channel.displayName == "Newest")
+    #expect(channel.channelType == "forum")
+    #expect(channel.membershipEventID == newerMembership.id)
+    #expect(channel.memberCount == 2)
+    #expect(
+      channel.memberDigests
+        == [member, addedMember].map {
+          BuzzPushPresentationIdentity.channelMember(
+            communityID: "original", channelID: "prefix", pubkey: $0
+          )
+        }.sorted())
+    #expect(
+      replayed.profile(
+        communityID: "original", relayOrigin: "https://relay.example", pubkey: addedMember
+      )?.eventID == profiles[1].id)
+    let suffix = try #require(
+      replayed.channel(
+        communityID: "original", relayOrigin: "https://relay.example", channelID: "suffix"
+      ))
+    #expect(suffix.eventID == metadata[1].id)
+    #expect(suffix.membershipEventID == memberships[1].id)
   }
 
   @Test("Channel authority rotation clears membership signed by the old authority")
@@ -744,5 +1115,50 @@ struct BuzzPushPresentationCacheTests {
       content: content,
       sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
     )
+  }
+}
+
+struct BuzzLaunchNotificationProtectionTests {
+  @Test func failedLaunchClearsCredentialsAndStillRequiresRetry() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+      try? FileManager.default.removeItem(at: directory)
+    }
+    let store = BuzzAgeRestrictionFenceStore(containerURL: directory)
+    try store.begin()
+    let allowed = try store.settleIfFencing()
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+    var credentials = ["community": "saved signing key"]
+
+    #expect(throws: (any Error).self) {
+      try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: directory) {
+        credentials.removeAll()
+      }
+    }
+    #expect(credentials.isEmpty)
+    #expect(store.current() == allowed, "The old allowed fence remains readable")
+
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: directory) {
+      Issue.record("Recovered storage should establish the fence")
+    }
+    #expect(store.current().isFencing)
+  }
+
+  @Test func missingContainerStillAttemptsCredentialRemoval() {
+    var cleared = false
+    #expect(throws: (any Error).self) {
+      try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: nil) { cleared = true }
+    }
+    #expect(cleared)
+  }
+
+  @Test func credentialRemovalFailurePropagates() {
+    let failure = NSError(domain: "test.keychain", code: 1)
+    #expect(throws: failure) {
+      try BuzzAgeRestrictionFenceStore.beginLaunch(containerURL: nil) { throw failure }
+    }
   }
 }

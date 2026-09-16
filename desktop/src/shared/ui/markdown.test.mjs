@@ -1400,6 +1400,7 @@ test("resolved human mentions replace the authored at-sign with the shared icon"
   );
 
   assert.match(html, /data-mention=""/);
+  assert.match(html, /wrapping-inline-chip/);
   assert.match(
     html,
     /inline-chip-leading-fragment[^>]*inline-chip-icon-human[^>]*>alice<\/span>/,

@@ -1167,7 +1167,7 @@ mod tests {
         // Simulate the minimum supported adapter version.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
@@ -1189,10 +1189,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("codex-acp");
-        // A 1.x adapter below MIN_CODEX_ACP_VERSION must still be reinstalled.
+        // The observed adapter bundles Codex 0.148.x and must be upgraded.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.6.2'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))

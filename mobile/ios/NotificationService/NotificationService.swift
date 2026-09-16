@@ -1,25 +1,40 @@
 import BuzzPushKit
 import Foundation
+import Intents
 import Security
 import UserNotifications
 
 final class NotificationService: UNNotificationServiceExtension {
-  private var contentHandler: ((UNNotificationContent) -> Void)?
+  private var handoff: BuzzNotificationHandoff<UNNotificationContent>?
   private var bestAttemptContent: UNMutableNotificationContent?
+  private var restrictedFallbackContent: UNMutableNotificationContent?
+  private var restrictionFenceAtStart = BuzzAgeRestrictionFence.initial
   private let communicationPresenter = BuzzCommunicationNotificationPresenter()
+  private let interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
+    timeout: 5,
+    deleteAllInteractions: { completion in
+      INInteraction.deleteAll(completion: completion)
+    },
+    scheduleTimeout: { delay, action in
+      DispatchQueue.global(qos: .utility).asyncAfter(
+        deadline: .now() + delay,
+        execute: action
+      )
+    }
+  )
+  private lazy var appGroupIdentifier =
+    Bundle.main.object(
+      forInfoDictionaryKey: "BuzzAppGroupIdentifier"
+    ) as? String
   private lazy var resolver: BuzzPushNotificationResolving = {
-    let appGroupIdentifier =
-      Bundle.main.object(
-        forInfoDictionaryKey: "BuzzAppGroupIdentifier"
-      ) as? String
     let keychainAccessGroup =
       Bundle.main.object(
         forInfoDictionaryKey: "BuzzKeychainAccessGroup"
       ) as? String
     return BuzzPushNotificationResolver(
       session: .shared,
-      loadCommunitiesData: {
-        Self.loadPushSnapshotData(appGroupIdentifier: appGroupIdentifier)
+      loadCommunitiesData: { [self] in
+        Self.loadPushSnapshotData(appGroupIdentifier: self.appGroupIdentifier)
       },
       loadPrivateKey: { communityID in
         Self.loadPrivateKey(
@@ -27,8 +42,8 @@ final class NotificationService: UNNotificationServiceExtension {
           keychainAccessGroup: keychainAccessGroup
         )
       },
-      loadPresentationCacheData: {
-        Self.loadPushSnapshotData(appGroupIdentifier: appGroupIdentifier)
+      loadPresentationCacheData: { [self] in
+        Self.loadPushSnapshotData(appGroupIdentifier: self.appGroupIdentifier)
       }
     )
   }()
@@ -37,9 +52,13 @@ final class NotificationService: UNNotificationServiceExtension {
     _ request: UNNotificationRequest,
     withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
-    self.contentHandler = contentHandler
+    handoff = BuzzNotificationHandoff(handler: contentHandler)
+    restrictionFenceAtStart = Self.loadRestrictionFence(
+      appGroupIdentifier: appGroupIdentifier
+    )
+    restrictedFallbackContent = Self.restrictedFallback(from: request.content)
     guard let content = request.content.mutableCopy() as? UNMutableNotificationContent else {
-      contentHandler(request.content)
+      finish(request.content)
       return
     }
     bestAttemptContent = content
@@ -66,7 +85,13 @@ final class NotificationService: UNNotificationServiceExtension {
         self.bestAttemptContent = content
         self.communicationPresenter.present(
           ordinaryContent: content,
-          resolution: resolution
+          resolution: resolution,
+          isStillAllowed: { [weak self] in
+            self?.restrictionFenceIsUnchanged() ?? false
+          },
+          onDeletionFailure: { [weak self] _ in
+            self?.activateRestrictionFence()
+          }
         ) { [weak self] specializedContent in
           self?.finish(specializedContent)
         }
@@ -83,9 +108,88 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private func finish(_ content: UNNotificationContent) {
-    guard let contentHandler else { return }
-    self.contentHandler = nil
-    contentHandler(content)
+    handoff?.finish(
+      content,
+      restrictedFallback: restrictedFallbackContent ?? Self.restrictedFallback(from: content),
+      handoffIfAllowed: { deliver in
+        Self.handoffIfRestrictionFenceUnchanged(
+          appGroupIdentifier: appGroupIdentifier,
+          since: restrictionFenceAtStart,
+          handoff: deliver
+        )
+      }
+    ) { [self] in
+      // The service deadline cannot wait for Intents cleanup. The safe content
+      // has already been handed back synchronously, including on expiration.
+      let center = UNUserNotificationCenter.current()
+      center.removeAllDeliveredNotifications()
+      center.removeAllPendingNotificationRequests()
+      interactionDeletionDeadline.deleteAll { [weak self] error in
+        if error != nil { self?.activateRestrictionFence() }
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+      }
+    }
+  }
+
+  private func restrictionFenceIsUnchanged() -> Bool {
+    !Self.loadRestrictionFence(
+      appGroupIdentifier: appGroupIdentifier
+    ).requiresDiscard(since: restrictionFenceAtStart)
+  }
+
+  private static func handoffIfRestrictionFenceUnchanged(
+    appGroupIdentifier: String?,
+    since earlier: BuzzAgeRestrictionFence,
+    handoff: () -> Void
+  ) -> Bool {
+    guard let appGroupIdentifier,
+      let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      )
+    else { return false }
+    do {
+      return try BuzzAgeRestrictionFenceStore(containerURL: container)
+        .performIfUnchanged(since: earlier, handoff)
+    } catch {
+      return false
+    }
+  }
+
+  private func activateRestrictionFence() {
+    guard let appGroupIdentifier,
+      let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      )
+    else { return }
+    try? BuzzAgeRestrictionFenceStore(containerURL: container).begin()
+  }
+
+  private static func restrictedFallback(
+    from content: UNNotificationContent
+  ) -> UNMutableNotificationContent {
+    let fallback =
+      (content.mutableCopy() as? UNMutableNotificationContent)
+      ?? UNMutableNotificationContent()
+    fallback.title = "Buzz"
+    fallback.subtitle = ""
+    fallback.body = "Open Buzz to view this message."
+    fallback.threadIdentifier = ""
+    var userInfo = fallback.userInfo
+    userInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
+    fallback.userInfo = userInfo
+    return fallback
+  }
+
+  private static func loadRestrictionFence(
+    appGroupIdentifier: String?
+  ) -> BuzzAgeRestrictionFence {
+    guard let appGroupIdentifier,
+      let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      )
+    else { return .unavailable }
+    return BuzzAgeRestrictionFenceStore(containerURL: container).current()
   }
 
   private static func loadPrivateKey(

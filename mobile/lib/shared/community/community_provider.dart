@@ -80,6 +80,12 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
 typedef CommunitySnapshotWriter =
     Future<void> Function(List<Community> communities);
 
+typedef AgeGateCommunitySnapshotWriter =
+    Future<void> Function(
+      List<Community> communities, {
+      required bool settleFence,
+    });
+
 /// Writes the complete persisted community set to storage shared with the iOS
 /// notification service extension. Tests override this provider to verify that
 /// every persistence path refreshes (or clears) the native snapshot.
@@ -89,9 +95,53 @@ final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
   return registerBuzzPushCommunitySnapshot;
 });
 
+/// Strict writer used only for security-sensitive launch age-gate transitions.
+final ageGateCommunitySnapshotWriterProvider =
+    Provider<AgeGateCommunitySnapshotWriter>((ref) {
+      return registerBuzzPushCommunitySnapshotStrict;
+    });
+
 final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
-  return _CommunitySnapshotSync(ref.read(communitySnapshotWriterProvider));
+  return _CommunitySnapshotSync(
+    ref.read(communitySnapshotWriterProvider),
+    ref.read(ageGateCommunitySnapshotWriterProvider),
+  );
 });
+
+/// Suspends or restores notification-service state at the launch age gate.
+typedef CommunitySnapshotAgeGateAction = Future<void> Function();
+
+/// Temporarily removes notification-service presentation material while the
+/// launch age signal has not allowed access.
+final suspendCommunitySnapshotForAgeCheckProvider =
+    Provider<CommunitySnapshotAgeGateAction>((ref) {
+      return () async {
+        try {
+          await ref.read(_communitySnapshotSyncProvider).suspendForAgeCheck();
+          pushCommunitySnapshotError.value = null;
+        } catch (error, stackTrace) {
+          reportPushCommunitySnapshotError(error, stackTrace);
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+      };
+    });
+
+/// Restores notification-service presentation material after the launch age
+/// signal allows access.
+final resumeCommunitySnapshotAfterAgeCheckProvider =
+    Provider<CommunitySnapshotAgeGateAction>((ref) {
+      return () async {
+        try {
+          await ref
+              .read(_communitySnapshotSyncProvider)
+              .resumeAfterAgeCheck(ref.read(communityStorageProvider).loadAll);
+          pushCommunitySnapshotError.value = null;
+        } catch (error, stackTrace) {
+          reportPushCommunitySnapshotError(error, stackTrace);
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+      };
+    });
 
 typedef CommunityPushLeaseDeactivator =
     Future<void> Function(Community community, {int? generation});
@@ -178,13 +228,70 @@ Future<void> _deactivateCommunityPushLease(
 }
 
 class _CommunitySnapshotSync {
-  _CommunitySnapshotSync(this._writer);
+  _CommunitySnapshotSync(this._writer, this._ageGateWriter);
 
   final CommunitySnapshotWriter _writer;
-  String? _lastSuccessfulSnapshot;
+  final AgeGateCommunitySnapshotWriter _ageGateWriter;
+  ({String content, bool strict, bool settleFence})? _lastSuccessfulSnapshot;
+  bool _ageRestricted = false;
+  bool _ageCheckSuspended = false;
+  Future<void> _mutationTail = Future.value();
 
-  Future<void> write(List<Community> communities) async {
-    final fingerprint = communities
+  Future<void> _serializeMutation(Future<void> Function() operation) {
+    final result = _mutationTail.then((_) => operation());
+    _mutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<void> suspendForAgeCheck() => _serializeMutation(() async {
+    if (!_ageRestricted) _ageCheckSuspended = true;
+    await _write(
+      const <Community>[],
+      useAgeGateWriter: true,
+      settleAgeGateFence: false,
+    );
+  });
+
+  Future<void> resumeAfterAgeCheck(
+    Future<List<Community>> Function() loadCommunities,
+  ) => _serializeMutation(() async {
+    if (_ageRestricted) return;
+    final communities = await loadCommunities();
+    _ageCheckSuspended = false;
+    await _write(communities, useAgeGateWriter: true, settleAgeGateFence: true);
+  });
+
+  Future<void> write(
+    List<Community> communities, {
+    bool enforceAgeRestriction = false,
+    bool useAgeGateWriter = false,
+    bool settleAgeGateFence = false,
+  }) {
+    if (enforceAgeRestriction) _ageRestricted = true;
+    // Ordinary exports must queue behind the entire restore, including its
+    // storage read. Otherwise an export can finish during that read and then
+    // be overwritten by the older list it returned.
+    return _serializeMutation(
+      () => _write(
+        communities,
+        useAgeGateWriter: useAgeGateWriter,
+        settleAgeGateFence: settleAgeGateFence,
+      ),
+    );
+  }
+
+  Future<void> _write(
+    List<Community> communities, {
+    bool useAgeGateWriter = false,
+    bool settleAgeGateFence = false,
+  }) async {
+    final effectiveCommunities = _ageRestricted || _ageCheckSuspended
+        ? const <Community>[]
+        : communities;
+    final contentFingerprint = effectiveCommunities
         .map(
           (community) => [
             community.id,
@@ -199,9 +306,23 @@ class _CommunitySnapshotSync {
           ].join('\u0000'),
         )
         .join('\u0001');
+    // Both paths replace the same native data. Strict writes additionally
+    // acknowledge the age-gate fence, so their mode is part of the request.
+    final fingerprint = (
+      content: contentFingerprint,
+      strict: useAgeGateWriter,
+      settleFence: settleAgeGateFence,
+    );
     if (fingerprint == _lastSuccessfulSnapshot) return;
 
-    await _writer(communities);
+    if (useAgeGateWriter) {
+      await _ageGateWriter(
+        effectiveCommunities,
+        settleFence: settleAgeGateFence,
+      );
+    } else {
+      await _writer(effectiveCommunities);
+    }
     _lastSuccessfulSnapshot = fingerprint;
   }
 }
@@ -218,6 +339,22 @@ Future<void> syncCommunitySnapshot(Ref ref, List<Community> communities) async {
 Future<void> syncStoredCommunitySnapshot(Ref ref) async {
   final communities = await ref.read(communityStorageProvider).loadAll();
   await syncCommunitySnapshot(ref, communities);
+}
+
+Future<void> _enforceAgeRestrictedCommunitySnapshot(Ref ref) async {
+  try {
+    await ref
+        .read(_communitySnapshotSyncProvider)
+        .write(
+          const [],
+          enforceAgeRestriction: true,
+          useAgeGateWriter: true,
+          settleAgeGateFence: false,
+        );
+    pushCommunitySnapshotError.value = null;
+  } catch (error, stackTrace) {
+    reportPushCommunitySnapshotError(error, stackTrace);
+  }
 }
 
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
@@ -412,7 +549,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
-  Future<void> markPushLeaseAccepted(
+  Future<bool> markPushLeaseAccepted(
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
@@ -420,14 +557,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
-    if (index < 0) return;
+    if (index < 0) return false;
 
     final community = current[index];
     final acceptedGeneration =
         community.pushSubscriptionState.acceptedGeneration ?? 0;
     final generationCursor =
         community.pushSubscriptionState.generationCursor ?? 0;
-    if (generation < max(acceptedGeneration, generationCursor)) return;
+    if (generation < max(acceptedGeneration, generationCursor)) return false;
+    if (buzzPushSubscriptionsFingerprint(
+          community.pushSubscriptionState.desired,
+        ) !=
+        buzzPushSubscriptionsFingerprint(subscriptions)) {
+      return false;
+    }
     final updated = community.copyWith(
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
@@ -438,6 +581,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    return true;
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
@@ -475,6 +619,68 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       } catch (_) {
         // The durable journal remains pending. BuzzPushBootstrap retries it
         // after reconnect while all registration/enrollment paths stay off.
+      }
+    }
+  }
+
+  /// Disables every stored push lease after the platform age gate restricts
+  /// access, and retries journals left pending by an earlier launch.
+  Future<void> enforceAgeRestrictionOnPush() async {
+    // Fence every older or later authenticated export before touching storage.
+    // The final empty write wins even if a stale export is already in I/O.
+    await _enforceAgeRestrictedCommunitySnapshot(ref);
+    final attempts = <({String id, bool advanceGeneration})>[];
+    await _serializePushMutation(() async {
+      final storage = ref.read(communityStorageProvider);
+      final current = state.value ?? await storage.loadAll();
+      final updatedList = [...current];
+      var changed = false;
+
+      for (var index = 0; index < current.length; index += 1) {
+        final community = current[index];
+        final pending =
+            community.pushSubscriptionState.pendingTombstoneGeneration;
+        if (!community.pushNotificationsEnabled) {
+          if (pending != null) {
+            attempts.add((id: community.id, advanceGeneration: true));
+          }
+          continue;
+        }
+
+        var pushState = community.pushSubscriptionState;
+        if (pushState.acceptedGeneration != null ||
+            pushState.generationCursor != null) {
+          final cursor =
+              pushState.generationCursor ?? pushState.acceptedGeneration ?? 0;
+          pushState = pushState.withPendingTombstone(cursor + 1);
+          attempts.add((id: community.id, advanceGeneration: false));
+        }
+        final updated = community.copyWith(
+          pushNotificationsEnabled: false,
+          pushSubscriptionState: pushState,
+        );
+        updatedList[index] = updated;
+        changed = true;
+      }
+
+      if (changed) {
+        // Persist the complete restricted state in one secure-storage write so
+        // termination can never leave later communities push-enabled.
+        await storage.saveAll(updatedList);
+        state = AsyncData(updatedList);
+      }
+      // A failed native clear is retried on the next restricted launch/resume.
+      await syncCommunitySnapshot(ref, updatedList);
+    });
+
+    for (final attempt in attempts) {
+      try {
+        await retryPendingPushLeaseTombstone(
+          attempt.id,
+          advanceGeneration: attempt.advanceGeneration,
+        );
+      } catch (_) {
+        // The durable journal remains available for the next launch/resume.
       }
     }
   }

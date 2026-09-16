@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../utils/string_utils.dart';
+
 @immutable
 class UserProfile {
   final String pubkey;
@@ -31,15 +33,26 @@ class UserProfile {
     nip05Handle: json['nip05_handle'] as String?,
   );
 
-  /// Short label: display name, or first 8 chars of pubkey.
-  String get label =>
-      displayName ??
-      '${pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey}...';
+  /// Short label: display name, or the compact npub form of the public key.
+  ///
+  /// Blank display names (empty or whitespace-only) fall back to the compact
+  /// npub too — relay profiles can carry them — so a valid identity never
+  /// renders an empty label, like [initial]. Nonblank names render as
+  /// authored: trim only tests blankness, so authored padding survives
+  /// (unlike [initial], which reads the trimmed padding).
+  String get label {
+    final name = displayName;
+    return name != null && name.trim().isNotEmpty ? name : shortPubkey(pubkey);
+  }
 
   /// First letter for fallback avatar.
-  String get initial =>
-      (displayName?.isNotEmpty == true ? displayName! : pubkey)[0]
-          .toUpperCase();
+  String get initial {
+    final name = displayName?.trim();
+    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
+    // Hex-derived (not npub-derived) so unnamed identities keep distinct
+    // initials instead of every npub rendering `N`.
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+  }
 }
 
 /// Optional profile handle shown beside a message author's display name.

@@ -45,7 +45,7 @@ use png::{BitDepth, ColorType, Decoder, Encoder};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
-use crate::managed_agents::types::ManagedAgentRecord;
+use crate::managed_agents::{types::ManagedAgentRecord, AcpSessionPolicy};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -112,6 +112,9 @@ pub struct AgentSnapshotDefinition {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// ACP conversation boundary carried with the portable definition.
+    #[serde(default, skip_serializing_if = "AcpSessionPolicy::is_channel")]
+    pub session_policy: AcpSessionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
     /// Allowlist entries. These are flagged during import — they come from the
@@ -212,6 +215,7 @@ pub fn build_snapshot(
         model: record.model.clone(),
         provider: record.provider.clone(),
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
+        session_policy: record.session_policy,
         respond_to: record.definition_respond_to.clone(),
         respond_to_allowlist: record.definition_respond_to_allowlist.clone(),
         name_pool: record.name_pool.clone(),

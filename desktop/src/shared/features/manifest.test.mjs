@@ -9,21 +9,6 @@ const manifest = JSON.parse(
   ),
 );
 
-test("thread-scoped ACP sessions is a default-off desktop experiment", () => {
-  const feature = manifest.features.find(
-    ({ id }) => id === "threadScopedAcpSessions",
-  );
-
-  assert.deepEqual(feature, {
-    id: "threadScopedAcpSessions",
-    name: "Thread Scoped ACP Sessions",
-    description:
-      "Give each channel thread isolated agent context. Applies when managed agents next start; DMs stay conversation-scoped.",
-    platforms: ["desktop"],
-  });
-  assert.equal(feature.defaultEnabled, undefined);
-});
-
 test("existing Projects and Workflows experiments remain unchanged", () => {
   const existing = Object.fromEntries(
     manifest.features

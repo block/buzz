@@ -8,21 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-/// Database pool roles with connection-setup coverage.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DbPoolRole {
-    /// The authoritative relay writer pool.
-    Writer,
-}
-
-impl DbPoolRole {
-    /// Stable metric label.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Writer => "writer",
-        }
-    }
-}
+use super::DbPoolRole;
 
 /// Fixed writer connection-setup steps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

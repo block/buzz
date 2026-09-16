@@ -27,6 +27,16 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+// Unnamed roster fixtures whose two plausible orders disagree (the e2e twin
+// of the memberUtils unit pair): both keys share the `npub1qqq…` head, so
+// the compact display labels order V5 first (`…2hcx` < `…2w5c`) while the
+// full canonical npubs order V24 first (`…vq53…` < `…zsfj…`). Only the
+// full-npub order is correct for the roster.
+const UNNAMED_MEMBER_V5_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000005";
+const UNNAMED_MEMBER_V24_PUBKEY =
+  "0000000000000000000000000000000000000000000000000000000000000018";
+const NEW_DM_AGENT_PUBKEY = "f".repeat(64);
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -571,6 +581,16 @@ test("shows presence in sidebar, DM header, and member list", async ({
     "Online",
   );
   await expect(page.getByTestId("channel-presence-alice-tyler")).toBeVisible();
+  const dmAvatarMask = page.getByTestId("channel-avatar-alice-tyler-mask");
+  await expect(dmAvatarMask).toHaveCSS("border-radius", "0px");
+  await expect(dmAvatarMask).toHaveCSS("clip-path", /polygon\(/);
+  await expect
+    .poll(() =>
+      dmAvatarMask.evaluate(
+        (element) => getComputedStyle(element).clipPath.split(",").length,
+      ),
+    )
+    .toBeGreaterThan(100);
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
@@ -588,6 +608,22 @@ test("shows presence in sidebar, DM header, and member list", async ({
 });
 
 test("start a new direct message from the sidebar", async ({ page }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        name: "Squircle Agent",
+        status: "stopped",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: NEW_DM_AGENT_PUBKEY,
+        displayName: "Squircle Agent",
+        isAgent: true,
+      },
+    ],
+  });
   await page.goto("/");
 
   await openNewMessagePage(page);
@@ -632,11 +668,27 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
+  await page.getByTestId("new-dm-search").fill("squircle agent");
+  await page.getByTestId(`new-dm-result-${NEW_DM_AGENT_PUBKEY}`).click();
+  const selectedAgent = page.getByTestId(
+    `new-dm-selected-${NEW_DM_AGENT_PUBKEY}`,
+  );
+  await expect(selectedAgent).toBeVisible();
+  await selectedAgent.focus();
+  await expect(selectedAgent).toBeFocused();
+  await expect(selectedAgent).toHaveCSS("clip-path", "none");
+  await expect(selectedAgent).not.toHaveClass(/rounded-squircle/);
+  await expect(
+    selectedAgent.locator("span.absolute[data-avatar-shape='squircle']"),
+  ).toHaveCSS("clip-path", /url\(["']?#rounded-squircle-clip["']?\)/);
+
   await page.getByTestId("message-input").fill("Hello charlie");
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
-  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("chat-title")).toHaveText(
+    "charlie, Squircle Agent",
+  );
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
@@ -2151,6 +2203,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  const activityAvatar = page.getByTestId(
+    `bot-activity-composer-avatar-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  await expect(activityAvatar).toHaveCSS("border-radius", "0px");
+  await expect(activityAvatar).toHaveCSS(
+    "clip-path",
+    'url("#rounded-squircle-clip")',
+  );
   await expect(
     page.getByTestId("bot-activity-composer-trigger"),
   ).not.toContainText("View activity");
@@ -3957,6 +4017,17 @@ test("Inbox keeps the unread boundary for replies from multiple agents", async (
 
   const firstUnreadRow = page.getByTestId(`home-inbox-item-${replyIds[0]}`);
   await expect(firstUnreadRow).toBeVisible();
+
+  const inboxAvatar = page.getByTestId(`home-inbox-avatar-${replyIds[0]}`);
+  await expect(inboxAvatar).toBeVisible();
+  await inboxAvatar.focus();
+  await expect(inboxAvatar).toBeFocused();
+  await expect(inboxAvatar).toHaveCSS("clip-path", "none");
+  await expect(inboxAvatar).not.toHaveClass(/rounded-squircle/);
+  await expect(inboxAvatar.locator("[data-avatar-shape='squircle']")).toHaveCSS(
+    "clip-path",
+    /url\(["']?#rounded-squircle-clip["']?\)/,
+  );
   await firstUnreadRow.click();
 
   const detail = page.getByTestId("home-inbox-detail");
@@ -4176,8 +4247,27 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  // Generated members have no display name, so the roster sorts them by
+  // their full canonical npub: these sequential pubkeys share an
+  // `npub1qqq…` head and diverge mid-key, while the compact label's
+  // checksum tail is display-only and decides nothing. Resolve
+  // a generated member from the rows the initial window actually rendered
+  // instead of assuming `pubkeys[0]` sorts into that window.
+  const generatedPubkeySet = new Set(pubkeys);
+  const renderedPubkeys = await memberRows.evaluateAll((rows) =>
+    rows.map(
+      (row) =>
+        (row as HTMLElement).dataset.testid?.slice("sidebar-member-".length) ??
+        "",
+    ),
+  );
+  const firstRenderedGeneratedPubkey = renderedPubkeys.find((pubkey) =>
+    generatedPubkeySet.has(pubkey),
+  );
+  expect(firstRenderedGeneratedPubkey).toBeTruthy();
+
   const firstGeneratedRow = memberList.getByTestId(
-    `sidebar-member-${pubkeys[0]}`,
+    `sidebar-member-${firstRenderedGeneratedPubkey}`,
   );
   await expect
     .poll(() =>
@@ -4214,9 +4304,76 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
   });
+  // Fully scrolling must render the roster's true tail, and the tail
+  // endpoint must be known independently of whatever the virtual window
+  // happens to render. The sidebar's own roster accounting — the
+  // "Members · N" header — must read exactly the fixture-known total
+  // ("random" seeds alice, the mock identity, and bob; this test adds the
+  // 500 generated pubkeys on top), so fixture or classification drift
+  // fails loudly here instead of silently weakening the tail check.
+  const rosterCount = 3 + pubkeys.length;
+  await expect(memberList.getByText(/^Members · \d+$/)).toHaveText(
+    `Members · ${rosterCount}`,
+  );
+  // VirtualizedList stamps each rendered row with its item index, so the
+  // final item's row is a fixed target that no window sample can pick in
+  // its place: a virtualizer clamped mid-roster never renders it.
   await expect(
-    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+    memberList.locator(
+      `[data-index="${rosterCount - 1}"] > [data-testid^="sidebar-member-"]`,
+    ),
   ).toBeVisible();
+});
+
+test("members sidebar orders unnamed members by full canonical npub", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  // Added in the opposite of the expected order, so incoming membership
+  // order can never satisfy the assertion on its own.
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys: [UNNAMED_MEMBER_V5_PUBKEY, UNNAMED_MEMBER_V24_PUBKEY],
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  // "random" seeds alice, the mock identity, and bob, so the two unnamed
+  // fixtures round out a five-row roster that the initial virtual window
+  // renders entirely — both fixtures are visible without scrolling.
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V24_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${UNNAMED_MEMBER_V5_PUBKEY}`),
+  ).toBeVisible();
+
+  // The compact labels (`npub1qqq…2hcx` < `npub1qqq…2w5c`) would order V5
+  // first; the full canonical npubs disagree and order V24 first. The
+  // rendered roster must follow the full key, not the display label.
+  const renderedOrder = await page
+    .getByTestId("members-sidebar-people")
+    .locator('[data-index] > [data-testid^="sidebar-member-"]')
+    .evaluateAll((rows) =>
+      rows.map(
+        (row) =>
+          (row as HTMLElement).dataset.testid?.slice(
+            "sidebar-member-".length,
+          ) ?? "",
+      ),
+    );
+  const v24Position = renderedOrder.indexOf(UNNAMED_MEMBER_V24_PUBKEY);
+  const v5Position = renderedOrder.indexOf(UNNAMED_MEMBER_V5_PUBKEY);
+  expect(v24Position).toBeGreaterThanOrEqual(0);
+  expect(v5Position).toBeGreaterThanOrEqual(0);
+  expect(v24Position).toBeLessThan(v5Position);
 });
 
 test("opening a human-only members sidebar skips managed runtime discovery", async ({

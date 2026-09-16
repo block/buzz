@@ -396,6 +396,7 @@ function isCustomEmojiShortcode(emoji: string) {
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
+  ref,
   onDelete,
   onEdit,
   onFollowThread,
@@ -417,6 +418,9 @@ export const MessageActionBar = React.memo(function MessageActionBar({
    *  action is hidden (callers like the home inbox that lack the context). */
   channelId?: string | null;
   message: TimelineMessage;
+  /** Attached to the root element so hosts can measure the rail's rendered
+   *  footprint (e.g. to reserve its width in the message-header layout). */
+  ref?: React.Ref<HTMLDivElement>;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
@@ -514,6 +518,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           : "",
       )}
       data-testid={`message-action-bar-${message.id}`}
+      ref={ref}
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">

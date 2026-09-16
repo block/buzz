@@ -525,6 +525,8 @@ struct LegacyBuiltInAvatar<'a> {
 }
 
 const LEGACY_BUILTIN_AVATARS: &[LegacyBuiltInAvatar<'static>] = &[
+    // Original circular portraits replaced in #2215. Keep these entries so an
+    // install that skips directly over that release still migrates cleanly.
     LegacyBuiltInAvatar {
         persona_id: "builtin:fizz",
         data_url_sha256: "2771b8c9c46aa3c8ac1c4d2acfa23fa9ba35b79c4b1694554e923081e3b8b4d0",
@@ -542,6 +544,25 @@ const LEGACY_BUILTIN_AVATARS: &[LegacyBuiltInAvatar<'static>] = &[
         data_url_sha256: "c08cf3b8b4c3f8721df6143367ababdebae8f913b9c654401ba74bb3d233655b",
         sanitized_media_sha256: "9f798c61f8965b80beb808f505feb0a5b33726545188ea8212cc9ab22d05f0b6",
         persona_content_hash: "544a73f9106a3c8848b0f308b7a8b6f95077ac8deccdb9ed5552caa833d66c95",
+    },
+    // Circular 384px portraits replaced by the square 128px agent artwork.
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:fizz",
+        data_url_sha256: "6cdf8c338d27ef3c9dd68cf4839f3d62dec2298e2d4e07b851f26f8ba289b377",
+        sanitized_media_sha256: "e6025a21c864750f4b3828c9035bafdbe68ec73bd247745c78309b82fedcbed5",
+        persona_content_hash: "d30d9c7105be0765a2c5ebe89fdb67842201409e79a4b7937f46e2772411d925",
+    },
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:honey",
+        data_url_sha256: "7b51bb3e353aed13b5d6a01d0ad9aa58d63b6bb347f2ed6ee891e7af6149febe",
+        sanitized_media_sha256: "4a64f32d2375ccfe44c0880416bc72b809b055f0fb7d9dddeb8bb3dd6b80c297",
+        persona_content_hash: "e0f88abf79d6826973cc99373ddd1f8350bed1df51064f7b1a0d7e3d7984c49e",
+    },
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:bumble",
+        data_url_sha256: "9e1e841a76069202474393b786ada0628d90711703f8ba96c9ecee84a1c6a593",
+        sanitized_media_sha256: "99d32de5791ec07db70c761db30fd145422e6c8200ba8d189363c3ce53273758",
+        persona_content_hash: "783ee80629046d28f4f07095b1ceedab129661d40a2d5560806bc487a1a65a11",
     },
 ];
 
@@ -674,20 +695,21 @@ fn legacy_avatar_match<'a>(
         .get("persona_id")
         .and_then(serde_json::Value::as_str)
         .or_else(|| record.get("slug").and_then(serde_json::Value::as_str))?;
-    let metadata = legacy_avatars
-        .iter()
-        .find(|legacy| legacy.persona_id == persona_id)?;
     let current_avatar = record
         .get("avatar_url")
         .and_then(serde_json::Value::as_str)?;
-    let matches_data_url =
-        hex::encode(Sha256::digest(current_avatar.as_bytes())) == metadata.data_url_sha256;
-    let matches_uploaded_media = uploaded_media_sha256(current_avatar)
-        .is_some_and(|sha256| sha256 == metadata.sanitized_media_sha256);
-    (matches_data_url || matches_uploaded_media).then(|| LegacyAvatarMatch {
+    let data_url_sha256 = hex::encode(Sha256::digest(current_avatar.as_bytes()));
+    let uploaded_media_sha256 = uploaded_media_sha256(current_avatar);
+    let metadata = legacy_avatars.iter().find(|legacy| {
+        legacy.persona_id == persona_id
+            && (legacy.data_url_sha256 == data_url_sha256
+                || uploaded_media_sha256.as_deref() == Some(legacy.sanitized_media_sha256))
+    })?;
+    let was_uploaded = uploaded_media_sha256.as_deref() == Some(metadata.sanitized_media_sha256);
+    Some(LegacyAvatarMatch {
         persona_id: persona_id.to_string(),
         metadata,
-        was_uploaded: matches_uploaded_media,
+        was_uploaded,
     })
 }
 

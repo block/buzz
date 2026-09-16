@@ -161,9 +161,11 @@ pub fn verify_nip98_event(
             )));
         }
     }
-    let payload_tag = event.tags.find(TagKind::Payload).and_then(|t| t.content());
-
-    if let (Some(payload_hex), Some(body_bytes)) = (payload_tag, body) {
+    // Keep a present-but-malformed tag distinct from an absent (optional) tag.
+    if let (Some(payload_tag), Some(body_bytes)) = (event.tags.find(TagKind::Payload), body) {
+        let payload_hex = payload_tag.content().ok_or_else(|| {
+            AuthError::Nip98Invalid("payload tag is missing its SHA-256 hash".to_string())
+        })?;
         let computed: [u8; 32] = Sha256::digest(body_bytes).into();
         let computed_hex = hex::encode(computed);
         if computed_hex != payload_hex {
@@ -311,6 +313,26 @@ mod tests {
         let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, Some(&wrong_hex), None);
         let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(body));
         assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));
+    }
+
+    #[test]
+    fn payload_tag_without_hash_rejected_with_body() {
+        let keys = Keys::generate();
+        for payload in [vec!["payload"], vec!["payload", ""]] {
+            let json = make_nip98_event_raw_tags(
+                &keys,
+                vec![
+                    nostr::Tag::parse(["u", TEST_URL]).unwrap(),
+                    nostr::Tag::parse(["method", TEST_METHOD]).unwrap(),
+                    nostr::Tag::parse(payload).unwrap(),
+                ],
+            );
+            let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, Some(b"some body"));
+            assert!(
+                matches!(result, Err(AuthError::Nip98Invalid(_))),
+                "{result:?}"
+            );
+        }
     }
 
     #[test]

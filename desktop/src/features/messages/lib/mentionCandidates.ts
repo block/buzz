@@ -5,7 +5,7 @@ import type {
   ChannelRole,
   UserSearchResult,
 } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 export function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -54,7 +54,7 @@ export type MentionCandidate = {
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (
     candidate.displayName ??
-    (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent")
+    (candidate.pubkey ? truncateNpub(candidate.pubkey) : "agent")
   );
 }
 

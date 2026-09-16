@@ -160,6 +160,9 @@ export async function setup({ lifecycle = false } = {}) {
     "@/shared/lib/pubkey": {
       normalizePubkey: (key) => key.toLowerCase(),
       truncatePubkey: (key) => key,
+      // Compact-identity seam stubbed alongside its sibling: these suites
+      // render display names, never key-form labels.
+      truncateNpub: (key) => key,
     },
     "@/shared/lib/customEmojiTags": { buildCustomEmojiTags: () => [] },
     "./useMentionSendFlow.helpers": helpers,
