@@ -84,10 +84,15 @@ class RelayConfigNotifier extends Notifier<RelayConfig> {
   RelayConfig build() {
     // Watch the active community so that when it changes (community switch),
     // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeCommunityProvider);
-    final active = activeAsync.value;
-    if (active != null) {
-      return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
+    // Presentation-only updates must not recreate the authenticated session.
+    final connection = ref.watch(
+      activeCommunityProvider.select((value) {
+        final active = value.value;
+        return active == null ? null : (active.relayUrl, active.nsec);
+      }),
+    );
+    if (connection != null) {
+      return RelayConfig(baseUrl: connection.$1, nsec: connection.$2);
     }
 
     // Fallback to compile-time env config (dev mode).

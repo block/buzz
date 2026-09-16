@@ -94,6 +94,18 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalize and bound the public community name before any profile write.
+fn normalize_community_name(name: &str) -> Result<&str, String> {
+    if name.chars().any(char::is_control) {
+        return Err("community name must not contain control characters".to_string());
+    }
+    let name = name.trim();
+    if name.is_empty() || name.len() > 256 {
+        return Err("community name must be between 1 and 256 UTF-8 bytes".to_string());
+    }
+    Ok(name)
+}
+
 /// Whether `sender_role` may set the workspace profile (kind:9033).
 ///
 /// Closed relays (`membership_enforced == true`) require an `admin`/`owner`
@@ -287,20 +299,40 @@ async fn execute_relay_admin_command(
             );
         }
 
-        // Empty or missing icon tag clears the workspace icon.
-        let icon = extract_tag_value(event, "icon").unwrap_or_default();
-        validate_workspace_icon(&icon)?;
-
+        // Names always require an explicit steward, including on rosterless
+        // open relays. Keep the existing open-relay icon policy unchanged.
+        let name_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("name"))
+            .collect();
+        if name_tags.len() > 1
+            || name_tags
+                .first()
+                .is_some_and(|tag| tag.as_slice().len() != 2)
+        {
+            return Err("expected one name tag with one value".to_string());
+        }
+        let raw_name = extract_tag_value(event, "name");
+        if raw_name.is_some() && sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".to_string());
+        }
+        let name = raw_name
+            .as_deref()
+            .map(normalize_community_name)
+            .transpose()?;
+        // Legacy empty commands clear the icon. A name-only patch preserves it.
+        let icon = extract_tag_value(event, "icon").or_else(|| name.is_none().then(String::new));
+        if let Some(icon) = &icon {
+            validate_workspace_icon(icon)?;
+        }
         state
             .db
-            .set_community_icon(
-                tenant.community(),
-                (!icon.is_empty()).then_some(icon.as_str()),
-            )
+            .set_community_profile(tenant.community(), name, icon.as_deref())
             .await
-            .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+            .map_err(|e| format!("failed to store workspace profile: {e}"))?;
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        info!(sender = %sender_hex, "workspace profile updated");
         return Ok(());
     }
 
@@ -701,7 +733,7 @@ mod postgres_tests {
     /// Build a real `AppState` + tenant for a fresh community on `host`, with
     /// `require_relay_membership` set as given. Mirrors
     /// `api::invites::tests::invite_test_state`.
-    async fn workspace_profile_test_state(
+    pub(super) async fn workspace_profile_test_state(
         host: &str,
         require_relay_membership: bool,
     ) -> (Arc<AppState>, TenantContext) {
@@ -897,3 +929,7 @@ mod postgres_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "relay_admin_profile_tests.rs"]
+mod profile_postgres_tests;

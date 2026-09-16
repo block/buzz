@@ -1,4 +1,10 @@
 import {
+  reconcileCommunityName,
+  withLocalCommunityName,
+} from "./communityName";
+import { useCommunityNames } from "./useCommunityNames";
+import type { CommunityProfile } from "@/shared/api/communityProfile";
+import {
   createContext,
   useCallback,
   useContext,
@@ -44,7 +50,10 @@ export function resolveCommunityUpdateResult(
   activeId: string | null,
   id: string,
   updates: Partial<
-    Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
+    Pick<
+      Community,
+      "name" | "localName" | "relayUrl" | "token" | "pubkey" | "reposDir"
+    >
   >,
 ): UpdateCommunityResult {
   const current = communities.find((w) => w.id === id);
@@ -60,6 +69,8 @@ export function resolveCommunityUpdateResult(
 
   const hasChange =
     (updates.name !== undefined && updates.name !== current.name) ||
+    (updates.localName !== undefined &&
+      updates.localName !== current.localName) ||
     (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) ||
     (updates.token !== undefined && updates.token !== current.token) ||
     (updates.pubkey !== undefined && updates.pubkey !== current.pubkey) ||
@@ -147,7 +158,10 @@ export type UseCommunitiesReturn = {
   updateCommunity: (
     id: string,
     updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
+      Pick<
+        Community,
+        "name" | "localName" | "relayUrl" | "token" | "pubkey" | "reposDir"
+      >
     >,
   ) => UpdateCommunityResult;
   /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
@@ -183,6 +197,26 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
 
+  const applyCommunityProfile = useCallback(
+    (id: string, relayUrl: string, profile: CommunityProfile) => {
+      setCommunitiesState((current) => {
+        let changed = false;
+        const next = current.map((community) => {
+          if (community.id !== id || community.relayUrl !== relayUrl)
+            return community;
+          const updated = reconcileCommunityName(community, profile);
+          changed ||= updated !== community;
+          return updated;
+        });
+        if (!changed) return current;
+        saveCommunities(next);
+        return next;
+      });
+    },
+    [],
+  );
+  useCommunityNames(communities, activeId, reinitKey, applyCommunityProfile);
+
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
     [communities, activeId],
@@ -201,7 +235,8 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           w.id === dup.id
             ? {
                 ...w,
-                name: community.name || w.name,
+                name:
+                  w.localName || w.canonicalName || community.name || w.name,
                 token: community.token ?? w.token,
                 pubkey: community.pubkey ?? w.pubkey,
               }
@@ -287,7 +322,10 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     (
       id: string,
       updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
+        Pick<
+          Community,
+          "name" | "localName" | "relayUrl" | "token" | "pubkey" | "reposDir"
+        >
       >,
     ): UpdateCommunityResult => {
       const result = resolveCommunityUpdateResult(
@@ -299,9 +337,21 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
       if (result.kind === "updated") {
         setCommunitiesState((prev) => {
-          const next = prev.map((w) =>
-            w.id === id ? { ...w, ...updates } : w,
-          );
+          const next = prev.map((w) => {
+            if (w.id !== id) return w;
+            let updated = { ...w, ...updates };
+            if (updates.relayUrl && updates.relayUrl !== w.relayUrl) {
+              updated = {
+                ...updated,
+                canonicalName: undefined,
+                fallbackName: updates.name ?? w.fallbackName ?? w.name,
+                name: updates.name ?? w.localName ?? w.fallbackName ?? w.name,
+              };
+            }
+            return updates.localName !== undefined
+              ? withLocalCommunityName(updated, updates.localName)
+              : updated;
+          });
           saveCommunities(next);
           return next;
         });

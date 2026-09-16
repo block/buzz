@@ -1,3 +1,5 @@
+import { CommunityNameSettings } from "./CommunityNameSettings";
+import { reconcileCommunityName } from "../communityName";
 import * as React from "react";
 
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
@@ -25,7 +27,7 @@ type EditCommunityDialogProps = {
   onSave: (
     id: string,
     updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
+      Pick<Community, "name" | "localName" | "relayUrl" | "token" | "reposDir">
     >,
   ) => void;
   showIconEditor?: boolean;
@@ -51,10 +53,18 @@ export function EditCommunityDialog({
       activeRole === "owner" ||
       activeRole === "admin");
 
-  // Sync form state when the dialog opens with a community
+  const initializedCommunity = React.useRef<string | null>(null);
+
+  // Do not discard draft connection/nickname edits when relay metadata refreshes.
   React.useEffect(() => {
-    if (community && open) {
-      setName(community.name);
+    if (!open) initializedCommunity.current = null;
+    if (community && open && initializedCommunity.current !== community.id) {
+      initializedCommunity.current = community.id;
+      setName(
+        reconcileCommunityName(community, {
+          name: community.canonicalName ?? null,
+        }).localName ?? "",
+      );
       setRelayUrl(community.relayUrl);
       setToken(community.token ?? "");
       setReposDir(community.reposDir ?? "");
@@ -74,12 +84,15 @@ export function EditCommunityDialog({
       }
 
       const updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
+        Pick<
+          Community,
+          "name" | "localName" | "relayUrl" | "token" | "reposDir"
+        >
       > = {};
 
       const trimmedName = name.trim();
-      if (trimmedName && trimmedName !== community.name) {
-        updates.name = trimmedName;
+      if (trimmedName !== (community.localName ?? "")) {
+        updates.localName = trimmedName;
       }
 
       const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
@@ -124,17 +137,22 @@ export function EditCommunityDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-md overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit Community</DialogTitle>
           <DialogDescription>
-            Update this community's name or relay URL.
+            Manage the shared name and this device’s connection settings.
           </DialogDescription>
         </DialogHeader>
         <form
           className="flex flex-col gap-4"
           onSubmit={(e) => void handleSubmit(e)}
         >
+          <CommunityNameSettings
+            key={community.id}
+            community={community}
+            canRename={canEditIcon}
+          />
           {canEditIcon ? (
             <div className="flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/20 p-3">
               <div className="min-w-0">
@@ -151,16 +169,20 @@ export function EditCommunityDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="edit-ws-name"
             >
-              Name
+              Local nickname (optional)
             </label>
             <Input
               autoFocus
               id="edit-ws-name"
               onChange={(e) => setName(e.target.value)}
-              placeholder="My Community"
+              placeholder="Use shared name"
               type="text"
               value={name}
             />
+            <p className="text-xs text-muted-foreground">
+              Only on this device. Leave blank to follow the shared name.
+              {` Previous device label: ${community.fallbackName ?? community.name}.`}
+            </p>
           </div>
           <div className="flex flex-col gap-1.5">
             <label
@@ -228,7 +250,7 @@ export function EditCommunityDialog({
             <Button onClick={handleClose} type="button" variant="outline">
               Cancel
             </Button>
-            <Button disabled={!name.trim() || !relayUrl.trim()} type="submit">
+            <Button disabled={!relayUrl.trim()} type="submit">
               Save Changes
             </Button>
           </div>

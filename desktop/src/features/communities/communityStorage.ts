@@ -194,6 +194,9 @@ export function deriveCommunityName(relayUrl: string): string {
     if (isLocalRelayHost(host)) {
       return "Local Dev";
     }
+    if (/^\d+(?:\.\d+){3}$/.test(host) || host.includes(":")) {
+      return `Community (${host})`;
+    }
     const parts = host.split(".");
     // Detect staging environments (e.g. buzz-oss.stage.blox.sqprod.co)
     if (parts.some((p) => p === "stage" || p === "staging")) {

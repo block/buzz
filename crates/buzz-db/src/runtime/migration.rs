@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations.len(), 46);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2288,6 +2288,53 @@ mod postgres_tests {
             .await
             .expect("drop probe database");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_names_migrate_without_changing_existing_identity_or_icon() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 45)
+            .await
+            .expect("pre-name schema");
+        let id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host, icon) VALUES ($1, 'names.example', 'https://example.com/icon.png')")
+            .bind(id).execute(&pool).await.expect("legacy community");
+        run_migrations(&pool).await.expect("upgrade");
+        let row: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT host, icon, name FROM communities WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("upgraded row");
+        assert_eq!(
+            row,
+            (
+                "names.example".into(),
+                Some("https://example.com/icon.png".into()),
+                None
+            )
+        );
+        sqlx::query("UPDATE communities SET name = 'Shared' WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Binary rollback leaves the additive column in place. The old icon
+        // SQL remains compatible and cannot discard the canonical name.
+        sqlx::query("UPDATE communities SET icon = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let name: String = sqlx::query_scalar("SELECT name FROM communities WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Shared");
+        run_migrations(&pool).await.expect("idempotent upgrade");
     }
 
     #[tokio::test]

@@ -98,6 +98,30 @@ pub async fn fetch_workspace_icon(
     Ok(doc.icon.filter(|icon| !icon.is_empty()))
 }
 
+/// Fetch canonical community presentation without turning network failures into
+/// successful empty metadata. Omitted capability means an older relay.
+#[tauri::command]
+pub async fn fetch_workspace_profile(
+    relay_url: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let response = state
+        .http_client
+        .get(relay::relay_http_base_url(&relay_url))
+        .header("Accept", "application/nostr+json")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let document: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(document
+        .get("community_profile")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
 #[derive(Serialize)]
 pub struct ActiveWorkspaceInfo {
     relay_url: String,

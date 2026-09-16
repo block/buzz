@@ -21,6 +21,9 @@ enum SensitiveActionPolicy { enabled, disabledByUser }
 class Community {
   final String id;
   final String name;
+  final String? canonicalName;
+  final String? fallbackName;
+  final String? localName;
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
@@ -41,6 +44,9 @@ class Community {
   const Community({
     required this.id,
     required this.name,
+    this.canonicalName,
+    this.fallbackName,
+    this.localName,
     required this.relayUrl,
     this.pubkey,
     this.nsec,
@@ -76,6 +82,9 @@ class Community {
 
   Community copyWith({
     String? name,
+    Object? canonicalName = _sentinel,
+    String? fallbackName,
+    Object? localName = _sentinel,
     String? relayUrl,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
@@ -88,6 +97,11 @@ class Community {
     return Community(
       id: id,
       name: name ?? this.name,
+      canonicalName: canonicalName == _sentinel
+          ? this.canonicalName
+          : canonicalName as String?,
+      fallbackName: fallbackName ?? this.fallbackName,
+      localName: localName == _sentinel ? this.localName : localName as String?,
       relayUrl: relayUrl ?? this.relayUrl,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
@@ -109,6 +123,9 @@ class Community {
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
+    if (canonicalName != null) 'canonicalName': canonicalName,
+    if (fallbackName != null) 'fallbackName': fallbackName,
+    if (localName != null) 'localName': localName,
     'relayUrl': relayUrl,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
@@ -144,6 +161,9 @@ class Community {
     return Community(
       id: json['id'] as String,
       name: json['name'] as String,
+      canonicalName: json['canonicalName'] as String?,
+      fallbackName: json['fallbackName'] as String?,
+      localName: json['localName'] as String?,
       relayUrl: json['relayUrl'] as String,
       pubkey: json['pubkey'] as String?,
       nsec: json['nsec'] as String?,
@@ -164,6 +184,9 @@ class Community {
     try {
       final host = Uri.parse(url).host;
       if (host.contains('localhost') || host == '127.0.0.1') return 'Local Dev';
+      if (RegExp(r'^\d+(?:\.\d+){3}$').hasMatch(host) || host.contains(':')) {
+        return 'Community ($host)';
+      }
       final parts = host.split('.');
       if (parts.length > 2) return parts.first;
       return host;

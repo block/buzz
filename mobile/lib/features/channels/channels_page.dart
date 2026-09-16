@@ -179,6 +179,24 @@ class ChannelsPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final channelsAsync = ref.watch(channelsProvider);
     final sessionState = ref.watch(relaySessionProvider);
+    final communityScope = ref
+        .watch(communityListProvider)
+        .value
+        ?.map((community) => '${community.id}:${community.relayUrl}')
+        .join('|');
+    final lifecycle = useAppLifecycleState();
+    useEffect(() {
+      if (lifecycle == null || lifecycle == AppLifecycleState.resumed) {
+        unawaited(
+          Future.microtask(
+            () => ref
+                .read(communityListProvider.notifier)
+                .refreshCommunityNames(),
+          ),
+        );
+      }
+      return null;
+    }, [communityScope, sessionState.status, lifecycle]);
     final currentPubkey = ref
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
@@ -305,6 +323,9 @@ class ChannelsPage extends HookConsumerWidget {
     void openCommunitySwitcher() {
       unawaited(HapticFeedback.selectionClick());
       ref.invalidate(communityIconProvider);
+      unawaited(
+        ref.read(communityListProvider.notifier).refreshCommunityNames(),
+      );
       showBuzzModalBottomSheet<void>(
         context: context,
         showCloseButton: false,

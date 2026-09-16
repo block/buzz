@@ -12,6 +12,7 @@ import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
 import 'community.dart';
+import 'community_name.dart';
 import 'community_storage.dart';
 
 final class CommunityTransitionCoordinator {
@@ -380,35 +381,36 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
-  Future<String> addCommunity(Community community) async {
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
+  Future<String> addCommunity(Community community) =>
+      _serializePushMutation(() async {
+        final storage = ref.read(communityStorageProvider);
+        final current = state.value ?? [];
 
-    // If a community with the same relay URL exists, update its credentials
-    // instead of creating a duplicate entry.
-    final existingIndex = current.indexWhere(
-      (w) => w.relayUrl == community.relayUrl,
-    );
-    if (existingIndex >= 0) {
-      final existing = current[existingIndex];
-      final updated = existing.copyWith(
-        pubkey: community.pubkey,
-        nsec: community.nsec,
-      );
-      await storage.save(updated);
-      final updatedList = [...current];
-      updatedList[existingIndex] = updated;
-      state = AsyncData(updatedList);
-      await syncCommunitySnapshot(ref, updatedList);
-      return existing.id;
-    }
+        // If a community with the same relay URL exists, update its credentials
+        // instead of creating a duplicate entry.
+        final existingIndex = current.indexWhere(
+          (w) => w.relayUrl == community.relayUrl,
+        );
+        if (existingIndex >= 0) {
+          final existing = current[existingIndex];
+          final updated = existing.copyWith(
+            pubkey: community.pubkey,
+            nsec: community.nsec,
+          );
+          await storage.save(updated);
+          final updatedList = [...current];
+          updatedList[existingIndex] = updated;
+          state = AsyncData(updatedList);
+          await syncCommunitySnapshot(ref, updatedList);
+          return existing.id;
+        }
 
-    await storage.save(community);
-    final updatedList = [...current, community];
-    state = AsyncData(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
-    return community.id;
-  }
+        await storage.save(community);
+        final updatedList = [...current, community];
+        state = AsyncData(updatedList);
+        await syncCommunitySnapshot(ref, updatedList);
+        return community.id;
+      });
 
   Future<void> removeCommunity(String id) =>
       _removeCommunity(id, invalidateAuthentication: true);
@@ -776,20 +778,85 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         await syncCommunitySnapshot(ref, updatedList);
       });
 
-  Future<void> renameCommunity(String id, String name) async {
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
-    final index = current.indexWhere((w) => w.id == id);
-    if (index < 0) return;
+  final Map<String, int> _nameRefreshGenerations = {};
 
-    final updated = current[index].copyWith(name: name);
-    await storage.save(updated);
-
-    final updatedList = [...current];
-    updatedList[index] = updated;
-    state = AsyncData(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
+  /// Bounded public reads preserve cached labels on failure. Serialize the
+  /// final write with transitions and use the current snapshot after I/O.
+  Future<void> refreshCommunityNames() async {
+    final targets = state.value ?? [];
+    final fetch = ref.read(communityProfileFetcherProvider);
+    await Future.wait(
+      targets.map((target) async {
+        final generation = (_nameRefreshGenerations[target.id] ?? 0) + 1;
+        _nameRefreshGenerations[target.id] = generation;
+        try {
+          final profile = await fetch(target.relayUrl);
+          if (profile == null || !ref.mounted) return;
+          await ref
+              .read(communityTransitionProvider)
+              .runExclusive(
+                () => _serializePushMutation(() async {
+                  if (!ref.mounted ||
+                      _nameRefreshGenerations[target.id] != generation) {
+                    return;
+                  }
+                  final current = state.value ?? [];
+                  final index = current.indexWhere(
+                    (community) =>
+                        community.id == target.id &&
+                        community.relayUrl == target.relayUrl,
+                  );
+                  if (index < 0) return;
+                  final updated = reconcileCommunityName(
+                    current[index],
+                    profile,
+                  );
+                  if (identical(updated, current[index])) return;
+                  final next = [...current]..[index] = updated;
+                  await ref.read(communityStorageProvider).saveAll(next);
+                  if (!ref.mounted) return;
+                  state = AsyncData(next);
+                  await syncCommunitySnapshot(ref, next);
+                }),
+              );
+        } catch (error) {
+          // Cached state remains authoritative offline; the next reconnect,
+          // foreground, or switcher open retries the public read.
+          developer.log(
+            'Community name refresh failed',
+            name: 'buzz.community',
+            error: error,
+          );
+        }
+      }),
+    );
   }
+
+  Future<void> renameCommunity(String id, String name) =>
+      _serializePushMutation(() async {
+        final storage = ref.read(communityStorageProvider);
+        final current = state.value ?? [];
+        final index = current.indexWhere((w) => w.id == id);
+        if (index < 0) return;
+
+        final community = current[index];
+        final nickname = name.trim();
+        final updated = community.copyWith(
+          localName: nickname,
+          fallbackName: community.fallbackName ?? community.name,
+          name: nickname.isNotEmpty
+              ? nickname
+              : (community.canonicalName ??
+                    community.fallbackName ??
+                    community.name),
+        );
+        await storage.save(updated);
+
+        final updatedList = [...current];
+        updatedList[index] = updated;
+        state = AsyncData(updatedList);
+        await syncCommunitySnapshot(ref, updatedList);
+      });
 }
 
 final communityListProvider =

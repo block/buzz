@@ -294,6 +294,42 @@ impl Db {
             .filter(|icon| !icon.is_empty()))
     }
 
+    /// Read the canonical public name, scoped to one community.
+    #[datastore_span(name = "get_community_name", system = "postgresql")]
+    pub async fn get_community_name(&self, community_id: CommunityId) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, Option<String>>("SELECT name FROM communities WHERE id = $1")
+                .bind(community_id.as_uuid())
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten(),
+        )
+    }
+
+    /// Atomically update the supplied presentation fields. An omitted icon is
+    /// preserved; an explicitly empty icon clears it. Names are validated by
+    /// the command handler and cannot be cleared by legacy icon-only clients.
+    #[datastore_span(name = "set_community_profile", system = "postgresql")]
+    pub async fn set_community_profile(
+        &self,
+        community_id: CommunityId,
+        name: Option<&str>,
+        icon: Option<&str>,
+    ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        sqlx::query("UPDATE communities SET name = COALESCE($2, name), icon = CASE WHEN $3::text IS NULL THEN icon ELSE NULLIF($3, '') END WHERE id = $1")
+            .bind(community_id.as_uuid())
+            .bind(name)
+            .bind(icon)
+            .execute(&mut *connection)
+            .await?;
+        Ok(())
+    }
+
     /// Sets or clears (`None`) the community's workspace icon.
     #[datastore_span(name = "set_community_icon", system = "postgresql")]
     pub async fn set_community_icon(

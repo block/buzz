@@ -49,3 +49,57 @@ export async function setCommunityIcon(icon: string): Promise<void> {
     "Failed to update the community icon.",
   );
 }
+
+export type CommunityProfile = { name: string | null };
+
+/** An absent descriptor is an older relay, not a successful empty name. */
+export async function fetchCommunityProfile(
+  relayUrl: string,
+): Promise<CommunityProfile | null> {
+  const value = await invokeTauri<unknown>("fetch_workspace_profile", {
+    relayUrl,
+  });
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || !("name" in value)) {
+    throw new Error("Invalid community profile response.");
+  }
+  const name = value.name;
+  if (
+    name !== null &&
+    (typeof name !== "string" ||
+      !name.trim() ||
+      new TextEncoder().encode(name).length > 256)
+  ) {
+    throw new Error("Invalid community name response.");
+  }
+  return { name: typeof name === "string" ? name.trim() : null };
+}
+
+/** Publish only the name: existing icons are preserved by supporting relays. */
+export async function setCommunityName(
+  name: string,
+  relayUrl: string,
+  isCurrent: () => boolean,
+): Promise<void> {
+  // Never send a name-only command to an old relay: it interprets a missing
+  // icon tag as a request to clear the icon.
+  if (!(await fetchCommunityProfile(relayUrl))) {
+    throw new Error(
+      "This relay needs an update before it can share community names.",
+    );
+  }
+  if (!isCurrent())
+    throw new Error("Community changed. Reopen its settings to rename it.");
+  const event = await signRelayEvent({
+    kind: KIND_SET_COMMUNITY_PROFILE,
+    content: "",
+    tags: [["name", name.trim()]],
+  });
+  if (!isCurrent())
+    throw new Error("Community changed. Reopen its settings to rename it.");
+  await relayClient.publishEvent(
+    event,
+    "Timed out while updating the community name.",
+    "Failed to update the community name.",
+  );
+}
