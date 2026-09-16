@@ -5,7 +5,7 @@ use launchdarkly_server_sdk::{
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::{BooleanFlag, BooleanFlagEvaluator, EvaluationContext};
+use crate::{BooleanFlag, EvaluationContext, FlagEvaluator, IntegerFlag};
 
 const COMMUNITY_CONTEXT_KIND: &str = "community";
 const PUBKEY_CONTEXT_KIND: &str = "pubkey";
@@ -72,7 +72,7 @@ pub enum LaunchDarklyStartError {
     InitializationFailed,
 }
 
-/// Boolean evaluator backed by the LaunchDarkly Rust server SDK.
+/// Feature-flag evaluator backed by the LaunchDarkly Rust server SDK.
 pub struct LaunchDarklyEvaluator {
     client: Client,
 }
@@ -136,7 +136,7 @@ impl LaunchDarklyEvaluator {
     }
 }
 
-impl BooleanFlagEvaluator for LaunchDarklyEvaluator {
+impl FlagEvaluator for LaunchDarklyEvaluator {
     fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool {
         let context = match launchdarkly_context(context) {
             Ok(context) => context,
@@ -144,6 +144,15 @@ impl BooleanFlagEvaluator for LaunchDarklyEvaluator {
         };
         self.client
             .bool_variation(&context, flag.key(), flag.default())
+    }
+
+    fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64 {
+        let context = match launchdarkly_context(context) {
+            Ok(context) => context,
+            Err(_) => return flag.default(),
+        };
+        self.client
+            .int_variation(&context, flag.key(), flag.default())
     }
 }
 
@@ -295,6 +304,146 @@ mod tests {
         assert!(evaluator.evaluate_bool(BooleanFlag::new("relay.feature.bool", false), &context,));
         assert!(
             !evaluator.evaluate_bool(BooleanFlag::new("relay.feature.string", false), &context,)
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn community_only_context_targets_integer_variation() {
+        let community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("community-int")
+                .variations([FlagValue::from(0_i64), FlagValue::from(13_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("community"), community.to_string(), 1),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("community-int", -1),
+                &EvaluationContext::for_community(community),
+            ),
+            13
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn actor_context_targets_integer_variation_by_community_and_pubkey() {
+        let community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let actor = actor();
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("by-community-int")
+                .variations([FlagValue::from(0_i64), FlagValue::from(8_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("community"), community.to_string(), 1),
+        );
+        test_data.update(
+            FlagBuilder::new("by-pubkey-int")
+                .variations([FlagValue::from(0_i64), FlagValue::from(21_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("pubkey"), actor.to_hex(), 1),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_actor(community, actor);
+
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("by-community-int", -1), &context),
+            8
+        );
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("by-pubkey-int", -1), &context),
+            21
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn same_actor_can_receive_different_integer_variations_by_community() {
+        let community_a = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let community_b = community("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        let actor = actor();
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("community-int-rollout")
+                .variations([FlagValue::from(-11_i64), FlagValue::from(99_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("community"), community_a.to_string(), 1),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("community-int-rollout", -1),
+                &EvaluationContext::for_actor(community_a, actor),
+            ),
+            99
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("community-int-rollout", -1),
+                &EvaluationContext::for_actor(community_b, actor),
+            ),
+            -11
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn missing_integer_flag_falls_back_to_declared_default() {
+        let test_data = TestData::new();
+        let evaluator = started_evaluator(&test_data).await;
+        let context =
+            EvaluationContext::for_community(community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("relay.feature.missing-int", -7), &context),
+            -7
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn wrong_type_integer_falls_back_to_declared_default() {
+        let test_data = TestData::new();
+        test_data
+            .update(FlagBuilder::new("relay.feature.int").value_for_all(FlagValue::from(17_i64)));
+        test_data.update(
+            FlagBuilder::new("relay.feature.int-bool").value_for_all(FlagValue::from(true)),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let context = EvaluationContext::for_actor(
+            community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            actor(),
+        );
+
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int", 0), &context),
+            17
+        );
+        assert_eq!(
+            evaluator.evaluate_int(IntegerFlag::new("relay.feature.int-bool", -5), &context),
+            -5
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn negative_integer_variation_is_supported() {
+        let community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let test_data = TestData::new();
+        test_data.update(FlagBuilder::new("negative-int").value_for_all(FlagValue::from(-42_i64)));
+        let evaluator = started_evaluator(&test_data).await;
+
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("negative-int", 3),
+                &EvaluationContext::for_community(community),
+            ),
+            -42
         );
         evaluator.close();
     }

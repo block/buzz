@@ -414,6 +414,10 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # Feature-flag crate coverage: run once with LaunchDarkly enabled.
+        # This includes all default tests plus the cfg(feature="launchdarkly")
+        # tests, avoiding duplicate default-only execution in the unit lane.
+        cargo nextest run -p buzz-feature-flags --features launchdarkly
         # buzz-agent: two infra-free concerns run together by executing the
         # whole crate (lib + integration tests), because nothing in CI runs
         # `cargo test --workspace`, so without this stanza neither the crate's

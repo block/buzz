@@ -1,36 +1,18 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! Typed boolean feature flags for Buzz server components.
+//! Typed boolean and integer feature flags for Buzz server components.
 
 use buzz_core::{CommunityId, PublicKey};
+
+pub mod environment;
+pub use environment::{EnvironmentDiagnostic, EnvironmentEvaluator};
+
+pub mod flags;
+pub use flags::{BooleanFlag, IntegerFlag};
 
 #[cfg(feature = "launchdarkly")]
 /// LaunchDarkly-backed evaluator adapter.
 pub mod launchdarkly;
-
-/// Typed boolean feature definition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BooleanFlag {
-    key: &'static str,
-    default: bool,
-}
-
-impl BooleanFlag {
-    /// Construct a typed boolean flag from its stable key and declared default.
-    pub const fn new(key: &'static str, default: bool) -> Self {
-        Self { key, default }
-    }
-
-    /// Stable key for this flag.
-    pub const fn key(self) -> &'static str {
-        self.key
-    }
-
-    /// Declared default used when an evaluator is unavailable or cannot return a value.
-    pub const fn default(self) -> bool {
-        self.default
-    }
-}
 
 /// Stable targeting context for one Buzz community and an optional actor.
 ///
@@ -71,21 +53,31 @@ impl EvaluationContext {
     }
 }
 
-/// Evaluates typed boolean feature flags.
-pub trait BooleanFlagEvaluator: Send + Sync {
+/// Evaluates typed feature flags.
+pub trait FlagEvaluator: Send + Sync {
     /// Resolve a boolean flag for one Buzz evaluation context.
     ///
     /// Implementations must return [`BooleanFlag::default`] whenever no valid
     /// boolean value is available, including provider absence or failure.
     fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool;
+
+    /// Resolve an integer flag for one Buzz evaluation context.
+    ///
+    /// Implementations must return [`IntegerFlag::default`] whenever no valid
+    /// integer value is available, including provider absence or failure.
+    fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64;
 }
 
 /// Static evaluator that should return each flag's declared default.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StaticEvaluator;
 
-impl BooleanFlagEvaluator for StaticEvaluator {
+impl FlagEvaluator for StaticEvaluator {
     fn evaluate_bool(&self, flag: BooleanFlag, _context: &EvaluationContext) -> bool {
+        flag.default()
+    }
+
+    fn evaluate_int(&self, flag: IntegerFlag, _context: &EvaluationContext) -> i64 {
         flag.default()
     }
 }
@@ -114,15 +106,38 @@ mod tests {
     }
 
     #[test]
+    fn static_evaluator_returns_declared_integer_defaults_for_community() {
+        let context =
+            EvaluationContext::for_community(community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+
+        assert_eq!(
+            StaticEvaluator.evaluate_int(IntegerFlag::new("positive", 7), &context),
+            7
+        );
+        assert_eq!(
+            StaticEvaluator.evaluate_int(IntegerFlag::new("negative", -9), &context),
+            -9
+        );
+    }
+
+    #[test]
     fn non_launchdarkly_evaluator_can_target_community_through_public_trait() {
         struct CommunityEvaluator {
             enabled_community: CommunityId,
         }
 
-        impl BooleanFlagEvaluator for CommunityEvaluator {
+        impl FlagEvaluator for CommunityEvaluator {
             fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool {
                 if context.community() == self.enabled_community {
                     true
+                } else {
+                    flag.default()
+                }
+            }
+
+            fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64 {
+                if context.community() == self.enabled_community {
+                    41
                 } else {
                     flag.default()
                 }
@@ -131,23 +146,72 @@ mod tests {
 
         let enabled_community = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         let other_community = community("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-        let evaluator: &dyn BooleanFlagEvaluator = &CommunityEvaluator { enabled_community };
-        let flag = BooleanFlag::new("community-targeted", false);
+        let evaluator: &dyn FlagEvaluator = &CommunityEvaluator { enabled_community };
 
-        assert!(evaluator.evaluate_bool(flag, &EvaluationContext::for_community(enabled_community)));
-        assert!(!evaluator.evaluate_bool(flag, &EvaluationContext::for_community(other_community)));
+        assert!(evaluator.evaluate_bool(
+            BooleanFlag::new("community-targeted-bool", false),
+            &EvaluationContext::for_community(enabled_community),
+        ));
+        assert!(!evaluator.evaluate_bool(
+            BooleanFlag::new("community-targeted-bool", false),
+            &EvaluationContext::for_community(other_community),
+        ));
+
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("community-targeted-int", -1),
+                &EvaluationContext::for_community(enabled_community),
+            ),
+            41
+        );
+        assert_eq!(
+            evaluator.evaluate_int(
+                IntegerFlag::new("community-targeted-int", -1),
+                &EvaluationContext::for_community(other_community),
+            ),
+            -1
+        );
     }
 
     #[test]
-    fn same_actor_in_two_communities_is_distinguishable() {
+    fn same_actor_in_two_communities_is_distinguishable_for_integer_evaluation() {
+        struct CommunityRolloutEvaluator {
+            enabled_community: CommunityId,
+            expected_actor: PublicKey,
+        }
+
+        impl FlagEvaluator for CommunityRolloutEvaluator {
+            fn evaluate_bool(&self, flag: BooleanFlag, _context: &EvaluationContext) -> bool {
+                flag.default()
+            }
+
+            fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64 {
+                if context.community() == self.enabled_community
+                    && context.actor_pubkey() == Some(&self.expected_actor)
+                {
+                    99
+                } else {
+                    flag.default()
+                }
+            }
+        }
+
         let actor = actor();
         let community_a = community("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         let community_b = community("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        let evaluator: &dyn FlagEvaluator = &CommunityRolloutEvaluator {
+            enabled_community: community_a,
+            expected_actor: actor,
+        };
+        let flag = IntegerFlag::new("community-rollout", -11);
 
-        let context_a = EvaluationContext::for_actor(community_a, actor);
-        let context_b = EvaluationContext::for_actor(community_b, actor);
-
-        assert_eq!(context_a.actor_pubkey(), context_b.actor_pubkey());
-        assert_ne!(context_a.community(), context_b.community());
+        assert_eq!(
+            evaluator.evaluate_int(flag, &EvaluationContext::for_actor(community_a, actor)),
+            99
+        );
+        assert_eq!(
+            evaluator.evaluate_int(flag, &EvaluationContext::for_actor(community_b, actor)),
+            -11
+        );
     }
 }
