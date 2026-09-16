@@ -55,9 +55,8 @@ pub(crate) const READINESS_REASON_LABELS: [&str; 2] = ["ready", "shutting_down"]
 /// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
 /// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
 /// - 1 overall readiness gauge
-/// - 1 dependency-sample age gauge
 #[cfg(test)]
-pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1 + 1;
+pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1;
 
 /// Terminal outcome of one readiness probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,11 +458,11 @@ impl DependencyDiagnostics {
     /// Runs one bounded evaluation, publishes its telemetry, and replaces the
     /// cached report.
     ///
-    /// The age gauge is published first, while the cache still holds the report
-    /// this cycle is about to replace — that is the age a scrape would have
-    /// read, and it grows whenever a cycle runs late.
+    /// Freshness is not published as its own series: the dependency outcome and
+    /// duration families stop receiving samples the moment this loop stops, and
+    /// the monitors alert on that no-data gap. A separate age gauge would have
+    /// to be advanced by the very loop whose absence it is meant to report.
     pub(crate) async fn sample(&self, db: &Db, redis_pool: &deadpool_redis::Pool) {
-        record_dependency_sample_age(self.snapshot());
         let report = self.evaluator.evaluate(db, redis_pool).await;
         record_dependency_report(&report);
         let sample = DependencySample {
@@ -537,15 +536,6 @@ fn record_dependency_report(report: &DependencyReport) {
         report.deletion_catalog.outcome.label(),
         report.deletion_catalog.duration,
     );
-}
-
-/// Publishes the age of the cached report, following the
-/// `buzz_storage_sweep_age_seconds` convention: absent until a report exists,
-/// so absence means "not yet sampled" rather than "fresh".
-fn record_dependency_sample_age(snapshot: DependencySnapshot) {
-    if let DependencySnapshot::Sampled { age, .. } = snapshot {
-        metrics::gauge!("buzz_readiness_dependency_sample_age_seconds").set(age.as_secs_f64());
-    }
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -684,7 +674,7 @@ mod tests {
             .map(DeletionCatalogOutcome::label),
             ["success", "operation_timeout", "operation_error"]
         );
-        assert_eq!(READINESS_RAW_SERIES_PER_POD, 87);
+        assert_eq!(READINESS_RAW_SERIES_PER_POD, 86);
     }
 
     #[test]
@@ -848,56 +838,6 @@ mod tests {
         let (age, stale) = sampled(diagnostics.snapshot());
         assert_eq!(age, DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1));
         assert!(stale, "a report that outlived two cadences missed a cycle");
-    }
-
-    fn sample_age_gauge(snapshot: &Snapshot) -> Option<f64> {
-        exact_metric(
-            snapshot,
-            "buzz_readiness_dependency_sample_age_seconds",
-            &[],
-        )
-        .map(|value| {
-            let DebugValue::Gauge(value) = value else {
-                panic!("sample age must be a gauge");
-            };
-            value.into_inner()
-        })
-    }
-
-    /// The scrape-side half of the same question. Following
-    /// `buzz_storage_sweep_age_seconds`, the gauge is absent until a report
-    /// exists and then carries the age of the cached report, so a sampler that
-    /// stops advancing it is visible without reading `/_status` at all.
-    #[test]
-    fn the_sample_age_gauge_is_absent_until_a_report_exists_then_carries_its_age() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(true)
-            .build()
-            .expect("paused current-thread runtime");
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let (db, redis_pool) = unreachable_dependencies();
-                let diagnostics = ready_diagnostics();
-
-                diagnostics.sample(&db, &redis_pool).await;
-                assert_eq!(
-                    sample_age_gauge(&snapshotter.snapshot().into_vec()),
-                    None,
-                    "the first cycle has no prior report whose age it could publish"
-                );
-
-                tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL).await;
-                diagnostics.sample(&db, &redis_pool).await;
-                assert_eq!(
-                    sample_age_gauge(&snapshotter.snapshot().into_vec()),
-                    Some(DEPENDENCY_SAMPLE_INTERVAL.as_secs_f64())
-                );
-            });
-        });
     }
 
     #[test]
