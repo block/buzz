@@ -3144,7 +3144,12 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let workflow_deletion =
+        super::workflow_deletion::persist(tenant, state, &event, channel_id).await?;
+    let workflow_deletion_applied = workflow_deletion.is_some();
+    let (stored_event, was_inserted) = if let Some(result) = workflow_deletion {
+        result
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3211,7 +3216,7 @@ async fn ingest_event_inner(
         });
     }
 
-    if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    if !workflow_deletion_applied && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await

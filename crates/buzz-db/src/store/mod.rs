@@ -54,3 +54,8 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+/// Atomic workflow deletion and definition retirement.
+pub mod workflow_deletion;
+
+#[cfg(test)]
+mod workflow_deletion_postgres_tests;
