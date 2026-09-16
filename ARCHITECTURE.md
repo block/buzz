@@ -606,9 +606,10 @@ pub struct AppState {
 Postgres pools use the closed physical role vocabulary `writer`, `reader`,
 `audit`, and `search`. The periodic sampler retains cheap SQLx pool handles and
 exports `buzz_db_pool_connections{pool_role,state}` for the bounded states
-`size`, `idle`, `active`, and `max`, plus
-`buzz_db_pool_configured{pool_role}`. All four roles are always present (20 raw
-gauge series total); absent optional pools report zero. The legacy
+`idle` and `active`, `buzz_db_pool_max_connections{pool_role}` for capacity,
+and `buzz_db_pool_configured{pool_role}`. All four roles are always present (16
+raw gauge series total); absent optional pools report zero. Current pool size is
+exactly the sum of its idle and active connection gauges. The legacy
 `buzz_db_pool_*` writer gauges and `buzz_db_read_pool_*` reader gauges remain
 for dashboard compatibility. Pool sizing and aggregate deployment connection
 budgets remain configuration/deployment concerns rather than a relay pool

@@ -257,7 +257,11 @@ pub(crate) fn describe_db_pool_metrics() {
     );
     metrics::describe_gauge!(
         "buzz_db_pool_connections",
-        "Postgres pool connections by physical pool role and bounded utilization state"
+        "Current Postgres pool connections by physical pool role and bounded utilization state"
+    );
+    metrics::describe_gauge!(
+        "buzz_db_pool_max_connections",
+        "Maximum Postgres pool connections by physical pool role"
     );
     metrics::describe_gauge!(
         "buzz_db_pool_configured",
@@ -280,9 +284,9 @@ pub struct DbPoolMetricsInput {
 /// Record fixed-cardinality utilization for every physical Postgres pool role.
 ///
 /// Optional roles emit zero-valued utilization when absent so the unified
-/// scrape always contains four roles by four states plus four configured
-/// series. The original writer and reader gauges are also emitted unchanged
-/// for dashboard compatibility.
+/// scrape always contains four roles by two states, four maximum-capacity
+/// series, and four configured series. The original writer and reader gauges
+/// are also emitted unchanged for dashboard compatibility.
 pub fn record_db_pool_metrics(input: DbPoolMetricsInput) {
     let DbPoolMetricsInput {
         writer,
@@ -304,12 +308,7 @@ pub fn record_db_pool_metrics(input: DbPoolMetricsInput) {
         } else {
             0.0
         });
-        for (state, value) in [
-            ("size", stats.size),
-            ("idle", stats.idle),
-            ("active", stats.active()),
-            ("max", stats.max),
-        ] {
+        for (state, value) in [("idle", stats.idle), ("active", stats.active())] {
             metrics::gauge!(
                 "buzz_db_pool_connections",
                 "pool_role" => role,
@@ -317,6 +316,7 @@ pub fn record_db_pool_metrics(input: DbPoolMetricsInput) {
             )
             .set(value as f64);
         }
+        metrics::gauge!("buzz_db_pool_max_connections", "pool_role" => role).set(stats.max as f64);
     }
 
     metrics::gauge!("buzz_db_pool_size").set(writer.size as f64);
@@ -454,18 +454,28 @@ mod contract_tests {
         });
 
         let scrape = handle.render();
-        let utilization = scrape
+        let connections = scrape
             .lines()
             .filter(|line| line.starts_with("buzz_db_pool_connections{"))
+            .collect::<Vec<_>>();
+        let max_connections = scrape
+            .lines()
+            .filter(|line| line.starts_with("buzz_db_pool_max_connections{"))
             .collect::<Vec<_>>();
         let configured = scrape
             .lines()
             .filter(|line| line.starts_with("buzz_db_pool_configured{"))
             .collect::<Vec<_>>();
-        assert_eq!(utilization.len(), 16, "unexpected scrape:\n{scrape}");
+        assert_eq!(connections.len(), 8, "unexpected scrape:\n{scrape}");
+        assert_eq!(max_connections.len(), 4, "unexpected scrape:\n{scrape}");
         assert_eq!(configured.len(), 4, "unexpected scrape:\n{scrape}");
+        assert_eq!(
+            connections.len() + max_connections.len() + configured.len(),
+            16,
+            "physical pool contract must stay fixed at 16 raw series:\n{scrape}"
+        );
 
-        let roles = utilization
+        let roles = connections
             .iter()
             .filter_map(|line| {
                 ["writer", "reader", "audit", "search"]
@@ -477,9 +487,18 @@ mod contract_tests {
             roles,
             BTreeSet::from(["writer", "reader", "audit", "search"])
         );
-        assert!(utilization
+        assert!(connections
             .iter()
             .all(|line| label_keys(line) == BTreeSet::from(["pool_role", "state"])));
+        assert!(max_connections
+            .iter()
+            .all(|line| label_keys(line) == BTreeSet::from(["pool_role"])));
+        assert!(connections.iter().all(|line| {
+            line.contains(r#"state="idle""#) || line.contains(r#"state="active""#)
+        }));
+        assert!(!connections
+            .iter()
+            .any(|line| line.contains(r#"state="size""#) || line.contains(r#"state="max""#)));
 
         assert_eq!(
             sample_value(
@@ -489,7 +508,7 @@ mod contract_tests {
             ),
             "7"
         );
-        for state in ["size", "idle", "active", "max"] {
+        for state in ["idle", "active"] {
             assert_eq!(
                 sample_value(
                     &scrape,
@@ -499,6 +518,22 @@ mod contract_tests {
                 "0"
             );
         }
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "writer")]
+            ),
+            "20"
+        );
+        assert_eq!(
+            sample_value(
+                &scrape,
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "reader")]
+            ),
+            "0"
+        );
         assert_eq!(
             sample_value(
                 &scrape,
@@ -582,16 +617,16 @@ mod contract_tests {
         assert_eq!(
             sample_value(
                 &scrape,
-                "buzz_db_pool_connections{",
-                &[("pool_role", "audit"), ("state", "max")]
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "audit")]
             ),
             "5"
         );
         assert_eq!(
             sample_value(
                 &scrape,
-                "buzz_db_pool_connections{",
-                &[("pool_role", "search"), ("state", "max")]
+                "buzz_db_pool_max_connections{",
+                &[("pool_role", "search")]
             ),
             "10"
         );
