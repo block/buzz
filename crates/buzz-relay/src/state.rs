@@ -268,10 +268,13 @@ fn record_admission_check(outcome: AdmissionOutcome) {
 /// The ordering is the archival admission invariant: archive-before-query is
 /// observed by the query, while archive-after-registration sees the token.
 ///
-/// Only a confirmed `Ok(false)` cancels. A lookup `Err` admits the socket and
-/// defers to [`AppState::revalidate_live_communities`], because a database blip
-/// is not evidence of archival and dropping sockets on one amplifies the very
-/// pressure that caused it.
+/// Admission is fail-closed: only an affirmative `Ok(true)` may serve. Both
+/// `Ok(false)` and a lookup `Err` cancel, because neither proves this tenant is
+/// currently admitted, and `docs/multi-tenant-relay.md` I5
+/// (`Inv_AdmissionFence`) grants capability only to an actor *currently*
+/// admitted to that community. The two are still told apart in telemetry
+/// (`buzz_community_admission_checks_total{outcome}`) so an operator can
+/// separate archival from database pressure.
 pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
     registry: &CommunityConnectionRegistry,
     connection_id: Uuid,
@@ -295,19 +298,20 @@ pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run,
             return;
         }
         Err(error) => {
-            // A lookup failure is not an answer, and dropping the socket on one
-            // turns shared database pressure into a reconnect storm that feeds
-            // straight back into the exhausted pool. Admitting costs nothing
-            // durable: writes still fail closed on their own per-event fence
-            // (`handlers::ingest::map_serving_fence_state`), and
-            // `AppState::revalidate_live_communities` closes the socket on the
-            // next tick if the community really is inactive.
+            // A lookup failure is not an answer, so it cannot authorize one.
+            // Admitting here would begin serving AUTH and REQ for a tenant
+            // whose lifecycle is unknown, and the adjacent host-binding seam
+            // already refuses on exactly this evidence (see
+            // `router::nip11_or_ws_handler`). The client sees an ordinary dial
+            // failure and retries.
             record_admission_check(AdmissionOutcome::CheckError);
             tracing::warn!(
                 %community_id,
                 %error,
-                "community active check failed; admitting the socket pending lifecycle revalidation"
+                "community active check failed; refusing the socket"
             );
+            cancel.cancel();
+            return;
         }
     }
     if cancel.is_cancelled() {
@@ -2160,13 +2164,15 @@ pub(crate) mod tests {
         })
     }
 
-    /// The reconnect-amplification regression. A durable *answer* of "inactive"
-    /// cancels the socket, but a lookup *failure* is not an answer: the socket is
-    /// admitted and the periodic revalidation backstop owns eviction. Collapsing
-    /// both into "not active" turned shared database pressure into a reconnect
-    /// storm that fed straight back into the exhausted pool.
+    /// Admission is fail-closed on both non-affirmative outcomes. A confirmed
+    /// `Ok(false)` and a lookup `Err` are different diagnoses — the counter
+    /// keeps them apart — but neither is proof of current admission, and
+    /// `docs/multi-tenant-relay.md` I5 (`Inv_AdmissionFence`) grants read or
+    /// membership capability only to an actor *currently* admitted to that
+    /// community. Serving AUTH/REQ on an unproven tenant lifecycle is the
+    /// failure this guards.
     #[test]
-    fn confirmed_inactive_cancels_while_an_active_check_error_admits_the_socket() {
+    fn neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2174,7 +2180,7 @@ pub(crate) mod tests {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
-        let (inactive_cancel, inactive_started, error_started, active_started) =
+        let (inactive_cancel, inactive_started, error_cancel, error_started, active_started) =
             metrics::with_local_recorder(&recorder, || {
                 runtime.block_on(async {
                     let registry = CommunityConnectionRegistry::new();
@@ -2193,13 +2199,14 @@ pub(crate) mod tests {
                     )
                     .await;
 
+                    let error_cancel = CancellationToken::new();
                     let error_started = Arc::new(AtomicBool::new(false));
                     let started = Arc::clone(&error_started);
                     run_registered_community_connection(
                         &registry,
                         Uuid::new_v4(),
                         community,
-                        CommunityConnectionControl::new(CancellationToken::new()),
+                        CommunityConnectionControl::new(error_cancel.clone()),
                         || async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut)) },
                         move |_| async move { started.store(true, Ordering::SeqCst) },
                     )
@@ -2220,6 +2227,7 @@ pub(crate) mod tests {
                     (
                         inactive_cancel,
                         inactive_started,
+                        error_cancel,
                         error_started,
                         active_started,
                     )
@@ -2235,8 +2243,12 @@ pub(crate) mod tests {
             "a confirmed-inactive community must never start the socket body"
         );
         assert!(
-            error_started.load(Ordering::SeqCst),
-            "an active-check error must admit the socket and leave eviction to revalidation"
+            error_cancel.is_cancelled(),
+            "a failed active check must cancel its socket, not admit it"
+        );
+        assert!(
+            !error_started.load(Ordering::SeqCst),
+            "a failed active check must never start serving AUTH/REQ on an unproven tenant"
         );
         assert!(active_started.load(Ordering::SeqCst));
 

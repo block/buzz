@@ -174,10 +174,13 @@ publishes that state.
 |--------|------|--------|
 | `buzz_community_admission_checks_total` | counter | `outcome` ∈ {`active`, `inactive`, `check_error`} |
 
-Counts the durable community-active check run when a socket is admitted.
-`inactive` is a confirmed answer and cancels the socket; `check_error` is a
-lookup failure and admits it, leaving eviction to the periodic lifecycle
-revalidator. `outcome` is the only dimension — community and error text are
+Counts the durable community-active check run before a socket is admitted.
+Admission is fail-closed: only `active` serves. `inactive` (a confirmed
+archival answer) and `check_error` (the lookup itself failed, so the tenant
+lifecycle is unknown) both refuse the socket before any AUTH or REQ frame is
+read; the client sees an ordinary dial failure and retries. The two outcomes
+stay distinct so a rise in `check_error` reads as database pressure rather than
+archival. `outcome` is the only dimension — community and error text are
 request-controlled and must never become labels.
 
 ### Operation-aware database pool acquisition contract
