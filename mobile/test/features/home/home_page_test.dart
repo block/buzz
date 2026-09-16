@@ -34,6 +34,64 @@ void main() {
     );
   }
 
+  testWidgets('uses the persistent workspace on a tablet-class window', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1024, 768);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(await buildHome());
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('tablet-workspace')), findsOneWidget);
+    expect(find.bySemanticsLabel('Home'), findsNothing);
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('tablet-workspace-sidebar')))
+          .width,
+      300,
+    );
+    expect(
+      find.byKey(const ValueKey('split-activity-inbox-list')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('tablet-workspace-activity')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('tablet-workspace-search')),
+      findsOneWidget,
+    );
+    final sidebar = find.byKey(const ValueKey('tablet-workspace-sidebar'));
+    final activityDestination = find.descendant(
+      of: sidebar,
+      matching: find.bySemanticsLabel('Activity'),
+    );
+    expect(activityDestination, findsOneWidget);
+    final activitySemantics = tester.getSemantics(activityDestination);
+    expect(activitySemantics.flagsCollection.isButton, isTrue);
+    expect(
+      activitySemantics.flagsCollection.isSelected.toString(),
+      'Tristate.isTrue',
+    );
+  });
+
+  testWidgets('keeps a wide landscape phone in the compact shell', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(932, 430);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(await buildHome());
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('tablet-workspace')), findsNothing);
+    expect(find.bySemanticsLabel('Home'), findsOneWidget);
+  });
+
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,
   ) async {

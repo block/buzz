@@ -65,6 +65,8 @@ part 'channels_page/quick_actions_launcher.dart';
 
 enum _QuickAction { createChannel, newDm, browseChannels }
 
+final _workspaceSelectedChannelIdProvider = Provider<String?>((ref) => null);
+
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;
 const double _kChannelIconSize = 18.0;
@@ -163,6 +165,11 @@ class ChannelsPage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
+    this.onChannelSelected,
+    this.selectedChannelId,
+    this.workspaceHeader,
+    this.onCommunityChanged,
+    this.onSelectedChannelUnavailable,
     super.key,
   });
 
@@ -174,6 +181,23 @@ class ChannelsPage extends HookConsumerWidget {
 
   /// Notifies this page when its already-selected tab is tapped again.
   final ValueListenable<int>? tabReselection;
+
+  /// Selects a channel in an enclosing persistent workspace instead of
+  /// pushing the phone detail route.
+  final ValueChanged<Channel>? onChannelSelected;
+
+  /// Channel currently shown by an enclosing persistent workspace.
+  final String? selectedChannelId;
+
+  /// Optional top-level workspace destinations rendered above channel groups.
+  final Widget? workspaceHeader;
+
+  /// Notifies an enclosing workspace when its relay scope changes.
+  final ValueChanged<String?>? onCommunityChanged;
+
+  /// Clears a persistent detail when the selected channel leaves the joined
+  /// channel set.
+  final VoidCallback? onSelectedChannelUnavailable;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -245,6 +269,10 @@ class ChannelsPage extends HookConsumerWidget {
     final activeCommunityId = ref.watch(
       activeCommunityProvider.select((v) => v.unwrapPrevious().value?.id),
     );
+    useEffect(() {
+      onCommunityChanged?.call(activeCommunityId);
+      return null;
+    }, [activeCommunityId]);
     final cachedChannels = useRef<List<Channel>?>(null);
     final lastCommunityId = useRef<String?>(null);
     if (lastCommunityId.value != activeCommunityId) {
@@ -255,7 +283,27 @@ class ChannelsPage extends HookConsumerWidget {
       cachedChannels.value = data;
     }
     final channels = cachedChannels.value;
+    final selectedChannelStillAvailable =
+        selectedChannelId == null ||
+        channels == null ||
+        channels.any(
+          (channel) =>
+              channel.id == selectedChannelId &&
+              channel.isMember &&
+              !channel.isArchived,
+        );
+    useEffect(() {
+      if (!selectedChannelStillAvailable) {
+        onSelectedChannelUnavailable?.call();
+      }
+      return null;
+    }, [selectedChannelStillAvailable]);
     Future<void> openChannel(Channel channel) async {
+      final onChannelSelected = this.onChannelSelected;
+      if (onChannelSelected != null) {
+        onChannelSelected(channel);
+        return;
+      }
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -364,18 +412,26 @@ class ChannelsPage extends HookConsumerWidget {
         bottomHeight: _kTopSectionBottomPadding,
         bottom: const SizedBox.expand(),
       ),
-      body: _ChannelsBody(
-        channels: channels,
-        channelsAsync: channelsAsync,
-        showError: showError.value,
-        sessionStatus: sessionState.status,
-        showConnectionSkeleton: showConnectionSkeleton.value,
-        currentPubkey: currentPubkey,
-        topSectionHeight: topSectionHeight,
-        usesPinnedGradient: usesPinnedGradient,
-        scrollController: channelsScrollController,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
-        onSelectChannel: openChannel,
+      body: ProviderScope(
+        overrides: [
+          _workspaceSelectedChannelIdProvider.overrideWithValue(
+            selectedChannelId,
+          ),
+        ],
+        child: _ChannelsBody(
+          channels: channels,
+          channelsAsync: channelsAsync,
+          showError: showError.value,
+          sessionStatus: sessionState.status,
+          showConnectionSkeleton: showConnectionSkeleton.value,
+          currentPubkey: currentPubkey,
+          topSectionHeight: topSectionHeight,
+          usesPinnedGradient: usesPinnedGradient,
+          scrollController: channelsScrollController,
+          workspaceHeader: workspaceHeader,
+          onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+          onSelectChannel: openChannel,
+        ),
       ),
     );
   }
