@@ -1287,6 +1287,12 @@ mod postgres_tests {
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
             "schema.sql exclusion list must match the pre-0041 body after ledger removal"
         );
+
+        assert_eq!(migrations[44].version, 45);
+        let observer_role = migrations[44].sql.as_str();
+        assert!(observer_role.contains("relay_members_role_check"));
+        assert!(observer_role.contains("'observer'"));
+        assert!(desired_schema.contains("'observer'"));
     }
 
     #[test]
