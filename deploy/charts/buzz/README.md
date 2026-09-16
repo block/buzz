@@ -139,8 +139,28 @@ migrations, Redis, and pub/sub are up, so a process that can answer has booted.
 Shared-dependency health moved to **`/_status`** on the same private health
 listener, under a `dependencies` object carrying the `postgres`, `redis`,
 `deletion_catalog`, and aggregate `reason` fields the readiness body used to
-return. Do not wire `/_status` to a Kubernetes probe; it is the only endpoint
-that touches the shared pools.
+return. Do not wire `/_status` to a Kubernetes probe.
+
+**`/_status` is a cached read.** It performs no Postgres, Redis, or
+deletion-catalog I/O of its own. One background loop per pod evaluates the
+three dependencies **every 30 seconds**, awaiting each evaluation before taking
+the next tick, so a pod never has more than one evaluation in flight no matter
+how often — or how rarely — the endpoint is read. The loop publishes the
+dependency metrics below and caches the report `/_status` serves. Its first
+cycle runs at startup, and each evaluation is bounded by a two-second budget.
+
+Every `dependencies` object therefore states how old its report is:
+
+| Field | Meaning |
+|-------|---------|
+| `sample: "not_yet_sampled"` | the first cycle has not completed; no `postgres`/`redis`/`deletion_catalog`/`reason` fields are present, because there is no observation to report |
+| `sample: "fresh"` | the report is at most two cadences (60s) old |
+| `sample: "stale"` | the report outlived two cadences, so the sampler missed at least one cycle — read the verdict as history, not as current state |
+| `sample_age_seconds` | age of the report at request time (absent when `not_yet_sampled`) |
+| `sample_interval_seconds` | the sampling cadence, `30` |
+
+Polling `/_status` more often than the cadence returns the same cached report;
+it does not make the data fresher and adds no dependency load.
 
 ### Readiness telemetry contract
 
@@ -152,19 +172,30 @@ listener returns the same lifecycle answer but does not change these metrics.
 |--------|------|--------|--------|
 | `buzz_readiness_checks_total` | counter | `reason` ∈ {`ready`, `shutting_down`} | `/_readiness` |
 | `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
-| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | `/_status` |
-| `buzz_readiness_check_duration_seconds` | histogram | `check` only | `/_status` |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
+| `buzz_readiness_dependency_sample_age_seconds` | gauge | none; age of the cached report | dependency sampler |
 
-The two dependency families keep their `buzz_readiness_*` names for dashboard
-continuity; their trigger moved from the 5s probe to `/_status`, so they now
-sample only when an operator or a scheduled scrape requests that endpoint.
+The three dependency families keep their `buzz_readiness_*` names for dashboard
+continuity, but nothing about them is request-driven any more: the 30-second
+sampler publishes them whether or not anyone reads `/_status`, so a quiet
+endpoint no longer produces a flat dashboard during the outage it exists to
+explain.
 
-The schema has a ceiling of 86 raw Prometheus series per pod: 2 probe reasons,
-11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge. Do not add
-pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
+`buzz_readiness_dependency_sample_age_seconds` follows the
+`buzz_storage_sweep_age_seconds` convention. It is **absent until the first
+report exists**, so absence means "not yet sampled", never "fresh". Each cycle
+republishes it before evaluating, so in steady state it reads about one cadence
+and grows whenever a cycle runs late. A sampler that stops advancing it leaves
+the series frozen and then evicted by the exporter's gauge idle timeout —
+alert on `absent()` or on a value well above the cadence.
+
+The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges. Do not
+add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.
-The gauge is not a monotonic lifecycle mirror: shutdown changes the
+The readiness gauge is not a monotonic lifecycle mirror: shutdown changes the
 authoritative lifecycle flag, and the next private readiness probe observes and
 publishes that state.
 

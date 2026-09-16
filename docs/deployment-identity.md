@@ -49,6 +49,9 @@ The relay health listener exposes intrinsic build identity at `/_status`:
     "url": "https://github.com/block/buzz/actions/runs/<run-id>/attempts/<attempt>"
   },
   "dependencies": {
+    "sample": "fresh",
+    "sample_interval_seconds": 30,
+    "sample_age_seconds": 12,
     "postgres": true,
     "redis": true,
     "deletion_catalog": true,
@@ -60,8 +63,13 @@ The relay health listener exposes intrinsic build identity at `/_status`:
 Non-CI builds report stable `unknown` or `local` fallback values instead of
 claiming provenance they do not have.
 
-`dependencies` is a diagnostic snapshot of shared-dependency health, evaluated
-per request with a two-second budget. `/_readiness` does not consult it — see
+`dependencies` is a cached diagnostic snapshot of shared-dependency health. A
+per-pod background loop evaluates the dependencies every 30 seconds; the
+endpoint only reads the latest report and never contacts a dependency itself,
+so polling it costs nothing. `sample` is always present and reports whether
+that cached verdict is `fresh`, `stale`, or `not_yet_sampled` — before the
+first cycle completes the health fields are absent rather than defaulted.
+`/_readiness` does not consult any of this — see
 [the readiness contract](../deploy/charts/buzz/README.md#readiness-contract) —
 so this endpoint must never be wired to a Kubernetes probe.
 

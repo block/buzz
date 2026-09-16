@@ -7,15 +7,39 @@
 //! process's own lifecycle (see [`crate::router`]), and the same dependency
 //! evaluation is reported on the diagnostic `/_status` endpoint, which is never
 //! wired to a probe.
+//!
+//! Dependency evaluation is also decoupled from requests. One per-pod loop
+//! ([`run_dependency_sampler`]) evaluates on a fixed cadence, publishes the
+//! dependency metrics, and caches the report; `/_status` only reads that cache.
+//! Evaluating per request made the load a pressured dependency sees depend on
+//! how often someone looked at the endpoint, with nothing bounding how many
+//! evaluations could be in flight at once.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use buzz_db::{Db, DbError, DbReadinessOutcome};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+
+use crate::state::AppState;
 
 const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Fixed cadence of the per-pod dependency sampling loop.
+///
+/// Slow enough that a pod adds negligible load to a shared dependency, fast
+/// enough that an operator opening `/_status` during an incident reads
+/// something current. Documented in `deploy/charts/buzz/README.md`.
+pub const DEPENDENCY_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Age past which a cached report is reported stale rather than current.
+///
+/// Two cadences: one full cycle can be missed by an evaluation that consumed
+/// its whole [`DEPENDENCY_TIMEOUT`] budget, so anything older than that means
+/// the sampler itself is not keeping up.
+const DEPENDENCY_SAMPLE_STALE_AFTER: Duration = DEPENDENCY_SAMPLE_INTERVAL.saturating_mul(2);
 
 /// Closed label set exported by `buzz_readiness_checks_total{reason}`.
 ///
@@ -31,8 +55,9 @@ pub(crate) const READINESS_REASON_LABELS: [&str; 2] = ["ready", "shutting_down"]
 /// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
 /// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
 /// - 1 overall readiness gauge
+/// - 1 dependency-sample age gauge
 #[cfg(test)]
-pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1;
+pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1 + 1;
 
 /// Terminal outcome of one readiness probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,45 +409,116 @@ impl DependencyEvaluator for ProductionDependencyEvaluator {
     }
 }
 
-/// Evaluates shared-dependency health for the diagnostic `/_status` endpoint.
+/// One completed evaluation and when it was observed.
+#[derive(Debug, Clone, Copy)]
+struct DependencySample {
+    report: DependencyReport,
+    observed_at: Instant,
+}
+
+/// What the cache can tell `/_status`.
 ///
-/// This deliberately owns no publication fence. It publishes no gauge, so two
-/// concurrent `/_status` requests cannot reorder any shared state — the fence
-/// the readiness coordinator used to need went away with the dependency probe.
+/// "No report yet" is a distinct state, not a fabricated healthy one, and a
+/// report is always accompanied by its age: a cached verdict presented without
+/// one would read as authoritative however long ago it was taken.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DependencySnapshot {
+    /// The sampler has not completed its first evaluation yet.
+    NotYetSampled,
+    Sampled {
+        report: DependencyReport,
+        age: Duration,
+        stale: bool,
+    },
+}
+
+/// The per-pod owner of shared-dependency evaluation.
+///
+/// [`run_dependency_sampler`] is the only caller of [`Self::sample`], so at
+/// most one evaluation exists at a time and no request path can start another.
+/// `/_status` reads [`Self::snapshot`], which touches no dependency.
 pub(crate) struct DependencyDiagnostics {
     evaluator: Arc<dyn DependencyEvaluator>,
+    latest: Mutex<Option<DependencySample>>,
 }
 
 impl Default for DependencyDiagnostics {
     fn default() -> Self {
-        Self {
-            evaluator: Arc::new(ProductionDependencyEvaluator),
-        }
+        Self::with_evaluator(Arc::new(ProductionDependencyEvaluator))
     }
 }
 
 impl DependencyDiagnostics {
-    #[cfg(test)]
     pub(crate) fn with_evaluator(evaluator: Arc<dyn DependencyEvaluator>) -> Self {
-        Self { evaluator }
+        Self {
+            evaluator,
+            latest: Mutex::new(None),
+        }
     }
 
-    /// Runs one bounded dependency evaluation and records its telemetry.
-    pub(crate) async fn evaluate(
-        &self,
-        db: &Db,
-        redis_pool: &deadpool_redis::Pool,
-    ) -> DependencyReport {
+    /// Runs one bounded evaluation, publishes its telemetry, and replaces the
+    /// cached report.
+    ///
+    /// The age gauge is published first, while the cache still holds the report
+    /// this cycle is about to replace — that is the age a scrape would have
+    /// read, and it grows whenever a cycle runs late.
+    pub(crate) async fn sample(&self, db: &Db, redis_pool: &deadpool_redis::Pool) {
+        record_dependency_sample_age(self.snapshot());
         let report = self.evaluator.evaluate(db, redis_pool).await;
         record_dependency_report(&report);
-        report
+        let sample = DependencySample {
+            report,
+            observed_at: Instant::now(),
+        };
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(sample);
+    }
+
+    /// The latest completed evaluation with its age. Starts no dependency work.
+    pub(crate) fn snapshot(&self) -> DependencySnapshot {
+        let latest = *self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        match latest {
+            None => DependencySnapshot::NotYetSampled,
+            Some(sample) => {
+                let age = sample.observed_at.elapsed();
+                DependencySnapshot::Sampled {
+                    report: sample.report,
+                    age,
+                    stale: age > DEPENDENCY_SAMPLE_STALE_AFTER,
+                }
+            }
+        }
+    }
+}
+
+/// Runs the per-pod dependency sampling loop until `cancel` fires.
+///
+/// One loop, one fixed cadence, each evaluation awaited before the next tick is
+/// taken, so this pod never has two evaluations in flight. `Skip` matches the
+/// community revalidator: an evaluation that overruns its slot delays the next
+/// cycle instead of queueing a catch-up burst into the dependency that was
+/// already slow. The first tick fires immediately, so the not-yet-sampled
+/// window is one evaluation long.
+pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
+    let mut interval = tokio::time::interval(DEPENDENCY_SAMPLE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                state
+                    .dependency_diagnostics
+                    .sample(&state.db, &state.redis_pool)
+                    .await;
+            }
+        }
     }
 }
 
 /// Records one dependency evaluation. Counters and durations only — dependency
-/// health has no publishable "current state" now that no probe consumes it, and
-/// a gauge driven by ad-hoc `/_status` requests would read as authoritative
-/// while going stale between operator visits.
+/// health has no publishable "current state" now that no probe consumes it; a
+/// per-dependency gauge would read as an authoritative verdict on infrastructure
+/// this pod only samples every [`DEPENDENCY_SAMPLE_INTERVAL`].
 fn record_dependency_report(report: &DependencyReport) {
     metrics::histogram!(
         "buzz_readiness_check_duration_seconds",
@@ -441,6 +537,15 @@ fn record_dependency_report(report: &DependencyReport) {
         report.deletion_catalog.outcome.label(),
         report.deletion_catalog.duration,
     );
+}
+
+/// Publishes the age of the cached report, following the
+/// `buzz_storage_sweep_age_seconds` convention: absent until a report exists,
+/// so absence means "not yet sampled" rather than "fresh".
+fn record_dependency_sample_age(snapshot: DependencySnapshot) {
+    if let DependencySnapshot::Sampled { age, .. } = snapshot {
+        metrics::gauge!("buzz_readiness_dependency_sample_age_seconds").set(age.as_secs_f64());
+    }
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -579,7 +684,7 @@ mod tests {
             .map(DeletionCatalogOutcome::label),
             ["success", "operation_timeout", "operation_error"]
         );
-        assert_eq!(READINESS_RAW_SERIES_PER_POD, 86);
+        assert_eq!(READINESS_RAW_SERIES_PER_POD, 87);
     }
 
     #[test]
@@ -675,6 +780,124 @@ mod tests {
             key.key().name() != "buzz_readiness_dependency_checks_total"
                 && key.key().name() != "buzz_readiness_check_duration_seconds"
         }));
+    }
+
+    /// A `Db` and a Redis pool on a closed port. The scripted evaluators below
+    /// never touch either, so no connection is ever attempted; they exist only
+    /// to satisfy the production `sample` signature.
+    fn unreachable_dependencies() -> (Db, deadpool_redis::Pool) {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/buzz").expect("lazy pg pool");
+        let redis_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        (Db::from_pool(pool), redis_pool)
+    }
+
+    struct FixedEvaluator(DependencyReport);
+
+    #[async_trait::async_trait]
+    impl DependencyEvaluator for FixedEvaluator {
+        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+            self.0
+        }
+    }
+
+    fn ready_diagnostics() -> DependencyDiagnostics {
+        DependencyDiagnostics::with_evaluator(Arc::new(FixedEvaluator(
+            DependencyReport::from_results(
+                TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
+                TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
+                TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(1)),
+                Duration::from_millis(3),
+            ),
+        )))
+    }
+
+    fn sampled(snapshot: DependencySnapshot) -> (Duration, bool) {
+        let DependencySnapshot::Sampled { age, stale, .. } = snapshot else {
+            panic!("a completed sample must be reported as sampled");
+        };
+        (age, stale)
+    }
+
+    /// An operator reading `/_status` must be able to tell "nothing has been
+    /// sampled yet" from "this is current" from "this outlived the sampler".
+    /// A cached report presented without its age would read as authoritative
+    /// however old it is.
+    #[tokio::test(start_paused = true)]
+    async fn freshness_separates_not_yet_sampled_from_a_fresh_and_a_stale_report() {
+        let (db, redis_pool) = unreachable_dependencies();
+        let diagnostics = ready_diagnostics();
+
+        assert!(
+            matches!(diagnostics.snapshot(), DependencySnapshot::NotYetSampled),
+            "no evaluation has completed, so there is nothing to report"
+        );
+
+        diagnostics.sample(&db, &redis_pool).await;
+        assert_eq!(sampled(diagnostics.snapshot()), (Duration::ZERO, false));
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL).await;
+        assert_eq!(
+            sampled(diagnostics.snapshot()),
+            (DEPENDENCY_SAMPLE_INTERVAL, false),
+            "one cadence of age is the steady state, not staleness"
+        );
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL + Duration::from_secs(1)).await;
+        let (age, stale) = sampled(diagnostics.snapshot());
+        assert_eq!(age, DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1));
+        assert!(stale, "a report that outlived two cadences missed a cycle");
+    }
+
+    fn sample_age_gauge(snapshot: &Snapshot) -> Option<f64> {
+        exact_metric(
+            snapshot,
+            "buzz_readiness_dependency_sample_age_seconds",
+            &[],
+        )
+        .map(|value| {
+            let DebugValue::Gauge(value) = value else {
+                panic!("sample age must be a gauge");
+            };
+            value.into_inner()
+        })
+    }
+
+    /// The scrape-side half of the same question. Following
+    /// `buzz_storage_sweep_age_seconds`, the gauge is absent until a report
+    /// exists and then carries the age of the cached report, so a sampler that
+    /// stops advancing it is visible without reading `/_status` at all.
+    #[test]
+    fn the_sample_age_gauge_is_absent_until_a_report_exists_then_carries_its_age() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let (db, redis_pool) = unreachable_dependencies();
+                let diagnostics = ready_diagnostics();
+
+                diagnostics.sample(&db, &redis_pool).await;
+                assert_eq!(
+                    sample_age_gauge(&snapshotter.snapshot().into_vec()),
+                    None,
+                    "the first cycle has no prior report whose age it could publish"
+                );
+
+                tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL).await;
+                diagnostics.sample(&db, &redis_pool).await;
+                assert_eq!(
+                    sample_age_gauge(&snapshotter.snapshot().into_vec()),
+                    Some(DEPENDENCY_SAMPLE_INTERVAL.as_secs_f64())
+                );
+            });
+        });
     }
 
     #[test]
