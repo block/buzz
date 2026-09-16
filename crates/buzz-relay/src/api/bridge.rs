@@ -3,6 +3,8 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod read_state_snapshot;
+
 use std::sync::Arc;
 
 use axum::{
@@ -1141,6 +1143,10 @@ async fn query_events_authed(
             StatusCode::FORBIDDEN,
             "restricted: author-only kinds require authors=[self]",
         ));
+    }
+
+    if read_state_snapshot::requested(&raw_filters) {
+        return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
@@ -3839,7 +3845,7 @@ mod postgres_tests {
     /// - Redis pool points at the local dev instance for the admission check.
     ///
     /// Returns `None` when local Postgres is not reachable.
-    async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+    pub(super) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.

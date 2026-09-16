@@ -378,6 +378,95 @@ Until a complete load succeeds, the client MUST evaluate unread state from its o
 
 The number of coordinates a full-state load must retrieve is bounded by the number of installations that have ever used the override layer, plus their not-yet-deleted rotation predecessors. It grows with the user's device history, not with elapsed time, and — because a coordinate carrying `ov_*` entries may not be deleted until it has been carried forward (see Client-ID Rotation) — it does not shrink on its own. Clients SHOULD carry forward and delete rotation predecessors promptly so the count stays near one coordinate per live installation.
 
+#### Buzz Atomic Snapshot Extension (version 1)
+
+A relay MAY offer a complete **point-in-time** alternative to the paginated
+full-state load above through the existing authenticated HTTP Nostr query bridge.
+This extension does not change kind 30078, encryption, register algebra, or the
+ordinary `POST /query` array response. It does not assert the five WebSocket
+conformance properties above.
+
+Discovery: obtain NIP-11 from the configured, trusted relay origin. Its optional
+`read_state_snapshot` descriptor contains `version: 1`, `community_id` (canonical
+UUID string), `max_events: 4096`, and `max_bytes: 8388608`. The community identifier
+is resolved from that request's Host through the active community map; it is not
+supplied by the client or derived from its key. An unresolved host omits the
+descriptor. This is TLS/origin-bound discovery, not an independently signed global
+community identity. Clients MUST bind discovery and queries to the same trusted
+relay origin and community session, and fence asynchronous results on identity or
+community changes.
+
+Request: NIP-98 authenticated `POST /query` with exactly one raw filter:
+
+```json
+[{"kinds":[30078],"authors":["<authenticated-self-hex>"],"read_state_snapshot":1}]
+```
+
+No extra keys, tags, time bounds, pagination, other kinds/authors, or mixed filters
+are accepted. Admission, replay protection, and relay membership gates apply as
+for ordinary bridge reads. The relay never substitutes an agent owner's identity
+for the authenticated signing identity.
+
+Success is a versioned envelope, **not an event array**:
+
+```json
+{
+  "read_state_snapshot": 1,
+  "complete": true,
+  "community_id": "<host-resolved-uuid>",
+  "pubkey": "<authenticated-self-hex>",
+  "snapshot_id": "<64-lowercase-hex>",
+  "events": []
+}
+```
+
+`events` contains every non-deleted own-author kind-30078 event retained at one
+writer-database MVCC statement cut, including unrelated application coordinates
+and events without a `t` tag. There is no ordinary query cap, age window, replica
+routing, or multi-request pagination. A coordinate replaced during the statement
+is consistently represented by the version visible at its cut; a later snapshot
+sees the replacement. This guarantee covers retained current state, not purged
+history, uncommitted writes, or future commits.
+
+`snapshot_id` is SHA-256 of the concatenation of UTF-8
+`buzz-read-state-snapshot-v1` plus a zero byte, the 16 raw community UUID bytes,
+the 32 author bytes, and each 32-byte event id in `created_at DESC, id ASC` order.
+It is a content identifier, **not** a monotone write revision, CAS precondition,
+or live-delivery cursor. An unchanged view may have the same identifier.
+
+Both event count and bytes are hard bounded. More than 4096 events, more than
+8 MiB of stored content plus PostgreSQL JSON tag text, or more than 8 MiB of
+compact encoded event-array bytes fails the whole request (HTTP 413). No partial
+envelope is returned. Row reconstruction, signature verification, serialization,
+or database failure produces an explicit non-success response (HTTP 503 after
+authentication). Invalid extension requests produce HTTP 400; normal auth,
+unknown-host, membership, replay and admission errors retain their bridge status.
+Clients MUST treat **all** such errors as `cannot prove complete`. There is no
+permission to delete old coordinates to get under the snapshot cap.
+
+Clients MUST reject absent discovery, version mismatch, ordinary arrays (including
+an old relay silently ignoring the extension), missing/false completeness,
+community/pubkey mismatch, invalid signatures, duplicate/conflicting coordinates,
+or invalid event envelopes. Read-state selection/decryption is client-side. An
+unreadable or unsupported recognized read-state coordinate MUST block override
+actions/publication; it MUST NOT be interpreted as absent state.
+
+A validated snapshot substitutes for the paginated enumeration and mutation fence
+**only for its point-in-time load**. Before **each** override action, canonical
+publication, or carry-forward/deletion decision, obtain a fresh snapshot from
+**every** write relay and merge those snapshots with durable local state. Failure
+on any required relay blocks that operation. Do not publish own coordinates while
+loading. Ordinary read-before-write, primary co-location, permanent clear floors,
+uint32/budget exhaustion, and per-relay acceptance-before-deletion rules remain.
+A failed/ambiguous publish does not report synchronized action success.
+
+Actions after different snapshot cuts are concurrent CRDT actions, not serialized
+transactions. A snapshot does not reserve a coordinate, prevent another writer,
+or make subsequent live delivery lossless. Clients MUST NOT cache `complete:true`
+as a session-wide authority or use it to label live freshness. On reconnect,
+identity changes, or later canonical publication, acquire a new snapshot; merge
+arriving live state as evidence but do not infer a complete load from it.
+
 ### Merge Rule
 
 After decrypting all fetched blobs, the effective read timestamp for each context is:
@@ -783,9 +872,9 @@ that expose read activity to other users MUST require explicit user consent.
 
 ## Backwards Compatibility
 
-This NIP introduces no changes to existing event kinds and adds no new kind, wire message, or relay-stored read-state logic. It uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
+This NIP introduces no changes to existing event kinds or relay-stored read-state logic. The baseline uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. The optional Buzz Atomic Snapshot Extension adds explicitly discovered, versioned query/discovery envelopes; ordinary query arrays and WebSocket messages remain unchanged. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
 
-The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. Against a relay known or evidenced not to conform, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
+The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its paginated full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. A validated atomic snapshot supplies the alternative point-in-time guarantee described in Buzz Atomic Snapshot Extension, without asserting those WebSocket properties. Without either proof, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
 
 ## References
 
