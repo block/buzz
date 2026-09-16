@@ -174,7 +174,6 @@ listener returns the same lifecycle answer but does not change these metrics.
 | `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
 | `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
 | `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
-| `buzz_readiness_dependency_sample_age_seconds` | gauge | none; age of the cached report | dependency sampler |
 
 The three dependency families keep their `buzz_readiness_*` names for dashboard
 continuity, but nothing about them is request-driven any more: the 30-second
@@ -182,16 +181,18 @@ sampler publishes them whether or not anyone reads `/_status`, so a quiet
 endpoint no longer produces a flat dashboard during the outage it exists to
 explain.
 
-`buzz_readiness_dependency_sample_age_seconds` follows the
-`buzz_storage_sweep_age_seconds` convention. It is **absent until the first
-report exists**, so absence means "not yet sampled", never "fresh". Each cycle
-republishes it before evaluating, so in steady state it reads about one cadence
-and grows whenever a cycle runs late. A sampler that stops advancing it leaves
-the series frozen and then evicted by the exporter's gauge idle timeout —
-alert on `absent()` or on a value well above the cadence.
+Freshness has no series of its own. The dependency outcome and duration
+families stop receiving samples the moment the loop stops, so **alert on
+no-data** for `buzz_readiness_dependency_checks_total` and
+`buzz_readiness_check_duration_seconds` (Datadog monitors do this already). An
+age gauge would have to be advanced by the very loop whose absence it is meant
+to report, so a wedged sampler would freeze it at its last value and read as
+permanently fresh. Per-report freshness stays where a human reads it: the
+`sample`, `sample_age_seconds`, and `sample_interval_seconds` fields of
+`/_status` above.
 
-The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
-11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges. Do not
+The schema has a ceiling of 86 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge. Do not
 add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.

@@ -1291,19 +1291,6 @@ mod tests {
                     0.0
                 );
                 assert!(!final_scrape.contains("sensitive-sql-or-url"));
-                // Freshness is part of the frozen contract: one unlabelled
-                // gauge, published from the second cycle on, so a stalled
-                // sampler is visible from a scrape alone.
-                assert!(final_scrape
-                    .contains("# TYPE buzz_readiness_dependency_sample_age_seconds gauge"));
-                assert_eq!(
-                    final_scrape
-                        .lines()
-                        .filter(|line| line
-                            .starts_with("buzz_readiness_dependency_sample_age_seconds"))
-                        .count(),
-                    1
-                );
 
                 let exported_reasons = final_scrape
                     .lines()
@@ -1313,7 +1300,7 @@ mod tests {
                 assert_eq!(
                     readiness_metric_lines(&final_scrape).len(),
                     readiness::READINESS_RAW_SERIES_PER_POD,
-                    "readiness series contract must stay at or below its 87-series cap"
+                    "readiness series contract must stay at or below its 86-series cap"
                 );
             });
         });
