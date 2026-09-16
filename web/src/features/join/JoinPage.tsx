@@ -20,6 +20,7 @@ import {
   inviteCodeFromMaterial,
   type JoinMaterial,
 } from "@/features/join/join-material";
+import { fetchJoinEvent } from "@/features/join/join-event";
 import { RoomView } from "@/features/room/RoomView";
 import { normalizeRelayAddress, type RelayAddress } from "@/shared/lib/address";
 import {
@@ -163,6 +164,9 @@ export function JoinPage() {
   const [busy, setBusy] = React.useState(false);
   const [material, setMaterial] = React.useState<JoinMaterial | null>(null);
   const [resolved, setResolved] = React.useState<RelayAddress | null>(null);
+  const [joinSource, setJoinSource] = React.useState<"event" | "json" | null>(
+    null,
+  );
 
   // Same-origin prefill: when this page is served BY a relay (the estate
   // proves it that way), the address is already in the URL bar — the
@@ -205,7 +209,14 @@ export function JoinPage() {
     setBusy(true);
     setPhase({ state: "resolving" });
     try {
-      const found = await fetchJoinMaterial(normalized.origin);
+      // THE WIRE FIRST: the owner-signed join material (kind 34550) off
+      // the relay itself — the path that needs nothing but the URL. The
+      // static join.json stays as the fallback for relays that have not
+      // published the event yet.
+      const fromWire = await fetchJoinEvent(normalized.wsUrl);
+      const found =
+        fromWire?.material ?? (await fetchJoinMaterial(normalized.origin));
+      setJoinSource(fromWire ? "event" : "json");
       if (!found) {
         setPhase({
           state: "refused",
@@ -303,7 +314,10 @@ export function JoinPage() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 px-6 py-12 text-center">
+    <div
+      className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 px-6 py-12 text-center"
+      data-join-source={joinSource ?? undefined}
+    >
       <div className="w-full max-w-md space-y-5">
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-white">
