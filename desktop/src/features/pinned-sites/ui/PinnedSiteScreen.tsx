@@ -205,20 +205,30 @@ function PinnedSiteSurface({
       if (!opened) {
         if (!pinWebviewBoundsAreUsable(bounds)) return;
         opened = true;
+        const id = pinId;
         void showPinWebview({
-          pinId,
+          pinId: id,
           startUrl,
           bounds,
-        }).catch((error) => {
-          console.error("Failed to open pinned site", error);
-          if (!cancelled) {
-            setLoadError(
-              error instanceof Error
-                ? error.message
-                : "Failed to open pinned site.",
-            );
-          }
-        });
+        })
+          .then(() => {
+            // Navigate-away / AppShell hide-all may win while show is in
+            // flight. Re-hide so a late show cannot leave an orphan WKWebView
+            // painted over the channel thread (same race as NativeStageHost).
+            if (cancelled) {
+              void hidePinWebview(id);
+            }
+          })
+          .catch((error) => {
+            console.error("Failed to open pinned site", error);
+            if (!cancelled) {
+              setLoadError(
+                error instanceof Error
+                  ? error.message
+                  : "Failed to open pinned site.",
+              );
+            }
+          });
         return;
       }
       void setPinWebviewBounds(pinId, bounds);

@@ -1,5 +1,8 @@
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
-import { hidePlaygroundWebview } from "@/features/playground/lib/webview";
+import {
+  hideAllPlaygroundWebviews,
+  hidePlaygroundWebview,
+} from "@/features/playground/lib/webview";
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 
 import type { PlaygroundCard } from "@/features/playground/lib/types";
@@ -186,7 +189,10 @@ export function dismissEmbeddedWindow() {
   store.activeLabel = null;
   persist();
   emit();
+  // Prefer known sid, then hide-all so a late NativeStageHost show cannot
+  // leave a blank topmost embed webview over the channel thread.
   if (sid) void hidePlaygroundWebview(sid);
+  void hideAllPlaygroundWebviews();
 }
 
 export function closeEmbeddedWindow(label: string) {

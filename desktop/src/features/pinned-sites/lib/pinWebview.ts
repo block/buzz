@@ -60,12 +60,35 @@ async function invokePin<T>(
   return invoke<T>(command, args);
 }
 
+/**
+ * Bumped by hide/hide-all/close. An in-flight show that started before a
+ * dismiss must re-hide after resolve so it cannot resurrect an orphan
+ * topmost WKWebView (AppShell leave-pin, playground park, embed open).
+ * Re-hides from a stale show must NOT bump again — that would invalidate a
+ * remounted pin's legitimate follow-up show.
+ */
+let pinHideEpoch = 0;
+
+export function bumpPinHideEpoch(): void {
+  pinHideEpoch += 1;
+}
+
+/** Test helper. */
+export function getPinHideEpoch(): number {
+  return pinHideEpoch;
+}
+
+async function invokeHidePinWebview(pinId: string): Promise<void> {
+  await invokePin("pin_webview_hide", { pinId }, undefined);
+}
+
 export async function showPinWebview(input: {
   pinId: string;
   startUrl: string;
   bounds: PinWebviewBounds;
 }): Promise<PinWebviewNavState> {
-  return invokePin(
+  const epoch = pinHideEpoch;
+  const nav = await invokePin(
     "pin_webview_show",
     {
       pinId: input.pinId,
@@ -77,13 +100,19 @@ export async function showPinWebview(input: {
       currentUrl: input.startUrl,
     },
   );
+  if (epoch !== pinHideEpoch) {
+    await invokeHidePinWebview(input.pinId);
+  }
+  return nav;
 }
 
 export async function hidePinWebview(pinId: string): Promise<void> {
-  await invokePin("pin_webview_hide", { pinId }, undefined);
+  bumpPinHideEpoch();
+  await invokeHidePinWebview(pinId);
 }
 
 export async function hideAllPinWebviews(): Promise<void> {
+  bumpPinHideEpoch();
   if (!isNativePinRuntime()) return;
   await invoke("pin_webview_hide_all");
 }
@@ -129,6 +158,7 @@ export async function pollPinWebview(
 }
 
 export async function closePinWebview(pinId: string): Promise<void> {
+  bumpPinHideEpoch();
   if (!isNativePinRuntime()) return;
   await invoke("pin_webview_close", { pinId });
 }
