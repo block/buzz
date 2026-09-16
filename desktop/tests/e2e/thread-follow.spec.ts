@@ -1,0 +1,267 @@
+import { expect, test } from "@playwright/test";
+
+import { waitForAnimations } from "../helpers/animations";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+
+const CHANNEL = "general";
+const STORAGE_KEY = `buzz-thread-follows.v1:${"deadbeef".repeat(8)}`;
+const SCREENSHOTS = "test-results/thread-follow";
+
+type MockMessage = { id: string; created_at: number; pubkey: string };
+
+async function waitForMockLiveSubscription(
+  page: import("@playwright/test").Page,
+  channelName: string,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (name) =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: name,
+          }) ?? false,
+        channelName,
+      ),
+    )
+    .toBe(true);
+}
+
+async function emitMessage(
+  page: import("@playwright/test").Page,
+  input: {
+    content: string;
+    parentEventId?: string;
+    createdAt?: number;
+    extraTags?: string[][];
+    id?: string;
+    pending?: boolean;
+  },
+): Promise<MockMessage> {
+  const message = await page.evaluate(
+    (payload) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: payload.channelName,
+        content: payload.content,
+        parentEventId: payload.parentEventId,
+        createdAt: payload.createdAt,
+        extraTags: payload.extraTags,
+        id: payload.id,
+        pending: payload.pending,
+        pubkey: payload.pubkey,
+      }),
+    {
+      ...input,
+      channelName: CHANNEL,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+  if (!message) throw new Error("mock message emitter is unavailable");
+  return message;
+}
+
+async function openMessageMenu(
+  page: import("@playwright/test").Page,
+  messageId: string,
+) {
+  const row = page.locator(
+    `[data-testid="message-row"][data-message-id="${messageId}"]`,
+  );
+  await row.hover();
+  await row.getByTestId(`more-actions-${messageId}`).click();
+  await expect(page.getByRole("menu")).toBeVisible();
+}
+
+async function storedFollowIds(page: import("@playwright/test").Page) {
+  return page.evaluate((key) => {
+    const entries = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<{
+      rootId: string;
+    }>;
+    return entries.map((entry) => entry.rootId);
+  }, STORAGE_KEY);
+}
+
+async function captureMessageMenu(
+  page: import("@playwright/test").Page,
+  messageId: string,
+  path: string,
+) {
+  await waitForAnimations(page);
+  const rowBox = await page
+    .locator(`[data-testid="message-row"][data-message-id="${messageId}"]`)
+    .boundingBox();
+  const menuBox = await page.getByRole("menu").boundingBox();
+  const viewport = page.viewportSize();
+  if (!rowBox || !menuBox || !viewport) {
+    throw new Error("message menu screenshot bounds are unavailable");
+  }
+  const padding = 16;
+  const x = Math.max(0, Math.min(rowBox.x, menuBox.x) - padding);
+  const y = Math.max(0, Math.min(rowBox.y, menuBox.y) - padding);
+  const right = Math.min(
+    viewport.width,
+    Math.max(rowBox.x + rowBox.width, menuBox.x + menuBox.width) + padding,
+  );
+  const bottom = Math.min(
+    viewport.height,
+    Math.max(rowBox.y + rowBox.height, menuBox.y + menuBox.height) + padding,
+  );
+  await page.screenshot({
+    path,
+    clip: { x, y, width: right - x, height: bottom - y },
+  });
+}
+
+async function notificationBodies(page: import("@playwright/test").Page) {
+  return page.evaluate(() =>
+    (window.__BUZZ_E2E_NOTIFICATIONS__ ?? []).map((entry) => entry.body),
+  );
+}
+
+async function waitForMessageProcessing(
+  page: import("@playwright/test").Page,
+  messageId: string,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const queryClient = window.__BUZZ_E2E_QUERY_CLIENT__ as unknown as {
+          getQueriesData: (filter: unknown) => Array<[unknown, unknown]>;
+        };
+        return queryClient
+          .getQueriesData({ queryKey: [] })
+          .some(([, data]) => (JSON.stringify(data) ?? "").includes(id));
+      }, messageId),
+    )
+    .toBe(true);
+}
+
+test("a delivered message can be followed before its first reply and unfollowed", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await expect(page.getByTestId("chat-title")).toHaveText(CHANNEL);
+  await waitForMockLiveSubscription(page, CHANNEL);
+
+  const rootId = "mock-general-alice";
+  await expect(
+    page.locator(`[data-testid="message-row"][data-message-id="${rootId}"]`),
+  ).toContainText("Hey team — checking in.");
+
+  await openMessageMenu(page, rootId);
+  const followItem = page.getByRole("menuitem", { name: "Follow thread" });
+  await expect(followItem).toBeVisible();
+  await captureMessageMenu(page, rootId, `${SCREENSHOTS}/follow-thread.png`);
+  await followItem.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => storedFollowIds(page)).toEqual([rootId]);
+
+  await page.reload();
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await waitForMockLiveSubscription(page, CHANNEL);
+  await expect.poll(() => storedFollowIds(page)).toEqual([rootId]);
+  await openMessageMenu(page, rootId);
+  const unfollowItem = page.getByRole("menuitem", {
+    name: "Unfollow thread",
+  });
+  await expect(unfollowItem).toBeVisible();
+  await captureMessageMenu(page, rootId, `${SCREENSHOTS}/unfollow-thread.png`);
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("channel-random").click();
+  await emitMessage(page, {
+    content: "First reply after follow",
+    parentEventId: rootId,
+    createdAt: Math.floor(Date.now() / 1000) + 60,
+  });
+  await expect
+    .poll(() => notificationBodies(page))
+    .toContain("First reply after follow");
+  await expect(page.getByTestId(`channel-unread-dot-${CHANNEL}`)).toBeVisible();
+
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await expect(page.getByTestId("chat-title")).toHaveText(CHANNEL);
+  await openMessageMenu(page, rootId);
+  await unfollowItem.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => storedFollowIds(page)).toEqual([]);
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId(`channel-unread-dot-${CHANNEL}`)).toHaveCount(
+    0,
+  );
+  const notificationCount = (await notificationBodies(page)).length;
+  const mutedReply = await emitMessage(page, {
+    content: "Later ordinary reply after unfollow",
+    parentEventId: rootId,
+    createdAt: Math.floor(Date.now() / 1000) + 120,
+  });
+  await waitForMessageProcessing(page, mutedReply.id);
+  await expect(page.getByTestId(`channel-unread-dot-${CHANNEL}`)).toHaveCount(
+    0,
+  );
+
+  await emitMessage(page, {
+    content: "Control reply after muted reply",
+    parentEventId: "mock-general-welcome",
+    createdAt: Math.floor(Date.now() / 1000) + 180,
+  });
+  await expect
+    .poll(() => notificationBodies(page))
+    .toContain("Control reply after muted reply");
+  const finalNotificationBodies = await notificationBodies(page);
+  expect(finalNotificationBodies).toHaveLength(notificationCount + 1);
+  expect(finalNotificationBodies).not.toContain(
+    "Later ordinary reply after unfollow",
+  );
+});
+
+test("following a broadcast reply persists its thread root", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId(`channel-${CHANNEL}`).click();
+  await waitForMockLiveSubscription(page, CHANNEL);
+
+  const pending = await emitMessage(page, {
+    content: "Pending message has no durable thread id",
+    pending: true,
+  });
+  await openMessageMenu(page, pending.id);
+  await expect(
+    page.getByRole("menuitem", { name: /^(Unfollow|Follow) thread$/ }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  const root = await emitMessage(page, { content: "Broadcast thread root" });
+  const broadcastReply = await emitMessage(page, {
+    content: "Broadcast reply row",
+    parentEventId: root.id,
+    extraTags: [["broadcast", "1"]],
+  });
+
+  await openMessageMenu(page, broadcastReply.id);
+  const followItem = page.getByRole("menuitem", { name: "Follow thread" });
+  await followItem.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => storedFollowIds(page)).toEqual([root.id]);
+  expect(await storedFollowIds(page)).not.toContain(broadcastReply.id);
+
+  await emitMessage(page, {
+    content: "Child of broadcast reply",
+    parentEventId: broadcastReply.id,
+  });
+  await expect(
+    page.locator(`[data-thread-head-id="${broadcastReply.id}"]`),
+  ).toBeVisible();
+  await openMessageMenu(page, broadcastReply.id);
+  const unfollowItem = page.getByRole("menuitem", {
+    name: "Unfollow thread",
+  });
+  await expect(unfollowItem).toBeVisible();
+  await unfollowItem.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => storedFollowIds(page)).toEqual([]);
+});
