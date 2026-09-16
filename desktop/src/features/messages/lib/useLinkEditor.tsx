@@ -113,36 +113,12 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
     [richText.editor],
   );
 
-  const showCard = React.useCallback(
-    (info: LinkSelectionInfo | null) => {
-      if (!info) {
-        setCardState(null);
-        return;
-      }
-
-      const rect = getLinkRect(info);
-      if (!rect) {
-        setCardState(null);
-        return;
-      }
-
-      setCardState((prev) => {
-        const sameLink =
-          prev?.info.href === info.href &&
-          prev.info.from === info.from &&
-          prev.info.to === info.to &&
-          prev.info.text === info.text;
-        const sameRect =
-          prev?.rect.left === rect.left &&
-          prev.rect.top === rect.top &&
-          prev.rect.width === rect.width &&
-          prev.rect.height === rect.height;
-        if (sameLink && sameRect) return prev;
-        return { info, rect };
-      });
-    },
-    [getLinkRect],
-  );
+  const showCard = React.useCallback((_info: LinkSelectionInfo | null) => {
+    // Keep clicks and caret movement inside composer links focused in the
+    // editor without opening contextual controls. Link editing remains
+    // available through the formatting toolbar and Cmd/Ctrl+K.
+    setCardState(null);
+  }, []);
 
   const openDialogFromInfo = React.useCallback((info: LinkSelectionInfo) => {
     setDraft({

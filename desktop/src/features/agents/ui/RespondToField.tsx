@@ -4,7 +4,8 @@ import {
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
@@ -39,6 +40,12 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * than an explanation, and stays one sentence — Only me already owns the line
  * below the control.
  *
+ * The line below Only me says "Only you and your agents", because the harness
+ * gate admits the owner and every verified same-owner agent, not the owner
+ * alone (see `managed_agents/access_policy.rs`). The dropdown label stays
+ * "Only me": it is the audience the user picks, and it has meant this since
+ * before agents could instruct each other.
+ *
  * Which machine and stakes it names follow the optional `runLocation` prop, and
  * an unknown location falls back to the local wording rather than hedging with
  * "computer or server" — see `lib/agentAccessWarning.ts` for the copy and the
@@ -53,7 +60,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -63,7 +70,7 @@ function formatSearchUserSecondary(user: UserSearchResult) {
   if (displayName && nip05Handle) {
     return nip05Handle;
   }
-  return truncatePubkey(user.pubkey);
+  return truncateNpub(user.pubkey);
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
@@ -72,6 +79,9 @@ const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Selected people", value: "allowlist" },
 ];
 
+export const OWNER_ONLY_ACCESS_DISABLED_REASON =
+  "This build disallows changing this setting.";
+
 export function CreateAgentRespondToField({
   mode,
   allowlist,
@@ -79,6 +89,7 @@ export function CreateAgentRespondToField({
   onAllowlistChange,
   ownerPubkey,
   disabled,
+  disabledReason,
   variant,
   runLocation,
 }: {
@@ -93,6 +104,8 @@ export function CreateAgentRespondToField({
    */
   ownerPubkey?: string | null;
   disabled?: boolean;
+  /** Explanation shown when this access control is unavailable. */
+  disabledReason?: string;
   /** When "persona", uses PersonaDropdownField styling to match the persona dialog. */
   variant?: "default" | "persona";
   /**
@@ -219,10 +232,18 @@ export function CreateAgentRespondToField({
           ))}
         </select>
       )}
+      {disabledReason ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="agent-respond-to-disabled-reason"
+        >
+          {disabledReason}
+        </p>
+      ) : null}
       {mode === "anyone" ? accessWarning : null}
       {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          Only you can send instructions.
+          Only you and your agents can send instructions.
         </p>
       ) : null}
       {mode === "allowlist" ? (
@@ -257,8 +278,6 @@ export function CreateAgentRespondToField({
     </div>
   );
 }
-
-const HEX_64_RE = /^[0-9a-f]{64}$/i;
 
 function AllowlistPicker({
   allowlist,
@@ -305,10 +324,12 @@ function AllowlistPicker({
 }) {
   const isPersona = variant === "persona";
 
-  // Detect if the query is a valid hex pubkey that's not already in the list.
-  const queryIsHexPubkey =
-    HEX_64_RE.test(deferredQuery) &&
-    !allowlist.some((p) => p.toLowerCase() === deferredQuery.toLowerCase());
+  // Detect if the query is a pubkey (npub or hex) not already in the list;
+  // direct entry offers the canonical hex for storage.
+  const queryPubkey = parseCanonicalPubkey(deferredQuery);
+  const queryIsDirectPubkey =
+    queryPubkey !== null &&
+    !allowlist.some((p) => p.toLowerCase() === queryPubkey);
 
   return (
     <div
@@ -362,12 +383,12 @@ function AllowlistPicker({
               >
                 <UserAvatar
                   avatarUrl={null}
-                  displayName={truncatePubkey(pubkey)}
+                  displayName={truncateNpub(pubkey)}
                   size="xs"
                 />
                 <PubKey pubkey={pubkey} />
                 <button
-                  aria-label={`Remove ${truncatePubkey(pubkey)}`}
+                  aria-label={`Remove ${truncateNpub(pubkey)}`}
                   className="text-muted-foreground transition-colors hover:text-foreground"
                   disabled={disabled}
                   onClick={() => onRemove(pubkey)}
@@ -399,6 +420,7 @@ function AllowlistPicker({
                       <UserAvatar
                         avatarUrl={result.avatarUrl}
                         displayName={formatSearchUserName(result)}
+                        shape={result.isAgent ? "squircle" : "circle"}
                         size="xs"
                       />
                       <div className="min-w-0">
@@ -414,22 +436,22 @@ function AllowlistPicker({
                   </button>
                 ))}
               </div>
-            ) : queryIsHexPubkey ? (
+            ) : queryIsDirectPubkey ? (
               <button
                 className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
                 data-testid="agent-respond-to-add-raw-pubkey"
-                onClick={() => onAddRawPubkey(deferredQuery.toLowerCase())}
+                onClick={() => onAddRawPubkey(queryPubkey)}
                 type="button"
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <UserAvatar
                     avatarUrl={null}
-                    displayName={truncatePubkey(deferredQuery)}
+                    displayName={truncateNpub(queryPubkey)}
                     size="xs"
                   />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium leading-5">
-                      {truncatePubkey(deferredQuery)}
+                      {truncateNpub(queryPubkey)}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
                       Add pubkey directly
@@ -473,22 +495,22 @@ function AllowlistPicker({
               id="agent-respond-to-direct-panel"
             >
               <p className="text-xs text-muted-foreground">
-                One per line, or comma/space-separated. 64-char lowercase hex
-                only — npub decoding is not yet supported here.
+                One per line, or comma/space-separated. Each entry is an npub
+                (npub1…) or a 64-char hex public key.
               </p>
               <Textarea
                 className="min-h-20 font-mono text-xs"
                 data-testid="agent-respond-to-paste"
                 disabled={disabled}
                 onChange={(event) => onPasteTextChange(event.target.value)}
-                placeholder="abcdef0123…"
+                placeholder="npub1… or abcdef0123…"
                 value={pasteText}
               />
               {pasteInvalid.length > 0 ? (
                 <p className="text-xs text-destructive">
                   {pasteInvalid.length} entr
-                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not 64-char
-                  hex and will be ignored.
+                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not a valid
+                  npub or 64-char hex public key and will be ignored.
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2">

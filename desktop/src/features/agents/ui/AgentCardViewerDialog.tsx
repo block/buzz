@@ -143,7 +143,10 @@ function AgentCardViewerContent({
       toast.success(`Sent ${agentName}'s card.`);
       closeCardViewer();
     } else if (sent === false) {
-      toast.error("Couldn’t send the card. Try again.");
+      toast.error(
+        sendController.getCurrentError() ??
+          "Couldn’t send the card. Try again.",
+      );
     }
   }
 

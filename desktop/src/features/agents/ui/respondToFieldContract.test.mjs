@@ -55,6 +55,16 @@ test("the warning copy comes from the shared helper, not inline text", () => {
   assert.match(collapsedSource, /<p aria-live="polite"[^>]*> \{warningText\}/);
 });
 
+test("the Only me line names the owner's agents, not the owner alone", () => {
+  // The harness gate admits the owner and every verified same-owner agent
+  // (`managed_agents/access_policy.rs`), and the built-in Welcome team depends
+  // on that, so a line promising the owner alone would overstate the boundary.
+  assert.match(
+    collapsedSource,
+    /mode === "owner-only" \? \( <p[^>]*> Only you and your agents can send instructions\./,
+  );
+});
+
 test("primary respond-to copy does not expose implementation jargon", () => {
   const primaryFieldSource = respondToFieldSource.slice(
     respondToFieldSource.indexOf('data-testid="agent-respond-to"'),

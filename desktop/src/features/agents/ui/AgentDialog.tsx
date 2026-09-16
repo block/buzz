@@ -29,12 +29,15 @@ import {
 
 type AgentDialogCreateProps = {
   mode: "definition";
+  embedded?: boolean;
+  submitLabel?: string;
   initialValues?: CreatePersonaInput | null;
+  onDirtyChange?: (dirty: boolean) => void;
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading: boolean;
+  runtimeCatalogStatus: "loading" | "ready" | "error";
   onSubmitDefinition: (
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
@@ -68,7 +71,7 @@ type AgentDialogDefinitionEditProps = {
   error: Error | null;
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading?: boolean;
+  runtimeCatalogStatus?: "loading" | "ready" | "error";
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
@@ -120,12 +123,15 @@ export function AgentDialog(props: AgentDialogProps) {
 }
 
 function AgentCreateDialogRouter({
+  embedded,
   initialValues: providedInitialValues,
   onOpenChange,
   definitionError,
   isDefinitionPending,
   runtimes,
-  runtimesLoading,
+  runtimeCatalogStatus,
+  submitLabel,
+  onDirtyChange,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
@@ -145,14 +151,19 @@ function AgentCreateDialogRouter({
           <WhereToRunSection
             draft={runDraft}
             isPending={isDefinitionPending}
-            onDraftChange={setRunDraft}
+            onDraftChange={(nextDraft) => {
+              setRunDraft(nextDraft);
+              onDirtyChange?.(true);
+            }}
           />
         }
         createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
         description={copy.description}
+        embedded={embedded}
         error={definitionError}
         initialValues={initialValues}
         isPending={isDefinitionPending}
+        onDirtyChange={onDirtyChange}
         onOpenChange={onOpenChange}
         onSubmit={async (input) => {
           const submitted = await onSubmitDefinition(
@@ -161,13 +172,14 @@ function AgentCreateDialogRouter({
             resolveBackendIntent(runDraft),
           );
           if (submitted) {
+            onDirtyChange?.(false);
             onOpenChange(false);
           }
         }}
         open
         runtimes={runtimes}
-        runtimesLoading={runtimesLoading}
-        submitLabel={copy.submitLabel}
+        runtimeCatalogStatus={runtimeCatalogStatus}
+        submitLabel={submitLabel ?? copy.submitLabel}
         title={copy.title}
       />
     </AgentRunLocationProvider>

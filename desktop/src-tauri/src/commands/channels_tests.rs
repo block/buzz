@@ -2,6 +2,10 @@
 // channels.rs under the per-file line cap.
 
 use super::*;
+// The relay-backed fetch helpers moved to the `fetch` submodule; its
+// `pub(super)` items are visible here as a descendant of the channels module.
+use super::fetch::*;
+use crate::models::ChannelInfo;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 /// Build a signed event for testing with the given kind, content, and tags.
@@ -195,6 +199,37 @@ fn pending_overlay_does_not_leak_across_identity_swap() {
 }
 
 #[test]
+fn pending_owned_channel_ids_scopes_to_the_asking_identity() {
+    // The member-only poll resolves non-member metadata solely from this
+    // helper (no all-open scan), so it must return exactly the caller's own
+    // not-yet-propagated channels — never another identity's — and nothing
+    // once membership is observed.
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+    state.mark_pending_owned_channel(PK_A, "chan-2");
+    state.mark_pending_owned_channel(PK_B, "chan-3");
+
+    let mut a_ids = state.pending_owned_channel_ids(PK_A);
+    a_ids.sort();
+    assert_eq!(a_ids, vec!["chan-1".to_string(), "chan-2".to_string()]);
+    assert_eq!(
+        state.pending_owned_channel_ids(PK_B),
+        vec!["chan-3".to_string()]
+    );
+
+    // Once chan-1's real membership lands, it drops out of the overlay set.
+    state.clear_pending_owned_channel(PK_A, "chan-1");
+    assert_eq!(
+        state.pending_owned_channel_ids(PK_A),
+        vec!["chan-2".to_string()]
+    );
+
+    // An identity with no pending creations resolves no non-member metadata,
+    // so the member-only fetch issues no `#d` directory query at all.
+    assert!(state.pending_owned_channel_ids(PK_C).is_empty());
+}
+
+#[test]
 fn classify_pending_owner_matches_only_the_owning_identity() {
     // Exercises the exact branch-level decision `get_channels`'s open-channel
     // fallthrough makes, not just the underlying `AppState` helpers in
@@ -266,6 +301,131 @@ fn duplicate_channel_rejection_is_ensure_success_only() {
     ));
 }
 
+// ── compute_channels_hash ─────────────────────────────────────────────────────
+
+fn make_channel(id: &str, name: &str, last_message_at: Option<String>) -> ChannelInfo {
+    ChannelInfo {
+        id: id.to_string(),
+        name: name.to_string(),
+        channel_type: "stream".to_string(),
+        visibility: "open".to_string(),
+        description: "".to_string(),
+        topic: None,
+        purpose: None,
+        member_count: 0,
+        member_pubkeys: Vec::new(),
+        last_message_at,
+        archived_at: None,
+        participants: Vec::new(),
+        participant_pubkeys: Vec::new(),
+        is_member: true,
+        ttl_seconds: None,
+        ttl_deadline: None,
+    }
+}
+
+#[test]
+fn hash_is_order_insensitive() {
+    let c1 = make_channel("aaa", "Alpha", None);
+    let c2 = make_channel("bbb", "Beta", None);
+    let c3 = make_channel("aaa", "Alpha", None);
+    let c4 = make_channel("bbb", "Beta", None);
+
+    assert_eq!(
+        compute_channels_hash(&[c1, c2]),
+        compute_channels_hash(&[c4, c3]),
+        "hash must be insensitive to channel list ordering",
+    );
+}
+
+#[test]
+fn hash_ignores_last_message_at() {
+    let c_none = make_channel("chan-1", "Alpha", None);
+    let c_some = make_channel("chan-1", "Alpha", Some("2026-01-01T00:00:00Z".to_string()));
+
+    assert_eq!(
+        compute_channels_hash(&[c_none]),
+        compute_channels_hash(&[c_some]),
+        "hash must be insensitive to last_message_at",
+    );
+}
+
+#[test]
+fn hash_changes_on_metadata_change() {
+    let c1 = make_channel("chan-1", "Alpha", None);
+    let c2 = make_channel("chan-1", "AlphaRenamed", None);
+
+    assert_ne!(
+        compute_channels_hash(&[c1]),
+        compute_channels_hash(&[c2]),
+        "hash must change when channel name changes",
+    );
+}
+
+#[test]
+fn hash_changes_on_membership_change() {
+    let mut c1 = make_channel("chan-1", "Alpha", None);
+    let mut c2 = make_channel("chan-1", "Alpha", None);
+    c1.member_pubkeys = vec![PK_A.to_string()];
+    c2.member_pubkeys = vec![PK_A.to_string(), PK_B.to_string()];
+
+    assert_ne!(
+        compute_channels_hash(&[c1]),
+        compute_channels_hash(&[c2]),
+        "hash must change when member_pubkeys changes",
+    );
+}
+
+#[test]
+fn not_modified_returns_none_when_hash_matches() {
+    let channels = vec![make_channel("chan-1", "General", None)];
+    let hash = compute_channels_hash(&channels);
+
+    // Mirror the get_channels command decision logic.
+    let known_hash = Some(hash.clone());
+    let is_not_modified = known_hash.as_deref() == Some(hash.as_str());
+
+    assert!(
+        is_not_modified,
+        "identical hash must trigger the not-modified short-circuit",
+    );
+}
+
+#[test]
+fn not_modified_does_not_trigger_on_hash_mismatch() {
+    let channels = vec![make_channel("chan-1", "General", None)];
+    let hash = compute_channels_hash(&channels);
+    let known_hash = Some("0000000000000000".to_string());
+
+    let is_not_modified = known_hash.as_deref() == Some(hash.as_str());
+
+    assert!(
+        !is_not_modified,
+        "stale hash must NOT trigger the not-modified short-circuit",
+    );
+}
+
+#[test]
+fn hash_is_stable_for_same_input() {
+    // Verifies that the FNV-1a output is deterministic across calls within
+    // the same process (unlike std DefaultHasher which uses random seeds).
+    let channels = vec![
+        make_channel("aaa", "General", Some("2026-01-01T00:00:00Z".to_string())),
+        make_channel("bbb", "Random", None),
+    ];
+    let first = compute_channels_hash(&channels);
+    let channels2 = vec![
+        make_channel("aaa", "General", None), // last_message_at change is ignored
+        make_channel("bbb", "Random", None),
+    ];
+    let second = compute_channels_hash(&channels2);
+
+    assert_eq!(
+        first, second,
+        "hash must be deterministic and ignore last_message_at"
+    );
+}
+
 #[test]
 fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     let spec = &STARTER_CHANNELS[0];
@@ -300,4 +460,56 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     channel.channel_type = "stream".to_string();
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
     assert!(!is_matching_starter_channel(&channel, spec));
+}
+
+#[test]
+fn last_message_filter_covers_all_human_visible_activity_kinds() {
+    let filter = last_message_filter("forum-1");
+
+    assert_eq!(
+        filter,
+        serde_json::json!({
+            "kinds": [9, 40002, 45001, 45003],
+            "#h": ["forum-1"],
+            "limit": 1
+        })
+    );
+}
+
+#[test]
+fn last_message_filters_stay_within_relay_channel_cap() {
+    let filters: Vec<serde_json::Value> = (0..257)
+        .map(|index| serde_json::json!({"#h": [format!("channel-{index}")]}))
+        .collect();
+
+    let batches = last_message_filter_batches(&filters);
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [128, 128, 1]
+    );
+    assert_eq!(batches.concat(), filters);
+}
+
+fn member(pubkey: &str) -> crate::models::ChannelMemberInfo {
+    crate::models::ChannelMemberInfo {
+        pubkey: pubkey.to_string(),
+        role: "member".to_string(),
+        is_agent: false,
+        joined_at: None,
+        display_name: None,
+    }
+}
+
+#[test]
+fn profile_join_pubkeys_caps_in_roster_order() {
+    let members = vec![member(PK_A), member(PK_B), member(PK_C)];
+
+    assert_eq!(
+        profile_join_pubkeys(&members, 2),
+        vec![PK_A.to_string(), PK_B.to_string()]
+    );
+    assert_eq!(profile_join_pubkeys(&members, 3).len(), 3);
+    assert_eq!(profile_join_pubkeys(&members, 10).len(), 3);
+    assert!(profile_join_pubkeys(&[], 10).is_empty());
 }

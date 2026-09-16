@@ -4,7 +4,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// A focused field inside a `Scaffold` body, which is the only arrangement
 /// either message list ever runs in.
-Widget _testable({required FocusNode focusNode}) {
+Widget _testable({
+  required FocusNode focusNode,
+  VoidCallback? onUserScrollStart,
+  VoidCallback? onUserScrollEnd,
+  Widget? scrollChild,
+}) {
   return MaterialApp(
     home: Scaffold(
       body: Column(
@@ -12,12 +17,16 @@ Widget _testable({required FocusNode focusNode}) {
           TextField(focusNode: focusNode),
           Expanded(
             child: KeyboardDismissOnDrag(
-              child: ListView(
-                children: [
-                  for (var i = 0; i < 40; i++)
-                    SizedBox(height: 60, child: Text('row $i')),
-                ],
-              ),
+              onUserScrollStart: onUserScrollStart,
+              onUserScrollEnd: onUserScrollEnd,
+              child:
+                  scrollChild ??
+                  ListView(
+                    children: [
+                      for (var i = 0; i < 40; i++)
+                        SizedBox(height: 60, child: Text('row $i')),
+                    ],
+                  ),
             ),
           ),
         ],
@@ -58,7 +67,15 @@ void main() {
       final focusNode = FocusNode();
       addTearDown(focusNode.dispose);
       _raiseKeyboard(tester);
-      await tester.pumpWidget(_testable(focusNode: focusNode));
+      var starts = 0;
+      var ends = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => starts += 1,
+          onUserScrollEnd: () => ends += 1,
+        ),
+      );
       focusNode.requestFocus();
       await tester.pump();
       expect(focusNode.hasFocus, isTrue);
@@ -70,6 +87,8 @@ void main() {
       // `ScrollUpdateNotification`, and the one a focused composer is usually
       // sitting in.
       expect(focusNode.hasFocus, isFalse);
+      expect(starts, 1);
+      expect(ends, 1);
     });
 
     testWidgets('an ordinary downward scroll dismisses too', (tester) async {
@@ -102,6 +121,164 @@ void main() {
       await _dragDown(tester, keyboardDismissDragThreshold / 2);
 
       expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('reports a user-started scroll', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      var userScrollStarts = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => userScrollStarts += 1,
+        ),
+      );
+
+      await tester.drag(find.text('row 3'), const Offset(0, -100));
+      await tester.pumpAndSettle();
+
+      expect(userScrollStarts, 1);
+    });
+
+    testWidgets('reports a user scroll ending', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      var userScrollEnds = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollEnd: () => userScrollEnds += 1,
+        ),
+      );
+
+      await tester.drag(find.text('row 3'), const Offset(0, -100));
+      await tester.pumpAndSettle();
+
+      expect(userScrollEnds, 1);
+    });
+
+    testWidgets('nested horizontal drag is outside the primary list boundary', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      _raiseKeyboard(tester);
+      var starts = 0;
+      var ends = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => starts += 1,
+          onUserScrollEnd: () => ends += 1,
+          scrollChild: ListView(
+            children: [
+              SizedBox(
+                height: 80,
+                child: SingleChildScrollView(
+                  key: const ValueKey('nested-horizontal'),
+                  scrollDirection: Axis.horizontal,
+                  child: const SizedBox(
+                    width: 1600,
+                    child: Text('nested horizontal content'),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 1200),
+            ],
+          ),
+        ),
+      );
+      focusNode.requestFocus();
+      await tester.pump();
+
+      await tester.drag(
+        find.byKey(const ValueKey('nested-horizontal')),
+        const Offset(-200, 60),
+      );
+      await tester.pumpAndSettle();
+
+      expect(starts, 0);
+      expect(ends, 0);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('nested vertical drag is outside the primary list boundary', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      _raiseKeyboard(tester);
+      var starts = 0;
+      var ends = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => starts += 1,
+          onUserScrollEnd: () => ends += 1,
+          scrollChild: ListView(
+            children: [
+              SizedBox(
+                height: 180,
+                child: ListView(
+                  key: const ValueKey('nested-vertical'),
+                  children: const [
+                    SizedBox(
+                      height: 900,
+                      child: Text('nested vertical content'),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 1200),
+            ],
+          ),
+        ),
+      );
+      focusNode.requestFocus();
+      await tester.pump();
+
+      await tester.drag(
+        find.byKey(const ValueKey('nested-vertical')),
+        const Offset(0, -100),
+      );
+      await tester.pumpAndSettle();
+
+      expect(starts, 0);
+      expect(ends, 0);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('programmatic scroll reports no user lifecycle callbacks', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      final controller = ScrollController();
+      addTearDown(focusNode.dispose);
+      addTearDown(controller.dispose);
+      var starts = 0;
+      var ends = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => starts += 1,
+          onUserScrollEnd: () => ends += 1,
+          scrollChild: ListView(
+            controller: controller,
+            children: const [SizedBox(height: 2000)],
+          ),
+        ),
+      );
+
+      final animation = controller.animateTo(
+        300,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.linear,
+      );
+      await tester.pumpAndSettle();
+      await animation;
+
+      expect(starts, 0);
+      expect(ends, 0);
     });
 
     testWidgets('an upward drag never dismisses, however far it goes', (

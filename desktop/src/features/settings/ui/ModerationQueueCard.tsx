@@ -1,6 +1,9 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ShieldAlert } from "lucide-react";
 import { useMemo } from "react";
 import { toast } from "sonner";
+
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 
 import {
   useModerationAuditQuery,
@@ -31,7 +34,7 @@ import {
   type SeverityTier,
 } from "@/features/settings/lib/moderationQueue";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -192,14 +195,15 @@ const SEVERITY_BADGE: Record<SeverityTier, string> = {
 };
 
 function targetLabel(group: ModerationQueueGroup): string {
-  const short = truncatePubkey(group.target);
   switch (group.targetKind) {
     case "event":
-      return `Message ${short}`;
+      // An event id is not a pubkey identity: keep the generic hex form.
+      return `Message ${truncatePubkey(group.target)}`;
     case "pubkey":
-      return `Member ${short}`;
+      return `Member ${truncateNpub(group.target)}`;
     case "blob":
-      return `Attachment ${short}`;
+      // Blob ids are not pubkey identities either.
+      return `Attachment ${truncatePubkey(group.target)}`;
   }
 }
 
@@ -210,7 +214,7 @@ function ReporterLine({
   report: ModerationReport;
   displayName?: string | null;
 }) {
-  const who = displayName?.trim() || truncatePubkey(report.reporterPubkey);
+  const who = displayName?.trim() || truncateNpub(report.reporterPubkey);
   return (
     <div className="rounded-md border border-border/50 bg-background/50 px-2.5 py-1.5">
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -222,7 +226,12 @@ function ReporterLine({
         </span>
       </div>
       {report.note ? (
-        <p className="mt-1 text-xs text-muted-foreground">{report.note}</p>
+        <p
+          className="mt-1 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          {report.note}
+        </p>
       ) : null}
     </div>
   );
@@ -264,7 +273,10 @@ function ResolveMenu({
           >
             <div className="flex flex-col">
               <span className="text-sm font-medium">{option.label}</span>
-              <span className="text-xs text-muted-foreground">
+              <span
+                className="text-xs text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 {option.description}
               </span>
             </div>
@@ -357,6 +369,7 @@ function QueueGroupCard({
 }
 
 function QueueTab() {
+  const queryClient = useQueryClient();
   const reportsQuery = useModerationReportsQuery({ status: "open" });
   const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
@@ -400,6 +413,12 @@ function QueueTab() {
       // report open (retryable, no orphan decision row). Only after the paired
       // 9040/9005/9001 lands do we resolve every open report about this target.
       await enforceResolution(group, action, banMutation.mutateAsync);
+      if (action === "kick" && group.channelId != null) {
+        // The kick writes the roster directly (no member mutation); without
+        // this, the kicked identity stays in the cached roster for the
+        // freshness window.
+        await invalidateChannelMembersRosters(queryClient, [group.channelId]);
+      }
       await Promise.all(
         openReports.map((report) =>
           resolveMutation.mutateAsync({
@@ -458,9 +477,11 @@ function AuditRow({
   action: ModerationAction;
   actorName?: string | null;
 }) {
-  const who = actorName?.trim() || truncatePubkey(action.actorPubkey);
+  const who = actorName?.trim() || truncateNpub(action.actorPubkey);
+  // Actor and member targets are pubkey identities; a targeted event keeps
+  // the generic hex truncation for its event id.
   const targetShort = action.targetPubkey
-    ? truncatePubkey(action.targetPubkey)
+    ? truncateNpub(action.targetPubkey)
     : action.targetEventId
       ? truncatePubkey(action.targetEventId)
       : null;
@@ -483,7 +504,9 @@ function AuditRow({
         </span>
       </div>
       {action.publicReason ? (
-        <p className="text-xs text-muted-foreground">{action.publicReason}</p>
+        <p className="text-xs text-muted-foreground/70" data-settings-subcopy>
+          {action.publicReason}
+        </p>
       ) : null}
     </div>
   );

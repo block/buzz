@@ -1,4 +1,5 @@
 import { invokeTauri } from "@/shared/api/tauri";
+import { getStorageItem } from "@/shared/lib/safeStorage";
 import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
@@ -116,11 +117,10 @@ export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void>
   }
 
   migrateLegacyCommunityStorage(window.localStorage);
-  const currentCommunitiesRaw =
-    window.localStorage.getItem(BUZZ_COMMUNITIES_KEY);
-  const hasCurrentActiveCommunity = window.localStorage.getItem(
-    BUZZ_ACTIVE_COMMUNITY_KEY,
-  );
+  // block/buzz#5078 — read through the throw-safe accessor so a denied-storage
+  // origin degrades to "no community state" instead of crashing pre-render.
+  const currentCommunitiesRaw = getStorageItem(BUZZ_COMMUNITIES_KEY);
+  const hasCurrentActiveCommunity = getStorageItem(BUZZ_ACTIVE_COMMUNITY_KEY);
   if (
     currentCommunitiesRaw &&
     hasCurrentActiveCommunity &&

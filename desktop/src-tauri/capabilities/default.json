@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the main window and trusted huddle companions",
+  "windows": ["main", "huddle-*"],
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",

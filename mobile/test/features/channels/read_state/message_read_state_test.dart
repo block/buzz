@@ -1,5 +1,5 @@
-import 'package:buzz/features/channels/read_state/message_read_state.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/message_read_state.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 ReadStateState _state(

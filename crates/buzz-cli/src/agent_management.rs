@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use crate::error::CliError;
 
-const REQUEST_KIND: &str = "agent_management_request";
+const AGENT_REQUEST_KIND: &str = "agent_management_request";
+const PROJECT_CHANNEL_REQUEST_KIND: &str = "project_channel_request";
 const MAX_NAME_CHARS: usize = 120;
 const MAX_PROMPT_CHARS: usize = 20_000;
 
@@ -35,6 +36,20 @@ pub struct UpdateAgentDraft {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectChannelDraft {
+    pub home_channel_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub visibility: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +103,7 @@ fn build<T: Serialize>(
     keys: &Keys,
     owner: &PublicKey,
     channel_id: String,
+    request_kind: &'static str,
     action: &'static str,
     request: T,
 ) -> Result<BuiltDraftRequest, CliError> {
@@ -95,13 +111,13 @@ fn build<T: Serialize>(
     let payload = ObserverEvent {
         seq: 0,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        kind: REQUEST_KIND,
+        kind: request_kind,
         agent_index: None,
         channel_id: Some(channel_id),
         session_id: None,
         turn_id: None,
         payload: ManagementRequest {
-            request_type: REQUEST_KIND,
+            request_type: request_kind,
             action,
             request_id: request_id.clone(),
             request,
@@ -138,7 +154,14 @@ pub fn build_create(
         display_name: required(draft.display_name, "display name", MAX_NAME_CHARS)?,
         system_prompt: required(draft.system_prompt, "system prompt", MAX_PROMPT_CHARS)?,
     };
-    build(keys, owner, channel_id, "create", request)
+    build(
+        keys,
+        owner,
+        channel_id,
+        AGENT_REQUEST_KIND,
+        "create",
+        request,
+    )
 }
 
 pub fn build_update(
@@ -182,7 +205,50 @@ pub fn build_update(
             "include at least one field to update".into(),
         ));
     }
-    build(keys, owner, channel_id, "update", request)
+    build(
+        keys,
+        owner,
+        channel_id,
+        AGENT_REQUEST_KIND,
+        "update",
+        request,
+    )
+}
+
+pub fn build_project_channel(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: CreateProjectChannelDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    let home_channel_id = required(draft.home_channel_id, "home channel", 128)?;
+    uuid::Uuid::parse_str(&home_channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {home_channel_id}")))?;
+    let visibility = required(draft.visibility, "visibility", 16)?;
+    if visibility != "open" && visibility != "private" {
+        return Err(CliError::Usage("visibility must be open or private".into()));
+    }
+    if draft.ttl_seconds == Some(0) {
+        return Err(CliError::Usage("ttl must be greater than zero".into()));
+    }
+    let request = CreateProjectChannelDraft {
+        home_channel_id: home_channel_id.clone(),
+        name: required(draft.name, "name", MAX_NAME_CHARS)?,
+        description: draft
+            .description
+            .map(|value| required(value, "description", 2_048))
+            .transpose()?,
+        visibility,
+        ttl_seconds: draft.ttl_seconds,
+        template_name: optional(draft.template_name, "template")?,
+    };
+    build(
+        keys,
+        owner,
+        home_channel_id,
+        PROJECT_CHANNEL_REQUEST_KIND,
+        "create",
+        request,
+    )
 }
 
 #[cfg(test)]
@@ -228,9 +294,9 @@ mod tests {
             .any(|tag| tag.first().map(String::as_str) == Some("h")));
 
         let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
-        assert_eq!(payload["kind"], REQUEST_KIND);
+        assert_eq!(payload["kind"], AGENT_REQUEST_KIND);
         assert_eq!(payload["channelId"], CHANNEL);
-        assert_eq!(payload["payload"]["type"], REQUEST_KIND);
+        assert_eq!(payload["payload"]["type"], AGENT_REQUEST_KIND);
         assert_eq!(payload["payload"]["action"], "create");
         assert_eq!(
             payload["payload"]["request"]["displayName"],
@@ -273,5 +339,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("invalid channel UUID"));
+    }
+
+    #[test]
+    fn project_channel_request_is_owner_encrypted() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_project_channel(
+            &agent,
+            &owner.public_key(),
+            CreateProjectChannelDraft {
+                home_channel_id: CHANNEL.into(),
+                name: "release-planning".into(),
+                description: Some("Coordinate the next release.".into()),
+                visibility: "open".into(),
+                ttl_seconds: None,
+                template_name: Some("Release team".into()),
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["kind"], PROJECT_CHANNEL_REQUEST_KIND);
+        assert_eq!(payload["channelId"], CHANNEL);
+        assert_eq!(payload["payload"]["type"], PROJECT_CHANNEL_REQUEST_KIND);
+        assert_eq!(payload["payload"]["action"], "create");
+        assert_eq!(payload["payload"]["request"]["homeChannelId"], CHANNEL);
+        assert_eq!(
+            payload["payload"]["request"]["templateName"],
+            "Release team"
+        );
     }
 }

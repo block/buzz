@@ -277,6 +277,7 @@ test("round-trip: text offset → PM → text offset is identity", () => {
 // mismatch so cursor math and autocomplete offsets stay correct.
 
 import { CustomEmojiNode } from "./customEmojiNode.ts";
+import { ComposerMessageLinkNode } from "./composerMessageLinkNode.ts";
 
 const schemaWithEmoji = getSchema([
   StarterKit.configure({
@@ -286,6 +287,9 @@ const schemaWithEmoji = getSchema([
     link: false,
   }),
   CustomEmojiNode,
+  ComposerMessageLinkNode.configure({
+    resolveChannelName: () => "general",
+  }),
 ]);
 
 const eDoc = (...content) => schemaWithEmoji.nodes.doc.create(null, content);
@@ -293,6 +297,11 @@ const ePara = (...c) => schemaWithEmoji.nodes.paragraph.create(null, c);
 const eText = (s) => schemaWithEmoji.text(s);
 const emoji = (shortcode) =>
   schemaWithEmoji.nodes.customEmoji.create({ shortcode, src: "" });
+const messageLink = (href) =>
+  schemaWithEmoji.nodes.composerMessageLink.create({
+    channelName: "general",
+    href,
+  });
 
 test("atom: projects to its full :shortcode: text", () => {
   const d = eDoc(ePara(eText("hi "), emoji("wave"), eText(" there")));
@@ -358,4 +367,11 @@ test("atom: caret offsets around an atom round-trip", () => {
     const back = p.mapPMToTextOffset(pm);
     assert.equal(back, offset, `caret offset ${offset} → pm ${pm} → ${back}`);
   }
+});
+
+test("message-link atom projects to its full underlying deep link", () => {
+  const href = "buzz://message?channel=general-id&id=root-id";
+  const d = eDoc(ePara(eText("See "), messageLink(href), eText(" now")));
+  const p = buildPlainTextProjection(d);
+  assert.equal(p.text, `See ${href} now`);
 });

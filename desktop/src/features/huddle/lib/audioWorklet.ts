@@ -19,10 +19,9 @@ function invokeRawBinary(cmd: string, payload: Uint8Array): Promise<unknown> {
 /** Return type for setupAudioWorklet — stop + mode control. */
 export type AudioWorkletHandle = {
   stop: () => void;
-  /** Send PTT state to the worklet processor. */
+  /** Update whether the microphone is manually unmuted. */
   setTransmitting: (active: boolean) => void;
-  /** Switch voice input mode. In VAD mode, always transmitting (PTT events ignored).
-   *  In PTT mode, gated by Ctrl+Space. */
+  /** Switch whether the push-to-talk shortcut participates in transmission. */
   setMode: (mode: "push_to_talk" | "voice_activity") => void;
   /** Set mic input gain (0–1). Adjusts the GainNode between source and worklet. */
   setGain: (value: number) => void;
@@ -40,17 +39,19 @@ export type AudioWorkletHandle = {
  *     → invokeRawBinary("push_audio_pcm", bytes)
  *         Rust: SttPipeline::push_audio → bounded sync_channel
  *
- * PTT gating:
- *   Main thread listens for Tauri "ptt-state" events (from Rust global shortcut)
- *   and forwards them to the worklet via port.postMessage({ type: 'ptt', active }).
- *   The worklet discards audio frames when transmitting=false.
+ * Transmission gating:
+ *   Main thread combines manual mute with Tauri "ptt-state" events from the
+ *   global shortcut. The worklet sends audio while either path is open and
+ *   discards frames only when both are closed.
  *
  * @param audioTrack - Mic track from LiveKit
- * @param initialTransmitting - Initial PTT state. true=open mic (VAD), false=muted until PTT press.
+ * @param initialMode - Whether the push-to-talk shortcut is enabled.
+ * @param initiallyManuallyUnmuted - Initial state of the clickable mic control.
  */
 export async function setupAudioWorklet(
   audioTrack: MediaStreamTrack,
-  initialTransmitting = true,
+  initialMode: "push_to_talk" | "voice_activity" = "voice_activity",
+  initiallyManuallyUnmuted = true,
 ): Promise<AudioWorkletHandle> {
   const audioContext = new AudioContext({ sampleRate: 48000 });
 
@@ -74,11 +75,17 @@ export async function setupAudioWorklet(
   source.connect(gainNode);
   gainNode.connect(workletNode);
 
-  // Set initial PTT state (worklet defaults to transmitting=true).
-  // In PTT mode, immediately gate audio until the user presses the key.
-  if (!initialTransmitting) {
-    workletNode.port.postMessage({ type: "ptt", active: false });
-  }
+  let currentMode = initialMode;
+  let shortcutActive = false;
+  let manuallyUnmuted = initiallyManuallyUnmuted;
+  const syncTransmission = () => {
+    workletNode.port.postMessage({
+      type: "ptt",
+      active:
+        manuallyUnmuted || (currentMode === "push_to_talk" && shortcutActive),
+    });
+  };
+  syncTransmission();
 
   // Forward PCM batches to Rust via raw binary invoke.
   // Direction: worklet→main (receives PCM data from worklet processor).
@@ -96,22 +103,16 @@ export async function setupAudioWorklet(
     });
   };
 
-  // Track the current mode so PTT events are only forwarded in PTT mode.
-  // In VAD mode, the worklet stays in transmitting=true regardless of
-  // Ctrl+Space presses — prevents accidental muting. (Crossfire fix I1.)
-  let currentMode: "push_to_talk" | "voice_activity" = initialTransmitting
-    ? "voice_activity"
-    : "push_to_talk";
-
   // Listen for PTT state from Rust global shortcut (Ctrl+Space press/release).
   // Direction: Rust→main→worklet. The Tauri event carries a boolean payload.
   let pttUnlisten: UnlistenFn | null = null;
   try {
     pttUnlisten = await listen<boolean>("ptt-state", (event) => {
       // Only forward PTT events to the worklet when in PTT mode.
-      // In VAD mode, Ctrl+Space is ignored — the worklet stays open.
+      // Manual unmute remains independent from the shortcut state.
       if (currentMode === "push_to_talk") {
-        workletNode.port.postMessage({ type: "ptt", active: event.payload });
+        shortcutActive = event.payload;
+        syncTransmission();
       }
     });
   } catch {
@@ -130,16 +131,13 @@ export async function setupAudioWorklet(
       void audioContext.close();
     },
     setTransmitting: (active: boolean) => {
-      workletNode.port.postMessage({ type: "ptt", active });
+      manuallyUnmuted = active;
+      syncTransmission();
     },
     setMode: (mode: "push_to_talk" | "voice_activity") => {
       currentMode = mode;
-      // When switching to VAD, immediately open the mic.
-      // When switching to PTT, immediately gate until key press.
-      workletNode.port.postMessage({
-        type: "ptt",
-        active: mode === "voice_activity",
-      });
+      shortcutActive = false;
+      syncTransmission();
     },
     setGain: (value: number) => {
       gainNode.gain.value = value;

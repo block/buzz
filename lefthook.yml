@@ -1,10 +1,27 @@
 # Glob patterns below mirror the `changes` job's dorny/paths-filter groups in
-# .github/workflows/ci.yml — keep the two in sync. Deliberate deviations:
+# .github/workflows/ci.yml — keep the two in sync. Each globbed pre-push lane
+# also sets `files: git diff --name-only origin/main...HEAD` so its file set is
+# the branch's merge-base diff against origin/main — the same semantics as CI's
+# dorny/paths-filter and `scripts/check-file-sizes-core.mjs` `resolveBaseRef`.
+# Without it lefthook derives files from `git diff HEAD @{push}`, which after a
+# rebase or `git merge origin/main` includes everything main changed since the
+# branch's last push (firing mobile/desktop/rust lanes on unrelated pushes), and
+# on a brand-new branch falls back to a stale remote's tip (a full-suite run).
+# The three-dot diff scopes every lane to what this branch actually changed.
+# Both the three-dot diff and lefthook's stock discovery inspect the checked-out
+# HEAD, so pushing a non-HEAD ref (explicit refspec, `--all`) validates HEAD's
+# tree, not the pushed commit — the always-on `push-head-scope` lane warns when
+# they diverge and CI remains the authoritative gate for that ref.
+# Deliberate deviations:
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
 #   is omitted; a CI-workflow-only edit doesn't need a local test run.
-# - `desktop-check`/`desktop-test` don't trigger on `rust` changes, though CI's
-#   Desktop Core job does. Those commands are pure TS (biome + node:test) with
-#   no Rust dependency, so the extra trigger would be spurious locally.
+# - `desktop-check`/`desktop-typecheck`/`desktop-test` don't trigger on `rust`
+#   changes, though CI's Desktop Core job does. Those commands are pure TS
+#   (biome + tsc + node:test) with no Rust dependency, so the extra trigger
+#   would be spurious locally.
+# - The repository-wide `file-size-check` is deliberately unfiltered. Its own
+#   merge-base diff is the path filter; duplicating its governed roots here is
+#   the coverage drift this gate is intended to prevent.
 # - Deletion-only surface changes do not trigger local hooks: lefthook 2.1.x
 #   drops deleted paths from push-file discovery (`extractFiles` existence
 #   check, repository.go). CI's dorny/paths-filter catches deletions.
@@ -12,6 +29,17 @@
 # - `commit-msg` has no glob: it rewrites the commit message, not files. Note
 #   Git only runs it for `git commit` and `git merge` — other flows need their own
 #   flag: `git rebase --signoff`, `git cherry-pick -s`.
+#
+# `rc` points `lefthook install` at `bin/.lefthookrc`, which the generated
+# `.git/hooks/*` dispatchers source before their `$LEFTHOOK_BIN`-first lookup. It
+# (1) sets `LEFTHOOK_BIN` to the Hermit-pinned `bin/lefthook` (2.1.3) so a push
+# from any worktree runs the pinned binary even when a different lefthook is on
+# PATH, and (2) prepends the repo's Hermit `bin/` to `PATH` so every lane
+# subprocess (`just mobile-check` -> flutter/dart, etc.) resolves the pinned
+# toolchain regardless of the invoking shell — the hook self-pins, so a Homebrew
+# flutter/dart ahead on PATH can no longer cause false lane failures.
+rc: bin/.lefthookrc
+
 pre-commit:
   parallel: true
   commands:
@@ -24,17 +52,19 @@ pre-commit:
       run: just desktop-tauri-fmt
       stage_fixed: true
     desktop-fix:
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      # A lockfile-only change has no desktop source for Biome to rewrite.
+      glob: ["desktop/**"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-fix
       stage_fixed: true
     web-fix:
-      glob: ["web/**", "pnpm-lock.yaml"]
+      # A lockfile-only change has no web source for Biome to rewrite.
+      glob: ["web/**"]
       run: just web-fix
       stage_fixed: true
-    mobile-fix:
+    mobile-fmt:
       glob: ["mobile/**"]
-      run: just mobile-fix
+      run: just mobile-fmt
       stage_fixed: true
 
 # Appends the DCO Signed-off-by trailer the required "DCO Check" enforces.
@@ -50,14 +80,33 @@ pre-push:
   commands:
     branch-skew:
       run: ./scripts/check-branch-skew.sh
+    push-head-scope:
+      # Warn-only: the scoped lanes below validate the checked-out HEAD, so a
+      # non-HEAD ref push (explicit refspec, --all) relies on CI for its
+      # path-scoped checks. This lane reads the pushed refs from stdin and
+      # warns when any pushed commit is not HEAD. It never fails the push.
+      use_stdin: true
+      run: ./scripts/check-push-head-scope.sh
+    file-size-check:
+      # The ratchet computes its own merge-base diff, so path filtering here
+      # would only duplicate policy and create another place for coverage drift.
+      run: just file-size-check
     rust-tests:
-      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
+      files: git diff --name-only origin/main...HEAD
+      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       run: just test-unit
     desktop-check:
+      files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-check
+    desktop-typecheck:
+      files: git diff --name-only origin/main...HEAD
+      glob: ["desktop/**", "pnpm-lock.yaml"]
+      exclude: ["desktop/src-tauri/**"]
+      run: just desktop-typecheck
     desktop-test:
+      files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-test
@@ -65,8 +114,12 @@ pre-push:
       # Keep local lint parity with Desktop Core CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
-      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
+      files: git diff --name-only origin/main...HEAD
+      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       run: just desktop-tauri-clippy && just desktop-tauri-test
-    mobile-test:
+    mobile-checks:
+      # Run analysis and tests serially so parallel pre-push hooks do not
+      # contend for shared Flutter state (.dart_tool, shader bundle).
+      files: git diff --name-only origin/main...HEAD
       glob: ["mobile/**"]
-      run: just mobile-test
+      run: just mobile-check && just mobile-test

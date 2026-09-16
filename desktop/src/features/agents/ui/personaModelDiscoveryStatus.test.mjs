@@ -21,7 +21,8 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   );
 
   assert.equal(status?.tone, "warning");
-  assert.match(status?.message ?? "", /OpenAI API key/);
+  assert.match(status?.message ?? "", /OpenAI runtime API key/);
+  assert.match(status?.message ?? "", /OPENAI_COMPAT_API_KEY/);
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 
@@ -66,6 +67,53 @@ test("model discovery status stays quiet for missing Databricks defaults", () =>
   );
 
   assert.equal(status, null);
+});
+
+test("Databricks sign-in-required is a muted note pointing at the picker and CLI", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "Databricks sign-in is required; save this agent, then open its model picker to sign in, or run `buzz-agent auth databricks`",
+    ),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "muted");
+  assert.match(status?.message ?? "", /model picker/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
+});
+
+test("Databricks sign-in failure warns and points at the explicit retry", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Databricks sign-in failed: oauth callback: access_denied"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /model picker/);
+});
+
+test("Databricks sign-in timeout warns and points at the explicit retry", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "Databricks sign-in timed out; open the model picker to retry, or run `buzz-agent auth databricks`",
+    ),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
+});
+
+test("other Databricks discovery failures fall through to the generic notice", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Databricks model discovery failed: relay offline"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Using built-in model options/);
 });
 
 test("auth-required errors name the agent and ask for sign-in", () => {

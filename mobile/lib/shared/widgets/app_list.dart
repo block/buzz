@@ -26,6 +26,7 @@ class AppListRow extends StatelessWidget {
     this.trailing,
     this.titleColor,
     this.onTap,
+    this.verticalPadding = _rowVerticalPadding,
   });
 
   final IconData? icon;
@@ -42,12 +43,16 @@ class AppListRow extends StatelessWidget {
   final Color? titleColor;
   final VoidCallback? onTap;
 
+  /// Vertical inset around the row content. Compact sheets may use
+  /// [Grid.twelve] while standard settings rows retain the default.
+  final double verticalPadding;
+
   @override
   Widget build(BuildContext context) {
     final row = Padding(
       padding: EdgeInsets.symmetric(
         horizontal: AppListInset.of(context),
-        vertical: _rowVerticalPadding,
+        vertical: verticalPadding,
       ),
       child: Row(
         // Centred rather than baseline-aligned to the title: on a two-line row
@@ -129,6 +134,7 @@ class AppListRowRaw extends StatelessWidget {
     this.subtitle,
     this.trailing,
     this.onTap,
+    this.verticalPadding = _rowVerticalPadding,
   });
 
   final Widget leading;
@@ -137,12 +143,15 @@ class AppListRowRaw extends StatelessWidget {
   final Widget? trailing;
   final VoidCallback? onTap;
 
+  /// Vertical inset around the row content.
+  final double verticalPadding;
+
   @override
   Widget build(BuildContext context) {
     final row = Padding(
       padding: EdgeInsets.symmetric(
         horizontal: AppListInset.of(context),
-        vertical: _rowVerticalPadding,
+        vertical: verticalPadding,
       ),
       child: Row(
         children: [

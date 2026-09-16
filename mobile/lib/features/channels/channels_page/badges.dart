@@ -1,56 +1,5 @@
 part of '../channels_page.dart';
 
-class _UnreadBadge extends StatelessWidget {
-  final String channelId;
-  final int count;
-
-  const _UnreadBadge({required this.channelId, required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    if (count <= 0) {
-      return SizedBox(
-        key: Key('channel-unread-dot-$channelId'),
-        width: 20,
-        height: 20,
-        child: Center(
-          child: Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: context.colors.primary,
-              shape: BoxShape.circle,
-            ),
-            child: Semantics(label: 'unread'),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      key: Key('channel-unread-$channelId'),
-      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
-      padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: context.colors.primary,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        _formatUnreadCount(count),
-        style: context.textTheme.labelSmall?.copyWith(
-          color: context.colors.onPrimary,
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          height: 1,
-        ),
-      ),
-    );
-  }
-}
-
-String _formatUnreadCount(int count) => count > 99 ? '99+' : count.toString();
-
 class _EphemeralBadge extends StatelessWidget {
   final Channel channel;
 

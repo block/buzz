@@ -16,11 +16,10 @@ pub(super) struct PresetHarness {
     install_instructions_url: &'static str,
     install_hint: &'static str,
     /// Vendor CLI the ACP command wraps, when the preset is an adapter.
-    ///
-    /// Consulted only when the adapter is absent, so `AdapterMissing` replaces
-    /// `NotInstalled` when the CLI is present but the adapter is not. `None`
-    /// when the command is itself the vendor CLI.
     underlying_cli: Option<&'static str>,
+    /// State-specific setup guidance for the wrapped vendor CLI.
+    underlying_cli_install_hint: Option<&'static str>,
+    underlying_cli_install_instructions_url: Option<&'static str>,
 }
 
 /// Build one preset catalog entry through an injectable command resolver.
@@ -28,28 +27,44 @@ pub(super) fn preset_catalog_entry(
     def: &PresetHarness,
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> AcpRuntimeCatalogEntry {
-    let (availability, command, binary_path) = match resolve(def.command) {
-        Some(path) => (
-            AcpAvailabilityStatus::Available,
-            Some(def.command.to_string()),
-            Some(path.display().to_string()),
-        ),
-        None => {
-            let underlying_cli_found = def
-                .underlying_cli
-                .map(|cli| resolve(cli).is_some())
-                .unwrap_or(false);
-            if underlying_cli_found {
-                (AcpAvailabilityStatus::AdapterMissing, None, None)
-            } else {
-                (AcpAvailabilityStatus::NotInstalled, None, None)
-            }
-        }
-    };
     let underlying_cli_path = def
         .underlying_cli
-        .and_then(resolve)
+        .and_then(&resolve)
         .map(|path| path.display().to_string());
+    let (availability, command, binary_path) = super::classify_runtime(
+        resolve(def.command).map(|path| (def.command, path)),
+        def.underlying_cli,
+        underlying_cli_path.is_some(),
+    );
+
+    let cli_install_hint = def.underlying_cli.map(|cli| {
+        def.underlying_cli_install_hint
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "Install the {} CLI and make sure {} is on your PATH.",
+                    def.label, cli
+                )
+            })
+    });
+    let install_hint = match availability {
+        AcpAvailabilityStatus::Available if def.underlying_cli.is_some() => String::new(),
+        AcpAvailabilityStatus::CliMissing => cli_install_hint.unwrap_or_default(),
+        AcpAvailabilityStatus::NotInstalled if def.underlying_cli.is_some() => {
+            format!(
+                "{} {}",
+                cli_install_hint.unwrap_or_default(),
+                def.install_hint
+            )
+        }
+        _ => def.install_hint.to_string(),
+    };
+    let install_instructions_url = match availability {
+        AcpAvailabilityStatus::CliMissing | AcpAvailabilityStatus::NotInstalled => def
+            .underlying_cli_install_instructions_url
+            .unwrap_or(def.install_instructions_url),
+        _ => def.install_instructions_url,
+    };
 
     AcpRuntimeCatalogEntry {
         id: def.id.to_string(),
@@ -67,22 +82,43 @@ pub(super) fn preset_catalog_entry(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
-        install_hint: def.install_hint.to_string(),
-        install_instructions_url: def.install_instructions_url.to_string(),
+        effort_canonical_values: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        install_hint,
+        install_instructions_url: install_instructions_url.to_string(),
         can_auto_install: false,
-        // Presets carry one flat install hint, so builtin external-CLI copy
-        // would name the wrong missing component for adapter presets.
-        requires_external_cli: false,
+        requires_external_cli: def.underlying_cli.is_some(),
         underlying_cli_path,
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Preset,
         definition_env: Default::default(),
+        // Derived from the static preset command (`def.command`). This ensures
+        // unavailable entries (command: null in JSON, None here) still carry
+        // the cap — the harness cap is command-keyed, not availability-gated.
+        max_parallelism: crate::managed_agents::harness_max_parallelism(def.command),
     }
 }
 
 pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
+    PresetHarness {
+        id: "pi",
+        label: "Pi",
+        command: "buzz-pi-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/salman1993/buzz-pi-acp",
+        install_hint: "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz.",
+        underlying_cli: Some("pi"),
+        underlying_cli_install_hint: Some(
+            "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider.",
+        ),
+        underlying_cli_install_instructions_url: Some(
+            "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
+        ),
+    },
     PresetHarness {
         id: "devin",
         label: "Devin",
@@ -91,6 +127,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://docs.devin.ai/cli",
         install_hint: "Buzz talks to Devin through the official Devin CLI's ACP mode (devin acp).",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "cursor",
@@ -100,6 +138,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://cursor.com/downloads",
         install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "omp",
@@ -109,6 +149,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://omp.sh/",
         install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "grok",
@@ -118,6 +160,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "opencode",
@@ -127,6 +171,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://opencode.ai/docs",
         install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "kimi",
@@ -136,6 +182,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://kimi.ai/download",
         install_hint: "Buzz talks to Kimi Code through its CLI's ACP mode (kimi acp).",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "amp",
@@ -145,6 +193,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://github.com/tao12345666333/amp-acp",
         install_hint: "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
         underlying_cli: Some("amp"),
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "hermes",
@@ -154,6 +204,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://hermes-agent.nousresearch.com",
         install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
     PresetHarness {
         id: "openclaw",
@@ -170,6 +222,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             needs BUZZ_* credentials at execution time, set them on the \
             Gateway's own environment separately.",
         underlying_cli: None,
+        underlying_cli_install_hint: None,
+        underlying_cli_install_instructions_url: None,
     },
 ];
 
@@ -199,6 +253,76 @@ pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
         .as_slice()
 }
 
+/// Return the primary command for a preset harness by id, or `None` if the id
+/// is not a known preset.
+///
+/// Returns a `&'static str` so callers can use it without allocation.
+pub(super) fn preset_command_for_id(id: &str) -> Option<&'static str> {
+    PRESET_HARNESSES
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.command)
+}
+
+/// Return the primary harness command for a given runtime id, or `None`.
+///
+/// Checks static builtins, then the static preset list (always available,
+/// no registry warm-up required — covers openclaw, devin, cursor, etc.),
+/// then the loaded preset/custom registry.
+pub(crate) fn command_for_runtime_id(id: &str) -> Option<String> {
+    super::known_acp_runtime_exact(id)
+        .and_then(|r| r.commands.first().copied())
+        .map(str::to_string)
+        .or_else(|| preset_command_for_id(id).map(str::to_string))
+        .or_else(|| {
+            crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+                .map(|d| d.command.clone())
+        })
+}
+
+/// Resolve a harness to its canonical command accepting either a runtime id or
+/// a command string (including path prefixes and aliases).
+///
+/// This is the pin-classification resolver for `apply_persona_snapshot`: the
+/// create-time override in `record.agent_command_override` can hold any of the
+/// forms a user or the harness selector might have stored — bare command
+/// ("goose"), alias ("claude-code-acp"), path ("/usr/local/bin/goose"), or the
+/// runtime id directly ("claude"). All three tiers are searched:
+///
+/// 1. **Builtins** — `known_acp_runtime(input)` matches by id, command, or
+///    alias in `KNOWN_ACP_RUNTIMES`; returns its first primary command.
+/// 2. **Static presets** — searched by id or by normalised command.
+/// 3. **Loaded registry** — searched by id or by normalised command.
+///
+/// Returns `None` for inputs that do not resolve to any known harness; those
+/// pins are treated as custom/unknown and always kept.
+pub(crate) fn canonical_harness_command(input: &str) -> Option<String> {
+    let normalized = super::normalize_command_identity(input);
+
+    // Tier 1: builtins — matched by id, command, or alias.
+    if let Some(rt) = super::known_acp_runtime(&normalized) {
+        if let Some(cmd) = rt.commands.first() {
+            return Some(cmd.to_string());
+        }
+    }
+
+    // Tier 2: static presets — matched by id or by normalized command.
+    if let Some(p) = PRESET_HARNESSES
+        .iter()
+        .find(|p| p.id == normalized || super::normalize_command_identity(p.command) == normalized)
+    {
+        return Some(p.command.to_string());
+    }
+
+    // Tier 3: loaded registry — matched by id or by normalized command.
+    let reg = crate::managed_agents::custom_harnesses::loaded_harness_registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    reg.iter()
+        .find(|d| d.id == normalized || super::normalize_command_identity(&d.command) == normalized)
+        .map(|d| d.command.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -216,6 +340,8 @@ mod tests {
         install_instructions_url: "https://example.com/install",
         install_hint: "Install the amp-acp npm adapter.",
         underlying_cli: Some("amp"),
+        underlying_cli_install_hint: Some("Install the Amp Test CLI."),
+        underlying_cli_install_instructions_url: Some("https://example.com/amp"),
     };
 
     #[test]
@@ -259,7 +385,7 @@ mod tests {
         let _path_guard = crate::managed_agents::lock_path_mutex();
         let _registry_guard = registry_test_lock();
 
-        let entry = super::super::discover_acp_runtimes_from(None)
+        let entry = super::super::discover_acp_runtimes_from(None, true)
             .into_iter()
             .find(|entry| entry.id == "devin")
             .expect("Devin preset should appear in the runtime catalog");
@@ -268,6 +394,76 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn pi_preset_uses_zero_arg_adapter_and_reports_missing_component() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "pi")
+            .expect("Pi preset should be present");
+
+        assert_eq!(preset.label, "Pi");
+        assert_eq!(preset.command, "buzz-pi-acp");
+        assert!(preset.args.is_empty());
+        assert_eq!(preset.underlying_cli, Some("pi"));
+
+        let available = preset_catalog_entry(preset, |command| match command {
+            "buzz-pi-acp" => Some(PathBuf::from("/usr/local/bin/buzz-pi-acp")),
+            "pi" => Some(PathBuf::from("/usr/local/bin/pi")),
+            _ => None,
+        });
+        assert_eq!(available.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(available.command.as_deref(), Some("buzz-pi-acp"));
+        assert!(available.default_args.is_empty());
+        assert!(available.install_hint.is_empty());
+        assert!(available.requires_external_cli);
+        assert_eq!(
+            available.underlying_cli_path.as_deref(),
+            Some("/usr/local/bin/pi")
+        );
+
+        let adapter_missing = preset_catalog_entry(preset, |command| {
+            (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi"))
+        });
+        assert_eq!(
+            adapter_missing.availability,
+            AcpAvailabilityStatus::AdapterMissing
+        );
+        assert!(adapter_missing.command.is_none());
+        assert!(adapter_missing.default_args.is_empty());
+        assert_eq!(
+            adapter_missing.install_hint,
+            "Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz."
+        );
+        assert_eq!(
+            adapter_missing.install_instructions_url,
+            "https://github.com/salman1993/buzz-pi-acp"
+        );
+
+        let cli_missing = preset_catalog_entry(preset, |command| {
+            (command == "buzz-pi-acp").then(|| PathBuf::from("/usr/local/bin/buzz-pi-acp"))
+        });
+        assert_eq!(cli_missing.availability, AcpAvailabilityStatus::CliMissing);
+        assert_eq!(cli_missing.command.as_deref(), Some("buzz-pi-acp"));
+        assert_eq!(
+            cli_missing.install_hint,
+            "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider."
+        );
+        assert_eq!(
+            cli_missing.install_instructions_url,
+            "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent"
+        );
+
+        let not_installed = preset_catalog_entry(preset, |_| None);
+        assert_eq!(
+            not_installed.availability,
+            AcpAvailabilityStatus::NotInstalled
+        );
+        assert_eq!(
+            not_installed.install_hint,
+            "Install Pi with `npm install -g @earendil-works/pi-coding-agent`, then run `pi` to configure its model provider. Requires Node.js 22 or newer. Install the Pi ACP adapter with `npm install -g --install-links=true 'git+https://github.com/salman1993/buzz-pi-acp.git#86b201e'`. Make sure `buzz-pi-acp` is on PATH, then restart Buzz."
+        );
     }
 
     #[test]
@@ -282,8 +478,12 @@ mod tests {
             entry.underlying_cli_path.as_deref(),
             Some("/usr/local/bin/amp")
         );
-        assert!(!entry.requires_external_cli);
+        assert!(entry.requires_external_cli);
         assert_eq!(entry.install_hint, "Install the amp-acp npm adapter.");
+        assert_eq!(
+            entry.install_instructions_url,
+            "https://example.com/install"
+        );
     }
 
     #[test]
@@ -291,7 +491,12 @@ mod tests {
         let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None);
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(entry.underlying_cli_path.is_none());
-        assert!(!entry.requires_external_cli);
+        assert!(entry.requires_external_cli);
+        assert_eq!(
+            entry.install_hint,
+            "Install the Amp Test CLI. Install the amp-acp npm adapter."
+        );
+        assert_eq!(entry.install_instructions_url, "https://example.com/amp");
     }
 
     #[test]
@@ -308,17 +513,20 @@ mod tests {
             entry.underlying_cli_path.as_deref(),
             Some("/usr/local/bin/amp")
         );
+        assert!(entry.install_hint.is_empty());
     }
 
     #[test]
-    fn adapter_presence_is_enough_for_availability() {
+    fn adapter_without_underlying_cli_reports_cli_missing() {
         let entry = preset_catalog_entry(&ADAPTER_PRESET, |command| {
             (command == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp"))
         });
-        assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(entry.availability, AcpAvailabilityStatus::CliMissing);
         assert_eq!(entry.command.as_deref(), Some("amp-acp"));
         assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
         assert!(entry.underlying_cli_path.is_none());
+        assert_eq!(entry.install_hint, "Install the Amp Test CLI.");
+        assert_eq!(entry.install_instructions_url, "https://example.com/amp");
     }
 
     #[test]
@@ -331,5 +539,66 @@ mod tests {
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(!entry.requires_external_cli);
         assert!(entry.underlying_cli_path.is_none());
+    }
+
+    // ── Catalog max_parallelism: command-keyed execution policy ──────────────
+
+    /// Unavailable OpenClaw (command not on PATH → command: null in JSON):
+    /// max_parallelism must still be Some(5) — derived from the static `def.command`,
+    /// not the probed `entry.command`.
+    #[test]
+    fn openclaw_preset_unavailable_carries_max_parallelism() {
+        let openclaw = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "openclaw")
+            .expect("openclaw preset must be present");
+
+        // Simulate "not installed" — resolver always returns None.
+        let entry = preset_catalog_entry(openclaw, |_| None);
+        assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
+        assert!(
+            entry.command.is_none(),
+            "unavailable entry must have command: null"
+        );
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
+            "unavailable OpenClaw must still carry max_parallelism {}",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Available OpenClaw: max_parallelism present regardless of install status.
+    #[test]
+    fn openclaw_preset_available_carries_max_parallelism() {
+        let openclaw = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "openclaw")
+            .expect("openclaw preset must be present");
+
+        let entry = preset_catalog_entry(openclaw, |cmd| {
+            (cmd == openclaw.id || cmd == "openclaw")
+                .then(|| std::path::PathBuf::from("/usr/local/bin/openclaw"))
+        });
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
+            "available OpenClaw must carry max_parallelism {}",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Uncapped preset (devin): max_parallelism must be None.
+    #[test]
+    fn uncapped_preset_has_no_max_parallelism() {
+        let devin = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "devin")
+            .expect("devin preset must be present");
+        let entry = preset_catalog_entry(devin, |_| None);
+        assert_eq!(
+            entry.max_parallelism, None,
+            "uncapped preset (devin) must have max_parallelism: None"
+        );
     }
 }

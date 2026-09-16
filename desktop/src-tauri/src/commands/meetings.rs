@@ -2,9 +2,9 @@
 //!
 //! A huddle (voice/video session) is identified by its `KIND_HUDDLE_STARTED`
 //! event id. During the huddle, whatever performs speech-to-text (agents bring
-//! their own STT) emits `KIND_HUDDLE_TRANSCRIPT` (48104) segments tagged with
+//! their own STT) emits `KIND_HUDDLE_TRANSCRIPT` (48107) segments tagged with
 //! the huddle id (`e`) and channel (`h`). After it ends, a summary is posted as
-//! `KIND_HUDDLE_SUMMARY` (48105). These commands record and read those events;
+//! `KIND_HUDDLE_SUMMARY` (48108). These commands record and read those events;
 //! the audio→text and text→summary producers run on the live stack.
 
 use nostr::{EventBuilder, Kind, Tag};
@@ -15,8 +15,8 @@ use crate::app_state::AppState;
 use crate::relay::{query_relay, submit_event_with_keys};
 
 const KIND_HUDDLE_STARTED: u16 = 48100;
-const KIND_HUDDLE_TRANSCRIPT: u16 = 48104;
-const KIND_HUDDLE_SUMMARY: u16 = 48105;
+const KIND_HUDDLE_TRANSCRIPT: u16 = 48107;
+const KIND_HUDDLE_SUMMARY: u16 = 48108;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

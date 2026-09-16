@@ -10,149 +10,109 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
     final isEditing = useState(false);
 
     return SafeArea(
-      child: Column(
+      child: BuzzTitledSheetLayout(
         key: const Key('community-switcher-sheet'),
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              Grid.xxs,
-              Grid.gutter,
-              Grid.xxs,
+        title: 'Switch Community',
+        titleKey: const Key('community-switcher-title'),
+        showDragHandle: true,
+        trailing: SizedBox(
+          key: const Key('community-switcher-edit'),
+          width: 56,
+          height: 44,
+          child: TextButton(
+            onPressed: () => isEditing.value = !isEditing.value,
+            style: TextButton.styleFrom(
+              minimumSize: const Size(56, 44),
+              padding: EdgeInsets.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 32),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Switch Community',
-                      key: const Key('community-switcher-title'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(right: Grid.half),
-                    child: ConstrainedBox(
-                      key: const Key('community-switcher-edit'),
-                      constraints: const BoxConstraints(
-                        minWidth: 48,
-                        minHeight: 32,
-                      ),
-                      child: TextButton(
-                        onPressed: () => isEditing.value = !isEditing.value,
-                        style: TextButton.styleFrom(
-                          minimumSize: Size.zero,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: Grid.half,
-                          ),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        child: Text(isEditing.value ? 'Done' : 'Edit'),
-                      ),
-                    ),
-                  ),
-                ],
+            child: Text(isEditing.value ? 'Done' : 'Edit'),
+          ),
+        ),
+        child: communitiesAsync.when(
+          loading: () => const SizedBox(
+            height: 120,
+            child: Center(
+              child: BuzzLoadingIndicator(
+                size: 40,
+                semanticLabel: 'Loading communities',
               ),
             ),
           ),
-          Flexible(
-            child: communitiesAsync.when(
-              loading: () => const SizedBox(
-                height: 120,
-                child: Center(
-                  child: BuzzLoadingIndicator(
-                    size: 40,
-                    semanticLabel: 'Loading communities',
+          error: (e, _) => Padding(
+            padding: const EdgeInsets.all(Grid.xs),
+            child: Text('Error loading communities: $e'),
+          ),
+          data: (communities) {
+            final activeId = activeAsync.value?.id;
+            return SingleChildScrollView(
+              padding: const EdgeInsets.only(bottom: Grid.xs),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+                child: Material(
+                  key: const Key('community-switcher-options'),
+                  color: context.colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(Radii.card),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    children: [
+                      for (
+                        var index = 0;
+                        index < communities.length;
+                        index++
+                      ) ...[
+                        if (index > 0) const _CommunitySwitcherDivider(),
+                        _CommunitySwitcherTile(
+                          community: communities[index],
+                          isActive: communities[index].id == activeId,
+                          isEditing: isEditing.value,
+                          onTap: isEditing.value
+                              ? null
+                              : () async {
+                                  final community = communities[index];
+                                  if (community.id != activeId) {
+                                    await ref
+                                        .read(communityListProvider.notifier)
+                                        .switchCommunity(community.id);
+                                  }
+                                  if (context.mounted) {
+                                    Navigator.of(context).pop();
+                                  }
+                                },
+                          onRemove: () => _confirmRemoveCommunity(
+                            context,
+                            ref,
+                            communities[index],
+                            closeSheetAfterRemoval:
+                                communities[index].id == activeId,
+                          ),
+                        ),
+                      ],
+                      if (communities.isNotEmpty)
+                        const _CommunitySwitcherDivider(),
+                      _AddCommunityTile(
+                        onTap: () {
+                          final nav = Navigator.of(
+                            context,
+                            rootNavigator: true,
+                          );
+                          ref.read(pairingProvider.notifier).reset();
+                          Navigator.of(context).pop();
+                          nav.push(
+                            MaterialPageRoute<void>(
+                              builder: (_) =>
+                                  const PairingPage(addingCommunity: true),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ),
                 ),
               ),
-              error: (e, _) => Padding(
-                padding: const EdgeInsets.all(Grid.xs),
-                child: Text('Error loading communities: $e'),
-              ),
-              data: (communities) {
-                final activeId = activeAsync.value?.id;
-                return SingleChildScrollView(
-                  padding: const EdgeInsets.only(bottom: Grid.xs),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.gutter,
-                    ),
-                    child: Material(
-                      key: const Key('community-switcher-options'),
-                      color: context.colors.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(Radii.card),
-                      clipBehavior: Clip.antiAlias,
-                      child: Column(
-                        children: [
-                          for (
-                            var index = 0;
-                            index < communities.length;
-                            index++
-                          ) ...[
-                            if (index > 0) const _CommunitySwitcherDivider(),
-                            _CommunitySwitcherTile(
-                              community: communities[index],
-                              isActive: communities[index].id == activeId,
-                              isEditing: isEditing.value,
-                              onTap: isEditing.value
-                                  ? null
-                                  : () async {
-                                      final community = communities[index];
-                                      if (community.id != activeId) {
-                                        await ref
-                                            .read(
-                                              communityListProvider.notifier,
-                                            )
-                                            .switchCommunity(community.id);
-                                      }
-                                      if (context.mounted) {
-                                        Navigator.of(context).pop();
-                                      }
-                                    },
-                              onRemove: () => _confirmRemoveCommunity(
-                                context,
-                                ref,
-                                communities[index],
-                                closeSheetAfterRemoval:
-                                    communities[index].id == activeId,
-                              ),
-                            ),
-                          ],
-                          if (communities.isNotEmpty)
-                            const _CommunitySwitcherDivider(),
-                          _AddCommunityTile(
-                            onTap: () {
-                              final nav = Navigator.of(
-                                context,
-                                rootNavigator: true,
-                              );
-                              ref.read(pairingProvider.notifier).reset();
-                              Navigator.of(context).pop();
-                              nav.push(
-                                MaterialPageRoute<void>(
-                                  builder: (_) =>
-                                      const PairingPage(addingCommunity: true),
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -422,7 +382,7 @@ Future<void> _confirmRemoveCommunity(
   Community community, {
   required bool closeSheetAfterRemoval,
 }) async {
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showBuzzDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog.adaptive(
       title: const Text('Remove community?'),
@@ -471,37 +431,44 @@ class _CommunityIndicator extends ConsumerWidget {
     final activeAsync = ref.watch(activeCommunityProvider);
 
     final activeCommunity = activeAsync.value;
-    final name = activeCommunity?.name;
 
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _CommunityAvatar(name: name, relayUrl: activeCommunity?.relayUrl),
-          const SizedBox(width: _kTopSectionLabelGap),
-          if (name != null)
-            Flexible(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            )
-          else
-            Text(
-              'Community',
+      child: _CommunityAvatar(
+        name: activeCommunity?.name,
+        relayUrl: activeCommunity?.relayUrl,
+      ),
+    );
+  }
+}
+
+class _CommunityHeaderTitle extends ConsumerWidget {
+  final TextStyle? style;
+  final VoidCallback onTap;
+
+  const _CommunityHeaderTitle({required this.onTap, this.style});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = ref.watch(activeCommunityProvider).value?.name;
+    final title = name?.trim();
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox.expand(
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: Grid.xxs),
+            child: Text(
+              title == null || title.isEmpty ? 'Community' : title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: context.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+              style: style,
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -516,7 +483,7 @@ class _CommunityAvatar extends ConsumerWidget {
     super.key,
     required this.name,
     this.relayUrl,
-    this.size = _kTopSectionAvatarSize,
+    this.size = _kTopSectionCommunityAvatarSize,
   });
 
   @override
