@@ -151,7 +151,7 @@ listener returns the same lifecycle answer but does not change these metrics.
 | Metric | Type | Labels | Source |
 |--------|------|--------|--------|
 | `buzz_readiness_checks_total` | counter | `reason` ∈ {`ready`, `shutting_down`} | `/_readiness` |
-| `buzz_readiness_state` | gauge | `check="overall"`; 1 ready, 0 shutting down | `/_readiness`, shutdown |
+| `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
 | `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | `/_status` |
 | `buzz_readiness_check_duration_seconds` | histogram | `check` only | `/_status` |
 
@@ -164,6 +164,9 @@ The schema has a ceiling of 86 raw Prometheus series per pod: 2 probe reasons,
 pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.
+The gauge is not a monotonic lifecycle mirror: shutdown changes the
+authoritative lifecycle flag, and the next private readiness probe observes and
+publishes that state.
 
 ### Community admission telemetry
 

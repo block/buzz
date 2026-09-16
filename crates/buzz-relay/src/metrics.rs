@@ -329,7 +329,7 @@ pub(crate) fn describe_readiness_metrics() {
     );
     metrics::describe_gauge!(
         "buzz_readiness_state",
-        "Local readiness of this process, where 1 is ready and 0 is shutting down"
+        "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
     );
 }
 

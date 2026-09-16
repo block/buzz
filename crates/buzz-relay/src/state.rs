@@ -1072,11 +1072,10 @@ impl AppState {
     }
 
     /// Withdraws this pod from routing. The lifecycle flag is authoritative for
-    /// `/_readiness`; the gauge is published immediately so a draining pod does
-    /// not report ready until its next probe.
+    /// `/_readiness`; the private probe publishes its sampled observation to
+    /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
-        crate::readiness::record_overall_state(false);
     }
 
     #[cfg(test)]

@@ -414,10 +414,11 @@ async fn public_readiness_handler(State(state): State<Arc<AppState>>) -> impl In
 }
 
 /// Kubernetes health-listener endpoint — the only source of rollout readiness
-/// telemetry.
+/// telemetry. Its single lifecycle sample determines every observable result
+/// of this request: counter, gauge, HTTP status, and body.
 async fn kubernetes_readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let reason = readiness_reason(&state);
-    readiness::record_readiness_probe(reason, || readiness_reason(&state).is_ready());
+    readiness::record_readiness_probe(reason);
     readiness_response(reason)
 }
 
@@ -842,8 +843,9 @@ mod tests {
     /// The frozen telemetry contract for the health listener.
     ///
     /// Readiness is lifecycle-only: its counter carries exactly two reasons and
-    /// its gauge follows shutdown, never a dependency. Dependency families are
-    /// still exported, but only by the diagnostic `/_status` endpoint, and
+    /// its gauge is the latest private readiness-probe observation, never a
+    /// dependency or a transition-owned lifecycle mirror. Dependency families
+    /// are still exported, but only by the diagnostic `/_status` endpoint, and
     /// public-listener traffic moves nothing.
     #[test]
     fn production_health_routes_export_the_frozen_telemetry_contract() {
@@ -1002,6 +1004,14 @@ mod tests {
                     .render()
                     .lines()
                     .all(|line| !line.contains("reason=\"shutting_down\"")));
+                assert_eq!(
+                    metric_value(
+                        &handle.render(),
+                        "buzz_readiness_state{check=\"overall\"}"
+                    ),
+                    1.0,
+                    "shutdown and public traffic must not update the private probe gauge"
+                );
 
                 assert_eq!(
                     readiness_request(health).await,

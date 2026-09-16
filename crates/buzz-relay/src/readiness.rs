@@ -56,28 +56,16 @@ impl ReadinessReason {
 
 /// Records one readiness probe served by the private health listener.
 ///
-/// `still_ready` re-reads process lifecycle *after* the gauge is written. That
-/// ordering is the whole fence: `begin_shutdown` is one-way, so a probe that
-/// sampled `Ready` immediately before it must not leave a stale ready gauge
-/// behind for the rest of the drain. Re-reading before the write would reopen
-/// the same window. Nothing else about a probe is shared, so this replaces the
-/// generation-fenced coordinator the dependency probe used to require.
-pub(crate) fn record_readiness_probe(reason: ReadinessReason, still_ready: impl FnOnce() -> bool) {
+/// The counter and gauge describe the same immutable lifecycle observation.
+/// The gauge is therefore the latest private readiness-probe observation, not
+/// a transition-owned lifecycle mirror.
+pub(crate) fn record_readiness_probe(reason: ReadinessReason) {
     metrics::counter!(
         "buzz_readiness_checks_total",
         "reason" => reason.label(),
     )
     .increment(1);
-    record_overall_state(reason.is_ready());
-    if !still_ready() {
-        record_overall_state(false);
-    }
-}
-
-/// Publishes the overall readiness gauge. Called by the probe and by terminal
-/// shutdown, so a draining pod reports not-ready before its next scrape.
-pub(crate) fn record_overall_state(ready: bool) {
-    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if ready {
+    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if reason.is_ready() {
         1.0
     } else {
         0.0
@@ -606,16 +594,17 @@ mod tests {
         );
     }
 
-    /// The readiness gauge and counter follow lifecycle only. A dependency
-    /// evaluation — however bad — must never move them, which is what let a
-    /// shared outage deroute every replica at once.
+    /// The readiness gauge and counter use the same immutable reason sampled by
+    /// the private probe. A dependency evaluation — however bad — must never
+    /// move them, which is what let a shared outage deroute every replica at
+    /// once.
     #[test]
     fn readiness_telemetry_tracks_lifecycle_and_dependency_failure_never_moves_it() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
         metrics::with_local_recorder(&recorder, || {
-            record_readiness_probe(ReadinessReason::Ready, || true);
+            record_readiness_probe(ReadinessReason::Ready);
             record_dependency_report(&redis_failure_report());
         });
         let after_failure = snapshotter.snapshot().into_vec();
@@ -653,7 +642,7 @@ mod tests {
         }
 
         metrics::with_local_recorder(&recorder, || {
-            record_readiness_probe(ReadinessReason::ShuttingDown, || false);
+            record_readiness_probe(ReadinessReason::ShuttingDown);
         });
         let after_shutdown = snapshotter.snapshot().into_vec();
 
@@ -668,47 +657,6 @@ mod tests {
         ));
     }
 
-    /// The publication fence. A probe that sampled `Ready` a moment before
-    /// `begin_shutdown` landed must not leave the gauge advertising ready for
-    /// the rest of the drain. Deleting the post-write re-read fails the first
-    /// case below.
-    #[test]
-    fn a_probe_that_raced_shutdown_cannot_leave_a_ready_gauge() {
-        for (sampled, still_ready, expected, case) in [
-            (
-                ReadinessReason::Ready,
-                false,
-                0.0,
-                "shutdown landed mid-probe",
-            ),
-            (ReadinessReason::Ready, true, 1.0, "no shutdown"),
-            (
-                ReadinessReason::ShuttingDown,
-                false,
-                0.0,
-                "already draining",
-            ),
-            (
-                ReadinessReason::ShuttingDown,
-                true,
-                0.0,
-                "sampled shutdown never publishes ready",
-            ),
-        ] {
-            let recorder = DebuggingRecorder::new();
-            let snapshotter = recorder.snapshotter();
-            metrics::with_local_recorder(&recorder, || {
-                record_readiness_probe(sampled, || still_ready);
-            });
-
-            assert_eq!(
-                gauge_value(&snapshotter.snapshot().into_vec(), "overall"),
-                expected,
-                "{case}"
-            );
-        }
-    }
-
     /// A shutdown probe records no dependency attempt or latency sample: it did
     /// not evaluate anything, and fabricating a sample would misreport the
     /// dependency's real health during a rollout.
@@ -718,8 +666,8 @@ mod tests {
         let snapshotter = recorder.snapshotter();
 
         metrics::with_local_recorder(&recorder, || {
-            record_readiness_probe(ReadinessReason::Ready, || true);
-            record_readiness_probe(ReadinessReason::ShuttingDown, || false);
+            record_readiness_probe(ReadinessReason::Ready);
+            record_readiness_probe(ReadinessReason::ShuttingDown);
         });
         let snapshot = snapshotter.snapshot().into_vec();
 
