@@ -174,6 +174,7 @@ listener returns the same lifecycle answer but does not change these metrics.
 | `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
 | `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
 | `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
+| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | gauge | none; Unix time the cached report completed | dependency sampler |
 
 The three dependency families keep their `buzz_readiness_*` names for dashboard
 continuity, but nothing about them is request-driven any more: the 30-second
@@ -181,18 +182,33 @@ sampler publishes them whether or not anyone reads `/_status`, so a quiet
 endpoint no longer produces a flat dashboard during the outage it exists to
 explain.
 
-Freshness has no series of its own. The dependency outcome and duration
-families stop receiving samples the moment the loop stops, so **alert on
-no-data** for `buzz_readiness_dependency_checks_total` and
-`buzz_readiness_check_duration_seconds` (Datadog monitors do this already). An
-age gauge would have to be advanced by the very loop whose absence it is meant
-to report, so a wedged sampler would freeze it at its last value and read as
-permanently fresh. Per-report freshness stays where a human reads it: the
-`sample`, `sample_age_seconds`, and `sample_interval_seconds` fields of
-`/_status` above.
+`buzz_readiness_dependency_sample_completed_timestamp_seconds` carries **when
+the cached report completed**, in Unix seconds, and is written only by a
+completed sample — nothing ages it in the background. The age is therefore a
+property of the query, not of a server-side loop:
 
-The schema has a ceiling of 86 raw Prometheus series per pod: 2 probe reasons,
-11 valid dependency/outcome pairs, 72 histogram series, and 1 gauge. Do not
+```promql
+time() - buzz_readiness_dependency_sample_completed_timestamp_seconds > 60
+```
+
+That expression grows on its own while a pod is wedged, which is the point of a
+timestamp rather than an age: a gauge carrying the age would have to be advanced
+by the very loop whose absence it is meant to report, so a stopped sampler would
+freeze it at its last value and read as permanently fresh. `60` is two cadences,
+the same threshold `/_status` uses to call a report `stale`.
+
+Do not alert on no-data for `buzz_readiness_dependency_checks_total` or
+`buzz_readiness_check_duration_seconds`. Both are cumulative: a stopped sampler
+leaves their last values being scraped indefinitely, so the series stay present
+and flat. The timestamp gauge is the only series whose derived age moves when
+sampling stops. Following the `buzz_storage_sweep_age_seconds` convention, that
+gauge is **absent until the first sample completes**, so absence means "not yet
+sampled", never "fresh" — alert on `absent()` as well. Per-report freshness for
+a human reading a single pod stays on the `sample`, `sample_age_seconds`, and
+`sample_interval_seconds` fields of `/_status` above.
+
+The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges. Do not
 add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
 community, pubkey, header, query, or other request-controlled labels. A
 readiness probe records no dependency attempt or latency sample at all.

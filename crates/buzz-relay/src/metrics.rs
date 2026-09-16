@@ -332,6 +332,11 @@ pub(crate) fn describe_readiness_metrics() {
         "buzz_readiness_state",
         "Latest private readiness-probe observation, where 1 is ready and 0 is shutting down"
     );
+    metrics::describe_gauge!(
+        "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+        metrics::Unit::Seconds,
+        "Unix time the cached /_status dependency report completed, absent until the first sample completes"
+    );
 }
 
 /// Register the bounded community-admission contract.

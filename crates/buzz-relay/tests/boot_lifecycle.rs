@@ -786,6 +786,11 @@ mod postgres_tests {
     /// that could evaluate a dependency on the test's behalf. The first tick
     /// fires immediately, so the wait is bounded by
     /// [`METRICS_SCRAPE_DEADLINE`] and never a fixed sleep.
+    ///
+    /// The completion-timestamp gauge is the needle because `sample` writes it
+    /// last, after the cache already serves the report: observing it proves the
+    /// whole cycle ran, with no window where the counters have landed but the
+    /// timestamp has not.
     #[test]
     #[ignore = "requires PostgreSQL"]
     fn startup_owns_the_dependency_sampler() {
@@ -810,7 +815,7 @@ mod postgres_tests {
         let scrape = wait_for_scraped_metric(
             &mut process,
             metrics_port,
-            "buzz_readiness_dependency_checks_total{",
+            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
         );
         let output = process.terminate();
         let logs = format!(
@@ -819,6 +824,10 @@ mod postgres_tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
+        assert!(
+            scrape.contains("buzz_readiness_dependency_checks_total{"),
+            "the same cycle must publish its per-dependency outcomes: {scrape}"
+        );
         assert!(
             scrape.contains("buzz_readiness_check_duration_seconds"),
             "a completed evaluation must publish its latency too: {scrape}"
