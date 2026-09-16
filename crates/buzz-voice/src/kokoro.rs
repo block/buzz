@@ -2,6 +2,7 @@
 //!
 //! One runtime, two voices: Martin (sid 0) and Victoria (sid 1 when present).
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use sherpa_onnx::{
@@ -44,6 +45,12 @@ impl KokoroGerman {
                 "Kokoro model files are missing in {}",
                 model_dir.display()
             ));
+        }
+        if !onnx_has_sherpa_kokoro_metadata(&model) {
+            return Err(
+                "Kokoro ONNX is not a sherpa-onnx TTS model (missing sample_rate metadata). German TTS is skipped so huddle can start."
+                    .into(),
+            );
         }
         let data_dir = first_existing(&[
             model_dir.join("espeak-ng-data"),
@@ -138,6 +145,44 @@ fn voice_label(voice: &str) -> &'static str {
 
 fn first_existing(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|path| path.exists()).cloned()
+}
+
+fn onnx_has_sherpa_kokoro_metadata(model: &Path) -> bool {
+    onnx_region_contains(model, b"sample_rate")
+}
+
+fn onnx_region_contains(path: &Path, needle: &[u8]) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    const WINDOW: usize = 128 * 1024;
+    let mut buf = vec![0u8; WINDOW];
+    let Ok(n) = file.read(&mut buf) else {
+        return false;
+    };
+    if contains_bytes(&buf[..n], needle) {
+        return true;
+    }
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if meta.len() <= WINDOW as u64 {
+        return false;
+    }
+    let Ok(tail) = i64::try_from(WINDOW) else {
+        return false;
+    };
+    if file.seek(SeekFrom::End(-tail)).is_err() {
+        return false;
+    }
+    let Ok(n) = file.read(&mut buf) else {
+        return false;
+    };
+    contains_bytes(&buf[..n], needle)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 pub fn install_voices_bin(model_dir: &Path) -> Result<PathBuf, String> {
@@ -277,6 +322,31 @@ mod tests {
     #[test]
     fn missing_model_is_not_available() {
         assert!(!KokoroGerman::is_available(Path::new("/tmp/missing-kokoro")));
+    }
+
+    #[test]
+    fn load_installed_kokoro_models() {
+        let dir = Path::new("/Users/cyberblade/.buzz/models/kokoro-de");
+        if !KokoroGerman::is_available(dir) {
+            return;
+        }
+        match KokoroGerman::load(dir) {
+            Ok(_) => panic!("raw Kokoro ONNX must not load via sherpa-onnx"),
+            Err(error) => assert!(
+                error.contains("sample_rate"),
+                "unexpected load error: {error}"
+            ),
+        }
+    }
+
+    #[test]
+    fn rejects_onnx_without_sherpa_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        std::fs::write(&model, b"pytorch-onnx-without-sherpa-keys").unwrap();
+        assert!(!onnx_has_sherpa_kokoro_metadata(&model));
+        std::fs::write(&model, b"sherpa-onnx kokoro sample_rate=24000").unwrap();
+        assert!(onnx_has_sherpa_kokoro_metadata(&model));
     }
 
     #[test]
