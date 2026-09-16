@@ -17,6 +17,8 @@ const VALID_RELAY_PRIVATE_KEY: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
+/// Bound on every wait for the relay to export a metric family.
+const METRICS_SCRAPE_DEADLINE: Duration = Duration::from_secs(8);
 
 struct RelayProcess {
     child: Option<Child>,
@@ -158,20 +160,27 @@ fn scrape_metrics(port: u16) -> std::io::Result<String> {
 }
 
 fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    wait_for_scraped_metric(process, port, "buzz_audit_enabled")
+}
+
+/// Polls the relay's own `/metrics` until `needle` appears, bounded by
+/// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
+/// timeout, so the panic names the real cause.
+fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
+    let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
         assert!(
             process.try_wait().is_none(),
-            "relay exited before its metrics endpoint became usable"
+            "relay exited before exporting {needle}"
         );
         if let Ok(response) = scrape_metrics(port) {
-            if response.contains("buzz_audit_enabled") {
+            if response.contains(needle) {
                 return response;
             }
         }
         assert!(
             Instant::now() < deadline,
-            "relay metrics did not become scrapeable within 8s"
+            "relay did not export {needle} within {METRICS_SCRAPE_DEADLINE:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -761,6 +770,66 @@ mod postgres_tests {
         assert!(
             TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
             "the health port must never have been bound"
+        );
+    }
+
+    /// Startup is the only owner of dependency evaluation. `/_status` just reads
+    /// the cache, a readiness probe records no dependency attempt at all, and no
+    /// request path may start a check — so if `main` stops spawning the sampler,
+    /// this pod evaluates Postgres, Redis, and the deletion catalog exactly
+    /// never: the dependency families stay absent from its scrape and `/_status`
+    /// answers `not_yet_sampled` for the pod's whole life.
+    ///
+    /// No in-process test can fail on that, because each one drives `sample`
+    /// itself. This one boots the real binary against real dependencies and
+    /// reads only the relay's own `/metrics` — no probe, no `/_status`, nothing
+    /// that could evaluate a dependency on the test's behalf. The first tick
+    /// fires immediately, so the wait is bounded by
+    /// [`METRICS_SCRAPE_DEADLINE`] and never a fixed sleep.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn startup_owns_the_dependency_sampler() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL")
+            .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let metrics_port = reserve_closed_port();
+        let metrics_port_value = metrics_port.to_string();
+        let health_port_value = reserve_closed_port().to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+
+        let mut process = RelayProcess::spawn(&[
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_METRICS_PORT", &metrics_port_value),
+            ("BUZZ_HEALTH_PORT", &health_port_value),
+            ("BUZZ_BIND_ADDR", &bind_addr),
+            ("DATABASE_URL", &database_url),
+            ("REDIS_URL", &redis_url),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+        ]);
+        let scrape = wait_for_scraped_metric(
+            &mut process,
+            metrics_port,
+            "buzz_readiness_dependency_checks_total{",
+        );
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(
+            scrape.contains("buzz_readiness_check_duration_seconds"),
+            "a completed evaluation must publish its latency too: {scrape}"
+        );
+        assert!(
+            !scrape.contains("buzz_readiness_checks_total{"),
+            "no readiness probe was sent, so the sampler alone produced this: {scrape}"
+        );
+        assert!(
+            logs.contains("Health probe listener started"),
+            "the sampler must be owned by a relay that finished booting: {logs}"
         );
     }
 }
